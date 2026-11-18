@@ -5,7 +5,7 @@ as occurrence proof for NULL-stamp audit copies. Shadow writes fail open inside 
 lock contention escapes to the ingest owner. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
 so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` stops capture and new bindings (see ``config.host_message_uid_mode`` for the reads it
-stops and the one it does not); ``on`` runs as ``shadow``.
+stops and the one it does not); ``on`` also enables UID replay recognition.
 From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
 Hermes homes never mixes two profiles' roots of the same session id."""
 from __future__ import annotations
@@ -17,14 +17,38 @@ import logging
 import os
 import sqlite3
 from collections import Counter, defaultdict
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import host_message_uid_mode
+from .config import host_message_uid_mode, host_uid_recognition_enabled
 from .host_uid_emit import engine_uid, identity_emit_enabled
+from .message_content import normalize_content_value
+from .reconcile import _OOB_MESSAGE_BLOCK_RE, _PRESERVED_TODO_CONTEXT_PREFIX, _todo_annotation_span
 from .reconcile import _has_lossy_redacted_identity as _lossy_identity
 
 logger = logging.getLogger(__name__)
+
+_UID_RECOGNITION = ContextVar("_UID_RECOGNITION", default=None)
+
+
+def _uid_recognition_pass(operation):
+    @wraps(operation)
+    def wrapped(self, *args, **kwargs):
+        if not host_uid_recognition_enabled():
+            return operation(self, *args, **kwargs)
+        key = self._uid_recognition_binding()
+        current = _UID_RECOGNITION.get()
+        if current is not None and current[0] == key:
+            return operation(self, *args, **kwargs)
+        token = _UID_RECOGNITION.set((key, self._uid_recognition_allowed()))
+        try:
+            return operation(self, *args, **kwargs)
+        finally:
+            _UID_RECOGNITION.reset(token)
+    return wrapped
+
 
 HOST_UID_COUNTER_KEY = "host_uid:counters"
 _MAX_UID_CHARS = 256
@@ -74,6 +98,18 @@ def _fmt_counts(counts: dict) -> str:
 
 class HostUidShadowMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``_state_db_path`` and the reconcile identity helpers."""
+
+    def _uid_recognition_binding(self):
+        return id(self), id(self._store), self._session_id, self._conversation_id
+
+    def _uid_recognition_allowed(self):
+        return not (self._config.ignore_message_patterns or self._load_generated_ignored_dependent_reply_records())
+
+    def _uid_recognition_enabled(self):
+        current = _UID_RECOGNITION.get()
+        if current is not None and current[0] == self._uid_recognition_binding():
+            return current[1]
+        return host_uid_recognition_enabled() and self._uid_recognition_allowed()
 
     def _host_uid_lineage_key(self, session_id=None, *, require_complete=False, hermes_home=None, store=None) -> tuple:
         """R3-4: ``("<home_tag>:<root>", None)``, the root by Hermes' own walk (``_session_turn_lease_key_on_conn``:
@@ -198,16 +234,40 @@ class HostUidShadowMixin:
         """The ``uids`` that are engine uids of this lineage: the durable record (one batched lookup) plus the
         uids this engine minted and has not recorded yet. Fails open to the in-memory set."""
         uids = {uid for uid in uids if isinstance(uid, str)}
-        known = uids & (set(self.__dict__.get("_engine_uids_pending") or ()) | self.__dict__.get(
-            "_engine_uids_recorded", set()))
+        pending = self.__dict__.get("_engine_uids_pending", {})
+        recognition = self._uid_recognition_enabled()
+        known = set() if recognition else uids & (pending.keys() | self.__dict__.get("_engine_uids_recorded", set()))
         try:
             lineage = self._host_uid_lineage_key()[0]
-            if lineage is not None and uids - known:
+            if lineage is None:
+                return known
+            if recognition:
+                known = {uid for uid in uids if pending.get(uid, (None,))[0] == lineage}
+            if uids - known:
                 known |= set(self._store.host_uid_bindings_for(lineage, uids - known, ("engine",)))
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
         return known
 
+    def _host_uid_tail_cut(self, messages, row):
+        if not self._uid_recognition_enabled() or not row or not any(_valid_uid(m.get("message_uid")) for m in messages):
+            return None
+        if ((lineage := self._host_uid_lineage_key()[0]) is None or row.get("session_id") != self._session_id
+                or str(row.get("conversation_id") or "").strip() not in {"", str(self._conversation_id or "")}):
+            return None
+        try:
+            sid = row["store_id"]
+            uids = self._store.host_uid_uids_of_stores(lineage, [sid]).get(sid, set())
+            carriers = [(i, m) for i, m in enumerate(messages)
+                        if _valid_uid(uid := m.get("message_uid")) and uid in uids]
+            if len(carriers) == 1:
+                i, message = carriers[0]
+                if (not message.get("_absorbed_message_uids")
+                        and not self._host_uid_engine_uids({message["message_uid"]})
+                        and self._host_uid_bytes_match([sid], message, {sid: row}, lossless=True) is not None):
+                    return i + 1
+        except Exception:
+            logger.debug("LCM UID tail cut unavailable", exc_info=True)
     def _host_uid_host_uids(self, uids) -> set:
         """The uids positively bound as canonical or version in this lineage; fail open to no host uids."""
         try:
@@ -217,6 +277,74 @@ class HostUidShadowMixin:
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
         return set()
+
+    def _host_uid_whole_scaffold(self, message):
+        content = message.get("content")
+        if (message.get("role") not in ("assistant", "user") or not isinstance(content, str)
+                or message.get("tool_calls") or message.get("tool_call_id")):
+            return False
+        if self._is_lcm_emitted_head_row(message, 2**63 - 1):
+            return True
+        remaining = content.lstrip()
+        while remaining:
+            if remaining.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+                end = _todo_annotation_span(remaining, 0)
+            else:
+                end = self._verified_lcm_summary_prefix_end(remaining)
+            if end == len(remaining):
+                return True
+            if end is None or not remaining.startswith("\n\n", end):
+                break
+            remaining = remaining[end + 2:]
+        return False
+
+    def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None):
+        """Resolve distinct, byte-proven occurrences in this store and lineage."""
+        if not self._uid_recognition_enabled():
+            return {}
+        uids = [m.get("message_uid") for m in messages]
+        wanted = {uid for uid in uids if _valid_uid(uid)}
+        if not wanted or prefix_only and not _valid_uid(uids[0]) or (lineage := self._host_uid_lineage_key()[0]) is None:
+            return {}
+        try:
+            bindings = self._store.host_uid_bindings_for(lineage, wanted)
+            engine = self._host_uid_engine_uids(wanted) if prefix_only or identities is not None else set()
+            fetched = {} if fetched is None else fetched
+            resolved, claimed = {}, set(excluded)
+            self._host_uid_fetch({sid for items in bindings.values() for sid, _kind in items}, fetched)
+            carry = self._load_compression_carry_ranges() if fetched else ()
+            conversation = {"", str(self._conversation_id or "")}
+            owned = {sid: row for sid, row in fetched.items() if row and self._identity_anchor_owned(row, carry)
+                     and str(row.get("conversation_id") or "").strip() in conversation}
+            for idx, (uid, message) in enumerate(zip(uids, messages)):
+                if _valid_uid(uid) and not message.get("_absorbed_message_uids"):
+                    identity = (identities if identities is not None else messages)[idx]
+                    if uid in engine:
+                        if (self._host_uid_whole_scaffold(identity) or identity.get("role") == "system"
+                                and self._is_verified_replay_scaffold_message(identity)):
+                            resolved[idx] = None
+                        elif prefix_only:
+                            break
+                        continue
+                    candidates = [sid for sid, _kind in bindings.get(uid, ()) if sid in owned and sid not in claimed]
+                    hit = self._host_uid_bytes_match(candidates, identity, owned, lossless=True) if candidates else None
+                    if hit is not None:
+                        resolved[idx] = owned[hit]
+                        claimed.add(hit)
+                        continue
+                if prefix_only:
+                    break
+            if resolved and (identities is not None or prefix_only and len(resolved) < len(messages)):
+                visible = [i for i, m in enumerate(messages) if not self._matches_ignore_message_patterns(m)]
+                hits = {j for j, i in enumerate(visible) if i in resolved}
+                self._identity_anchor_tool_segments([messages[i] for i in visible], 0, hits,
+                    {j: [resolved[i]] for j, i in enumerate(visible) if resolved.get(i)})
+                for j in set(range(len(visible))) - hits:
+                    resolved.pop(visible[j], None)
+            return resolved
+        except Exception:
+            logger.debug("LCM host UID recognition unavailable", exc_info=True)
+            return {}
 
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None, *, store=None):
@@ -289,7 +417,7 @@ class HostUidShadowMixin:
         for uid, items in bindings.items():
             for sid, _kind in items:
                 by_store[sid].add(uid)
-        fetched: dict = {}
+        fetched = capture.get("fetched") or {}
         self._host_uid_fetch(by_store, fetched, **target)  # one batched read for the whole decided range
         targets = {idx: int(matched[idx][0]["store_id"]) for idx in valid
                    if idx not in stored_at and len(matched.get(idx) or ()) == 1}
@@ -397,12 +525,19 @@ class HostUidShadowMixin:
             fetched.update((self._store if store is None else store).get_batch(missing[start:start + 500]))
 
     def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict, *, store=None, hermes_home=None,
-                              session_id=None, conversation_id=None) -> Optional[int]:
+                              session_id=None, conversation_id=None, lossless=False) -> Optional[int]:
         """The first bound row holding this dict's payload (its stored or host-rewrite form), else None."""
         if any(int(sid) not in fetched for sid in store_ids):
             self._host_uid_fetch(store_ids, fetched, **(dict(store=store) if store is not None else {}))
         target = {} if store is None else dict(store=store, hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
         identity = self._message_replay_identity(identity_message, strip_carrier=False, **target)
+        if lossless and _lossy_identity(identity):
+            return None
+        if lossless:
+            content = normalize_content_value(identity_message.get("content")) or ""
+            blocks = Counter(_OOB_MESSAGE_BLOCK_RE.findall(content))
+            store_ids = [sid for sid in store_ids if blocks == Counter(_OOB_MESSAGE_BLOCK_RE.findall(
+                normalize_content_value((fetched.get(int(sid)) or {}).get("content")) or ""))]
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
                      and identity in self._stored_row_forms(fetched[int(sid)], **target)), None)
 
