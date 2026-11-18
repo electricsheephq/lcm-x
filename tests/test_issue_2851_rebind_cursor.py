@@ -480,3 +480,38 @@ def test_bind_back_reestablishes_old_session_reconcile_state(tmp_path, monkeypat
     assert raced["b_frontier_after"].needs_reconcile is True
     assert raced["a_reconcile_before_schedule"] == control["a_reconcile_before_schedule"] == [False]
     assert raced["a_reconcile_at_rebind"] == control["a_reconcile_at_rebind"] is True
+
+
+def test_shutdown_with_a_switch_after_the_pass_matches_main(tmp_path, monkeypatch, caplog):
+    """Mode unset: the binding check precedes the shutdown check, so the switch wins, as on main.
+
+    Expected values were computed on main with this cell's inputs; the shutdown stop would leave
+    ("noop", "engine shutting down") in the session served after the switch."""
+    caplog.set_level(logging.INFO, logger="hermes_lcm.compaction")
+    monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    _state_db(tmp_path, [("S", None, None), ("B", None, None)])
+    engine = _engine(tmp_path)
+    engine._hermes_home = engine._store._hermes_home = str(tmp_path)
+    rows = _view(7)
+    try:
+        engine.ingest(rows)
+        original = engine._compress_impl
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            def at_outer_exit(*args, **kwargs):
+                result = original(*args, **kwargs)
+                pool.submit(_bind, engine, "B", "convB").result(timeout=WAIT)
+                with engine._compaction_gate:
+                    engine._compaction_closing = True
+                return result
+
+            monkeypatch.setattr(engine, "_compress_impl", at_outer_exit)
+            caller_view = list(rows)
+            returned = engine.compress(caller_view, 24_000)
+        with engine._compaction_gate:
+            engine._compaction_closing = False
+        assert returned is caller_view
+        assert (engine._session_id, engine._last_compression_status, engine._last_compression_noop_reason,
+                engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == ("B", "idle", "", 0, True)
+        assert [record.message for record in caplog.records if record.message == STOP] == [STOP]
+    finally:
+        engine.shutdown()

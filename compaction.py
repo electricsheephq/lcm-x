@@ -844,6 +844,8 @@ class CompactionMixin:
                     force=force,
                     recovery_attempt=bypass_cooldown,
                 )
+            if uid_binding is None and binding_changed():  # #2851: main's place when the uid mode is not active
+                return messages
             if self._compaction_is_closing():
                 self._stop_pass_for_shutdown()
                 returned = messages
@@ -858,7 +860,7 @@ class CompactionMixin:
                 if scope.matches_binding():
                     self._ingest_cursor = len(result)
                     self._compress_host_rows_consumed = 0
-            if binding_changed():  # #2851; after the block above, whose stand-down under the uid mode is unchanged
+            if uid_binding is not None and binding_changed():  # #2851: under the uid mode, after its block above
                 return messages
             if (
                 isinstance(result, list)
