@@ -85,13 +85,16 @@ def require_local_semantic(raw):
         raise LocalRecallUnavailable(LocalRecallUnavailable.code)
 
 
-def require_voyage_semantic(raw, *, summaries):
+def require_voyage_semantic(raw, *, summaries, product_raised=None):
     payload = json.loads(raw)
+    # Build probes omit product_raised and still require a successful reply.
+    if product_raised is False and "error" in payload:
+        return
     metadata = _recall_metadata(payload)
     include = payload.get("include", "all")
     coverage = payload.get("provenance", {}).get("coverage", {})
     require_chunk = include != "summaries"
-    require_summary = include == "summaries" or (include != "verbatim" and summaries)
+    require_summary = summaries and include != "verbatim"
     if (metadata["reason_class"] in VOYAGE_RECALL_STOP
             or (require_chunk and coverage.get("chunk") not in SEMANTIC_COVERAGE)
             or (require_summary and coverage.get("summary") not in SEMANTIC_COVERAGE)):
@@ -184,9 +187,11 @@ def dispatch(name, arguments, engine, offered=None):
             raise ValueError("arguments must be a JSON object")
     except ValueError as exc:
         return json.dumps({"error": f"Invalid JSON arguments for {name}: {exc}"}, ensure_ascii=False)
+    product_raised = False
     try:
         raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
+        product_raised = True
         raw = json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
     if name == "lcm_recall":
         if getattr(engine, "_fmp_local_recall_guard", False):
@@ -196,7 +201,7 @@ def dispatch(name, arguments, engine, offered=None):
                 exc.recall_metadata = metadata
                 raise exc
         elif getattr(engine, "_fmp_voyage_recall_guard", False):
-            require_voyage_semantic(raw, summaries=engine._fmp_has_summaries)
+            require_voyage_semantic(raw, summaries=engine._fmp_has_summaries, product_raised=product_raised)
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
         payload = json.loads(raw)
         if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":

@@ -122,20 +122,84 @@ def test_empty_revision_refused_at_build_and_frozen_recall(voyage_store, questio
         assert "degraded_reason" not in record and "query" not in record and "hits" not in record
 
 
+@pytest.mark.parametrize("invalid", [
+    {"query": ""},
+    {"limit": 0},
+    {"include": "bogus"},
+    {"seen_refs": ["synthetic-ref"]},
+])
+def test_voyage_validation_reply_reaches_reader(voyage_store, question, tmp_path, invalid):
+    from hermes_lcm import tools
+
+    store = voyage_store()
+    assert store.build(question) == "built"
+    log = tmp_path / "mcp.jsonl"
+    valid = {"query": question.question}
+    arguments = {**valid, **invalid}
+    with store.engine(question) as (engine, _):
+        expected = tools.lcm_recall(arguments, engine=engine)
+        assert "error" in json.loads(expected)
+        spec = {"max_calls": 2, "question": {"question_date": question.question_date}}
+        reader = mcp_reader.Reader(spec, engine, delivery.schemas(engine), log)
+
+        def call_reader(model, messages, records, server, **kwargs):
+            records.append({"mcp_log": str(log)})
+            reply = reader.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "lcm_recall", "arguments": arguments}})["result"]
+            assert reply["isError"] and reply["content"][0]["text"] == expected
+            raw, error = reader.call("lcm_recall", valid)
+            assert not error
+            assert json.loads(raw)["provenance"]["coverage"]["chunk"] == "full"
+            return {"content": "synthetic answer"}
+
+        client = Mock()
+        client.agentic.side_effect = call_reader
+        result = delivery.harness_agentic(question, client, "fixture", {}, [])
+        assert result["status"] == "ok" and result["hypothesis"] == "synthetic answer"
+        assert result["tool_calls"] == 2
+        assert result["trace"][0]["reason_class"] == "error"
+        assert all("fatal" not in event for event in result["trace"])
+        assert delivery.dispatch("lcm_recall", arguments, engine) == expected
+
+
+def test_voyage_raised_product_exception_stops(voyage_store, question, monkeypatch):
+    from hermes_lcm import tools
+    from hermes_lcm.ingest_policy import EmbeddingPrivacyPolicyError
+
+    store = voyage_store()
+    assert store.build(question) == "built"
+    monkeypatch.setattr(tools, "_lcm_grep_embed_query",
+                        Mock(side_effect=EmbeddingPrivacyPolicyError("synthetic privacy failure")))
+    with store.engine(question) as (engine, _):
+        with pytest.raises(delivery.VoyageRecallUnavailable, match="^voyage_recall_semantic_unavailable$") as run:
+            delivery.single(question, engine)
+    assert run.value.recall_metadata["reason_class"] == "error"
+
+
+def test_voyage_build_probe_requires_success(voyage_store, question, monkeypatch):
+    from hermes_lcm import tools
+
+    store = voyage_store()
+    monkeypatch.setattr(tools, "lcm_recall", Mock(return_value='{"error": "synthetic"}'))
+    with pytest.raises(delivery.VoyageRecallUnavailable, match="^voyage_recall_semantic_unavailable$") as build:
+        store.build(question)
+    assert build.value.recall_metadata["reason_class"] == "error"
+    assert not store.directory(question).exists()
+
+
 @pytest.mark.parametrize("coverage, reason, expected", [
     ({"summary": "full", "chunk": "none"}, "chunk vectors are unavailable", "other"),
     ({"summary": "none", "chunk": "full"}, "summary vectors are unavailable", "summary_vectors_unavailable"),
     ({}, "embedding provider unavailable: synthetic", "provider_unavailable"),
     ({"summary": "disabled", "chunk": "disabled"}, "semantic retrieval is disabled", "other"),
     ({"summary": "full", "chunk": "full"}, "prefix_stale", "prefix_stale"),
-    (None, None, "error"),
 ])
 def test_voyage_certification_and_guard_refuse_incomplete_replies(voyage_store, question, monkeypatch,
                                                                  coverage, reason, expected):
     from hermes_lcm import tools
 
     store = voyage_store()
-    payload = {"error": "synthetic"} if coverage is None else {
+    payload = {
         "provenance": {"coverage": coverage},
         "degraded_reason": tools._EMBEDDING_PREFIX_STALE_REASON if reason == "prefix_stale" else reason,
     }
@@ -160,8 +224,24 @@ def test_voyage_without_summaries_and_empty_scope(voyage_store, question):
 
         assert recall()["provenance"]["coverage"] == {"fts": "ok", "chunk": "full", "summary": "none"}
         assert recall(include="verbatim")["provenance"]["coverage"] == {"fts": "ok", "chunk": "full"}
+        summary_reply = recall(include="summaries")
+        assert summary_reply["provenance"]["coverage"] == {"fts": "ok", "summary": "none"}
+        assert summary_reply["degraded_reason"] == "summary vectors are unavailable"
         reply = recall(exclude_session_ids=[session["session_id"] for session in question.sessions])
         assert reply["hits"] == [] and reply["provenance"]["coverage"]["chunk"] == "full"
+
+
+def test_voyage_summaries_only_requires_built_summary_coverage(voyage_store, question, monkeypatch):
+    from hermes_lcm import tools
+
+    store = voyage_store()
+    assert store.build(question) == "built"
+    monkeypatch.setattr(tools, "_lcm_recall_summary_arm", Mock(return_value=([], "none", 0, 0, [])))
+    with store.engine(question) as (engine, _):
+        args = {"query": question.question, "include": "summaries"}
+        with pytest.raises(delivery.VoyageRecallUnavailable, match="^voyage_recall_semantic_unavailable$") as run:
+            delivery.dispatch("lcm_recall", args, engine)
+    assert run.value.recall_metadata["reason_class"] == "summary_vectors_unavailable"
 
 
 def test_old_voyage_manifest_rebuilds(voyage_store, question):
