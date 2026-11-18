@@ -472,3 +472,14 @@ def test_committed_prefix_is_still_resumed(open_engine, summaries):
     assert engine._last_compression_status == "compacted"
     assert engine._last_compress_leaves[1] == 0 and summaries == calls
     assert engine._ingest_cursor == len(output)
+
+
+def test_quarantine_behind_replayed_head_is_reassembled(open_engine, uid_mode, summaries):
+    engine = open_engine(survival_fit=False)
+    view = [*published_head(engine), user_row(0),
+            host_row({"role": "assistant", "content": _broken_assistant_output()}, "broken")]
+    output = engine.compress(view, current_tokens=4_000)
+    assert engine._last_compress_leaves[1] == 0
+    assert output is not view
+    assert "assistant output quarantined" in output[-1]["content"]
+    assert output[-1]["content"] != view[-1]["content"]
