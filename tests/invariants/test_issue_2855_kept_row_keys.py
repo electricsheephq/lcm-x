@@ -6,6 +6,7 @@ import random
 import pytest
 
 from hermes_lcm import engine as engine_module, host_uid_emit
+from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 from hermes_lcm.tokens import count_messages_tokens
 from tests.harness.engine import engine_context
 
@@ -174,3 +175,37 @@ def test_returned_rows_preserve_host_key_property(open_engine, uid_mode, append)
         pairs = _kept_rows(history, result)
         assert len(pairs) == len(result) == len(history)
         _assert_host_keys(pairs)
+
+
+def test_generated_replay_row_does_not_inherit_host_keys(open_engine, monkeypatch):
+    host = _row("user", "Synthetic ignored input")
+    kept = _row("assistant", "Synthetic reply")
+    rows = [host, kept]
+    with open_engine() as engine:
+        # Give the placeholder builder a filtering decision without requiring regex.
+        monkeypatch.setattr(engine, "_compiled_ignore_message_patterns", [object()])
+        cached = engine._apply_ignored_active_replay_placeholders(rows, rows, ignored_messages=[True, False])
+        host["host_extra"] = "belongs to the original input"
+        kept["host_extra"] = "belongs to the kept reply"
+
+        generated, returned = engine._keep_host_held_stubs(rows, cached, rows)
+
+        assert "LCM active replay placeholder: message ignored" in generated["content"]
+        assert id(generated) in engine._generated_ignored_active_replay_placeholder_message_ids
+        assert "host_extra" not in generated
+        assert returned["host_extra"] == kept["host_extra"]
+
+
+def test_host_held_stub_is_skipped_by_key_refresh(open_engine):
+    class HostRow(dict):
+        def update(self, *args, **kwargs):
+            pytest.fail("The refresh must skip the host's own row")
+
+    host = HostRow(role="tool", content=_HERMES_PRUNED_TOOL_PLACEHOLDER, host_extra="host-owned")
+    with open_engine() as engine:
+        cached = engine._copy_active_replay_messages_preserving_generated_ids([
+            _row("tool", "Original synthetic tool result"),
+        ])
+        returned, = engine._keep_host_held_stubs([host], cached, [host])
+
+    assert returned is host

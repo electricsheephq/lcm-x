@@ -2887,6 +2887,7 @@ class LCMEngine(
 
         input_pairs = [(row.get("content"), row["api_content"]) for row in messages
                        if isinstance(row, dict) and "api_content" in row]
+        input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
         # Index ordinary text pairs, and compare structured values by equality.
         text_pairs = {(content, api) for content, api in input_pairs
                       if isinstance(content, str) and isinstance(api, str)}

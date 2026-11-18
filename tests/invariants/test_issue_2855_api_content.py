@@ -153,6 +153,25 @@ def test_returned_api_text_has_an_exact_input_pair(engine):
                for row in output if "api_content" in row)
 
 
+@pytest.mark.parametrize("path", ["cleanup", "force"])
+@pytest.mark.parametrize("surrogate_in", ["content", "api_content", "both", "other-row", "neither"])
+def test_kept_api_text_matches_canonical_input_pair(engine, path, surrogate_in):
+    content = "Question \ud83d with context" if surrogate_in in {"content", "both"} else "Question"
+    api_text = "API \udc00 context" if surrogate_in in {"api_content", "both"} else "API context"
+    answer = "Answer \ud83d" if surrogate_in == "other-row" else "Answer"
+    rows = [dict(_user(content), api_content=api_text), _assistant(answer),
+            dict(_user("Next question"), api_content="Next question with context")]
+    engine.ingest(rows)
+
+    output = _cleanup(engine, rows) if path == "cleanup" else _compress(engine, rows, force=True)
+
+    kept, reply, trailing = output
+    assert kept["content"] == content.replace("\ud83d", "\ufffd")
+    assert kept["api_content"] == api_text.replace("\udc00", "\ufffd")
+    assert reply["content"] == answer.replace("\ud83d", "\ufffd")
+    assert trailing == rows[-1]
+
+
 @pytest.mark.parametrize("late_stamp", [False, True], ids=["initially-stamped", "late-stamp"])
 def test_no_progress_hold_survives_unchanged_replay_and_clears_on_leaf(engine, monkeypatch, late_stamp):
     monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: ("Earlier synthetic work.", 1))
