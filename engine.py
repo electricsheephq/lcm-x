@@ -2959,9 +2959,10 @@ class LCMEngine(
             deadline=deadline,
             admit_rescue=getattr(self, "_leaf_rescue_admit", None),
         )
-        self._last_leaf_summary_model = result.model
-        self._last_leaf_content_filter_error = result.content_filter_error
-        self._last_leaf_level_3_verbatim = result.level_3_verbatim
+        if not self._compress_binding_changed():
+            self._last_leaf_summary_model = result.model
+            self._last_leaf_content_filter_error = result.content_filter_error
+            self._last_leaf_level_3_verbatim = result.level_3_verbatim
         return result.chunk, result.source_tokens, result.summary, result.level, result.attempts
 
     # -- ContextEngine optional methods ------------------------------------
@@ -3409,7 +3410,7 @@ class LCMEngine(
         )
 
     @contextlib.contextmanager
-    def _fresh_tail_pressure_yield_invocation(self):
+    def _fresh_tail_pressure_yield_invocation(self, binding_changed=None):
         """Invocation scope for the transient pressure-yield tail bound.
 
         Entered by every public compaction entry point (``compress`` and
@@ -3449,17 +3450,18 @@ class LCMEngine(
             completed = True
         finally:
             self._pressure_yield_scope_depth -= 1
-            if completed and self._pressure_yield_scope_depth == 0:
+            same_binding = binding_changed is None or not binding_changed()
+            if same_binding and completed and self._pressure_yield_scope_depth == 0:
                 if self._pressure_yield_invocation_verdict not in ("blocked", "neutral"):
                     self._pressure_yield_blocked_streak = 0
-            if self._pressure_yield_reset_epoch == entry_epoch:
+            if same_binding and self._pressure_yield_reset_epoch == entry_epoch:
                 self._pressure_yield_tail_token_limit = saved_limit
                 self._pressure_yield_streak_counted = saved_counted
                 self._pressure_yield_invocation_verdict = saved_verdict
                 self._pressure_yield_preflight_candidate = saved_preflight_candidate
                 if self._pressure_yield_scope_depth > 0:
                     self._pressure_yield_blocked_streak = saved_streak
-            else:
+            elif same_binding:
                 self._pressure_yield_tail_token_limit = 0
                 self._pressure_yield_blocked_streak = 0
                 self._pressure_yield_streak_counted = False
@@ -10789,7 +10791,7 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
-        if self._compaction_is_closing():
+        if self._compress_binding_changed() or self._compaction_is_closing():
             return None
         # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
