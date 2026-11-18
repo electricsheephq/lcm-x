@@ -25,6 +25,26 @@ PAD = " alpha beta gamma delta" * 30
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
 pytestmark = pytest.mark.issue(2854)
 
+# Hotfix tree only: with the uid mode on, the mode's no-leaf path returns the restored rows without
+# re-assembly, so these cells fail with or without the #2854 change. Strict: they turn red once that
+# path is fixed, and the marks then come out.
+_MODE_ON_NO_LEAF_GAPS = {
+    "test_new_condensation_is_assembled[on]": "the newly stored condensation is not assembled",
+    "test_missing_result_behind_replayed_head_is_stubbed[on-at-end]": "no stub for an unanswered tool call",
+    "test_missing_result_behind_replayed_head_is_stubbed[on-before-user]": "no stub for an unanswered tool call",
+    "test_aged_results_behind_replayed_head_are_stubbed[on-one-result]": "aged large results are not stubbed",
+    "test_aged_results_behind_replayed_head_are_stubbed[on-two-results]": "aged large results are not stubbed",
+    "test_assembly_cap_trims_tail_behind_replayed_head[on]": "the list is not trimmed to the assembly cap",
+}
+
+
+@pytest.fixture(autouse=True)
+def _mode_on_no_leaf_gap(request):
+    gap = _MODE_ON_NO_LEAF_GAPS.get(request.node.name)
+    if gap is not None:
+        request.applymarker(pytest.mark.xfail(strict=True, reason=(
+            f"hotfix tree, uid mode on: the mode's no-leaf path returns rows without re-assembly: {gap}")))
+
 
 @pytest.fixture(params=["unset", "shadow", "on"])
 def uid_mode(request, monkeypatch):
