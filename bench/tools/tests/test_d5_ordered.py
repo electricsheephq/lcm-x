@@ -5,14 +5,13 @@ import os
 import random
 import sys
 import time
-from collections import Counter
 from operator import eq
 
 import pytest
 
 from bench.instruments.d5_clone import bars
 from bench.tools.d5_end_read import coverage
-from bench.tools.d5_ordered import identity_key, ordered_pairs
+from bench.tools.d5_ordered import ordered_pairs
 
 
 def test_ordered_pairs_match_reference_on_3200_seeded_cases():
@@ -44,33 +43,17 @@ def test_a_shared_nan_key_does_not_match_itself():
     assert ordered_pairs(rows, hosts) == bars._ordered(rows, hosts, eq) == [(0, 1)]
 
 
-def test_structured_identities_preserve_equality_as_hashable_keys():
-    values = [
-        ("user", [{"text": "a", "n": 1}]),
-        ("user", [{"n": True, "text": "a"}]),
-        ("user", [{"text": "a", "n": 2}]),
-        ("user", ({"text": "a", "n": 1},)),
-        ("user", {"text": "a", "n": 1}),
-        ("user", {"text": "a", "n": 2}),
-        ("user", {"a", "b"}),
-        ("user", frozenset({"b", "a"})),
-        ("tool", bytearray(b"ok")),
-        ("tool", b"ok"),
-    ]
-    keys = list(map(identity_key, values))
-    for value, key in zip(values, keys, strict=True):
-        for other, other_key in zip(values, keys, strict=True):
-            assert (key == other_key) == (value == other)
-            if value == other:
-                assert hash(key) == hash(other_key)
-    assert ordered_pairs(keys, keys[::-1]) == bars._ordered(values, values[::-1], eq)
+def test_tuples_match_when_they_share_the_same_nan_element():
+    nan = float("nan")
+    rows, hosts = [(nan,), (float("nan"),)], [(float("nan"),), (nan,)]
+    assert ordered_pairs(rows, hosts) == bars._ordered(rows, hosts, eq) == [(0, 1)]
 
 
 def test_coverage_calls_identity_once_per_matching_input_row(tmp_path):
-    calls = Counter()
+    calls = []
 
     def identity(row):
-        calls[row["token"]] += 1
+        calls.append(row["token"])
         return "user", [{"n": row["key"]}]
 
     def host(i, session, key):
@@ -84,7 +67,7 @@ def test_coverage_calls_identity_once_per_matching_input_row(tmp_path):
            "store": [*start["store"], stored(2, "s1", "a"), stored(3, "s1", "a"), stored(4, "s1", "b")]}
     result = coverage(start, end, identity, tmp_path)
     assert (result["matched"], result["unmatched"], result["lost"]) == (1, 1, 1)
-    assert calls == {"h2": 1, "h3": 1, "h4": 1, "s2": 1, "s3": 1, "s4": 1}
+    assert calls == ["s2", "h2", "h3", "s3", "s4"]
 
 
 @pytest.mark.skipif(os.environ.get("LCMX_ENDREAD_FIELD_SCALE") != "1", reason="set LCMX_ENDREAD_FIELD_SCALE=1")

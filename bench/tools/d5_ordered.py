@@ -2,22 +2,8 @@
 from __future__ import annotations
 
 
-def identity_key(value):
-    """Freeze structured row identities while preserving Python equality."""
-    if isinstance(value, (tuple, list)):
-        kind = tuple if isinstance(value, tuple) else list
-        return kind, tuple(map(identity_key, value))
-    if isinstance(value, dict):
-        return dict, frozenset((identity_key(k), identity_key(v)) for k, v in value.items())
-    if isinstance(value, (set, frozenset)):
-        return frozenset(map(identity_key, value))
-    if isinstance(value, bytearray):
-        return bytes(value)
-    return value
-
-
 def ordered_pairs(row_keys, host_keys):
-    """Return the same ordered index pairs as bars._ordered with key equality."""
+    """Match bars._ordered with == for exact str, int, float, bytes, None and plain tuples of those values."""
     if not row_keys or not host_keys:
         return []
 
