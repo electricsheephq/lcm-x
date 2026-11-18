@@ -2918,9 +2918,10 @@ class CompactionMixin:
                 and self._ingest_cursor == len(messages)
                 and not self._proactive_recall_eligible()
                 and active_context_messages is state.working_messages and self._replayed_head_covers_frontier(state)
-                and self._sanitize_active_context_messages(
-                    active_context_messages, insert_missing_tool_stubs=False,
-                ) == active_context_messages
+                and state.recovery_assembly_cap is None and self._effective_assembly_token_cap() is None
+                and self._sanitize_active_context_messages(active_context_messages) == active_context_messages
+                and (active_tail := active_context_messages[self._leading_anchor_count(active_context_messages):])
+                == self._stub_large_tool_results_for_active_replay(active_tail, write=False)
             )
             if kept_replayed_head:
                 sanitized_messages = messages

@@ -19,7 +19,7 @@ from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from hermes_lcm.tokens import count_messages_tokens, count_tokens
 from tests.test_ingest_protection import _broken_assistant_output
 from tests.test_issue_667_level3_repair import _fake_route
-from tests.test_issue_671_stub_first_exit import STUB, tool_pair, tool_view
+from tests.test_issue_671_stub_first_exit import STUB, payload_of, tool_content, tool_pair, tool_view
 
 PAD = " alpha beta gamma delta" * 30
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
@@ -483,3 +483,87 @@ def test_quarantine_behind_replayed_head_is_reassembled(open_engine, uid_mode, s
     assert output is not view
     assert "assistant output quarantined" in output[-1]["content"]
     assert output[-1]["content"] != view[-1]["content"]
+
+
+@pytest.mark.parametrize("position", ["at-end", "before-user"])
+def test_missing_result_behind_replayed_head_is_stubbed(open_engine, uid_mode, summaries, position):
+    engine = open_engine(survival_fit=False)
+    head = published_head(engine)
+    call, _ = tool_pair("unanswered", "unused")
+    call["content"] = ""
+    view = [*head, user_row(0), host_row(call, "unanswered-call")]
+    following = [user_row(1)] if position == "before-user" else []
+    view.extend(following)
+    snapshot = deepcopy(view)
+
+    output = engine.compress(view, current_tokens=4_000)
+
+    assert engine._last_compress_leaves[1] == 0
+    assert output[len(head) + 1:] == [call, engine._missing_tool_result_stub("unanswered"), *following]
+    assert output is not view
+    assert view == snapshot
+
+
+@pytest.mark.parametrize("result_count", [1, 2], ids=["one-result", "two-results"])
+def test_aged_results_behind_replayed_head_are_stubbed(open_engine, uid_mode, summaries, result_count):
+    engine = open_engine(survival_fit=False, threshold_full_sweep_enabled=False,
+                         large_output_externalization_enabled=True,
+                         large_output_active_replay_stubbing_enabled=True,
+                         large_output_externalization_threshold_chars=1_000_000)
+    view = list(published_head(engine))
+    tool_ids = [f"aged-{index}" for index in range(result_count)]
+    for index, tool_id in enumerate(tool_ids):
+        call, result = tool_pair(tool_id, payload_of(3_000, f"word{index}"))
+        call["content"] = ""
+        reply = {"role": "assistant", "content": f"reply {index}"}
+        view.extend((user_row(index), host_row(call, f"call-{index}"),
+                     host_row(result, f"result-{index}"), host_row(reply, f"reply-{index}")))
+    view.extend((user_row(result_count), {"role": "assistant", "content": "fresh reply"}))
+    snapshot = deepcopy(view)
+
+    output = engine.compress(view, current_tokens=count_messages_tokens(view))
+
+    assert engine._last_compress_leaves[1] == 0
+    assert not engine._last_stub_first_exit
+    assert [tool_content(output, tool_id).startswith(STUB) for tool_id in tool_ids] == [True] * result_count
+    assert output is not view
+    assert output[-2:] == view[-2:]
+    assert view == snapshot
+
+
+def test_assembly_cap_trims_tail_behind_replayed_head(open_engine, monkeypatch, uid_mode, summaries):
+    engine = open_engine(survival_fit=False)
+    head = published_head(engine)
+    old_user = user_row(0)
+    old_user["content"] += PAD * 10
+    fresh = [user_row(1), {"role": "assistant", "content": "fresh reply"}]
+    view = [*head, old_user, *fresh]
+    snapshot = deepcopy(view)
+    engine._config.max_assembly_tokens = 300
+    assert count_messages_tokens(view) > engine._effective_assembly_token_cap()
+    # An over-cap view normally takes the forced recovery exit. Exercise the ordinary tail selector here.
+    monkeypatch.setattr(engine, "_should_force_overflow_recovery", lambda **kwargs: False)
+
+    output = engine.compress(view, current_tokens=count_messages_tokens(view))
+
+    assert engine._last_compress_leaves[1] == 0
+    assert old_user not in output and len(output) < len(view)
+    assert count_messages_tokens(output) <= 300
+    assert output is not view and output[-2:] == fresh
+    assert view == snapshot
+
+
+def test_paired_inline_result_behind_replayed_head_returns_input(open_engine, uid_mode, summaries):
+    engine = open_engine(survival_fit=False, large_output_externalization_enabled=True,
+                         large_output_active_replay_stubbing_enabled=True)
+    head = published_head(engine)
+    call, result = tool_pair("paired", "short result")
+    call["content"] = ""
+    view = [*head, user_row(0), host_row(call, "paired-call"), host_row(result, "paired-result"),
+            user_row(1), {"role": "assistant", "content": "fresh reply"}]
+    snapshot = deepcopy(view)
+
+    output = engine.compress(view, current_tokens=count_messages_tokens(view))
+
+    assert engine._last_compress_leaves[1] == 0
+    assert_unchanged(engine, view, output, snapshot)
