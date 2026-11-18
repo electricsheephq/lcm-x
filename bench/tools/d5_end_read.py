@@ -52,6 +52,7 @@ HINTS = ("equal after stripping edge whitespace", "payload swapped for a referen
          "matches a declared message pattern", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _PLAIN_KEY_TYPES = (str, int, float, bytes, type(None))
+_MISS = object()
 
 
 def _sha12(value):
@@ -65,24 +66,17 @@ def _plain_key(key):
 
 def _hint_cache(end_dir):
     """Cache successful payload lookups and strips of plain strings for one session."""
-    @cache
-    def swap_text(text):
-        return runner._swap_payload(end_dir, text)
-
     strip_text = cache(str.strip)
-
-    def swap(value):
-        return swap_text(value) if type(value) is str else runner._swap_payload(end_dir, value)
 
     def strip(value):
         return strip_text(value) if type(value) is str else value.strip()
 
-    return swap, strip
+    return end_dir, {}, strip
 
 
 def _hint(host, candidates, hint_cache):
     """The hint class for one unmatched host row against its session's unpaired stored rows (never a credit)."""
-    swap, strip = hint_cache
+    end_dir, memo, strip = hint_cache
     text = host.get("content")
     for row in candidates:
         if row.get("role") != host.get("role"):
@@ -90,9 +84,15 @@ def _hint(host, candidates, hint_cache):
         stored = row.get("content")
         if isinstance(text, str) and isinstance(stored, str) and text != stored and strip(text) == strip(stored):
             return HINTS[0], row["store_id"]
-        if (isinstance(text, str) and swap(stored) == text) or \
-                (isinstance(stored, str) and swap(text) == stored):  # Either side the reference.
-            return HINTS[1], row["store_id"]
+        for value, expected in ((stored, text), (text, stored)):
+            if isinstance(expected, str):
+                swapped = memo.get(value, _MISS) if type(value) is str else _MISS
+                if swapped is _MISS:
+                    swapped = runner._swap_payload(end_dir, value)
+                    if type(value) is str:
+                        memo[value] = swapped
+                if swapped == expected:
+                    return HINTS[1], row["store_id"]
     return HINTS[4], None
 
 
@@ -139,13 +139,22 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
         pairs = []
         if rows and hosts:
             # Follow the first encounter with each row in bars._ordered's row-major comparisons.
-            row_values = [identity(rows[0])]
-            host_values = [identity(host) for host in hosts]
-            row_values.extend(identity(row) for row in rows[1:])
-            if all(map(_plain_key, row_values)) and all(map(_plain_key, host_values)):
-                pairs = ordered_pairs(row_values, host_values)
+            memo = {}
+            for row in rows[:1] + hosts + rows[1:]:
+                row_id = id(row)
+                if row_id not in memo:
+                    memo[row_id] = identity(row)
+                if not _plain_key(memo[row_id]):
+                    def key(row):
+                        row_id = id(row)
+                        if row_id not in memo:
+                            memo[row_id] = identity(row)
+                        return memo[row_id]
+
+                    pairs = bars._ordered(rows, hosts, lambda r, h: key(r) == key(h))
+                    break
             else:
-                pairs = bars._ordered(row_values, host_values, lambda a, b: a == b)
+                pairs = ordered_pairs([memo[id(r)] for r in rows], [memo[id(h)] for h in hosts])
         used_rows, used_hosts = {i for i, _ in pairs}, {j for _, j in pairs}
         spare = [r for i, r in enumerate(rows) if i not in used_rows]
         hint_cache = _hint_cache(end_dir)

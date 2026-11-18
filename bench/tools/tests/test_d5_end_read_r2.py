@@ -94,7 +94,7 @@ def test_non_plain_identities_use_reference_equality(monkeypatch, tmp_path, row_
     monkeypatch.setattr(er, "ordered_pairs", unexpected_fast_path)
     end = {"host": [host(1, "s", "host")], "store": [stored(1, "s", "store")]}
     result = er.coverage(EMPTY, end, lambda row: row_key if "store_id" in row else host_key, tmp_path)
-    assert calls == [([row_key], [host_key])]
+    assert calls == [(end["store"], end["host"])]
     assert result["matched"] == len(expected)
 
 
