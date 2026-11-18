@@ -229,7 +229,7 @@ def test_certified_mcp_summaries_returns_result(local_store, question, tmp_path)
         assert reader.handle({"id": 2, "method": "ping"})["result"] == {}
 
 
-def test_voyage_build_does_not_certify(local_store, question, monkeypatch):
+def test_voyage_build_does_not_use_local_certification(local_store, question, monkeypatch):
     from hermes_lcm import command
     from benchmarking import longmemeval
     provider = LocalProvider()
@@ -244,6 +244,7 @@ def test_voyage_build_does_not_certify(local_store, question, monkeypatch):
     certify.assert_not_called()
     with voyage.engine(question, frozen=True) as (engine, _):
         assert not getattr(engine, "_fmp_local_recall_guard", False)
+        assert engine._fmp_voyage_recall_guard
 
 
 @pytest.mark.parametrize("backend_raises", [False, True])

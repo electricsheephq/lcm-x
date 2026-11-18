@@ -30,18 +30,33 @@ FINAL_NUDGE = ("The tool budget for this question is exhausted. Give your final 
 NUDGE = {"role": "user", "content": FINAL_NUDGE}
 
 
-class LocalRecallUnavailable(RuntimeError):
-    """A LOCAL benchmark must not silently measure full-text-only recall."""
+class SemanticRecallUnavailable(RuntimeError):
+    """A semantic benchmark cannot use a failed recall measurement."""
+
+
+class LocalRecallUnavailable(SemanticRecallUnavailable):
+    code = "local_recall_semantic_unavailable"
+
+
+class VoyageRecallUnavailable(SemanticRecallUnavailable):
+    code = "voyage_recall_semantic_unavailable"
 
 
 LOCAL_RECALL_STOP = {"not_certified", "catching_up", "prefix_stale", "provider_unavailable", "unavailable"}
+VOYAGE_RECALL_STOP = LOCAL_RECALL_STOP | {"embedding_identity_stale", "error"}
+SEMANTIC_COVERAGE = {"full", "full_approx", "bounded"}
+MCP_RECALL_STOPS = {exc.__name__: exc for exc in (LocalRecallUnavailable, VoyageRecallUnavailable)}
 
 
 def recall_metadata(raw):
     """Classify product replies without retaining reason, query or hit text."""
+    return _recall_metadata(json.loads(raw))
+
+
+def _recall_metadata(payload):
     from hermes_lcm import tools
     prefix_stale = getattr(tools, "_EMBEDDING_PREFIX_STALE_REASON", None)
-    payload = json.loads(raw)
+    identity_stale = getattr(tools, "_EMBEDDING_IDENTITY_STALE_REASON", None)
     reason = str(payload.get("degraded_reason") or "")
     # Capacity exhaustion is wrapped as provider-unavailable by the product.
     provider_failure = re.search(
@@ -52,6 +67,7 @@ def recall_metadata(raw):
               ("prefix_stale", prefix_stale is not None and prefix_stale in reason),
               ("provider_unavailable", provider_failure),
               ("unavailable", "local semantic recall unavailable; using full-text recall" in reason),
+              ("embedding_identity_stale", identity_stale is not None and identity_stale in reason),
               ("preparing", "local semantic recall preparing; using full-text recall" in reason),
               ("worker_capacity", "worker capacity is exhausted" in reason),
               ("arm_failed", "arm failed:" in reason),
@@ -66,7 +82,22 @@ def require_local_semantic(raw):
     payload = json.loads(raw)
     if ("chunk" not in payload.get("provenance", {}).get("arms_run", []) or
             "coverage not certified" in str(payload.get("degraded_reason", ""))):
-        raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+        raise LocalRecallUnavailable(LocalRecallUnavailable.code)
+
+
+def require_voyage_semantic(raw, *, summaries):
+    payload = json.loads(raw)
+    metadata = _recall_metadata(payload)
+    include = payload.get("include", "all")
+    coverage = payload.get("provenance", {}).get("coverage", {})
+    require_chunk = include != "summaries"
+    require_summary = include == "summaries" or (include != "verbatim" and summaries)
+    if (metadata["reason_class"] in VOYAGE_RECALL_STOP
+            or (require_chunk and coverage.get("chunk") not in SEMANTIC_COVERAGE)
+            or (require_summary and coverage.get("summary") not in SEMANTIC_COVERAGE)):
+        exc = VoyageRecallUnavailable(VoyageRecallUnavailable.code)
+        exc.recall_metadata = metadata
+        raise exc
 
 
 def tokens(value):
@@ -156,13 +187,16 @@ def dispatch(name, arguments, engine, offered=None):
     try:
         raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
-        return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
-    if name == "lcm_recall" and getattr(engine, "_fmp_local_recall_guard", False):
-        metadata = recall_metadata(raw)
-        if metadata["reason_class"] in LOCAL_RECALL_STOP:
-            exc = LocalRecallUnavailable("local_recall_semantic_unavailable")
-            exc.recall_metadata = metadata
-            raise exc
+        raw = json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
+    if name == "lcm_recall":
+        if getattr(engine, "_fmp_local_recall_guard", False):
+            metadata = recall_metadata(raw)
+            if metadata["reason_class"] in LOCAL_RECALL_STOP:
+                exc = LocalRecallUnavailable(LocalRecallUnavailable.code)
+                exc.recall_metadata = metadata
+                raise exc
+        elif getattr(engine, "_fmp_voyage_recall_guard", False):
+            require_voyage_semantic(raw, summaries=engine._fmp_has_summaries)
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
         payload = json.loads(raw)
         if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":
@@ -233,9 +267,11 @@ def mcp_trace(records):
             for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().split("\n") if line.strip()]
 
 
-def require_mcp_local_recall(trace):
-    if any(t.get("fatal") == "LocalRecallUnavailable" for t in trace):
-        raise LocalRecallUnavailable("local_recall_semantic_unavailable")
+def require_mcp_semantic_recall(trace):
+    for event in trace:
+        failure = MCP_RECALL_STOPS.get(event.get("fatal"))
+        if failure:
+            raise failure(failure.code)
 
 
 def harness_agentic(q, client, reader, server, records):
@@ -246,7 +282,7 @@ def harness_agentic(q, client, reader, server, records):
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
     def retryable(attempt_records):
-        return not any(t.get("counted") or t.get("fatal") == "LocalRecallUnavailable"
+        return not any(t.get("counted") or t.get("fatal") in MCP_RECALL_STOPS
                        for t in mcp_trace(attempt_records))
     try:
         message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1),
@@ -258,7 +294,7 @@ def harness_agentic(q, client, reader, server, records):
         result["trace"] = mcp_trace(records)
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
-        require_mcp_local_recall(result["trace"])
+        require_mcp_semantic_recall(result["trace"])
     if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
         raise DeliveryMismatch("MCP session delivery verification failed")
     result["finish_reason"] = records[-1].get("finish_reason") if records else None

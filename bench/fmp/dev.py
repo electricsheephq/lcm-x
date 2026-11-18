@@ -485,7 +485,7 @@ def main():
                 frames=[dict(file=Path(f.filename).name, line=f.lineno, function=f.name)
                         for f in traceback.extract_tb(exc.__traceback__)])
             write_json(receipt, state)
-        reason = str(exc) if isinstance(exc, delivery.LocalRecallUnavailable) or (
+        reason = str(exc) if isinstance(exc, delivery.SemanticRecallUnavailable) or (
             isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override")) else None
         print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__, reason=reason)), file=sys.stderr)
         return 2
