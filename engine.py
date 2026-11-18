@@ -8670,6 +8670,8 @@ class LCMEngine(
                     else:
                         maximum = conn.execute("SELECT max(ordinal) FROM occurrence_bindings WHERE lineage=?", (lineage,)).fetchone()[0]
                         existing = sorted({v for v in [maximum, *(p.left for p in placements)] if v is not None})
+                        if len(existing) > ingest_ledger._RESPACE_WINDOW_LIMIT:  # the whole-lineage re-space needs every label
+                            existing = ingest_ledger.lineage_ordinals(conn, lineage)
                     try:
                         ordinals, respace = ingest_ledger.plan_ordinals(existing, placements)
                     except ingest_ledger.LedgerError as exc:

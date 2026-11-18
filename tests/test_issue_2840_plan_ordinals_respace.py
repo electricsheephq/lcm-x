@@ -300,8 +300,8 @@ def test_fallback_logs_counts_only(caplog, monkeypatch):
     monkeypatch.setattr(ledger, "_RESPACE_WINDOW_LIMIT", 2, raising=False)
     ledger.plan_ordinals(list(range(1, 11)), [P(5, 6)])
     lines = [r.getMessage() for r in caplog.records if "respace fallback" in r.getMessage()]
-    assert lines == ["LCM ledger ordinals respace fallback: window 5, 5 labels moved",
-                     "LCM ledger ordinals respace fallback: window whole lineage, 10 labels moved"]
+    assert lines == ["LCM ledger ordinals respace fallback planned: window 5, 5 labels to move",
+                     "LCM ledger ordinals respace fallback planned: window whole lineage, 10 labels to move"]
 
 
 @pytest.fixture
@@ -407,3 +407,54 @@ def test_ingest_through_the_fallback_stores_each_row_once_in_order(engines, monk
         stored = [m["content"] for m in engine._store.get_session_messages(engine._session_id)]
         assert sorted(stored) == sorted(m["content"] for m in view)
         assert count(engine, "respaced") == 1
+
+
+@pytest.mark.parametrize("outside", [ledger.ORDINAL_STEP, 2 * ledger.ORDINAL_STEP + 1], ids=["collides", "inverts"])
+def test_partial_lineage_past_the_limit_loads_the_whole_lineage(tmp_path, outside):
+    """NULL-ordinal anchors hide every right bound, so the caller's subset holds more than the limit.
+
+    Built with direct inserts and a hand-made attempt (as the #2858 review probe does): whether ordinary
+    ingest produces NULL-ordinal anchors is not established. The unseen label sits low in the range.
+    """
+    from hermes_lcm.engine import LCMEngine
+
+    store = MessageStore(tmp_path / "partial.db")
+    store.ensure_ingest_ledger()
+    conn, top = store.connection, ledger._MAX_ORDINAL
+    labels = [top - (1 << 32), *range(top - LIMIT, top + 1)]  # LIMIT + 2 distinct left bounds
+    size = 3 * len(labels)
+    matched = {idx: idx + 1 for idx in range(size) if idx % 3 != 1}  # a NULL anchor follows every new row
+    pending = {idx: idx + 1 for idx in range(size) if idx % 3 == 1}
+    with store.atomic(immediate=True):
+        ledger.insert_bindings(conn, "A", [dict(ordinal=outside, identity_digest=DIGEST, disposition="stored",
+                                                view_seq=0, store_id=9999)] +
+                               [dict(ordinal=value, identity_digest=DIGEST, disposition="stored", view_seq=0,
+                                     store_id=idx + 1) for i, label in enumerate(labels)
+                                for idx, value in ((3 * i, label), (3 * i + 2, None))])
+    before = [r[0] for r in conn.execute("SELECT store_id FROM occurrence_bindings WHERE ordinal IS NOT NULL "
+                                         "ORDER BY ordinal")]
+    entries = [ledger.ViewEntry(DIGEST, None, None, None)] * size
+    salt = store.ingest_ledger_salt()
+    attempt = dict(adopted=True, salt=salt, lineage="A", resolved=None, stored=pending, matched=matched,
+                   entries=entries, stamps=[None] * size, chain=ledger.prefix_chain(salt, entries),
+                   observations=[], remainders={})
+    engine = object.__new__(LCMEngine)
+    engine._ensure_storage = lambda: None
+    engine._store, engine._session_id = store, "S"
+    callbacks = []
+    try:
+        with store.ingest_atomic():
+            engine._write_ingest_ledger(attempt, callbacks, {"ledger_ms": 0})
+        for callback in callbacks:
+            callback()
+        ordinal = dict(conn.execute("SELECT store_id, ordinal FROM occurrence_bindings WHERE ordinal IS NOT NULL"))
+        counters = engine.__dict__.get("_ingest_ledger_counters", {})
+        assert counters.get("ledger.write_failed", 0) == 0, dict(counters)
+        new = [ordinal.get(sid) for _idx, sid in sorted(pending.items())]
+        assert None not in new and len(new) == len(labels)  # every new binding is written
+        assert new == sorted(set(new))  # stored order of the new rows is their view order
+        assert all(ordinal[sid] > ordinal[idx] for idx, sid in pending.items())  # each after its left bound
+        after = sorted((sid for sid in ordinal if sid not in pending.values()), key=ordinal.get)
+        assert after == before  # no existing label, seen or unseen, changes its relative order
+    finally:
+        store.close()
