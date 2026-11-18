@@ -1,5 +1,6 @@
 """Synthetic coverage for the Track S env-file reader and summary share."""
 
+import inspect
 import json
 import runpy
 import sqlite3
@@ -238,14 +239,36 @@ def test_summary_blocks_match_the_engine_render(load):
         assert runner.SUMMARY_BLOCK_RE.findall(text) == [], text[:20]
 
 
-def test_schema_engine_serves_the_current_engine(load):
-    """The open reader's schema lookup on this tree: a bare shell raises, the configured shell lists the public tools."""
+def test_schema_engine_serves_the_current_engine(load, monkeypatch):
+    """The open reader's schema lookup on this tree: a bare shell raises, the configured shell lists the public tools,
+    and the arm's env decides what it lists."""
+    import os
+
     import hermes_lcm.config as lcm_config
     import hermes_lcm.engine as lcm_engine
+    from hermes_lcm.recall_session import session_schema
 
+    for key in [key for key in os.environ if key.startswith("LCM_")]:  # no ambient settings
+        monkeypatch.delenv(key)
     runner = load("s2/run_s_lcmx.py")
+    m = SimpleNamespace(engine=lcm_engine, config=lcm_config)
+
+    def listed():
+        return {schema.get("name"): schema for schema in lcm_engine.LCMEngine.get_tool_schemas(runner.schema_engine(m))}
+
     with pytest.raises(AttributeError):
         lcm_engine.LCMEngine.get_tool_schemas(lcm_engine.LCMEngine.__new__(lcm_engine.LCMEngine))
-    shell = runner.schema_engine(SimpleNamespace(engine=lcm_engine, config=lcm_config))
-    names = {schema.get("name") for schema in lcm_engine.LCMEngine.get_tool_schemas(shell)}
-    assert set(runner.R.PUBLIC_TOOLS) & names
+    default = listed()
+    assert set(runner.R.PUBLIC_TOOLS) <= set(default)
+    # The env applied before the lookup reaches the shell: disabled tools, session delivery and guidance v2.
+    monkeypatch.setenv("LCM_DISABLED_TOOLS", "lcm_describe")
+    assert "lcm_describe" not in listed() and set(runner.R.PUBLIC_TOOLS) - {"lcm_describe"} <= set(listed())
+    monkeypatch.delenv("LCM_DISABLED_TOOLS")
+    monkeypatch.setenv("LCM_RECALL_DELIVERY_UNIT", "session")
+    assert listed()["lcm_recall"] == session_schema(default["lcm_recall"]) != default["lcm_recall"]
+    monkeypatch.delenv("LCM_RECALL_DELIVERY_UNIT")
+    monkeypatch.setenv("LCM_RECALL_GUIDANCE", "v2")
+    assert listed()["lcm_recall"]["description"].startswith(default["lcm_recall"]["description"] + " ")
+    # main() builds the lookup shell through the helper, not a bare shell (probe() is stubbed in the main() tests).
+    source = inspect.getsource(runner.main)
+    assert "schema_engine(m)" in source and "LCMEngine.__new__" not in source

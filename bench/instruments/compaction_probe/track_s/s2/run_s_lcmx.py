@@ -341,8 +341,8 @@ def summary_tokens(run: Run, view: list[dict]) -> int:
     return total
 
 def schema_engine(m):
-    """A closed engine shell for the tool-schema lookup. Engines from b48011df on read their config there, so the shell
-    carries one built from the arm's env, which the caller has applied."""
+    """A closed engine shell for the tool-schema lookup. Engines from 6a848776 (v0.27.0) on read their config there, so
+    the shell carries one built from the arm's env, which the caller has applied."""
     shell = m.engine.LCMEngine.__new__(m.engine.LCMEngine)
     shell._config = m.config.LCMConfig.from_env()
     return shell
