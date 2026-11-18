@@ -10,12 +10,15 @@ import pytest
 import hermes_lcm.compaction as compaction
 import hermes_lcm.engine as engine_module
 import hermes_lcm.host_uid_emit as host_uid_emit
+from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig, host_message_uid_mode
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.escalation import _L3_TRUNCATION_MARKER
 from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_messages_tokens, count_tokens
 from tests.test_ingest_protection import _broken_assistant_output
+from tests.test_issue_667_level3_repair import _fake_route
 from tests.test_issue_671_stub_first_exit import STUB, tool_pair, tool_view
 
 PAD = " alpha beta gamma delta" * 30
@@ -301,6 +304,96 @@ def test_new_condensation_is_assembled(open_engine, uid_mode, summaries):
     assert output != view and marker in output[1]["content"]
     assert output[2:] == view[2:]
     assert engine._ingest_cursor == len(output)
+
+
+@pytest.mark.parametrize("repair", ["store-update", "doctor-command"])
+def test_replayed_head_refreshes_after_in_place_repair(open_engine, monkeypatch, repair):
+    engine = open_engine(survival_fit=False, dynamic_leaf_chunk_enabled=False)
+    original = f"Truncated earlier turns.{_L3_TRUNCATION_MARKER}\nExpand for details about: old turns"
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: (original, 3))
+    previous = published_head(engine)
+    node, = engine._summary_frontier_nodes()
+    old_part = engine_module._summary_part_text(node)
+    assert old_part in previous[1]["content"]
+    assert node.expand_hint == "old turns"
+
+    if repair == "doctor-command":
+        calls = _fake_route(monkeypatch)
+        result = handle_lcm_command("doctor repair level3 apply", engine)
+        assert "nodes_repaired: 1" in result
+        assert len(calls) == 1
+    else:
+        text = "Recovered earlier turns.\nExpand for details about: recovered turns"
+        with engine._dag.connection as conn:
+            conn.execute("UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ? WHERE node_id = ?",
+                         (text, count_tokens(text), "recovered turns", node.node_id))
+
+    repaired, = engine._summary_frontier_nodes()
+    assert (repaired.depth, repaired.node_id) == (node.depth, node.node_id)
+    assert repaired.summary != node.summary and repaired.expand_hint != node.expand_hint
+    view = [*previous, user_row(0)]
+    output = engine.compress(view, current_tokens=4_000)
+    assert engine._last_compress_leaves[1] == 0
+    assert engine_module._summary_part_text(repaired) in output[1]["content"]
+    assert old_part not in output[1]["content"]
+    assert output[2:] == view[2:]
+
+
+def test_replayed_head_does_not_count_a_quoted_header(open_engine, monkeypatch):
+    engine = open_engine(survival_fit=False, dynamic_leaf_chunk_enabled=False)
+    quoted_header = "[Recent Summary (d0, node 2)]"
+    summary = f"A quoted header follows.\n\n---\n\n{quoted_header}\nQuotation ends here."
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: (summary, 1))
+    previous = published_head(engine)
+    first, = engine._summary_frontier_nodes()
+    assert first.node_id == 1
+    second_text = "Actual second frontier summary."
+    uncondensed_sources = [row["store_id"] for row in stored_rows(engine)
+                           if row["store_id"] not in first.source_ids]
+    second = engine._dag.add_node(SummaryNode(session_id="S", summary=second_text, depth=0,
+                                             source_ids=uncondensed_sources[:1], token_count=count_tokens(second_text)))
+    second_part = engine_module._summary_part_text(engine._dag.get_node(second))
+    assert second_part.startswith(quoted_header)
+    assert quoted_header in previous[1]["content"] and second_part not in previous[1]["content"]
+
+    view = [*previous, user_row(0)]
+    output = engine.compress(view, current_tokens=4_000)
+    assert engine._last_compress_leaves[1] == 0
+    assert second_part in output[1]["content"]
+    assert output[2:] == view[2:]
+
+
+def test_replayed_head_keeps_a_summary_with_an_internal_separator(open_engine, monkeypatch):
+    engine = open_engine(survival_fit=False, dynamic_leaf_chunk_enabled=False)
+    summary = "Earlier turns.\n\n---\n\nFurther details."
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: (summary, 1))
+    previous = published_head(engine)
+    assert summary in previous[1]["content"]
+
+    view = [*previous, user_row(0)]
+    snapshot = deepcopy(view)
+    output = engine.compress(view, current_tokens=4_000)
+    assert engine._last_compress_leaves[1] == 0
+    assert_unchanged(engine, view, output, snapshot)
+
+
+def test_replayed_head_is_reassembled_for_proactive_recall(open_engine, monkeypatch, summaries):
+    engine = open_engine(survival_fit=False, dynamic_leaf_chunk_enabled=False)
+    previous = published_head(engine)
+    engine._config.proactive_recall_enabled = True
+    engine._config.embeddings_enabled = True
+    engine._config.proactive_recall_provider = "fastembed"
+    assert engine._proactive_recall_eligible()
+    recall = "<relevant-memories>\nA synthetic memory.\n</relevant-memories>"
+    monkeypatch.setattr(engine, "_build_proactive_recall_message",
+                        lambda *args: {"role": "user", "content": recall})
+
+    view = [*previous, user_row(0)]
+    assert all(row["content"] != recall for row in view)
+    output = engine.compress(view, current_tokens=4_000)
+    assert engine._last_compress_leaves[1] == 0
+    assert output is not view
+    assert sum(row["content"] == recall for row in output) == 1
 
 
 def test_redaction_is_still_returned(open_engine, summaries):

@@ -203,7 +203,7 @@ def test_saved_file_removed_stores_each_row_once(shape, variant, replay_setup):
 # #2703 turns every list into zeros, and then this test and the xfail above change together.
 REMOVED_EXTRA_TODAY = {
     ('temp_plain_lf', 'V1'): [2, 2, 2, 2, 2, 3, 3, 3],
-    ('temp_data_uri', 'V1'): [2, 2, 2, 2, 2, 3, 4, 4],
+    ('temp_data_uri', 'V1'): [2, 2, 2, 2, 2, 2, 2, 2],
     ('temp_plain_lf', 'V2'): [2, 2, 3, 3, 4, 4, 4, 4],
     ('temp_data_uri', 'V2'): [2, 2, 3, 3, 3, 3, 3, 3],
 }

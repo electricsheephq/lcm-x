@@ -2843,7 +2843,7 @@ class CompactionMixin:
 
 
     def _replayed_head_covers_frontier(self, state: _CompressionState) -> bool:
-        from .engine import _LCM_SUMMARY_PART_HEADER_RE
+        from .engine import _summary_part_text
 
         occurrences = getattr(self, "_compress_occurrences", None)
         if not occurrences or not self._emission_proof_matches_binding(
@@ -2853,16 +2853,18 @@ class CompactionMixin:
         anchor = state.anchor_source_messages
         start = self._leading_anchor_count(anchor)
         end = start + len(anchor) - len(state.working_messages)
-        visible = set()
+        separator = "\n\n---\n\n"
+        spans = []
         for index, row in enumerate(anchor[start:end], start):
             entry, identity = occurrences.get(id(row), (None, ()))
             if (identity is not None or not entry.generated_span or entry.output_index != index
                     or entry.kind not in {"summary", "objective"}):
                 return False
-            # A quoted node header in the summary can satisfy the ID scan until the next publishing pass.
-            visible.update((int(m[1]), int(m[2])) for m in _LCM_SUMMARY_PART_HEADER_RE.finditer(entry.generated_span)
-                           if m.start() == 0 or entry.generated_span[m.start() - 7:m.start()] == "\n\n---\n\n")
-        return all((node.depth, node.node_id) in visible for node in self._summary_frontier_nodes())
+            spans.append(separator + entry.generated_span + separator)
+        return all(
+            any(separator + part + separator in span for span in spans)
+            for part in map(_summary_part_text, self._summary_frontier_nodes())
+        )
 
     def _finish_without_leaf(
         self, state: _CompressionState, messages: List[Dict[str, Any]],
@@ -2914,6 +2916,7 @@ class CompactionMixin:
                 and not (state.resumed_prefix or state.ingest_cleanup_changed_active_context
                          or self._compress_dropped_ignored_rows or self._ingest_cursor_needs_reconcile)
                 and self._ingest_cursor == len(messages)
+                and not self._proactive_recall_eligible()
                 and active_context_messages is state.working_messages and self._replayed_head_covers_frontier(state)
                 and self._sanitize_active_context_messages(
                     active_context_messages, insert_missing_tool_stubs=False,
