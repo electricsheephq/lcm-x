@@ -567,3 +567,36 @@ def test_paired_inline_result_behind_replayed_head_returns_input(open_engine, ui
 
     assert engine._last_compress_leaves[1] == 0
     assert_unchanged(engine, view, output, snapshot)
+
+
+@pytest.mark.parametrize("cap_kind", ["reserve-floor", "explicit-max", "exact-boundary"])
+def test_fitting_assembly_cap_behind_replayed_head_returns_input(
+    open_engine, monkeypatch, uid_mode, summaries, cap_kind,
+):
+    options = {
+        "reserve-floor": {"reserve_tokens_floor": 40_000},
+        "explicit-max": {"max_assembly_tokens": 100_000},
+        "exact-boundary": {},
+    }
+    engine = open_engine(survival_fit=False, context_length=1_000_000, **options[cap_kind])
+    head = published_head(engine)
+    head_bytes = json.dumps(head[:2], ensure_ascii=False).encode()
+    view = [*head, user_row(0)]
+    snapshot = deepcopy(view)
+    tokens = count_messages_tokens(view)
+    if cap_kind == "exact-boundary":
+        engine._config.max_assembly_tokens = tokens
+        # Forced recovery starts at equality. Isolate the ordinary selector, which keeps rows at equality.
+        assert engine._should_force_overflow_recovery(observed_tokens=tokens, messages=view)
+        monkeypatch.setattr(engine, "_should_force_overflow_recovery", lambda **kwargs: False)
+    assert engine._effective_assembly_token_cap() == {
+        "reserve-floor": 960_000, "explicit-max": 100_000, "exact-boundary": tokens,
+    }[cap_kind]
+    assert tokens <= engine._effective_assembly_token_cap()
+    calls = list(summaries)
+
+    output = engine.compress(view, current_tokens=tokens)
+
+    assert engine._last_compress_leaves[1] == 0 and summaries == calls
+    assert_unchanged(engine, view, output, snapshot)
+    assert json.dumps(output[:2], ensure_ascii=False).encode() == head_bytes
