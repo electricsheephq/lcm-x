@@ -39,7 +39,7 @@ from .fresh_tail import tool_group_safe_end
 from .ingest_protection import redact_sensitive_value
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from .message_content import text_content_for_pattern_matching
+from .message_content import canonical_value, text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
@@ -89,6 +89,12 @@ def _counted_compaction(operation):
                 return messages
             self._compaction_inflight += 1
         try:
+            messages = canonical_value(messages)
+        except Exception as exc:
+            self._last_compression_status = "error"
+            self._record_ingest_failure("compress", exc)
+            return messages
+        else:
             return operation(self, messages, *args, **kwargs)
         finally:
             with self._compaction_gate:
@@ -271,6 +277,12 @@ class CompactionMixin:
             return self._should_compress_preflight_impl(messages)
 
     def _should_compress_preflight_impl(self, messages):
+        original = messages
+        try:
+            messages = canonical_value(messages)
+        except Exception as exc:
+            self._record_ingest_failure("preflight", exc)
+            return self._should_force_overflow_recovery(observed_tokens=self.last_prompt_tokens)
         self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
         self._compaction_request.below_threshold_cleanup_only = False
         self._compaction_request.automatic_request = False
@@ -329,6 +341,11 @@ class CompactionMixin:
             try:
                 with self._attribution_span("preflight", len(messages)):
                     replay_messages = self._ingest_messages(messages)
+                if messages is not original:
+                    try:
+                        self._rekey_host_rewrite_watch(messages, original)
+                    except Exception:
+                        logger.debug("LCM preflight: host-rewrite watch rekey failed", exc_info=True)
                 self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:

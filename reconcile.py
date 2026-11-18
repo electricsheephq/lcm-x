@@ -59,7 +59,7 @@ from .ingest_protection import (
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
-from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
 from .store import _normalize_observed_at
 
@@ -426,13 +426,12 @@ class ReconcileMixin:
                 if _json_has_duplicate_object_keys(value):
                     return value
                 try:
-                    parsed = json.loads(value)
+                    parsed = canonical_value(json.loads(value))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     return value
                 if isinstance(parsed, (dict, list)):
                     canonical = ReconcileMixin._canonicalize_tool_call_identity_value(parsed)
                     return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            return value
         return value
 
     @staticmethod
@@ -823,7 +822,7 @@ class ReconcileMixin:
         present = {id(message) for message in messages}
         if not isinstance(result, list) or not any(id(o) in present for _i, _c, objs in watch.values() for o in objs):
             return
-        identities = [self._message_replay_identity(message) for message in result]
+        identities = [self._message_replay_identity(canonical_value(message)) for message in result]
         inputs = Counter(self._message_replay_identity(message) for message in messages)
         for identity, _content, objects in watch.values():
             # Only an unambiguous input occurrence transfers to its unique output copy.

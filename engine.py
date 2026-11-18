@@ -169,6 +169,8 @@ from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
+    canonical_text,
+    canonical_value,
     normalize_content_value,
     stored_text_content_for_pattern_matching,
     text_content_for_pattern_matching,
@@ -2833,6 +2835,7 @@ class LCMEngine(
             # turns may still fire it; meta has no final-response/hook-fired bit.
             if not meta.get("interrupted"):
                 return
+            messages = canonical_value(messages)
             binding = (self._session_id, self._conversation_id)
 
             def ingest_stopped(active_engine):
@@ -2877,16 +2880,13 @@ class LCMEngine(
         compression runs later the same turn, already-ingested messages
         are skipped (no duplicates).
         """
-        if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._bypasses_lcm_context_management():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._session_id and messages:
-            try:
+        try:
+            messages = canonical_value(messages)
+            if (self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest()
+                    or self._bypasses_lcm_context_management()):
+                self._log_bypassed_ingest()
+                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+            elif self._session_id and messages:
                 self._remember_lcm_normal_message_prefix(
                     self._session_id,
                     messages,
@@ -2899,8 +2899,8 @@ class LCMEngine(
                     "Per-turn ingest OK: session=%s msgs=%d cursor=%d",
                     self._session_id, len(messages), self._ingest_cursor,
                 )
-            except Exception as e:
-                self._record_ingest_failure("per-turn ingest()", e)
+        except Exception as e:
+            self._record_ingest_failure("per-turn ingest()", e)
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
         return _is_retry_worthy_leaf_summary_error(exc)
@@ -5107,6 +5107,10 @@ class LCMEngine(
                 self._frozen_tail_reached = False
                 self._retry_session_end_tails()
                 try:
+                    messages = canonical_value(messages)
+                except Exception as exc:
+                    self._record_ingest_failure("session-end ingest", exc)
+                else:
                     self._on_session_end_unlocked(session_id, messages)
                 finally:
                     self._session_end_flush_active = False
@@ -6197,25 +6201,24 @@ class LCMEngine(
         messages = kwargs.get("messages")
 
         if name != "lcm_inspect" and messages and self._session_id:
-            if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            elif not (
-                self._session_ignored or self._session_stateless or self._thread_context_stateless()
-            ):
-                try:
+            try:
+                messages = canonical_value(messages)
+                if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
+                    self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+                elif not (self._session_ignored or self._session_stateless or self._thread_context_stateless()):
                     self._ingest_messages(messages)
                     self._record_ingest_success()
                     self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-                except Exception as e:
-                    self._record_ingest_failure("tool-call ingest", e)
+            except Exception as e:
+                self._record_ingest_failure("tool-call ingest", e)
 
         handlers = {
             spec.name: getattr(lcm_tools, spec.handler_name) for spec in TOOL_REGISTRY
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance", "recency_floor"}})
+            return canonical_text(handler(canonical_value(args), engine=self,
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries", "later_statements", "min_sessions", "session_hints", "recall_guidance", "recency_floor"}}))
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:

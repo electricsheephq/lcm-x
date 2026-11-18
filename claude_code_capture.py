@@ -15,6 +15,8 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
+from .message_content import canonical_message, canonical_text
+
 PROJECTION_VERSION = "claude-code-v1"
 SOURCE = "claude-code"
 
@@ -153,9 +155,8 @@ def project_entry(entry: Mapping[str, Any], *, folder: Path | None = None) -> Pr
             role = "system" if any(entry.get(flag) for flag in SYSTEM_FLAGS) else "user"
             content = _joined_text(rest) if all(part.get("type") == "text" for part in rest) else rest
             rows.append({"role": role, "content": content, **stamp})
-    if len(rows) == 1:
-        return Projection([(uid, rows[0])], files, problems)
-    return Projection([(f"{uid}#{index}", row) for index, row in enumerate(rows)], files, problems)
+    return Projection([(canonical_text(uid if len(rows) == 1 else f"{uid}#{index}"), canonical_message(row))
+                       for index, row in enumerate(rows)], files, problems)
 
 
 def content_digest(entry: Mapping[str, Any]) -> str:
