@@ -82,6 +82,13 @@ def engine_at(path, **config):
     return engine_context(path, window=128000, conversation_id="conv", embeddings_enabled=False, **config)
 
 
+def drain_bind_maintenance(engine):
+    # The bind-time rollup pass writes on its own connection, and the sender stamp after a
+    # pre-ingest is non-blocking by design, so let that pass finish first.
+    assert engine.drain_rollup_maintenance(timeout=10)
+    assert engine.drain_embedding_maintenance(timeout=10)
+
+
 def sql_messages(engine):
     return engine._store.connection.execute(
         "SELECT role, content, tool_call_id, tool_calls, tool_name FROM messages WHERE session_id = ? ORDER BY store_id",
@@ -370,6 +377,7 @@ def test_gateway_sender_survives_canonical_copy(tmp_path, request, text, capture
     with engine_at(tmp_path) as engine:
         if capture_after_preflight:
             engine.should_compress_preflight(view)
+            drain_bind_maintenance(engine)
         pending = sender_capture.create_pending(engine, {
             "session_id": "S", "turn_id": request.node.name, "platform": "telegram",
             "sender_id": "synthetic-a", "conversation_history": view,
@@ -385,6 +393,7 @@ def test_gateway_sender_does_not_stamp_equal_older_surrogate_row(tmp_path):
     old = {"role": "user", "content": f"fixture {SURROGATE}"}
     with engine_at(tmp_path) as engine:
         engine.should_compress_preflight([old])
+        drain_bind_maintenance(engine)
         assert sender_capture.create_pending(engine, {
             "session_id": "S", "turn_id": "turn-b", "platform": "telegram",
             "sender_id": "synthetic-b", "conversation_history": [deepcopy(old)],
@@ -403,6 +412,7 @@ def test_known_limit_repeated_surrogate_sender_captured_after_preflight(tmp_path
         engine.ingest(original)
         engine.should_compress_preflight(view)
         assert len(sql_messages(engine)) == len(view)
+        drain_bind_maintenance(engine)
         assert sender_capture.create_pending(engine, {
             "session_id": "S", "turn_id": request.node.name, "platform": "telegram",
             "sender_id": "synthetic-repeat", "conversation_history": view,
