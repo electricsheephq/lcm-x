@@ -41,10 +41,10 @@ def _first_recursion_error(probe):
     return high
 
 
-# CPython 3.12 gave C recursion its own limit. On 3.11 json decoding shares the Python frame budget,
-# so the first failing depth moves with the frame difference listed in the PR's known limits.
-_C_RECURSION_LIMIT = pytest.mark.skipif(sys.version_info < (3, 12),
-                                        reason="exact parity needs CPython 3.12+ (separate C recursion limit)")
+# Exact parity is validated where C recursion is a call count: CPython 3.12 and 3.13. On 3.11 json decoding
+# shares the Python frame budget; 3.14 checks the native stack instead, so a decode at depth 32,768 succeeds.
+_C_RECURSION_LIMIT = pytest.mark.skipif(not (3, 12) <= sys.version_info[:2] < (3, 14),
+                                        reason="exact parity is validated on CPython 3.12 and 3.13 only")
 
 
 def _nested_array(depth):
