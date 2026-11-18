@@ -167,12 +167,12 @@ def canary(args, client, dataset_sha, q):
                     try:
                         client.agentic(args.reader, messages, records, server_spec(args, dataset_sha, q))
                     finally:
-                        delivery.require_mcp_local_recall(delivery.mcp_trace(records))
+                        delivery.require_mcp_semantic_recall(delivery.mcp_trace(records))
                 else:
                     client.call(args.reader, messages, records)
             except ToolViolation:
                 status = "tool_violation"
-            except delivery.LocalRecallUnavailable:
+            except delivery.SemanticRecallUnavailable:
                 raise
             except Exception as exc:
                 status = "error:" + type(exc).__name__
@@ -460,7 +460,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             except ToolViolation as exc:  # the harness used a non-MCP tool: a failed question
                 row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="tool_violation")
-            except delivery.LocalRecallUnavailable:
+            except delivery.SemanticRecallUnavailable:
                 raise
             except Exception as exc:
                 row.update(getattr(exc, "delivery_result", {}))
@@ -612,7 +612,7 @@ def main():
     except Exception as exc:
         import traceback
         # Only fixed harness diagnostics are shown; other exception text may carry corpus content.
-        reason = str(exc) if isinstance(exc, (RecallOptionError, delivery.LocalRecallUnavailable)) or (
+        reason = str(exc) if isinstance(exc, (RecallOptionError, delivery.SemanticRecallUnavailable)) or (
             isinstance(exc, RuntimeError) and str(exc) in (CANARY_NO_MCP, CANARY_FAILED)) else None
         message = "FMP failed: " + type(exc).__name__ + (f" ({reason})" if reason else "") + " (no corpus logged)"
         home = getattr(args, "codex_home", None)

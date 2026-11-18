@@ -51,9 +51,9 @@ class Reader:
                 self.counted += 1
             else:
                 raw = OVER_BUDGET
-        except delivery.LocalRecallUnavailable as exc:
-            fatal, metadata = exc, {**exc.recall_metadata, "fatal": "LocalRecallUnavailable"}
-            raw = json.dumps({"error": "local_recall_semantic_unavailable"})
+        except delivery.SemanticRecallUnavailable as exc:
+            fatal, metadata = exc, {**exc.recall_metadata, "fatal": type(exc).__name__}
+            raw = json.dumps({"error": exc.code})
         if name == "lcm_recall" and fatal is None:
             metadata = delivery.recall_metadata(raw)
         try:
