@@ -70,6 +70,7 @@ def test_recompress_with_carried_recall_has_unique_uids(tmp_path, monkeypatch):
     _state_db(tmp_path, [("S", None, None)])
     engine = _open(tmp_path)
     recall = "<relevant-memories>\nEarlier context\n</relevant-memories>"
+    monkeypatch.setattr(engine, "_proactive_recall_eligible", lambda: True)
     monkeypatch.setattr(engine, "_build_proactive_recall_message",
                         lambda *a: {"role": "user", "content": recall})
     try:

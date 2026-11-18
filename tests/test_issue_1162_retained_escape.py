@@ -211,6 +211,7 @@ def test_a_sanitizing_retained_stop_is_not_pressure_relief(tmp_path, summaries, 
     engine, view = _restore(tmp_path, False)
     relieved = []
     monkeypatch.setattr(engine, "_note_fresh_tail_pressure_relieved", lambda: relieved.append(1))
+    monkeypatch.setattr(engine, "_replayed_head_covers_frontier", lambda _: False)
     try:
         trace = []
         while not (trace and trace[-1]["reason"].startswith(RETAINED)) and len(trace) < 4:

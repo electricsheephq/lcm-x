@@ -334,6 +334,9 @@ def _condensation_source_text(nodes) -> str:
 
 
 _SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+_LCM_SUMMARY_PART_HEADER_RE = re.compile(
+    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
+)
 
 
 def _summary_part_text(node) -> str:
@@ -2959,9 +2962,10 @@ class LCMEngine(
             deadline=deadline,
             admit_rescue=getattr(self, "_leaf_rescue_admit", None),
         )
-        self._last_leaf_summary_model = result.model
-        self._last_leaf_content_filter_error = result.content_filter_error
-        self._last_leaf_level_3_verbatim = result.level_3_verbatim
+        if not self._compress_binding_changed():
+            self._last_leaf_summary_model = result.model
+            self._last_leaf_content_filter_error = result.content_filter_error
+            self._last_leaf_level_3_verbatim = result.level_3_verbatim
         return result.chunk, result.source_tokens, result.summary, result.level, result.attempts
 
     # -- ContextEngine optional methods ------------------------------------
@@ -3409,7 +3413,7 @@ class LCMEngine(
         )
 
     @contextlib.contextmanager
-    def _fresh_tail_pressure_yield_invocation(self):
+    def _fresh_tail_pressure_yield_invocation(self, binding_changed=None):
         """Invocation scope for the transient pressure-yield tail bound.
 
         Entered by every public compaction entry point (``compress`` and
@@ -3449,17 +3453,18 @@ class LCMEngine(
             completed = True
         finally:
             self._pressure_yield_scope_depth -= 1
-            if completed and self._pressure_yield_scope_depth == 0:
+            same_binding = binding_changed is None or not binding_changed()
+            if same_binding and completed and self._pressure_yield_scope_depth == 0:
                 if self._pressure_yield_invocation_verdict not in ("blocked", "neutral"):
                     self._pressure_yield_blocked_streak = 0
-            if self._pressure_yield_reset_epoch == entry_epoch:
+            if same_binding and self._pressure_yield_reset_epoch == entry_epoch:
                 self._pressure_yield_tail_token_limit = saved_limit
                 self._pressure_yield_streak_counted = saved_counted
                 self._pressure_yield_invocation_verdict = saved_verdict
                 self._pressure_yield_preflight_candidate = saved_preflight_candidate
                 if self._pressure_yield_scope_depth > 0:
                     self._pressure_yield_blocked_streak = saved_streak
-            else:
+            elif same_binding:
                 self._pressure_yield_tail_token_limit = 0
                 self._pressure_yield_blocked_streak = 0
                 self._pressure_yield_streak_counted = False
@@ -6937,9 +6942,7 @@ class LCMEngine(
         )
         return len(messages) if exact or safe_trailing_skip else None
 
-    _LCM_SUMMARY_PART_HEADER_RE = re.compile(
-        r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
-    )
+    _LCM_SUMMARY_PART_HEADER_RE = _LCM_SUMMARY_PART_HEADER_RE
 
     @staticmethod
     def _lcm_generated_marker(message) -> Optional[str]:
@@ -10331,8 +10334,36 @@ class LCMEngine(
             if msg.get("role") == "assistant":
                 cleaned_msg = _clean_active_assistant_message(msg)
                 if cleaned_msg is None:
-                    dropped_assistant_messages += 1
-                    continue
+                    if not isinstance(msg.get("api_content"), str) or not msg["api_content"]:
+                        dropped_assistant_messages += 1
+                        continue
+                    cleaned_msg = msg
+                    if merge_adjacent_assistants:
+                        # Repair all tool pairs first, then merge within runs between API-only rows.
+                        paired = self._sanitize_active_context_messages(
+                            messages, insert_missing_tool_stubs=insert_missing_tool_stubs,
+                            merge_adjacent_assistants=False, generated_rows=generated_rows,
+                        )
+                        merged, merged_generated, start = [], [], 0
+                        for index, row in enumerate([*paired, None]):
+                            if row is not None and not (
+                                isinstance(row.get("api_content"), str) and row["api_content"]
+                                and _clean_active_assistant_message(row) is None
+                            ):
+                                continue
+                            generated_run = list(generated_rows or ())
+                            merged.extend(_merge_adjacent_assistant_messages(
+                                paired[start:index], generated_rows=generated_run,
+                            ))
+                            merged_generated.extend(generated_run)
+                            if row is not None:
+                                merged.append(row)
+                                if id(row) in generated_ids:
+                                    merged_generated.append(row)
+                            start = index + 1
+                        if generated_rows is not None:
+                            generated_rows[:] = merged_generated
+                        return merged
                 if cleaned_msg is not msg:
                     stripped_assistant_messages += 1
                 cleaned.append(cleaned_msg)
@@ -10789,7 +10820,7 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
-        if self._compaction_is_closing():
+        if self._compress_binding_changed() or self._compaction_is_closing():
             return None
         # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
