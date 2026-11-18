@@ -1611,7 +1611,7 @@ class IdentityAnchorMixin:
             return []
         saved = getattr(self, "_current_compress_placeholder_identity_counts", None)
         try:
-            mapping = self._get_store_id_map_for_messages(messages[:cursor])
+            mapping = self._get_store_id_map_for_messages(messages[:cursor], uid_first=False)
         finally:
             self._current_compress_placeholder_identity_counts = saved
         rows = self._store.get_batch(sorted({mapping[id(messages[i])] for i, _s in pairs if id(messages[i]) in mapping}))

@@ -23,22 +23,66 @@ drains over later passes (never past a row the scan did not read).
 """
 from __future__ import annotations
 
+import json
 import logging
+from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from threading import get_ident
 from typing import NamedTuple, Optional
 
-from .config import host_message_uid_mode, identity_anchor_enabled
+from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
-from .reconcile import _has_lossy_redacted_identity
+from .message_content import text_content_for_pattern_matching
+from .reconcile import (
+    _HERMES_PRUNED_TOOL_PLACEHOLDER, _PRESERVED_TODO_CONTEXT_PREFIX, _emission_identity, _has_lossy_redacted_identity,
+)
+from .store import _MESSAGE_SELECT_COLUMNS
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
 
+_UID_COPY_SOURCES = ContextVar("_UID_COPY_SOURCES", default=None)
+_UID_DROP_INPUT = ContextVar("_UID_DROP_INPUT", default=None)
 _SCAN_LIMIT = 2000  # owned rows per source page; a larger eligible backlog drains over later passes
 _SCAN_EXTEND = 4  # a first tool group open at the cap is re-read once with this many times the page
 _COPY_WINDOW = 8000  # store ids before the scanned prefix; a lookup miss leaves the row summarized
 _CONTIGUITY = "leaf input cannot form a contiguous stored prefix"
+
+
+@dataclass
+class _UidDropState:
+    owner: object
+    before: list
+    binding: tuple
+    uid_trimmed: bool = False
+    restored: bool = False
+    binding_changed: bool = False
+    scaffold_ids: set[int] = field(default_factory=set)
+    legacy_replay: Optional[tuple[list, bool, bool, int]] = None
+    # Object id -> (store id, re-resolve UID, base removes or whole scaffold).
+    removed: dict[int, tuple[Optional[int], bool, bool]] = field(default_factory=dict)
+
+    def matches_binding(self):
+        if self.binding == self.owner._uid_recognition_binding():
+            return True
+        if not self.binding_changed:
+            logger.info("LCM UID drop skipped after rebind: input_rows=%d", len(self.before))
+            self.binding_changed = True
+        return False
+
+    @contextmanager
+    def cursor_binding(self):
+        """Check the binding without waiting, holding the lifecycle lock when available."""
+        owner = self.owner
+        if owner._stable_use_owner_thread == get_ident():
+            yield self.matches_binding()
+        else:
+            with owner._exclusive_lifecycle("restore cursor", deadline=0.0):
+                yield self.matches_binding()
 
 
 class HiddenBacklog(NamedTuple):
@@ -104,6 +148,101 @@ class StoreCompleteMixin:
         ).fetchall()
         return {int(row[0]) for row in found}
 
+    def _drop_uid_covered_live_rows(self, messages):
+        if not uid_recognition_enabled(self):
+            return messages
+        resolved = self._host_uid_resolve(messages)
+        frontier = self._store_complete_frontier()
+        folded = self._load_folded_tail_lineage(messages)
+        keep = {(self._load_retained_user_anchor_row() or {}).get("store_id"), folded[1]["store_id"] if folded else None}
+        leading, tail = self._leading_anchor_count(messages), self._fresh_tail_start(messages)
+        candidates = {i: row["store_id"] for i, row in resolved.items()
+                      if row["store_id"] <= frontier and row["store_id"] not in keep and leading <= i < tail
+                      and _PRESERVED_TODO_CONTEXT_PREFIX not in (
+                          text_content_for_pattern_matching(messages[i].get("content")) or "")}
+        covered = self._store_complete_node_covered(set(candidates.values()))
+        drop = {i for i, sid in candidates.items() if sid in covered}
+        owners, groups = {}, {}
+        for i, message in enumerate(messages):
+            role = message.get("role")
+            if role in ("user", "system"):
+                owners.clear()
+            elif role == "assistant" and (calls := {_tool_call_id(call) for call in message.get("tool_calls") or ()} - {""}):
+                groups[i] = {i}
+                owners.update((call_id, i) for call_id in calls)
+            elif role == "tool" and (owner := owners.get(str(message.get("tool_call_id") or "").strip())) is not None:
+                groups[owner].add(i)
+        drop.difference_update(*(group for group in groups.values() if not group <= drop))
+        scope = _UID_DROP_INPUT.get()
+        owned = scope is not None and scope.owner is self
+        if owned and not scope.matches_binding():
+            return messages
+        if drop:
+            self._compress_host_rows_consumed += len(drop)
+            if owned:
+                scope.removed.update((id(messages[i]), (candidates[i], True, False)) for i in drop)
+        scaffold = {i for i in range(leading, tail) if i not in resolved
+                    and self._host_uid_whole_scaffold(messages[i], allow_task_list=False)}
+        if owned:
+            scope.scaffold_ids.update(id(messages[i]) for i in scaffold)
+        drop.update(scaffold)
+        return [m for i, m in enumerate(messages) if i not in drop] if drop else messages
+
+    def _guard_uid_covered_drop(self, result):
+        scope = _UID_DROP_INPUT.get()
+        if (scope is None or scope.owner is not self or not scope.matches_binding()
+                or not (scope.uid_trimmed or scope.removed)):
+            return result
+        present = Counter((str(row.get("message_uid") or ""), _emission_identity(row)) for row in result)
+        present_ids = {id(row) for row in result}
+        for row in result:
+            absorbed = row.get("_absorbed_message_uids") or ()
+            if len(absorbed) == 1 and (remainder := self._generated_context_carrier_remainder(row)) is not None:
+                present[(str(absorbed[0]), _emission_identity(row, content=remainder))] += 1
+        system = result[0].get("content") if result and result[0].get("role") == "system" else None
+        missing, nodes = [], set()
+        # Match surviving objects before falling back to emitted identity, so an equal
+        # retained occurrence cannot stand in for a different recorded occurrence.
+        for row in sorted(scope.before, key=lambda row: id(row) not in present_ids):
+            key = str(row.get("message_uid") or ""), _emission_identity(row)
+            if present[key]:
+                present[key] -= 1
+            elif row.get("role") == "system" and system == self._append_lcm_note_to_content(row.get("content")):
+                continue
+            elif id(row) in scope.removed or id(row) not in scope.scaffold_ids:
+                missing.append(row)
+        if not missing or not scope.matches_binding():
+            return result
+        for row in result:
+            content = row.get("content")
+            if row.get("role") in {"user", "assistant"} and isinstance(content, str):
+                for header in self._LCM_SUMMARY_PART_HEADER_RE.finditer(content):
+                    nodes.update(self._verified_lcm_summary_prefix(content[header.start():])[1])
+        covered = {sid for node in nodes for sid in self._dag.source_message_ids(node, limit=2**63 - 1)}
+        other = [row for row in missing if id(row) not in scope.removed]
+        uid_rows = [row for row in missing if id(row) in scope.removed and scope.removed[id(row)][1]]
+        resolved = {id(uid_rows[i]): row["store_id"] for i, row in self._host_uid_resolve(uid_rows).items()}
+        failing = 0
+        for row in missing:
+            if (record := scope.removed.get(id(row))) is not None:
+                sid, check_uid, exempt = record
+                failing += not exempt and (sid not in covered or (check_uid and resolved.get(id(row)) != sid))
+        unproven = len(other) - sum(row["store_id"] in covered for row in self._host_uid_resolve(other).values())
+        if failing or unproven:
+            logger.info("LCM UID covered drop: recorded=%d recorded_failing=%d other_missing=%d other_unproven=%d",
+                        len(scope.removed), failing, len(other), unproven)
+        if not failing:
+            return result
+        restored = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
+        if not scope.matches_binding():
+            return result
+        scope.restored = True
+        with scope.cursor_binding() as bound:
+            if bound:
+                self._compress_host_rows_consumed = 0
+                self._ingest_cursor = len(restored)
+        return restored
+
     def _store_complete_messages(self, rows) -> list:
         """Hidden rows as summarizer input through the ingest replay protections (quarantine,
         redaction). Tool calls stay data: the summarizer reads them, nothing replays them."""
@@ -145,7 +284,7 @@ class StoreCompleteMixin:
                 canonical = self._store.host_uid_uids_of_stores(lineage, owned_ids, kinds=("canonical",), require_disagree=True)
                 composite = {int(r["related_store_id"]) for r in self._store.get_message_relations(owned_ids, "composite", related=True)}
             except Exception:  # optional uid evidence unavailable: E2 is false, never a guessed binding
-                bound, canonical = {}, {}
+                bound, canonical, lineage = {}, {}, None
                 logger.debug("LCM copy uid evidence unavailable", exc_info=True)
         by_key, twins = {}, {}
         stored = {int(row["store_id"]): row for row in rows}
@@ -161,8 +300,79 @@ class StoreCompleteMixin:
                 if matches:
                     twins[sid] = matches
             by_key.setdefault(key, []).append(sid)
+        if lineage and uid_recognition_enabled(self):
+            try:
+                sources = self._store_complete_uid_copy_sources(lineage, carry)
+                raw_columns = {int(raw[0]): raw[3:] for raw in owned}
+                for sid in stored.keys() & raw_columns.keys():
+                    row = stored[sid]
+                    if not bound.get(sid) and sid not in composite:
+                        for twin in sources.get(self._uid_copy_key(row), ()):
+                            if twin["store_id"] < sid and self._uid_copy_identity_matches(row, twin, raw_columns[sid] == twin["_uid_copy_raw"]):
+                                twins.setdefault(sid, []).append(twin["store_id"])
+            except Exception:
+                logger.debug("LCM UID twin lookup unavailable", exc_info=True)
         covered = self._store_complete_node_covered({t for matches in twins.values() for t in matches})
         return twins, covered
+
+    @staticmethod
+    def _uid_copy_key(row):
+        if row.get("role") == "tool" and str(row.get("tool_call_id") or "").strip():
+            return "tool", row["tool_call_id"]
+        if row.get("role") == "assistant" and row.get("tool_calls"):
+            ids = frozenset(_tool_call_id(call) for call in row["tool_calls"])
+            if "" not in ids:
+                return "assistant", ids
+
+    def _uid_copy_identity_matches(self, row, twin, exact=False):
+        identity = self._message_replay_identity(row, stored_row=True, strip_carrier=False)
+        return not _has_lossy_redacted_identity(identity) and (exact or (
+            row.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER and identity in self._stored_row_forms(twin)))
+
+    def _store_complete_uid_copy_sources(self, lineage, carry):
+        if not uid_recognition_enabled(self):
+            return {}
+        cache = _UID_COPY_SOURCES.get()
+        key = (id(self._store), self._session_id, lineage, tuple(carry))
+        if cache is not None and key in cache:
+            return cache[key]
+        by_key = {}
+        if not self._store._host_uid_table_exists():
+            return by_key
+        owners = sorted({self._session_id, *(source for source, _, _ in carry)})
+        rows = self._store.connection.execute(
+            f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE session_id IN (SELECT value FROM json_each(?)) "
+            "AND (role='assistant' AND tool_calls IS NOT NULL OR role='tool' AND tool_call_id IS NOT NULL) "
+            "AND EXISTS(SELECT 1 FROM host_uid_bindings AS binding "
+            "WHERE binding.store_id=messages.store_id AND lineage_key=? AND kind IN ('canonical', 'version')) "
+            "ORDER BY store_id", (json.dumps(owners), lineage),
+        )
+        conversation = {"", str(self._conversation_id or "")}
+        for raw in rows:
+            row = self._store._row_to_dict(raw)
+            if (self._identity_anchor_owned(row, carry) and str(row.get("conversation_id") or "").strip() in conversation
+                    and (tool_key := self._uid_copy_key(row))):
+                row["_uid_copy_raw"] = raw[3:8]
+                by_key.setdefault(tool_key, []).append(row)
+        if cache is not None:
+            cache[key] = by_key
+        return by_key
+
+    def _store_complete_uid_copy_publication_match(self, conn, raw, twin):
+        if not uid_recognition_enabled(self):
+            return False
+        lineage = self._host_uid_lineage_key()[0]
+        if not lineage or not conn.execute(
+            "SELECT 1 FROM host_uid_bindings WHERE lineage_key=? AND store_id=? AND kind IN ('canonical', 'version')",
+            (lineage, twin[0]),
+        ).fetchone():
+            return False
+        names = ("store_id", "session_id", "conversation_id", "content", "role", "tool_call_id", "tool_calls", "tool_name")
+        copy, source = (dict(zip(names, entry)) for entry in (raw, twin))
+        for row in (copy, source):
+            row["tool_calls"] = json.loads(row["tool_calls"]) if row["tool_calls"] else None
+        key = self._uid_copy_key(copy)
+        return bool(key and key == self._uid_copy_key(source) and self._uid_copy_identity_matches(copy, source))
 
     def _hidden_backlog_label(self) -> int | str | None:
         """#597: None means not evaluated; a capped empty scan cannot prove zero backlog."""
@@ -262,7 +472,13 @@ class StoreCompleteMixin:
         self._load_host_rewrite_overrides(candidates)
         shown = _match_occurrences(candidates, self._stored_row_forms, occurrences) if occurrences else {}
         blocked = set()
-        escaped = {int(row["store_id"]): "mapped" for row in candidates
+
+        def retained_kind(store_id):
+            shown = store_id in blocked or (legacy_id := getattr(full_map, "legacy_id", None)) and not any(
+                legacy_id(id(message)) == store_id for message in view)
+            return "shown" if shown else "mapped"
+
+        escaped = {int(row["store_id"]): retained_kind(int(row["store_id"])) for row in candidates
                    if escape_retained and int(row["store_id"]) in full_map.values()}
         for store_id, idx in shown.items():
             if id(view[idx]) in in_chunk:  # the chunk row's own text is this stored occurrence
@@ -386,7 +602,7 @@ class StoreCompleteMixin:
                 continue
             if store_id not in text or not take(text[store_id], [store_id]):  # a retained row, or the budget
                 if store_id not in text:  # #1162: shown by an unmapped view occurrence, or mapped by a view row
-                    self._store_complete_blocked = (store_id, role, "shown" if store_id in blocked else "mapped",
+                    self._store_complete_blocked = (store_id, role, retained_kind(store_id),
                                                     position(chunk[0]) if chunk else 0)
                 complete = False
                 break

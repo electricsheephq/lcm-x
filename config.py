@@ -287,7 +287,10 @@ def host_message_uid_mode() -> str:
     proof (#1403, ``identity_anchor``): bindings left from an earlier ``shadow`` run can still prove an
     occurrence there after a switch to ``off``. ``shadow`` (default) writes bindings and never skips a row on a
     UID alone, but its bindings are read as evidence by all of the above. In every mode, an incoming
-    ``message_uid`` on the row vetoes the stamp-tail rewind. ``on`` behaves exactly like ``shadow``. Alias UID conflicts are count-only diagnostics (#1519).
+    ``message_uid`` on the row vetoes the stamp-tail rewind. ``on`` also recognises replay by a byte-proven
+    UID binding, maps live rows to their bound store rows first, removes node-covered live rows from
+    the returned list when a leaf publishes, excludes UID-proven copies from summariser input, and
+    bounds the cold cursor search. Alias UID conflicts are count-only diagnostics (#1519).
     An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
     raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
@@ -295,6 +298,16 @@ def host_message_uid_mode() -> str:
         _host_message_uid_mode_warned = True
         logger.warning("invalid env LCM_HOST_MESSAGE_UID=%r ignored; using shadow", raw)
     return raw if raw in _HOST_MESSAGE_UID_MODES else "shadow"
+
+
+def host_uid_recognition_enabled() -> bool:
+    return host_message_uid_mode() == "on"
+
+
+def uid_recognition_enabled(owner) -> bool:
+    """Use the owner's UID recognition policy when it provides one."""
+    enabled = getattr(owner, "_uid_recognition_enabled", None)
+    return enabled is not None and enabled()
 
 
 _ingest_ledger_mode_warned = False

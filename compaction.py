@@ -20,11 +20,14 @@ import json
 import logging
 import sys
 import time
+from threading import get_ident
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
+from .config import uid_recognition_enabled
 from .dag import SummaryNode
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -36,6 +39,7 @@ from .escalation import (
 )
 from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
+from .host_uid import _uid_recognition_pass
 from .ingest_protection import redact_sensitive_value
 from . import leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
@@ -44,6 +48,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+    _PRESERVED_TODO_CONTEXT_PREFIX,
     _carrier_emission_key,
     _commit_proof_identity_digest,
     _emission_identity,
@@ -55,6 +60,7 @@ from .reconcile import (
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import PhaseSqlTrace, _is_sqlite_locked_error
+from .store_complete import _UID_COPY_SOURCES, _UID_DROP_INPUT, _UidDropState
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
@@ -741,12 +747,34 @@ class CompactionMixin:
             return messages
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
-            sid = self._bypass_lcm_session_id() if bypassed else self._session_id
-            if self._emission_handle is not None and self._emission_handle.session_id == sid:
-                self._emission_handle = None
             if bypassed:
-                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
+                handle = self._emission_handle
+                if handle is not None and handle.session_id == self._bypass_lcm_session_id():
+                    self._emission_handle = None
+                # #1931: store a delegated child's rows before the host rewrites its view.
                 return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+        caller = get_ident()
+        with self._compaction_gate:
+            if self._compress_owner not in (None, caller):
+                self._compress_reentry_refusals += 1
+                logger.info("LCM compression skipped: another pass owns this engine")
+                return messages
+            self._compress_owner = caller
+            self._compress_owner_depth += 1
+        try:
+            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown)
+        finally:
+            with self._compaction_gate:
+                self._compress_owner_depth -= 1
+                if not self._compress_owner_depth:
+                    self._compress_owner = None
+
+    @_uid_recognition_pass
+    def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown):
+        uid_binding = self._uid_recognition_binding() if uid_recognition_enabled(self) else None
+        handle = self._emission_handle
+        if handle is not None and handle.session_id == self._session_id:
+            self._emission_handle = None
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_escaped = []
@@ -763,6 +791,8 @@ class CompactionMixin:
         # map must too, or a later ingest can match a reused address and store a carried ignored placeholder.
         store_id_scope = self._compress_run.preserve_store_ids()
         store_id_scope.__enter__()
+        uid_drop_scope = _UID_DROP_INPUT.set(_UidDropState(self, [], uid_binding) if uid_binding is not None else None)
+        copy_sources_scope = _UID_COPY_SOURCES.set({} if uid_binding is not None else None)
         try:
             budget.pre_leaf = PhaseSqlTrace()  # #1127: timed until the first leaf call, or the stop before one
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
@@ -779,10 +809,15 @@ class CompactionMixin:
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif (not force and (self._retained_stop_hold_active() or (self._no_progress_hold is not None
-                  and (self._no_progress_hold[1] != "no_progress"
-                       or not getattr(self, "_no_progress_hold_persisted", False))))) and self._no_progress_hold_blocks(
-                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+            elif (
+                not force
+                and (self._retained_stop_hold_active() or (
+                    (hold := self._no_progress_hold) is not None
+                    and (hold[1] != "no_progress" or not getattr(self, "_no_progress_hold_persisted", False))
+                ))
+                and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages))
+            ):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._compaction_request.below_threshold_cleanup_only = True
@@ -803,6 +838,17 @@ class CompactionMixin:
                 returned = messages
                 return messages
             self._compress_occurrences = None
+            scope = _UID_DROP_INPUT.get()
+            if budget.leaves and scope is not None and not scope.restored:
+                if scope.matches_binding():
+                    result = self._guard_uid_covered_drop(result)
+            elif scope is not None and scope.uid_trimmed and not scope.restored and result is not messages:
+                result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
+                scope.restored = True
+                with scope.cursor_binding() as bound:
+                    if bound:
+                        self._ingest_cursor = len(result)
+                        self._compress_host_rows_consumed = 0
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -827,9 +873,11 @@ class CompactionMixin:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
-                self._ingest_cursor = len(result)
-                if not force and not bypass_cooldown and not self._compress_forced_overflow:
-                    self._start_no_progress_hold("hidden_only")
+                with scope.cursor_binding() if scope is not None and scope.restored else nullcontext(True) as bound:
+                    if bound:
+                        self._ingest_cursor = len(result)
+                        if not force and not bypass_cooldown and not self._compress_forced_overflow:
+                            self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
@@ -925,6 +973,8 @@ class CompactionMixin:
                     self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages,
                                                    automatic=automatic and exit_written and not self._compaction_is_closing())
             finally:
+                _UID_COPY_SOURCES.reset(copy_sources_scope)
+                _UID_DROP_INPUT.reset(uid_drop_scope)
                 store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
@@ -1158,7 +1208,7 @@ class CompactionMixin:
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
-            store_ids = self._get_store_id_map_for_messages(result, occurrences)
+            store_ids = self._get_store_id_map_for_messages(result, occurrences, uid_first=False)
             carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in result if id(m) in store_ids}))
             proof = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
@@ -1413,7 +1463,7 @@ class CompactionMixin:
         emissions: list = []
         self._carry_prior_emissions(messages, messages, emissions, emission_binding)
         occurrences, _v4 = self._replay_occurrences(messages, {"version": 4, **emission_binding, "emissions": emissions})
-        store_ids = self._get_store_id_map_for_messages(messages, occurrences)
+        store_ids = self._get_store_id_map_for_messages(messages, occurrences, uid_first=False)
         carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in messages if id(m) in store_ids}))
         output = [self._proof_replay_identity(m, strip_carrier=False) for m in messages]
         for item in emissions:
@@ -1594,6 +1644,8 @@ class CompactionMixin:
                     filter_exclusion_proofs,
                     carried_ranges,
                     copy_exclusion_proofs=self._store_complete_copy_exclusion_proofs,
+                    **({"copy_matches": self._store_complete_uid_copy_publication_match}
+                       if uid_recognition_enabled(self) else {}),
                 )
             before_commit = stage_frontier
         self._dag.add_node(
@@ -1915,7 +1967,8 @@ class CompactionMixin:
         if (
             self._survival_measure(candidate) + overhead + recall > target
             or (cap is not None and count_messages_tokens(candidate) + recall > cap)
-            or self._committed_replay_drops(working_messages, start)[0]  # #457: a resumed prefix takes today's path
+            or self._committed_replay_drops(working_messages, start, **(
+                {"uid_first": False} if uid_recognition_enabled(self) else {}))[0]  # #457
         ):
             return None
         # #726: a write that fails in the final assembly keeps a full result; re-check the list it returns.
@@ -1993,6 +2046,8 @@ class CompactionMixin:
         self,
         working: List[Dict[str, Any]],
         start: int,
+        *,
+        uid_first: bool = True,
     ) -> tuple[list[int], Optional[dict[int, int]], int, int]:
         """(#457) Positions of the replayed run at ``start`` that committed lineage accounts
         for, the store-id map of ``working[start:]`` when computed, the token cost of the
@@ -2015,7 +2070,8 @@ class CompactionMixin:
             or int(self._last_compacted_store_id or 0) != frontier
         ):
             return [], None, 0, 0
-        ids = self._get_store_id_map_for_messages(working[start:])
+        ids = self._get_store_id_map_for_messages(working[start:], uid_first=False) if not uid_first else (
+            self._get_store_id_map_for_messages(working[start:]))
         # #524: LCM scaffold heading a superseded emission drops with the run it heads.
         scaffold, (start, carrier) = start, self._replay_head(working, start, frontier)
         end = next(
@@ -2180,7 +2236,7 @@ class CompactionMixin:
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
                 and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-                and (retained_hold or (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"))):
+                and (retained_hold or ((hold := self._no_progress_hold) is not None and hold[1] == "no_progress"))):
             # A cold direct caller now has current replay proof. Ingest cleanup
             # is adopted, but no attribution/leaf/condensation work is repeated.
             self._ingest_cursor = len(state.working_messages)
@@ -2493,11 +2549,17 @@ class CompactionMixin:
             return "break", None
 
         leaf.candidate_start = leaf.leading_anchor_count
+        scope = _UID_DROP_INPUT.get()
         while leaf.candidate_start < leaf.fresh_tail_start and (
             self._is_replayed_context_scaffold_message(state.working_messages[leaf.candidate_start])
             if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
             else self._compress_occurrences.get(id(state.working_messages[leaf.candidate_start]), (None, ()))[1] is None
         ):
+            if (scope is not None and scope.owner is self and scope.uid_trimmed
+                    and _PRESERVED_TODO_CONTEXT_PREFIX in (
+                        text_content_for_pattern_matching(state.working_messages[leaf.candidate_start].get("content")) or ""
+                    )):
+                break
             leaf.candidate_start += 1
         # #457: a retry replays rows a cancelled attempt already committed; drop
         # those with the scaffold, keeping any row committed lineage does not hold.
@@ -2511,6 +2573,20 @@ class CompactionMixin:
             if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
+            if ((scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self and scope.before
+                    and scope.matches_binding()):
+                working, start = state.working_messages, leaf.candidate_start
+                scaffold = {i for i in resumed if leaf.leading_anchor_count <= i < leaf.fresh_tail_start
+                            and self._host_uid_whole_scaffold(working[i], allow_task_list=False)}
+                replay = {i: None if i in scaffold else (store_ids or {}).get(id(working[i])) for i in resumed}
+                base = (self._committed_replay_drops(working, start, uid_first=False)[0]
+                        if None in replay.values() or (not scope.uid_trimmed and hasattr(store_ids, "legacy_id")) else resumed)
+                exempt = set(base) | scaffold
+                scope.removed.update((id(working[i]), (sid, False, sid is None and i in exempt)) for i, sid in replay.items())
+                if not scope.uid_trimmed and base != resumed:
+                    base_drops = set() if adopt_before_stop and not base else drops.union(base)
+                    scope.legacy_replay = ([row for i, row in enumerate(working) if i not in base_drops],
+                                           bool(base_drops), bool(base), base[0] - start if base else 0)
             state.resumed_prefix = bool(resumed)
             state.resumed_ahead = resumed[0] - leaf.candidate_start if resumed else 0  # kept rows before lineage
             leaf.premapped_store_ids = None if drops or resumed else store_ids
@@ -2697,8 +2773,8 @@ class CompactionMixin:
                 self._start_sweep_budget_hold(seconds_left, turn_paced=(
                     self._sweep_budget_hold_turn_paced
                     and self._sweep_budget_hold_active()
-                    and self._hung_summary_strike is not None
-                    and self._hung_summary_strike[0] == self._hold_conversation_key()
+                    and (strike := self._hung_summary_strike) is not None
+                    and strike[0] == self._hold_conversation_key()
                 ))
         elif state.sweep_stop_reason == "summary_result_rejected":
             warn_rejected()
@@ -2707,8 +2783,8 @@ class CompactionMixin:
 
         if state.budget.hung_route is not None:
             first_hang = (
-                self._hung_summary_strike is None
-                or self._hung_summary_strike[0] != self._hold_conversation_key())
+                (strike := self._hung_summary_strike) is None
+                or strike[0] != self._hold_conversation_key())
             if not first_hang:
                 # #1369: even an exempt forced retry consumes the pending turn-end release.
                 self._sweep_budget_hold_turn_paced = False
@@ -2733,6 +2809,19 @@ class CompactionMixin:
     ) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
         """Finish a no-leaf run, or continue to post-leaf condensation."""
         if not state.leaf_compacted_this_turn:
+            if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is not self:
+                scope = None
+            if scope is not None and scope.uid_trimmed:
+                state.working_messages = scope.before
+                scope.restored = True
+                state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
+                if scope.matches_binding():
+                    self._compress_host_rows_consumed = 0
+                    if state.sweep_stop_reason == "time_budget_exhausted":
+                        self._no_progress_candidate = False
+            elif scope is not None and scope.legacy_replay is not None:
+                (state.working_messages, state.dropped_replayed_scaffold_messages,
+                 state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
             if state.pre_leaf_condensation_reason == "summary_result_rejected":
                 warn_rejected()
             if state.sweep_stop_reason == "time_budget_exhausted":
@@ -2802,7 +2891,9 @@ class CompactionMixin:
                 # or reassembled context, keeping the old cursor could make the
                 # next appended messages look already ingested. This applies to
                 # content-only cleanup as well as dropped-message cleanup.
-                self._ingest_cursor = len(sanitized_messages)
+                with scope.cursor_binding() if scope is not None and scope.restored else nullcontext(True) as bound:
+                    if bound:
+                        self._ingest_cursor = len(sanitized_messages)
                 # A resumed committed prefix returns that compaction's output.
                 self._last_compression_status = "compacted" if state.resumed_prefix else "sanitized"
                 if state.unattributed_leaf_refused:  # #1147: the refusal reason stays visible
@@ -3599,6 +3690,14 @@ class CompactionMixin:
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
+        if ((scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self
+                and scope.matches_binding() and uid_recognition_enabled(self)):
+            scope.before = working_messages
+            trimmed = self._drop_uid_covered_live_rows(working_messages)
+            if trimmed is not working_messages:
+                scope.uid_trimmed = True
+                working_messages = pressure_messages = trimmed
+                dropped_replayed_scaffold_messages = True
 
         # #787 (amendment M-1): a leaf pass whose chunk matches a prepared leaf publishes it without the call
         prep_enabled = bool(getattr(self._config, "background_leaf_prep_enabled", False))

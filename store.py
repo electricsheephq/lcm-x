@@ -2242,6 +2242,19 @@ class MessageStore:
             return None
         return data if isinstance(data, dict) else None
 
+    def try_increment_compaction_telemetry(self, conversation_id, increment, updates):
+        """Skip a turn's diagnostic update if another thread owns the store."""
+        lock = self._write_lock
+        if lock.acquire(blocking=False):
+            try:
+                if self._conn is not None and not self._conn.in_transaction:
+                    return self.increment_compaction_telemetry(conversation_id, increment, updates)
+            except Exception:
+                logger.debug("LCM turn telemetry write failed", exc_info=True)
+            finally:
+                lock.release()
+        return None
+
     def increment_compaction_telemetry(
         self,
         conversation_id: str,
