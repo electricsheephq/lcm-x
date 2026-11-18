@@ -98,6 +98,80 @@ def _emitted_sources(engine, output):
             for sid in engine._dag.source_message_ids(node, limit=2**63 - 1)}
 
 
+def test_no_leaf_restore_updates_cursor_during_lifecycle_contention(tmp_path, monkeypatch):
+    # Exercise cursor-based replay without the identity anchor's recovery of missed rows.
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    # Cleanup drops these orphan results, so a stale cursor can hide the next append.
+    view = _view(7) + [
+        {"role": "tool", "tool_call_id": f"orphan-{i}", "message_uid": f"orphan-{i}",
+         "content": "Synthetic orphan result", "timestamp": 2000.0 + i}
+        for i in range(2)
+    ]
+    added = {"role": "user", "message_uid": "new", "content": "New synthetic user turn", "timestamp": 3000.0}
+
+    def run(on):
+        _mode(monkeypatch, on)
+        path = tmp_path / ("on" if on else "unset")
+        path.mkdir()
+        _state_db(path, [("S", None, None)])
+        with _open(path) as engine, ThreadPoolExecutor(max_workers=1) as threads:
+            engine.ingest(deepcopy(view))
+            covered = _rows(engine)[0]["store_id"]
+            _stage(engine, 0, [covered])
+            engine._last_compacted_store_id = covered
+            engine._config.threshold_full_sweep_enabled = True
+            before = engine._dag.get_session_nodes("S")
+            binding = engine._uid_recognition_binding()
+            ready, release = Event(), Event()
+            removed = set()
+            drop = engine._drop_uid_covered_live_rows
+            condense = engine._condense_before_leaves
+
+            def expire_before_first_leaf(state, focus_topic):
+                result = condense(state, focus_topic)
+                state.sweep_deadline = 0.0
+                return result
+
+            def observe_drop(rows):
+                trimmed = drop(rows)
+                removed.update(row["message_uid"] for row in rows if row not in trimmed)
+                return trimmed
+
+            def hold_lifecycle():
+                with engine._exclusive_lifecycle("test contention") as acquired:
+                    assert acquired
+                    ready.set()
+                    assert release.wait(10)
+
+            monkeypatch.setattr(engine, "_drop_uid_covered_live_rows", observe_drop)
+            monkeypatch.setattr(engine, "_condense_before_leaves", expire_before_first_leaf)
+            holder = threads.submit(hold_lifecycle)
+            try:
+                assert ready.wait(10)
+                output = engine.compress(deepcopy(view), current_tokens=24000)
+            finally:
+                release.set()
+            holder.result(timeout=10)
+
+            assert engine._uid_recognition_binding() == binding
+            assert engine._dag.get_session_nodes("S") == before
+            assert engine.last_compression_status == "sanitized"
+            assert engine._last_threshold_full_sweep["stop_reason"] == "time_budget_exhausted"
+            assert removed == ({view[0]["message_uid"]} if on else set())
+            assert len(output) == len(view) - 2
+            cursor = engine._ingest_cursor
+            stored = _rows(engine)
+            engine.ingest(deepcopy(output + [added]))
+            after = _rows(engine)
+            assert after[:len(stored)] == stored
+            return output, cursor, _contents(after[len(stored):])
+
+    unset, _, _ = run(False)
+    output, cursor, appended = run(True)
+    assert output == unset
+    assert (cursor, appended) == (len(output), _contents([added]))
+
+
 @pytest.mark.parametrize("seam", ["guard-after-check", "outer-fit"])
 def test_restore_then_rebind_keeps_next_session_cursor(tmp_path, monkeypatch, summaries, seam):  # noqa: F811
     _mode(monkeypatch, True)

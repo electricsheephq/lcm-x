@@ -76,13 +76,13 @@ class _UidDropState:
 
     @contextmanager
     def cursor_binding(self):
-        """Check and write together without waiting on lifecycle or shutdown."""
+        """Check the binding without waiting, holding the lifecycle lock when available."""
         owner = self.owner
         if owner._stable_use_owner_thread == get_ident():
             yield self.matches_binding()
         else:
-            with owner._exclusive_lifecycle("restore cursor", deadline=0.0) as acquired:
-                yield acquired and self.matches_binding()
+            with owner._exclusive_lifecycle("restore cursor", deadline=0.0):
+                yield self.matches_binding()
 
 
 class HiddenBacklog(NamedTuple):
