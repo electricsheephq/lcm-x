@@ -83,10 +83,31 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 })
 
 
+_PROGRESS_FIELDS = ("role", "content", "tool_call_id", "tool_calls")
+
+
+def _progress_view(messages):
+    """The fields a progress report compares; count_message_tokens reads only content and tool_calls from them."""
+    try:
+        return [{field: message.get(field) for field in _PROGRESS_FIELDS} for message in messages]
+    except Exception:
+        return None
+
+
+def _made_progress(before, returned) -> bool:
+    """#2863: true only when the returned list differs from the input by content and is smaller by the counter."""
+    after = _progress_view(returned) if isinstance(returned, list) else None
+    if before is None or after is None or after == before:
+        return False
+    try:
+        return count_messages_tokens(after) < count_messages_tokens(before)
+    except Exception:
+        return False
+
+
 def _counted_compaction(operation):
     """Keep connections live through the entire pass, including its finalizers."""
-    @wraps(operation)
-    def counted(self, messages, *args, **kwargs):
+    def counted_pass(self, messages, *args, **kwargs):
         with self._compaction_gate:
             if self._compaction_closing:
                 return messages
@@ -104,6 +125,16 @@ def _counted_compaction(operation):
             with self._compaction_gate:
                 self._compaction_inflight -= 1
                 self._compaction_gate.notify_all()
+
+    @wraps(operation)
+    def counted(self, messages, *args, **kwargs):
+        # #2863: the host arms its compaction-cleared re-check only when the engine reports progress
+        # (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False.
+        self._last_compression_made_progress = False
+        before = _progress_view(messages)
+        returned = counted_pass(self, messages, *args, **kwargs)
+        self._last_compression_made_progress = _made_progress(before, returned)
+        return returned
     return counted
 
 

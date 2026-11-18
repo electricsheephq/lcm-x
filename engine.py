@@ -759,6 +759,9 @@ class LCMEngine(
     # store, and prepared leaves (#787) publish inside compress(). A class attribute and the bool singleton, so the
     # fresh type(self)(...) that clone_for_agent() builds carries it too.
     compacts_outside_compress = False
+    # #2872: the host's built-in default (agent/context_compressor.py 3b421578:2801); the host's idle compaction reads it
+    # (turn_context_compaction.py 3b421578:171).
+    summary_target_ratio = 0.20
 
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
@@ -1031,6 +1034,7 @@ class LCMEngine(
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
+        self._last_compression_made_progress = False  # #2863: read by the host after each compress()
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -1924,6 +1928,12 @@ class LCMEngine(
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
         self._record_turn_compaction_telemetry()
+        if self.last_prompt_tokens > 0:
+            # #2863: a real provider count ends the host's post-compaction wait. The host reads the verify flag before
+            # this call (agent/turn_usage.py 3b421578:130-131), so clearing it here is what its built-in compressor
+            # does (context_compressor.py 3b421578:2894-2901).
+            self._verify_compaction_cleared_threshold = False
+            self.awaiting_real_usage_after_compression = False
 
     @property
     def cache_read_ratio(self) -> float:
