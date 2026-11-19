@@ -355,8 +355,9 @@ class SummaryDAG:
             """SELECT source.depth
                FROM json_each(?) AS selected
                LEFT JOIN summary_nodes AS source
-                 ON source.node_id = selected.value AND source.node_id != ?""",
-            (source_ids, node_id),
+                 ON source.node_id = selected.value AND source.node_id != ?
+                AND source.session_id = ?""",
+            (source_ids, node_id, node.session_id),
         ).fetchall()
         if any(row[0] is None for row in depths):
             raise CondensationPublicationRejected("source_missing")

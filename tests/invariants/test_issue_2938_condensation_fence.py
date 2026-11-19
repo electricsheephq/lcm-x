@@ -163,6 +163,73 @@ def test_concurrent_routine_compress(tmp_path, monkeypatch):
         first.shutdown()
 
 
+@pytest.mark.parametrize("condense_before_rotation", [True, False], ids=["a-parent-moves", "b-leaves-move"])
+def test_rotation_during_condensation(tmp_path, monkeypatch, condense_before_rotation):
+    held, release = Event(), Event()
+    first = _new_engine(tmp_path, sweep=False, condensation_fanin=2, incremental_max_depth=0)
+    second = None
+    rows = _view(12)
+    binding = {"platform": "telegram", "context_length": 200_000, "conversation_id": "conv"}
+
+    def held_summarize(**kwargs):
+        if kwargs["depth"] == 1 and not held.is_set():
+            held.set()
+            assert release.wait(WAIT), "stalled condensation was never released"
+        return _summarize(**kwargs)
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", _summarize)
+    try:
+        for turns in range(4, 8):
+            first.compress(deepcopy(rows[:4 * turns]), current_tokens=24000, bypass_cooldown=True)
+        sources = [node.node_id for node in first._dag.get_uncondensed_at_depth("S", 0)][:2]
+        assert sources == [1, 2]
+        first._config.incremental_max_depth = 1
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", held_summarize)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            running = pool.submit(first.compress, deepcopy(rows[:32]), current_tokens=24000, bypass_cooldown=True)
+            try:
+                assert held.wait(WAIT), "compression did not reach depth-1 condensation"
+                second = first.clone_for_agent()
+                second.on_session_start("S", **binding)
+                if condense_before_rotation:
+                    pool.submit(second.compress, deepcopy(rows[:44]), current_tokens=24000,
+                                bypass_cooldown=True).result(timeout=WAIT)
+                old_nodes = _nodes(first)
+                assert [node.source_ids for node in old_nodes if node.depth == 1] == (
+                    [sources] if condense_before_rotation else []
+                )
+                second.on_session_start("S2", boundary_reason="compression", old_session_id="S", **binding)
+                moved = second._dag.get_session_nodes("S2")
+                assert {node.node_id for node in moved} == {node.node_id for node in old_nodes}
+                assert not _nodes(first)
+                provenance = _provenance(first)
+            finally:
+                release.set()
+            running.result(timeout=WAIT)
+
+        stale_nodes = _nodes(first)
+        after_resume = second._dag.get_session_nodes("S2")
+        after_provenance = _provenance(first)
+        if not condense_before_rotation:
+            second.compress(deepcopy(rows[:36]), current_tokens=24000, bypass_cooldown=True)
+        rotated_nodes = second._dag.get_session_nodes("S2")
+        assert [node.source_ids for node in rotated_nodes if node.depth == 1] == [sources]
+        claims = Counter((node.depth, source) for node in stale_nodes + rotated_nodes
+                         if node.source_type == "nodes" for source in node.source_ids)
+        assert {claim: count for claim, count in claims.items() if count > 1} == {}
+        assert not stale_nodes
+        assert after_resume == moved
+        assert after_provenance == provenance
+        assert first._condensation_publication_rejections == {"source_missing": 1}
+        assert second._condensation_publication_rejections == {}
+        assert first.last_compression_status == second.last_compression_status == "compacted"
+    finally:
+        if second is not None:
+            second.shutdown()
+        first.shutdown()
+
+
 @pytest.mark.parametrize("reason", REJECTION_REASONS)
 def test_post_leaf_rejection_reports_partial_sweep(tmp_path, monkeypatch, reason):
     from hermes_lcm.dag import CondensationPublicationRejected
