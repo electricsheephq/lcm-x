@@ -82,7 +82,8 @@ def _exercise(tmp_path, monkeypatch, where, first, *, anchor="default", grow=Fal
     if where == "condensation-gap":
         config.update(condensation_fanin=2, temporal_rollups_enabled=False, embeddings_enabled=False)
     if where == "fit-gap":
-        config["context_length"] = 3_000
+        # Keep multiple turns for survival fit after UID recognition drops covered rows.
+        config.update(context_length=3_000, fresh_tail_count=10)
     if where == "stub-first-gap":
         config.update(
             leaf_chunk_tokens=1_000, fresh_tail_pressure_yield_enabled=False,
@@ -141,6 +142,9 @@ def _exercise(tmp_path, monkeypatch, where, first, *, anchor="default", grow=Fal
             current_tokens = 6_000 if where == "fit-gap" else 24_000
             if where == "stub-first-gap":
                 rows = tool_view()
+                if uid_mode == "on":
+                    for index, row in enumerate(rows[1:]):
+                        row["message_uid"] = f"uid-{index}"
                 engine.threshold_tokens = THRESHOLD
                 current_tokens = count_messages_tokens(rows)
                 assert current_tokens >= THRESHOLD
@@ -234,6 +238,15 @@ def _exercise(tmp_path, monkeypatch, where, first, *, anchor="default", grow=Fal
 
                 patch.setattr(engine, method, at_checkpoint)
 
+            if uid_mode == "on":
+                recognition = []
+                compress_impl = engine._compress_impl
+
+                def observe_recognition(messages, *args, **kwargs):
+                    recognition.append(engine._uid_recognition_enabled() and any(row.get("message_uid") for row in messages))
+                    return compress_impl(messages, *args, **kwargs)
+
+                patch.setattr(engine, "_compress_impl", observe_recognition)
             error = None
             caller_view = list(rows)
             if control:
@@ -268,6 +281,8 @@ def _exercise(tmp_path, monkeypatch, where, first, *, anchor="default", grow=Fal
                         error = str(exc)
                         returned = None
 
+            if uid_mode == "on":
+                assert recognition == [True]
             b_after = _binding_state(engine)
             a_before_successor_ingest = _stored(engine, "S")
             a_reconcile_before_schedule = []
@@ -317,6 +332,8 @@ def _exercise(tmp_path, monkeypatch, where, first, *, anchor="default", grow=Fal
                 "b_expected": [(row["role"], row["content"]) for row in b_input],
                 "b_stored": [(role, content) for role, content, *_ in b_stored],
                 "cursor": (b_at_rebind["frontier"].cursor, b_after["frontier"].cursor),
+                "b_status": b_after["_last_compression_status"],
+                "b_rows_unchanged": b_after["B rows"] == b_at_rebind["B rows"],
                 "b_ingested_cursor": b_ingested_cursor,
                 "b_changes": changes,
                 "b_changed_metadata": {
@@ -367,9 +384,10 @@ def test_nine_row_view(tmp_path, monkeypatch, caplog, uid_mode):
     _assert_rebound(tmp_path, monkeypatch, caplog, "summary", grow=True, uid_mode=uid_mode)
 
 
+@pytest.mark.parametrize("uid_mode", [None, "on"], ids=["unset", "on"])
 @pytest.mark.parametrize("where", ["fallback", "published", "leaf-finish", "no-leaf", "outer-exit", "exception"])
-def test_rebind_at_exit(tmp_path, monkeypatch, caplog, where):
-    _assert_rebound(tmp_path, monkeypatch, caplog, where)
+def test_rebind_at_exit(tmp_path, monkeypatch, caplog, where, uid_mode):
+    _assert_rebound(tmp_path, monkeypatch, caplog, where, uid_mode=uid_mode)
 
 
 def test_release_while_stable_use_lock_is_held(tmp_path, monkeypatch, caplog):
@@ -421,35 +439,49 @@ def test_condensed_node_keeps_its_source_session(tmp_path, monkeypatch):
         raise _LeakedBindingState(foreign_nodes)
 
 
-def _assert_gap_rows(tmp_path, monkeypatch, where, first="user-unstamped"):
-    raced = _exercise(tmp_path / "rebound", monkeypatch, where, first, grow=True)
-    control = _exercise(tmp_path / "control", monkeypatch, where, first, grow=True, control=True)
+def _assert_gap_rows(tmp_path, monkeypatch, where, first="user-unstamped", **options):
+    raced = _exercise(tmp_path / "rebound", monkeypatch, where, first, grow=True, **options)
+    control = _exercise(tmp_path / "control", monkeypatch, where, first, grow=True, control=True, **options)
     assert raced["error"] is None, raced["error"]
     assert control["b_stored"] == control["b_expected"]
     assert raced["a_after"] == control["a_after"]
     assert raced["b_stored"] == raced["b_expected"], {
         key: raced[key] for key in ("cursor", "b_stored", "b_expected", "b_changes")
     }
+    assert raced["b_rows_unchanged"]
     return raced, control
 
 
 @pytest.mark.parametrize("first", FIRST_ROWS)
-def test_rebind_inside_trimming_survival_fit(tmp_path, monkeypatch, first):
-    raced, control = _assert_gap_rows(tmp_path, monkeypatch, "fit-gap", first)
+@pytest.mark.parametrize("uid_mode", [None, "on"], ids=["unset", "on"])
+def test_rebind_inside_trimming_survival_fit(tmp_path, monkeypatch, first, uid_mode):
+    raced, control = _assert_gap_rows(tmp_path, monkeypatch, "fit-gap", first, uid_mode=uid_mode)
     for result in (raced, control):
         [(before, after)] = result["fit_lengths"]
         assert after < before
+    assert (raced["cursor"], raced["b_status"]) == ((0, 6), "idle")
     assert raced["b_frontier_after"].needs_reconcile is True
+    assert raced["returned_original"]
 
 
-@pytest.mark.parametrize("where", CURSOR_WRITERS)
-def test_rebind_before_cursor_write(tmp_path, monkeypatch, where):
-    raced, control = _assert_gap_rows(tmp_path, monkeypatch, where)
-    assert raced["cursor"][0] == control["cursor"][0] == (2 if where == "nonempty-gap" else 0)
-    assert raced["cursor"][1] > raced["cursor"][0]
+@pytest.mark.parametrize("uid_mode", [None, "on"], ids=["unset", "on"])
+@pytest.mark.parametrize(("where", "expected_cursors", "status"), [
+    # UID replay trims the leaf's working view, with the original host length restored on reset.
+    ("leaf-gap", (24, 4), "idle"),
+    ("no-leaf-gap", (3, 3), "sanitized"),
+    ("stub-first-gap", (18, 18), "sanitized"),
+    ("nonempty-gap", (24, 4), "idle"),
+    ("reset-gap", (24, 28), "idle"),
+], ids=CURSOR_WRITERS)
+def test_rebind_before_cursor_write(tmp_path, monkeypatch, where, uid_mode, expected_cursors, status):
+    raced, control = _assert_gap_rows(tmp_path, monkeypatch, where, uid_mode=uid_mode)
+    start = 2 if where == "nonempty-gap" else 0
+    assert raced["cursor"] == (start, expected_cursors[uid_mode == "on"])
+    assert control["cursor"] == (start, start)
+    assert raced["b_status"] == status
     assert raced["b_frontier_after"].needs_reconcile is True
+    assert raced["returned_original"]
     if where == "reset-gap":
-        assert raced["returned_original"]
         assert raced["a_before"] == raced["a_before_successor_ingest"] == raced["a_after"]
 
 
@@ -482,23 +514,29 @@ def test_bind_back_reestablishes_old_session_reconcile_state(tmp_path, monkeypat
     assert raced["a_reconcile_at_rebind"] == control["a_reconcile_at_rebind"] is True
 
 
-def test_shutdown_with_a_switch_after_the_pass_matches_main(tmp_path, monkeypatch, caplog):
-    """Mode unset: the binding check precedes the shutdown check, so the switch wins, as on main.
-
-    Expected values were computed on main with this cell's inputs; the shutdown stop would leave
-    ("noop", "engine shutting down") in the session served after the switch."""
+@pytest.mark.parametrize(("uid_mode", "expected"), [
+    pytest.param(None, ("B", "idle", "", 0, True), id="unset"),
+    # UID recognition checks for shutdown before checking the new binding.
+    pytest.param("on", ("B", "noop", "engine shutting down", 0, True), id="on"),
+])
+def test_shutdown_with_a_switch_after_the_pass_matches_main(tmp_path, monkeypatch, caplog, uid_mode, expected):
     caplog.set_level(logging.INFO, logger="hermes_lcm.compaction")
-    monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    if uid_mode is None:
+        monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    else:
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
     _state_db(tmp_path, [("S", None, None), ("B", None, None)])
     engine = _engine(tmp_path)
     engine._hermes_home = engine._store._hermes_home = str(tmp_path)
     rows = _view(7)
+    recognition = []
     try:
         engine.ingest(rows)
         original = engine._compress_impl
         with ThreadPoolExecutor(max_workers=1) as pool:
-            def at_outer_exit(*args, **kwargs):
-                result = original(*args, **kwargs)
+            def at_outer_exit(messages, *args, **kwargs):
+                recognition.append(engine._uid_recognition_enabled() and any(row.get("message_uid") for row in messages))
+                result = original(messages, *args, **kwargs)
                 pool.submit(_bind, engine, "B", "convB").result(timeout=WAIT)
                 with engine._compaction_gate:
                     engine._compaction_closing = True
@@ -509,9 +547,10 @@ def test_shutdown_with_a_switch_after_the_pass_matches_main(tmp_path, monkeypatc
             returned = engine.compress(caller_view, 24_000)
         with engine._compaction_gate:
             engine._compaction_closing = False
+        assert recognition == [uid_mode == "on"]
         assert returned is caller_view
         assert (engine._session_id, engine._last_compression_status, engine._last_compression_noop_reason,
-                engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == ("B", "idle", "", 0, True)
+                engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == expected
         assert [record.message for record in caplog.records if record.message == STOP] == [STOP]
     finally:
         engine.shutdown()

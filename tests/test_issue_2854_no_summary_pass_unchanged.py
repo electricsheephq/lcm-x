@@ -42,7 +42,7 @@ _MODE_ON_NO_LEAF_GAPS = {
 def _mode_on_no_leaf_gap(request):
     gap = _MODE_ON_NO_LEAF_GAPS.get(request.node.name)
     if gap is not None:
-        request.applymarker(pytest.mark.xfail(strict=True, reason=(
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
             f"hotfix tree, uid mode on: the mode's no-leaf path returns rows without re-assembly: {gap}")))
 
 
