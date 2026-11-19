@@ -11551,9 +11551,10 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
-            summary_budget, anchor_part = self._resolve_survival_prefix_budget(
+            summary_budget, anchor_part, survival_room = self._resolve_survival_prefix_budget(
                 system_msg, retained_user_msg, anchor_source, tail_selected, result,
-                summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part)
+                summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part,
+                has_older_nodes=bool(older_nodes))
             selection = select_prefix(summary_parts, PrefixBudgetFacts(
                 part_keys=part_keys, summary_role=summary_role, summary_budget=summary_budget,
                 assembly_cap=assembly_cap, survival_fit=self._config.survival_fit,
@@ -11564,10 +11565,30 @@ class LCMEngine(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             combined = "\n\n---\n\n".join(selected_parts)
             if older_nodes and (self.context_length > 0 or self._config.summary_prefix_target_tokens > 0):
-                limit = self._summary_prefix_target() + self._config.leaf_chunk_tokens
+                first_tail = tail_selected[0] if tail_selected else {}
+                can_pack = first_tail.get("role") == summary_role and (
+                    retained_user_msg is not None
+                    or (leading_msg is None and isinstance(first_tail.get("content"), str))
+                )
+                first_charge = count_message_tokens(first_tail) if can_pack else 0
+
+                def prefix_charges(text):
+                    separate = count_message_tokens({"role": summary_role, "content": text})
+                    if not can_pack:
+                        return separate, separate
+                    # A carrier or a fold can change the counter's script mix.
+                    packed = (self._prepend_generated_context_to_message(first_tail, text)
+                              if retained_user_msg is not None else
+                              {"role": summary_role, "content": text + "\n\n" + first_tail["content"]})
+                    return separate, count_message_tokens(packed) - first_charge
+
+                primary_charges = prefix_charges(combined)
+                limit = self._older_summary_limit(min(primary_charges), count_messages_tokens(result + tail_selected))
+                if survival_room is not None:
+                    limit = min(limit, survival_room - 1)
                 if summary_budget is not None:
                     limit = min(limit, summary_budget)
-                if count_message_tokens({"role": summary_role, "content": combined}) <= limit:
+                if max(primary_charges) <= limit:
                     older_parts = [(index, _summary_part_text(node)) for index, node in older_nodes]
                     primary_parts = list(zip(kept_indexes, selected_parts))
                     keep = len(older_parts)
@@ -11575,7 +11596,7 @@ class LCMEngine(
                         # Restore chronology in each depth, including before tier 1 at ties.
                         ordered = sorted(older_parts[:keep][::-1] + primary_parts, key=lambda part: part[0])
                         trial = "\n\n---\n\n".join(part for _, part in ordered)
-                        if count_message_tokens({"role": summary_role, "content": trial}) <= limit:
+                        if max(prefix_charges(trial)) <= limit:
                             combined = trial
                             active_summary_node_ids.update(node.node_id for _, node in older_nodes[:keep])
                             break
@@ -11741,10 +11762,11 @@ class LCMEngine(
 
     def _resolve_survival_prefix_budget(
         self, system_msg, retained_user_msg, anchor_source, tail_selected, result,
-        summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part,
-    ) -> tuple[Optional[int], Optional[str]]:
+        summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part, *, has_older_nodes=False,
+    ) -> tuple[Optional[int], Optional[str], Optional[int]]:
+        survival_room = None
         if (
-            summary_budget is None
+            (summary_budget is None or has_older_nodes)
             and (ceiling := self._survival_ceiling()) is not None
         ):
             # #930: bound only the prefix; keep the tail and every stored node.
@@ -11759,16 +11781,20 @@ class LCMEngine(
             # Measure without externalizing preserved-objective payloads.
             # Tool-pair repair still reserves any missing-result stubs.
             measurement_tail = self._sanitize_tool_pairs(list(tail_selected))
-            default_budget = default_prefix_budget(
+            budget_facts = dict(
                 ceiling=ceiling, overhead=overhead, leading_tokens=count_messages_tokens(result),
                 tail_tokens=count_messages_tokens(tail_selected),
                 repaired_tail_tokens=count_messages_tokens(measurement_tail),
                 recall_budget_tokens=self._config.proactive_recall_budget_tokens,
                 proactive_recall_enabled=self._proactive_recall_eligible(),
-                embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
+                embeddings_enabled=self._config.embeddings_enabled,
             )
-            full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
-            if count_message_tokens(full_prefix) > default_budget:
+            default_budget = default_prefix_budget(**budget_facts, survival_fit=self._config.survival_fit)
+            if has_older_nodes:
+                # The quarter floor belongs to tier 1; tier 2 must fit real spare room.
+                survival_room = default_prefix_budget(**budget_facts, survival_fit=False)
+            tier_one = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
+            if summary_budget is None and count_message_tokens(tier_one) > default_budget:
                 summary_budget = default_budget
                 if part_keys[0] == (-1, None) and count_message_tokens({
                     "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
@@ -11783,7 +11809,7 @@ class LCMEngine(
                         }) <= summary_budget:
                             summary_parts[0] = anchor_part = candidate
                             break
-        return summary_budget, anchor_part
+        return summary_budget, anchor_part, survival_room
 
     def _fold_generated_context(
         self, retained_generated_context_parts, tail_selected, summary_role, result, emission_candidates,

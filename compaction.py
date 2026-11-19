@@ -239,6 +239,18 @@ class CompactionMixin:
             target = min(target, int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE))
         return max(1, target)
 
+    def _older_summary_limit(self, primary_tokens: int, fixed_tokens: int) -> int:
+        target = self._summary_prefix_target()
+        threshold = self.threshold_tokens
+        leaf = self._config.leaf_chunk_tokens
+        if threshold <= 0:
+            return target + leaf
+        band = min(target + min(leaf, int(threshold * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE)), threshold // 2)
+        if primary_tokens + fixed_tokens < threshold:
+            # Give the next turns headroom using the host gate's message count.
+            band = min(band, threshold * 4 // 5 - fixed_tokens)
+        return band
+
     def _warn_unattributed_leaf(self, rows) -> None:
         # #1147 r1: share the warn-once refusal across admission, rescue and publication.
         frontier = self._store_complete_frontier()

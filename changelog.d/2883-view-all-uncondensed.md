@@ -1,1 +1,1 @@
-- Fixed: Context assembly can show older uncondensed summaries at each depth while the summary prefix fits within the sweep target plus one leaf chunk and its summary budget.
+- Fixed: Context assembly can include older uncondensed summaries at each depth within a window-scaled sweep band and the available summary and survival budgets.

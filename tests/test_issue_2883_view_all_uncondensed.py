@@ -36,12 +36,12 @@ def _view_bytes(view):
     return json.dumps(view, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def _with_main_reader(engine, monkeypatch, tail, cap=None):
+def _with_main_reader(engine, monkeypatch, tail, cap=None, system=SYSTEM):
     fetch = engine._dag.get_uncondensed_at_depth
     with monkeypatch.context() as patch:
         patch.setattr(engine._dag, "get_uncondensed_at_depth",
                       lambda session, depth, limit=100, newest=False: fetch(session, depth, limit=100, newest=newest))
-        return engine._assemble_context(SYSTEM, tail, cap, include_lcm_note=False, persist=False)
+        return engine._assemble_context(system, tail, cap, include_lcm_note=False, persist=False)
 
 
 def _covered_content(engine, nodes, result):
@@ -393,3 +393,190 @@ def test_older_summary_backoff_cost(tmp_path, monkeypatch, node_count):
                 assert len(_rendered(view)) == expected
                 if node_count == 2_000 and budget is not None:
                     assert elapsed <= 1.0, "2,000-node budgeted assembly exceeded 1 second"
+
+
+@pytest.mark.parametrize("window,leaf_chars,frontier,turn_sizes", [
+    (32_000, 200, 340, (30, 90)),
+    (64_000, 400, 300, (60, 220)),
+    (200_000, 400, 300, (60, 220)),
+], ids=["32k", "64k", "200k"])
+def test_r10_no_extra_host_compactions(tmp_path, monkeypatch, window, leaf_chars, frontier, turn_sizes):
+    # Start in the stalled steady state from verify-1, then drive real host calls.
+    metrics = {}
+    for reader in ("main", "full"):
+        with monkeypatch.context() as patch:
+            clock = Clock()
+            install_clock(patch, clock)
+            fits = calls = turn = compressed = 0
+
+            def leaf(label):
+                return (f"LEAF-{label} " + "brief recap token " * 30)[:leaf_chars]
+
+            def provider(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+                nonlocal calls
+                if timeout is not None and timeout < 1:
+                    clock.now += timeout
+                    raise TimeoutError("synthetic summary timed out")
+                clock.now += 1
+                calls += 1
+                return leaf(f"new-{calls}")
+
+            def stall(*args, **kwargs):
+                raise lcm_engine.SummaryResultRejected("synthetic stall")
+
+            patch.setattr(escalation, "_invoke_summary_llm", provider)
+            rng = random.Random(7919)
+            sub = tmp_path / reader
+            sub.mkdir()
+            with engine_context(sub, window=window, conversation_id="c1", **QUIET) as engine:
+                patch.setattr(engine, "_condense_summary_nodes", stall)
+                fit, compress = engine._apply_survival_fit, engine.compress
+
+                def count_fit(*args, **kwargs):
+                    nonlocal fits
+                    fits += 1
+                    return fit(*args, **kwargs)
+
+                patch.setattr(engine, "_apply_survival_fit", count_fit)
+
+                def count_compress(*args, **kwargs):
+                    nonlocal compressed
+                    compressed += 1
+                    return compress(*args, **kwargs)
+
+                patch.setattr(engine, "compress", count_compress)
+                if reader == "main":
+                    fetch = engine._dag.get_uncondensed_at_depth
+                    patch.setattr(engine._dag, "get_uncondensed_at_depth",
+                                  lambda session, depth, limit=100, newest=False:
+                                  fetch(session, depth, limit=100 if limit is None else limit, newest=newest))
+                for index in range(frontier):
+                    engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=leaf(index),
+                                                    token_count=leaf_chars // 4, created_at=float(index)))
+                view = [SYSTEM]
+                small = sent_over = 0
+                for call in range(96):
+                    burst = call % 4 == 0
+                    pressure = count_messages_tokens(view)
+                    while True:
+                        size = rng.randint(*turn_sizes)
+                        pair = [
+                            {"role": "user", "content": f"<u{turn}> " + "question text " * size,
+                             "timestamp": 5.0 * (turn + 1)},
+                            {"role": "assistant", "content": f"<a{turn}> " + "answer text " * size},
+                        ]
+                        view = view + pair
+                        turn += 1
+                        pressure += count_messages_tokens(pair)
+                        if not burst or pressure > engine.threshold_tokens + 500:
+                            break
+                    before = compressed
+                    outcome = host_call(engine, view)
+                    view = outcome.view
+                    if not burst:
+                        small += compressed - before
+                    sent_over += outcome.sent_tokens >= engine.threshold_tokens
+                    engine.note_turn_complete()
+                    clock.now += 600
+            metrics[reader] = (compressed, small, fits, sent_over)
+    print(f"R10 host {window}: main={metrics['main']} full={metrics['full']}")
+    assert metrics["main"][0] >= 24
+    assert all(full <= main for main, full in zip(metrics["main"], metrics["full"]))
+
+
+@pytest.mark.parametrize("window,tail_target,nodes,words", [
+    (128_000, 80_000, 300, 30),
+    (32_000, 9_000, 700, 5),
+], ids=["128k", "32k"])
+def test_r10_survival_room_for_full_prefix(tmp_path, monkeypatch, window, tail_target, nodes, words):
+    # Match verify-2's wide tail and short-summary frontier.
+    system = {"role": "system", "content": "you are a test system"}
+    with engine_context(tmp_path, window=window, conversation_id="conv", **QUIET) as engine:
+        for index in range(nodes):
+            engine._dag.add_node(SummaryNode(session_id="S", depth=0,
+                                            summary=f"node text 0/{index} " + "lorem ipsum dolor sit " * words,
+                                            token_count=words * 5, created_at=float(index + 1)))
+        tail = []
+        tail_tokens = 0
+        while tail_tokens < tail_target:
+            index = len(tail)
+            row = {"role": "user" if index % 2 == 0 else "assistant",
+                   "content": f"turn {index} " + "alpha beta gamma delta " * 120,
+                   "timestamp": 50_000.0 + index}
+            tail.append(row)
+            tail_tokens += count_message_tokens(row)
+        tail.append({"role": "user", "content": "last question?", "timestamp": 99_999.0})
+        baseline = _with_main_reader(engine, monkeypatch, tail, system=system)
+        view = engine._assemble_context(system, tail, include_lcm_note=False, persist=False)
+        ceiling = engine._survival_ceiling()
+    main_tokens, full_tokens = map(count_messages_tokens, (baseline, view))
+    print(f"R10 survival {window}: main={main_tokens} full={full_tokens} ceiling={ceiling} "
+          f"parts={len(_rendered(baseline))}/{len(_rendered(view))}")
+    assert main_tokens < ceiling
+    assert set(_rendered(baseline)) <= set(_rendered(view))
+    assert full_tokens < ceiling
+
+
+def test_r10_survival_room_preserves_main_at_the_quarter_floor(tmp_path, monkeypatch):
+    with engine_context(tmp_path, window=128_000, conversation_id="conv", **QUIET) as engine:
+        _depth_0_nodes(engine, 300, text="synthetic note " * 50)
+        tail = _turn("tail", 5000.0)
+        main = _with_main_reader(engine, monkeypatch, tail)
+        padding = engine._survival_ceiling() - count_messages_tokens(main) - 10
+        tail[-1]["content"] += " " + "x" * (4 * padding)
+        baseline = _with_main_reader(engine, monkeypatch, tail)
+        view = engine._assemble_context(SYSTEM, tail, include_lcm_note=False, persist=False)
+        assert len(_rendered(baseline)) == 100
+        assert count_messages_tokens(baseline) < engine._survival_ceiling()
+        assert set(_rendered(baseline)) <= set(_rendered(view))
+        assert count_messages_tokens(view) < engine._survival_ceiling()
+        assert _view_bytes(view) == _view_bytes(baseline)
+
+
+def test_r10_survival_room_counts_the_mixed_script_carrier(tmp_path, monkeypatch):
+    with engine_context(tmp_path, window=128_000, conversation_id="conv", **QUIET) as engine:
+        _depth_0_nodes(engine, 1, text="漢" * 2400)
+        for index in range(100):
+            engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"seed {index}",
+                                            created_at=float(index + 2)))
+        tail = [
+            {"role": "user", "content": "漢" * 52_990 + "a" * 212_010, "timestamp": 5000.0},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "next question", "timestamp": 5010.0},
+        ]
+        baseline = _with_main_reader(engine, monkeypatch, tail, system=None)
+        view = engine._assemble_context(None, tail, include_lcm_note=False, persist=False)
+        main_tokens, full_tokens = map(count_messages_tokens, (baseline, view))
+        ceiling = engine._survival_ceiling()
+        print(f"R10 carrier: main={main_tokens} full={full_tokens} ceiling={ceiling}")
+        assert len(_rendered(baseline)) == 100
+        assert main_tokens < ceiling
+        assert set(_rendered(baseline)) <= set(_rendered(view))
+        assert full_tokens < ceiling
+        assert full_tokens < engine.threshold_tokens
+
+
+@pytest.mark.parametrize("words", [40, 140], ids=["95-token", "285-token"])
+def test_r10_backoff_keeps_older_parts(tmp_path, monkeypatch, words):
+    with engine_context(tmp_path, window=200_000, conversation_id="conv", **QUIET) as engine:
+        _depth_0_nodes(engine, 757, text="synthetic summary word " * (words // 3))
+        tail = [{"role": "user", "content": "tail question " * 40, "timestamp": 9e5}]
+        baseline = _with_main_reader(engine, monkeypatch, tail)
+        view = engine._assemble_context(SYSTEM, tail, include_lcm_note=False, persist=False)
+    kept = _rendered(view)
+    print(f"R10 backoff {words}: main={len(_rendered(baseline))} full={len(kept)} prefix={_prefix_tokens(view)}")
+    assert len(_rendered(baseline)) == 100
+    assert set(_rendered(baseline)) < set(kept)
+    assert len(kept) < 757
+
+
+@pytest.mark.parametrize("nodes,target", [(100, 24_000), (300, 1)], ids=["at-cap", "no-extras"])
+def test_r10_byte_identical_without_extras(tmp_path, monkeypatch, nodes, target):
+    with engine_context(tmp_path, window=32_000, summary_prefix_target_tokens=target,
+                        leaf_chunk_tokens=400, **QUIET) as engine:
+        _depth_0_nodes(engine, nodes, text=PART_BODY)
+        tail = _turn("tail", 5000.0)
+        baseline = _with_main_reader(engine, monkeypatch, tail)
+        view = engine._assemble_context(SYSTEM, tail, include_lcm_note=False, persist=False)
+    assert len(_rendered(baseline)) == 100
+    assert _view_bytes(view) == _view_bytes(baseline)
