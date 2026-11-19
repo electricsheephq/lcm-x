@@ -232,11 +232,17 @@ class _Rows:
         return [row for row in rows if row]
 
 
+def _key(row, stored_row):
+    """The wrapper's key of a row: its key fields read once, then the key."""
+    names = reconcile._REPLAY_IDENTITY_STORED_FIELDS if stored_row else reconcile._REPLAY_IDENTITY_FIELDS
+    return reconcile._replay_identity_memo_key(tuple(row.get(name) for name in names), True, True, stored_row)
+
+
 def _admitted(row, stored_row):
     if type(row) is not dict:
         return False
     try:
-        key, frozen = reconcile._replay_identity_memo_key(row, True, True, stored_row)
+        key, frozen = _key(row, stored_row)
     except (TypeError, RecursionError):
         return False
     return not reconcile._replay_identity_memo_gate(key[3], key[4], frozen)
@@ -514,14 +520,14 @@ def test_s1_structure_gate_names_each_stored_kind_and_keys_stored_and_live_apart
         for store_id, kind in rows.kinds.items():
             if kind in GATE_KINDS and store_id in by_id:
                 row = by_id[store_id]
-                key, frozen = reconcile._replay_identity_memo_key(row, True, True, True)
+                key, frozen = _key(row, True)
                 # A row the store itself externalized on insert (over the 200-char line) carries that kind instead.
                 expected = "externalized" if key[4].startswith("[Externalized tool output:") else GATE_KINDS[kind]
                 assert expected in reconcile._replay_identity_memo_gate(key[3], key[4], frozen), (kind, row)
         separate, seen = 0, set()
         for row in by_id.values():
-            if _admitted(row, True) and reconcile._replay_identity_memo_key(row, True, True, True)[0] not in seen:
-                seen.add(reconcile._replay_identity_memo_key(row, True, True, True)[0])
+            if _admitted(row, True) and _key(row, True)[0] not in seen:
+                seen.add(_key(row, True)[0])
                 engine._message_replay_identity(row, stored_row=False)
                 before = calls.n
                 engine._message_replay_identity(row, stored_row=True)
