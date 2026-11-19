@@ -3804,6 +3804,25 @@ def _embedding_backfill_summary_run(
                 "status: refused",
                 "error: another embedding backfill holds the lease; retry after it exits or after the lease TTL expires",
             ]), reason="lease_held")
+        # Register the default-off summary identity alongside the old vectors.
+        # Ordinary backfill discovers the summaries as pending under it.
+        if (
+            not retry_uncertain
+            and getattr(config, "embedding_privacy_enabled", None) is not True
+            and profile_revision.startswith("privacy:v")
+            and provider_name == embedding_provider_id(config.embedding_provider)
+            and embedding_provider_requires_privacy(provider_name)
+            and model == effective_embedding_model(config.embedding_provider, config.embedding_model)
+            and profile_suffix == embedding_prefix_suffix(config, provider_name)
+            and profile_dtype == _resolve_storage_dtype(config)
+        ):
+            with store._write_transaction():
+                if _embedding_current_profile(conn) == profile and lease.renew(force=True):
+                    profile_revision = "privacy:off"
+                    identity = store.register_profile(
+                        model, provider_name, profile["dim"], revision=profile_revision,
+                        revision_suffix=profile_suffix, dtype=profile_dtype, byteorder=profile["byteorder"],
+                    )
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)
         if captured_identity.identity_hash != identity:
