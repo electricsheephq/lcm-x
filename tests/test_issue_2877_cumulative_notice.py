@@ -43,19 +43,21 @@ CELL = {"group": "S", "id": "s-600k-l40-prefix", "passes": 60, "raw_tokens": 150
         "growth_tokens": 26_000, "turn_gap": 60, "finalize": 32, "chunk": 24_000, "summary_tokens": 1_500,
         "window": 600_000, "pre": 37, "estimate": 44, "call": 40, "delta": 0, "prefix": "1-2x"}
 TODAY = "survival_fit.survival_fit_notice = lambda *args, **kwargs: None  # today's single-range notice\n"
+# the parsers also read the reviewed head's form (one limit for all ranges), so a cell fails there on its own claim
 NOTICE = re.compile(r"^\[LCM survival fit: (\d+) earlier messages \(store ids (\d+)\.\.(\d+)\) are stored verbatim but not "
-                    r"in live context; read with lcm_load_session limit=(\d+), next_cursor, and lcm_expand\(store_id\) "
-                    r"if truncated: (.*)\.\]$", re.S)
-GROUP = re.compile(r"session_id=([^;\s]+) ((?:after_store_id=\d+ to \d+(?:, )?)+)")
-ITEM = re.compile(r"after_store_id=(\d+) to (\d+)")
+                    r"in live context; read with lcm_load_session(?: limit=(\d+))?, next_cursor, and "
+                    r"lcm_expand\(store_id\) if truncated: (.*)\.\]$", re.S)
+GROUP = re.compile(r"session_id=([^;\s]+) ((?:after_store_id=\d+(?: limit=\d+)? to \d+(?:, )?)+)")
+ITEM = re.compile(r"after_store_id=(\d+)(?: limit=(\d+))? to (\d+)")
 
 
 def _calls(notice: str) -> list[tuple[int, int, dict]]:
     """(first, last, arguments) of every range the notice names, its arguments parsed from the text."""
     head = NOTICE.match(notice)
     assert head, notice
-    calls = [(int(after) + 1, int(stop), {"session_id": session, "after_store_id": int(after), "limit": int(head.group(4))})
-             for session, items in GROUP.findall(head.group(5)) for after, stop in ITEM.findall(items)]
+    calls = [(int(after) + 1, int(stop), {"session_id": session, "after_store_id": int(after),
+                                          "limit": int(limit or head.group(4))})
+             for session, items in GROUP.findall(head.group(5)) for after, limit, stop in ITEM.findall(items)]
     assert len(calls) == len(ITEM.findall(head.group(5))), notice  # every range says where it starts and stops
     return calls
 
@@ -143,13 +145,13 @@ def test_builder_text_one_range_and_several_ranges_are_pinned_by_literals(engine
     messages, ids = _listed(rows, {4, 5, 6, 7, 8, 9, 10})
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) == (
         "[LCM survival fit: 3 earlier messages (store ids 1..3) are stored verbatim but not in live context; read with "
-        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 "
+        "lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 limit=3 "
         "to 3.]")
     messages, ids = _listed(rows, {3, 4, 7})
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) == (
         "[LCM survival fit: 7 earlier messages (store ids 1..10) are stored verbatim but not in live context; read with "
-        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 "
-        "to 2, after_store_id=4 to 6, after_store_id=7 to 10.]")
+        "lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 limit=2 "
+        "to 2, after_store_id=4 limit=2 to 6, after_store_id=7 limit=3 to 10.]")
     messages, ids = _listed(rows, set(range(1, 11)))
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) is None  # nothing out of view
 
@@ -196,8 +198,8 @@ def test_builder_text_on_the_emergency_path_is_pinned_by_a_literal(engine, monke
     assert "dropped the summary prefix" in caplog.text
     notice = engine._last_survival_fit["notice"]
     assert notice == ("[LCM survival fit: 10 earlier messages (store ids 1..10) are stored verbatim but not in live "
-                      "context; read with lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: "
-                      "session_id=S after_store_id=0 to 10.]")
+                      "context; read with lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: "
+                      "session_id=S after_store_id=0 limit=10 to 10.]")
     assert result[0]["content"] == f"system prompt\n\n{notice}"
     # the same text from a direct call on the returned list, outside the fit (no node is shown: the prefix left)
     assert survival_fit_notice(engine, result, set()) == notice
@@ -270,15 +272,20 @@ def test_b_the_notice_bound_holds_for_long_ids(ids):
 
 def _load(engine, args: dict, stop: int = 10 ** 15) -> list[dict]:
     """Follow the notice exactly: the call as written (its arguments parsed from the text), paging with next_cursor,
-    stopping after the range's last store id, and a row marked content_truncated read whole with lcm_expand."""
+    stopping after the range's last store id, and a row marked content_truncated read whole with lcm_expand (paging
+    with its next_content_offset while has_more is set)."""
     rows, page = [], json.loads(lcm_load_session(dict(args), engine=engine))
     while True:
         for message in page["messages"]:
             if message["store_id"] > stop:
                 return rows
             if message["content_truncated"]:
-                message = {**message, **json.loads(lcm_expand({"store_id": message["store_id"]}, engine=engine)),
-                           "content_truncated": False}
+                part = json.loads(lcm_expand({"store_id": message["store_id"]}, engine=engine))
+                message = {**message, **part, "content_truncated": False}
+                while part["has_more"]:
+                    part = json.loads(lcm_expand({"store_id": message["store_id"],
+                                                  "content_offset": part["next_content_offset"]}, engine=engine))
+                    message["content"] += part["content"]
             rows.append(message)
         if page["next_cursor"] is None:
             return rows
@@ -380,7 +387,7 @@ def test_rows_that_left_are_named_in_any_case(engine):
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) is None  # row 5's copy (1) is in the list
     assert survival_fit_notice(engine, messages, set(), left=[5], store_ids=ids) == (
         "[LCM survival fit: 1 earlier messages (store ids 5..5) are stored verbatim but not in live context; read with "
-        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=4 "
+        "lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=4 limit=1 "
         "to 5.]")
 
 
@@ -437,7 +444,7 @@ def test_a_session_id_with_colons_parses_back_and_its_call_loads_the_rows(tmp_pa
         messages, ids = _listed(rows, {6, 7, 8})
         notice = survival_fit_notice(engine, messages, set(), store_ids=ids)
         (first, last, args), = _calls(notice)
-        assert (first, last) == (1, 5) and args == {"session_id": COLON_ID, "after_store_id": 0, "limit": 200}, notice
+        assert (first, last) == (1, 5) and args == {"session_id": COLON_ID, "after_store_id": 0, "limit": 5}, notice
         loaded = _load(engine, args, last)
         assert [m["content"] for m in loaded] == [f"row {i}" for i in range(1, 6)]
     finally:
@@ -559,7 +566,7 @@ def test_fix5_a_rotations_parent_rows_stay_named_on_the_next_fit(engine, monkeyp
               for i, role in enumerate(("user", "assistant"))]
     rows = _store(engine, [f"[R{i}]{pad}" for i in range(1, 5)] + ["[N] the newest question", "[N] answer " * 150])
     carried = [{"role": "user", "content": f"[P0]{pad}"}, {"role": "assistant", "content": f"[P1]{pad}"}]
-    monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, **k: [("P", parent[0], parent[1])])
+    monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, **k: [("P", parent[0] - 1, parent[1])])
     real = engine._get_store_id_map_for_messages
     monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda messages, *a, **k: {
         **real(messages, *a, **k), **{id(m): s for m, s in zip(carried, parent) if any(m is x for x in messages)}})
@@ -568,3 +575,111 @@ def test_fix5_a_rotations_parent_rows_stay_named_on_the_next_fit(engine, monkeyp
     assert not any(str(m["content"]).startswith("[P") for m in second)
     named = {(a, b): args["session_id"] for a, b, args in _calls(engine._last_survival_fit["notice"])}
     assert named.get((parent[0], parent[1])) == "P", engine._last_survival_fit["notice"]
+
+
+# -- review fix round 2 (each cell red on fcd5a1ee, green after) ----------------------------------------------------
+
+def test_r2_following_the_notice_reads_a_row_past_lcm_expands_budget_whole(engine):
+    """A row over lcm_expand's token budget comes back in parts (has_more, next_content_offset): following the notice
+    reads it whole."""
+    long = " ".join(f"w{i}" for i in range(12_000))
+    rows = _store(engine, ["row 1", long, "row 3"])
+    messages, ids = _listed(rows, {1, 3})
+    (first, last, args), = _calls(survival_fit_notice(engine, messages, set(), store_ids=ids))
+    assert json.loads(lcm_expand({"store_id": 2}, engine=engine))["has_more"]  # the premise: one call is not enough
+    assert [(m["store_id"], m["content"]) for m in _load(engine, args, last)] == [(2, long)]
+
+
+def test_r2_a_one_row_ranges_call_reads_exactly_that_row(engine):
+    """Each range's call carries its own limit (at most 200): a one-row range with many later rows reads that row."""
+    rows = _store(engine, [f"row {i}" for i in range(1, 400)])
+    messages, ids = _listed(rows, set(range(1, 400)) - {10})
+    (first, last, args), = _calls(survival_fit_notice(engine, messages, set(), store_ids=ids))
+    page = json.loads(lcm_load_session(dict(args), engine=engine))
+    assert (first, last) == (10, 10) and [m["store_id"] for m in page["messages"]] == [10], args
+
+
+def _rotation(engine, monkeypatch, end=None):
+    """Parent rows P:1..4 and child rows 5..10; the carry range is half-open, ("P", 2, end): P:3 and P:4 are carried
+    (end 4), and the map gives the carried list rows their parent ids, as a rotation does."""
+    _rough(monkeypatch)
+    pad = " older words" * 100
+    parent = [engine._store.append("P", {"role": role, "content": f"[P{i}]{pad}"}, conversation_id="conv")
+              for i, role in zip(range(1, 5), ("user", "assistant", "user", "assistant"))]
+    rows = _store(engine, [f"[R{i}]{pad}" for i in range(1, 5)] + ["[N] the newest question", "[N] answer " * 150])
+    carried = [{"role": "user", "content": f"[P3]{pad}"}, {"role": "assistant", "content": f"[P4]{pad}"}]
+    monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, **k: [("P", parent[1], end or parent[3])])
+    real = engine._get_store_id_map_for_messages
+    monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda messages, *a, **k: {
+        **real(messages, *a, **k), **{id(m): s for m, s in zip(carried, parent[2:]) if any(m is x for x in messages)}})
+    return pad, parent, rows, carried
+
+
+def _named(engine, session="P"):
+    return [(a, b) for a, b, args in _calls(engine._last_survival_fit["notice"]) if args["session_id"] == session]
+
+
+def test_r2_the_carry_range_is_half_open_and_a_carried_row_in_view_is_not_named(engine, monkeypatch):
+    """Fit one drops the carried rows: P:3..4 are named, not P:2 (the range's exclusive start). Fit two keeps a child
+    row byte-equal to P:3: P:3 is in view and only P:4 is named."""
+    pad, parent, rows, carried = _rotation(engine, monkeypatch)
+    active = [{"role": "system", "content": "system prompt"}, *carried, *(row for _, row in rows)]
+    first, second = _two_fits(engine, active, [f"[P3]{pad}", f"[M2]{pad}", "[N2] next", "[N2] " * 300], cap=1400)
+    assert any(m.get("content") == f"[P3]{pad}" for m in second)  # the premise: P:3's copy is in the list
+    assert _named(engine) == [(4, 4)], engine._last_survival_fit["notice"]
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+    engine._survival_fit(active, list(active), 0, "test", request_cap=900)
+    assert _named(engine) == [(3, 4)], engine._last_survival_fit["notice"]
+
+
+def test_r2_a_carried_row_under_a_shown_summary_is_not_named(engine, monkeypatch):
+    """The list holds no carried row but keeps a summary whose node covers P:3..4: they are in view, not named."""
+    pad, parent, rows, carried = _rotation(engine, monkeypatch)
+    node = engine._dag.add_node(SummaryNode(session_id="S", summary="parent turns three and four", token_count=1,
+                                            source_token_count=1, source_ids=parent[2:], expand_hint="turns"))
+    summary = {"role": "user", "content": f"[Recent Summary (d0, node {node})]\nparent turns three and four\n"
+                                          "[Expand for details: turns]"}
+    active = [{"role": "system", "content": "system prompt"}, summary, *(row for _, row in rows)]
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+    result = engine._survival_fit(active, list(active), 0, "test", request_cap=1500)
+    assert result[1]["content"] == summary["content"] and engine._last_survival_fit["notice"], result  # the premise
+    assert _named(engine) == [], engine._last_survival_fit["notice"]
+
+
+def test_r2_the_carry_read_does_not_grow_with_the_ranges_span(engine, monkeypatch):
+    """The same carried rows inside a 100,000-id span and a tight one: the fit's own reads are the same statements (one
+    indexed read of the source session's own rows per carry range, whose bound alone differs) and the notice is the
+    same."""
+    pad, parent, rows, carried = _rotation(engine, monkeypatch)
+    active = [{"role": "system", "content": "system prompt"}, *carried, *(row for _, row in rows)]
+    own = ("SELECT store_id FROM messages WHERE session_id", "WITH RECURSIVE walk(root, node_id)",
+           "SELECT store_id, session_id, role, content, tool_calls, tool_call_id FROM messages")
+    seen = []
+    for end in (parent[3], 100_000):
+        monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, end=end, **k: [("P", parent[1], end)])
+        statements = []
+        engine._store.connection.set_trace_callback(statements.append)
+        try:
+            engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+            engine._survival_fit(active, list(active), 0, "test", request_cap=900)
+        finally:
+            engine._store.connection.set_trace_callback(None)
+        reads = [x.replace("store_id <= 100000", f"store_id <= {parent[3]}") for x in statements if x.startswith(own)]
+        seen.append((reads, engine._last_survival_fit["notice"]))
+    assert seen[1] == seen[0] and sum(x.startswith(own[0]) for x in seen[0][0]) == 1, [len(x[0][-1]) for x in seen]
+    plan = " ".join(str(row) for row in engine._store.connection.execute(
+        "EXPLAIN QUERY PLAN " + survival_fit._CARRIED_SQL, ("P", 2, 100_000)).fetchall())
+    assert "idx_msg_session" in plan, plan
+
+
+def test_r2_tool_calls_keys_follow_replay_identity(engine):
+    """An unmapped listed row whose calls are a duplicate-key JSON string is not a copy of a stored row holding the
+    last key's value (replay identity keeps them apart); a host's string calls, stored and listed again, are a copy."""
+    engine._store.append("S", {"role": "assistant", "content": "same", "tool_calls": [{"id": "new"}]}, conversation_id="conv")
+    engine._store.append("S", {"role": "assistant", "content": "other", "tool_calls": '[{"id":"x"}]'}, conversation_id="conv")
+    kept = _store(engine, ["u3", "r4"])
+    messages, ids = _listed(kept, {3, 4})
+    listed = [*messages, {"role": "assistant", "content": "same", "tool_calls": '[{"id":"old","id":"new"}]'},
+              {"role": "assistant", "content": "other", "tool_calls": '[{"id":"x"}]'}]
+    (first, last, _), = _calls(survival_fit_notice(engine, listed, set(), store_ids=ids))
+    assert (first, last) == (1, 1)
