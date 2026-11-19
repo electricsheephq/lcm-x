@@ -78,8 +78,8 @@ class Sim:
         eng.compress = record_compression
         eng._warn_unattributed_leaf = record_refusal
         if claim := getattr(eng, "_tool_result_leaf_claim", None):
-            def record_claim(message, caller=None):
-                store_id = claim(message, caller)
+            def record_claim(message, caller=None, **kwargs):
+                store_id = claim(message, caller, **kwargs)
                 if store_id is not None:
                     matches = eng._store.find_session_tool_rows(
                         SESSION, message["tool_call_id"], conversation_id="conv", tool_name="",
