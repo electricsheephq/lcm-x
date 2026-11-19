@@ -20,6 +20,7 @@ import re
 import stat
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, BinaryIO, Dict
 
@@ -1313,79 +1314,83 @@ def find_externalized_payload_for_message(
     return None
 
 
-# #2856: a tool-call lookup reads only the payload files that can decide its answer. The index maps
-# each file to the call id stored in it, and an entry holds only while the file's stat signature
-# (size, mtime_ns, inode, ctime_ns) is unchanged. A file the old scan would raise on, or could not
-# read, is a candidate for every call, so the lookup raises or skips exactly where the scan did.
+# #2856: a tool-call lookup walks the old scan's sorted file list but opens a file only when its cached
+# entry cannot decide it. An entry records the call id stored in the file (None when no call can match;
+# _EVERY_CALL when the old scan would skip or raise on it before its id test) and holds only while the
+# file's stat signature is unchanged. A lookup stops where the old scan stops, so the files it opens are
+# a subset of the old scan's, in the same order, and the payload it checks is read now, never cached.
+# Accepted limits: the racy window assumes timestamps no coarser than 2 s and a clock that does not step
+# back into a cached second; a stored call id that is not a string is indexed as absent (callers pass str).
 _CALL_INDEX_RACY_NS = 2_000_000_000  # a change this recent may share its timestamp tick with the next one
-_CALL_INDEX_MAX_FOLDERS = 8
+_CALL_INDEX_MAX_ENTRIES = 100_000  # about 12 reference folders of 8,559 files; some 40 MB at most
 _EVERY_CALL = object()
 _call_index_lock = threading.Lock()
-_call_index: dict[Path, tuple[tuple[int, ...] | None, list[str], dict[str, tuple[tuple[int, ...] | None, Any]]]] = {}
+_call_index: "OrderedDict[Path, list]" = OrderedDict()  # folder -> [signature or None, sorted paths, entries]
 
 
 def _stat_signature(st: os.stat_result) -> tuple[int, ...]:
     return (st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, st.st_dev, st.st_nlink)
 
 
-def _payload_call_key(path: Path) -> Any:
-    """What the old scan's checks before the call-id test decide for this file."""
+def _settled_signature(path: Path, now_ns: int) -> tuple[int, ...] | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None  # skipped by every lookup
-    except Exception:  # OSError (skipped, maybe not next time) or what the old scan raised on
-        return _EVERY_CALL
-    if not isinstance(payload, dict):
-        return _EVERY_CALL  # the old scan raises here on payload.get
-    if payload.get("kind", "tool_result") != "tool_result":
+        signature = _stat_signature(os.stat(path))
+    except OSError:
         return None
-    call_id = payload.get("tool_call_id") or ""
-    return call_id if isinstance(call_id, str) else None
+    return signature if now_ns - max(signature[1], signature[3]) >= _CALL_INDEX_RACY_NS else None
 
 
-def _tool_call_lookup_candidates(storage_dir: Path, tool_call_id: str) -> list[Path]:
-    """``sorted(storage_dir.glob("*.json"))`` narrowed to the files that can hold ``tool_call_id``.
+def _folder_call_index(storage_dir: Path, now_ns: int) -> list:
+    """The folder's sorted listing and entries, listed again when the folder's stat moved (LRU, bounded)."""
+    signature = _settled_signature(storage_dir, now_ns)
+    with _call_index_lock:
+        folder = _call_index.get(storage_dir)
+    if folder is None or signature is None or folder[0] != signature:
+        os.stat(storage_dir)  # an unreadable folder raises here and the caller falls back to the old scan
+        folder = [signature, sorted(storage_dir.glob("*.json")), folder[2] if folder else {}]
+    with _call_index_lock:
+        _call_index[storage_dir] = folder
+        _call_index.move_to_end(storage_dir)
+        while len(_call_index) > 1 and sum(len(f[2]) for f in _call_index.values()) > _CALL_INDEX_MAX_ENTRIES:
+            _call_index.popitem(last=False)
+    return folder
 
-    Each lookup stats the folder and every indexed file; the folder is listed again when its stat
-    changed, and a file is parsed again when its stat changed. A signature taken within the racy
-    window of its own change is not trusted. Returned files are re-read by the caller.
-    """
+
+def _tool_call_payloads(storage_dir: Path, tool_call_id: str):
+    """Yield, in the old scan's order, every payload the old scan's call-id test could pass or raise on."""
     now_ns = time.time_ns()
     try:
-        folder_signature = _stat_signature(os.stat(storage_dir))
+        _, paths, entries = _folder_call_index(storage_dir, now_ns)
     except OSError:
-        return sorted(storage_dir.glob("*.json"))
-    with _call_index_lock:
-        cached = _call_index.get(storage_dir)
-    known = cached[2] if cached else {}
-    if cached and cached[0] == folder_signature:
-        names = cached[1]
-    else:
-        names = [path.name for path in storage_dir.glob("*.json")]
-    files: dict[str, tuple[tuple[int, ...] | None, Any]] = {}
-    candidates = []
-    prefix = os.path.join(os.fspath(storage_dir), "")
-    for name in names:
+        paths, entries = sorted(storage_dir.glob("*.json")), {}
+    for path in paths:
+        before = _settled_signature(path, now_ns)
+        entry = entries.get(path.name)
+        if before is not None and entry is not None and entry[0] == before:
+            if entry[1] is not _EVERY_CALL and entry[1] != tool_call_id:
+                continue  # decided without opening: the old scan skips it at its kind or call-id test
+        key, parsed, error = _EVERY_CALL, False, None
         try:
-            st = os.stat(prefix + name)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            parsed = True
+        except json.JSONDecodeError:
+            key = None
         except OSError:
-            candidates.append(storage_dir / name)
-            continue
-        entry = known.get(name)
-        signature = _stat_signature(st)
-        if entry is None or entry[0] != signature:
-            trusted = now_ns - max(st.st_mtime_ns, st.st_ctime_ns) >= _CALL_INDEX_RACY_NS
-            entry = (signature if trusted else None, _payload_call_key(storage_dir / name))
-        files[name] = entry
-        if entry[1] is _EVERY_CALL or entry[1] == tool_call_id:
-            candidates.append(storage_dir / name)
-    folder_trusted = now_ns - max(folder_signature[1], folder_signature[3]) >= _CALL_INDEX_RACY_NS
-    with _call_index_lock:
-        if storage_dir not in _call_index and len(_call_index) >= _CALL_INDEX_MAX_FOLDERS:
-            _call_index.pop(next(iter(_call_index)))
-        _call_index[storage_dir] = (folder_signature if folder_trusted else None, names, files)
-    return sorted(candidates)
+            pass  # skipped, and read again next time
+        except Exception as exc:  # the old scan raises here
+            error = exc
+        if parsed and isinstance(payload, dict):
+            call_id = payload.get("tool_call_id") or "" if payload.get("kind", "tool_result") == "tool_result" else None
+            key = call_id if isinstance(call_id, str) else None
+        if before is not None and before == _settled_signature(path, now_ns):  # unchanged across the read
+            if path.name in entries or len(entries) < _CALL_INDEX_MAX_ENTRIES:
+                entries[path.name] = (before, key)
+        else:
+            entries.pop(path.name, None)
+        if error is not None:
+            raise error
+        if parsed and (key is _EVERY_CALL or key == tool_call_id):
+            yield payload
 
 
 def find_externalized_tool_result_content_for_call(
@@ -1415,11 +1420,7 @@ def find_externalized_tool_result_content_for_call(
     storage_dir = get_large_output_storage_dir(config, hermes_home=hermes_home, create=False)
     if not storage_dir.exists() or not storage_dir.is_dir():
         return None
-    for path in _tool_call_lookup_candidates(storage_dir, tool_call_id):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for payload in _tool_call_payloads(storage_dir, tool_call_id):
         if payload.get("kind", "tool_result") != "tool_result":
             continue
         if (payload.get("tool_call_id") or "") != tool_call_id:

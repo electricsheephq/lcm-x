@@ -320,11 +320,39 @@ def _stored_id(path):
     return payload.get("tool_call_id") if isinstance(payload, dict) else None
 
 
+_OPENED: list | None = None  # payload files read, in order, while a check records them
+
+
+def _record_reads(monkeypatch):
+    global _OPENED
+    real_read = pathlib.Path.read_text
+
+    def read_text(self, *a, **k):
+        if _OPENED is not None and self.suffix == ".json":
+            _OPENED.append(self.name)
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+
+
+def _is_subsequence(part, whole):
+    rest = iter(whole)
+    return all(item in rest for item in part)
+
+
 def _check(folder, kwargs, tally):
+    """Same outcome as the old scan, and the files opened are a subsequence of the old scan's."""
+    global _OPENED
+    _OPENED = []
     expected = _outcome(oracle_lookup, **kwargs)
+    old_opened, _OPENED = _OPENED, []
     actual = _outcome(find_externalized_tool_result_content_for_call, **kwargs)
+    new_opened, _OPENED = _OPENED, None
     assert actual == expected, kwargs
+    assert _is_subsequence(new_opened, old_opened), (new_opened, old_opened)
     tally[expected[0] if expected[0] == "raise" or expected[1] is None else "found"] += 1
+    tally["opened_old"] = tally.get("opened_old", 0) + len(old_opened)
+    tally["opened_new"] = tally.get("opened_new", 0) + len(new_opened)
 
 
 @pytest.mark.parametrize("seed", range(16))
@@ -334,6 +362,7 @@ def test_index_lookup_equals_sorted_scan(tmp_path, monkeypatch, seed):
         # A short racy window so quiet steps reach trusted entries; still above the mtime tick of
         # APFS (ns) and of a Linux coarse clock (ms). Seeds 0, 4, 8, 12 keep the product's window.
         monkeypatch.setattr(externalize, "_CALL_INDEX_RACY_NS", 30_000_000, raising=False)  # absent on the base
+    _record_reads(monkeypatch)
     folder = Folder(tmp_path, rng)
     tally = {"found": 0, "ok": 0, "raise": 0}
     steps = dict.fromkeys(["add", "remove", "rewrite", "to_id", "from_id", "replace", "raising", "quiet",
@@ -441,6 +470,24 @@ def test_same_tick_rewrite_of_the_stored_id_is_seen(tmp_path, monkeypatch):
     assert find_externalized_tool_result_content_for_call(**kwargs) == "same-size"
 
 
+def test_same_size_rewrite_with_mtime_restored_is_seen(tmp_path, monkeypatch):
+    """A same-size in-place rewrite whose mtime is put back: only the change time moves, and it is seen."""
+    monkeypatch.setattr(externalize, "_CALL_INDEX_RACY_NS", 30_000_000, raising=False)
+    folder = Folder(tmp_path, random.Random(2859))
+    path = folder.dir / folder._name(_tool_call_stub("call_1"))
+    path.write_text(json.dumps({"kind": "tool_result", "tool_call_id": "call_2", "content": "same-size"}))
+    kwargs = {"tool_call_id": "call_1", "config": folder.config, "hermes_home": str(folder.home)}
+    time.sleep(0.05)
+    assert find_externalized_tool_result_content_for_call(**kwargs) is None  # cached: holds call_2
+    stamp = os.stat(path)
+    folder._write_in_place(path, {"kind": "tool_result", "tool_call_id": "call_1", "content": "same-size"})
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    after = os.stat(path)
+    assert (after.st_size, after.st_mtime_ns, after.st_ino) == (stamp.st_size, stamp.st_mtime_ns, stamp.st_ino)
+    time.sleep(0.05)
+    assert find_externalized_tool_result_content_for_call(**kwargs) == "same-size"
+
+
 def test_issue_2703_shape_name_for_one_call_content_for_another(tmp_path):
     folder = Folder(tmp_path, random.Random(2858))
     name = "20251109_145500_call_spill_34e7b012bd2d_18765e66da0ba800.json"
@@ -497,8 +544,9 @@ class _Counts:
 
 
 def test_unchanged_files_are_parsed_once_and_lookups_read_only_candidates(tmp_path, monkeypatch):
-    """N lookups on a quiet folder: one listing, every file parsed once, then only candidates re-read.
-    Files written within the racy window are parsed again on each lookup, and nothing else is."""
+    """N lookups on a quiet folder: one listing; a file is parsed the first time a lookup reaches it, and
+    afterwards only files holding the looked-up id are read again, up to the old scan's stopping point.
+    Files written within the racy window are read again whenever a lookup reaches them."""
     folder = Folder(tmp_path, random.Random(28560))
     by_id = {}
 
