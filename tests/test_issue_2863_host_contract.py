@@ -18,6 +18,7 @@ H6 verdict (conversation_compression.py:3442-3475): output == input -> no-progre
 """
 
 import copy
+from collections import Counter
 import hashlib
 import json
 import random
@@ -175,24 +176,35 @@ def is_stub(m):
     return m.get("role") == "tool" and bool(extract_externalized_refs(m.get("content") or ""))
 
 
+def _digest(m):
+    return hashlib.sha256(json.dumps(_row_key(m), default=str).encode()).hexdigest()
+
+
 def pairing_problems(out, newest_id):
-    open_ids, problems = set(), []
+    """Every tool result consumes exactly one matching call id of the assistant row it answers."""
+    open_ids, answered, problems = Counter(), set(), []
     for i, m in enumerate(out):
         if m.get("role") == "assistant":
-            open_ids = {tc.get("id") for tc in (m.get("tool_calls") or [])}
+            open_ids, answered = Counter(tc.get("id") for tc in (m.get("tool_calls") or [])), set()
         elif m.get("role") == "tool":
-            if m.get("tool_call_id") not in open_ids:
-                problems.append(f"orphan tool row {i} {m.get('tool_call_id')}")
+            cid = m.get("tool_call_id")
+            if open_ids[cid] > 0:
+                open_ids[cid] -= 1
+                answered.add(cid)
+            else:
+                problems.append(f"{'duplicate' if cid in answered else 'orphan'} tool row {i} {cid}")
         else:
-            open_ids = set()
+            open_ids, answered = Counter(), set()
     if newest_id and not any(m.get("role") == "tool" and m.get("tool_call_id") == newest_id for m in out):
         problems.append(f"newest result {newest_id} missing")
     return problems
 
 
 def conservation_violations(eng, out):
-    """Every stored row not under a node whose summary is in `out` appears in `out` by content (a tool row may
-    appear as its externalized pointer, or as the payload of the pointer the store holds)."""
+    """By content digest, copies counting. Every stored row is covered: a byte-equal stored copy of it is under a
+    node whose summary is in `out`, or it appears in `out` (a tool row may appear as its externalized pointer, or as
+    the payload of the pointer the store holds). No row appears in `out` more often than the store holds byte-equal
+    copies of it outside those nodes."""
     sid = eng._session_id
     texts = [_text(m) for m in out]
     joined = "\n".join(texts)
@@ -201,19 +213,27 @@ def conservation_violations(eng, out):
     for node in eng._dag.get_session_nodes(sid, limit=100_000):
         if node.node_id in header_ids or (node.summary and node.summary in joined):
             covered.update(eng._dag.source_message_ids(node.node_id, limit=1_000_000))
-    exact = {_row_key(m) for m in out}
+    rows = eng._store.get_session_messages(sid, limit=100_000)
+    summarised = {_digest(r) for r in rows if r["store_id"] in covered}
+    outside = Counter(_digest(r) for r in rows if r["store_id"] not in covered)
+    listed = Counter(_digest(m) for m in out)
     stub_ids = {m.get("tool_call_id") for m in out if is_stub(m)}
     out_tool = {m.get("tool_call_id"): _text(m) for m in out if m.get("role") == "tool"}
     violations = []
-    for row in eng._store.get_session_messages(sid, limit=100_000):
-        if row["store_id"] in covered or _row_key(row) in exact:
+    for row in rows:
+        digest = _digest(row)
+        if digest in summarised or digest in listed:
             continue
         cid = row.get("tool_call_id")
         if row.get("role") == "tool" and (cid in stub_ids or (cid in out_tool and any(
                 (load_externalized_payload(ref, config=eng._config, hermes_home=eng._hermes_home) or {})
                 .get("content") == out_tool[cid] for ref in extract_externalized_refs(row.get("content") or "")))):
             continue
-        violations.append((row["store_id"], row.get("role"), cid))
+        violations.append(("missing", row["store_id"], row.get("role"), cid))
+    for digest, n in listed.items():
+        if (digest in outside or digest in summarised) and n > outside[digest]:
+            m = next(x for x in out if _digest(x) == digest)
+            violations.append(("duplicate", n, outside[digest], m.get("role"), m.get("tool_call_id")))
     return violations
 
 
@@ -394,15 +414,100 @@ def test_new_engine_reports_no_progress(engine):
     assert engine._last_compression_made_progress is False
 
 
-def test_real_usage_clears_both_host_flags(engine):
-    engine._verify_compaction_cleared_threshold = True
-    engine.awaiting_real_usage_after_compression = True
-    engine.update_from_response({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-    assert engine._verify_compaction_cleared_threshold is True
-    assert engine.awaiting_real_usage_after_compression is True
-    engine.update_from_response({"prompt_tokens": 30_000, "completion_tokens": 100, "total_tokens": 30_100})
-    assert engine._verify_compaction_cleared_threshold is False
-    assert engine.awaiting_real_usage_after_compression is False
+def _arm_host_flags(eng):
+    eng._verify_compaction_cleared_threshold = True
+    eng.awaiting_real_usage_after_compression = True
+
+
+def _host_flags(eng):
+    return eng._verify_compaction_cleared_threshold, eng.awaiting_real_usage_after_compression
+
+
+@pytest.mark.parametrize("usage", [
+    {},
+    {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    {"prompt_tokens": 30_000, "completion_tokens": 100, "total_tokens": 30_100},
+], ids=["usage-less", "zero-count", "real-count"])
+def test_any_foreground_response_clears_both_host_flags(engine, usage):
+    # context_compressor.py:2899-2901 clears both with or without a count; turn_usage.py:87-91 sends {} when the
+    # provider omits usage, so a count-gated clear would leave the post-tool gate off for the rest of the turn.
+    _arm_host_flags(engine)
+    engine.update_from_response(usage)
+    assert _host_flags(engine) == (False, False)
+
+
+def test_auxiliary_response_leaves_both_host_flags(engine, monkeypatch):
+    aux = ["aux-2863"]
+    monkeypatch.setattr(engine, "_thread_context_session_id", lambda: aux[0])
+    assert engine._thread_context_stateless()
+    _arm_host_flags(engine)
+    engine.update_from_response({"prompt_tokens": 900, "completion_tokens": 50, "total_tokens": 950})
+    engine.update_from_response({})
+    assert _host_flags(engine) == (True, True)
+    aux[0] = ""
+    engine.update_from_response({})
+    assert _host_flags(engine) == (False, False)
+
+
+@pytest.mark.parametrize("kind", ["stateless", "ignore"])
+def test_side_channel_response_leaves_both_host_flags_until_the_foreground_answers(tmp_path, monkeypatch, kind):
+    force_char_estimate(monkeypatch)
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **{f"{kind}_session_patterns": ["side-*"]})
+    eng = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        eng.on_session_start("s2863", platform="cli", model="probe-model", context_length=WINDOW)
+        eng.update_from_response({"prompt_tokens": 47_000, "completion_tokens": 100, "total_tokens": 47_100})
+        _arm_host_flags(eng)  # the host's post-commit state (conversation_compression.py:3411-3427)
+        eng.on_session_start("side-1", platform="cron", model="probe-model", context_length=WINDOW)
+        assert eng.side_channel_active and eng._bypasses_lcm_context_management()
+        eng.update_from_response({"prompt_tokens": 900, "completion_tokens": 50, "total_tokens": 950})
+        eng.update_from_response({})
+        assert _host_flags(eng) == (True, True)
+        eng.on_session_start("s2863", platform="cli", model="probe-model", context_length=WINDOW)
+        assert not eng.side_channel_active and not eng._bypasses_lcm_context_management()
+        assert _host_flags(eng) == (True, True)
+        eng.update_from_response({})
+        assert _host_flags(eng) == (False, False)
+    finally:
+        eng.shutdown()
+
+
+# ---------------------------------------------------------------- the checks themselves flag what they guard
+def _calls(*ids):
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": cid, "type": "function", "function": {"name": "terminal", "arguments": "{}"}} for cid in ids]}
+
+
+def _result(cid, text="ok"):
+    return {"role": "tool", "tool_call_id": cid, "content": f"{text} {cid}"}
+
+
+def test_pairing_problems_flags_a_result_that_reuses_a_call_id():
+    assert pairing_problems([dict(USER), _calls("a", "b"), _result("a"), _result("b")], "b") == []
+    problems = pairing_problems([dict(USER), _calls("a", "b"), _result("b"), _result("b")], "b")
+    assert problems == ["duplicate tool row 3 b"], problems
+    assert pairing_problems([dict(USER), _calls("a"), _result("a"), _result("c")], None) == ["orphan tool row 3 c"]
+
+
+def test_conservation_violations_flags_a_duplicated_row_and_counts_stored_copies(engine):
+    msgs = msgs_at(4, R2_STEPS)
+    engine.ingest(list(msgs))
+    assert conservation_violations(engine, msgs) == []
+    tool_row = next(m for m in msgs if m.get("role") == "tool")
+    found = conservation_violations(engine, msgs + [dict(tool_row)])
+    assert [v[0] for v in found] == ["duplicate"], found
+    found = conservation_violations(engine, msgs + [dict(USER)])
+    assert [v[0] for v in found] == ["duplicate"], found
+    # A row the store legitimately holds twice may appear twice; a third copy is a duplicate.
+    again = msgs + [dict(USER)]
+    engine.ingest(list(again))
+    assert sum(_digest(r) == _digest(USER) for r in engine._store.get_session_messages(engine._session_id)) == 2
+    assert conservation_violations(engine, again) == []
+    found = conservation_violations(engine, again + [dict(USER)])
+    assert [v[0] for v in found] == ["duplicate"], found
+    assert [v[0] for v in conservation_violations(engine, msgs[:-1])] == ["missing"]
 
 
 def test_summary_target_ratio_is_the_host_default():
