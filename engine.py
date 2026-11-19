@@ -21,7 +21,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -160,7 +160,10 @@ from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, 
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
-from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
+from .host_uid_emit import (
+    ADDRESS_KEYS, IDENTITY_KEYS, carry_identity, identity_emit_enabled, record_absorbed_message,
+    sync_cached_host_metadata,
+)
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
 from .db_bootstrap import refresh_legacy_conversation_ids
@@ -334,6 +337,9 @@ def _condensation_source_text(nodes) -> str:
 
 
 _SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+_LCM_SUMMARY_PART_HEADER_RE = re.compile(
+    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
+)
 
 
 def _summary_part_text(node) -> str:
@@ -2871,6 +2877,30 @@ class LCMEngine(
             logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
+
+    @wraps(CompactionMixin.compress)
+    def compress(self, messages, *args, **kwargs):
+        # All compaction routes converge here, with the original host list still available.
+        result = super().compress(messages, *args, **kwargs)
+        if result is messages or not isinstance(result, list):
+            return result
+        with_api = {id(row): row for row in result if isinstance(row, dict) and "api_content" in row}
+        if not with_api:
+            return result
+
+        input_pairs = [(row.get("content"), row["api_content"]) for row in messages
+                       if isinstance(row, dict) and "api_content" in row]
+        input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
+        # Index ordinary text pairs, and compare structured values by equality.
+        text_pairs = {(content, api) for content, api in input_pairs
+                      if isinstance(content, str) and isinstance(api, str)}
+        for row in with_api.values():
+            content, api = row.get("content"), row["api_content"]
+            matches = text_pairs if isinstance(content, str) and isinstance(api, str) else input_pairs
+            if (content, api) not in matches:
+                # A caller-owned row necessarily matched its own pair above.
+                row.pop("api_content")
+        return result
 
     def ingest(self, messages: List[Dict[str, Any]], *, host_pairs=()) -> None:
         """Persist messages to the durable store every turn.
@@ -6833,15 +6863,33 @@ class LCMEngine(
         ]
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
+            generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
+            # UID and address fields still use the host-UID mode and placeholder rules.
+            # Timestamp belongs to the cached occurrence established at ingest.
+            excluded = {
+                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
+                *IDENTITY_KEYS, *ADDRESS_KEYS,
+            }
+            for host, row in zip(host_messages, current):
+                if row is host or id(row) in generated_ids:
+                    continue
+                # Preflight can see a row before Hermes stamps its host fields.
+                # Other absent keys may belong to the engine's replay view.
+                row.update((key, value) for key, value in host.items() if key not in excluded)
+                if "api_content" in host and row.get("content") == host.get("content"):
+                    row["api_content"] = host["api_content"]
+                else:
+                    row.pop("api_content", None)
             sync_cached_host_metadata(
-                host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
+                host_messages, current, generated_ids,
             )
+        # The copy loop captured the old fields. Hash the refreshed view on this pass
+        # so the next identical replay does not appear to change.
         for row in current:
-            if id(row) not in self._no_progress_public_rows:
-                self._no_progress_public_rows[id(row)] = {
-                    key: value for key, value in row.items()
-                    if key != "timestamp" and not str(key).startswith("_")
-                }
+            self._no_progress_public_rows[id(row)] = {
+                key: value for key, value in row.items()
+                if key != "timestamp" and not str(key).startswith("_")
+            }
         return current
 
     def _cached_active_replay_messages(
@@ -6939,9 +6987,7 @@ class LCMEngine(
         )
         return len(messages) if exact or safe_trailing_skip else None
 
-    _LCM_SUMMARY_PART_HEADER_RE = re.compile(
-        r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
-    )
+    _LCM_SUMMARY_PART_HEADER_RE = _LCM_SUMMARY_PART_HEADER_RE
 
     @staticmethod
     def _lcm_generated_marker(message) -> Optional[str]:
@@ -10333,8 +10379,36 @@ class LCMEngine(
             if msg.get("role") == "assistant":
                 cleaned_msg = _clean_active_assistant_message(msg)
                 if cleaned_msg is None:
-                    dropped_assistant_messages += 1
-                    continue
+                    if not isinstance(msg.get("api_content"), str) or not msg["api_content"]:
+                        dropped_assistant_messages += 1
+                        continue
+                    cleaned_msg = msg
+                    if merge_adjacent_assistants:
+                        # Repair all tool pairs first, then merge within runs between API-only rows.
+                        paired = self._sanitize_active_context_messages(
+                            messages, insert_missing_tool_stubs=insert_missing_tool_stubs,
+                            merge_adjacent_assistants=False, generated_rows=generated_rows,
+                        )
+                        merged, merged_generated, start = [], [], 0
+                        for index, row in enumerate([*paired, None]):
+                            if row is not None and not (
+                                isinstance(row.get("api_content"), str) and row["api_content"]
+                                and _clean_active_assistant_message(row) is None
+                            ):
+                                continue
+                            generated_run = list(generated_rows or ())
+                            merged.extend(_merge_adjacent_assistant_messages(
+                                paired[start:index], generated_rows=generated_run,
+                            ))
+                            merged_generated.extend(generated_run)
+                            if row is not None:
+                                merged.append(row)
+                                if id(row) in generated_ids:
+                                    merged_generated.append(row)
+                            start = index + 1
+                        if generated_rows is not None:
+                            generated_rows[:] = merged_generated
+                        return merged
                 if cleaned_msg is not msg:
                     stripped_assistant_messages += 1
                 cleaned.append(cleaned_msg)
