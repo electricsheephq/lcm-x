@@ -57,7 +57,7 @@ def test_child_gate_during_managed_pass(tmp_path, monkeypatch, on):
 def test_split_gate_read_after_owner_finishes(tmp_path, monkeypatch, on):
     _mode(monkeypatch, on)
     with _managed_pass(tmp_path, monkeypatch) as (engine, finish), ThreadPoolExecutor(max_workers=1) as reader:
-        # A second reader leaves a marker pending so the test also checks thread isolation and reset.
+        # The worker clears its pending reason before the main reader consumes its own.
         assert reader.submit(engine._automatic_compression_blocked).result(timeout=10)
 
         def blocked_then_finish():
@@ -67,14 +67,13 @@ def test_split_gate_read_after_owner_finishes(tmp_path, monkeypatch, on):
 
         assert blocked_then_finish()
         assert engine._compress_owner is None
-        assert engine._compression_block_reason() == _BUSY
-        assert engine._compression_block_reason() is None
-
         def reevaluate():
             assert not engine._automatic_compression_blocked()
             return engine._compression_block_reason()
 
         assert reader.submit(reevaluate).result(timeout=10) is None
+        assert engine._compression_block_reason() == _BUSY
+        assert engine._compression_block_reason() is None
 
 
 def _cold_cuts(engine, monkeypatch, view):
