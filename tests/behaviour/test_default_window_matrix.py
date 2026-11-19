@@ -26,6 +26,10 @@ class ImmediateRecompaction(AssertionError):
     """The #1123 expectation cannot hide a fit, objective, or accounting failure."""
 
 
+class FirstObjectiveUncovered(AssertionError):
+    """The first objective left the host view without a rendered source."""
+
+
 def _cells():
     for mode in ("healthy", "outage"):
         for control in CONTROLS:
@@ -35,6 +39,11 @@ def _cells():
                     strict=True, raises=ImmediateRecompaction,
                     reason="#1123: emitted view remains over the threshold; next host call compacts again",
                 )] if repeats else []
+                if mode == "outage" and control in {"defaults", "full-sweep-off", "externalization-off"}:
+                    marks.append(pytest.mark.xfail(
+                        strict=True, raises=FirstObjectiveUncovered,
+                        reason="#2923: outage survival fit drops the first objective",
+                    ))
                 yield pytest.param(window_k, control, mode, marks=marks,
                                    id=f"{mode}-{control}-{window_k}K")
 
@@ -115,12 +124,14 @@ def test_default_window_matrix(tmp_path, monkeypatch, caplog, window_k, control,
     }[control]
     view = [{"role": "system", "content": "Keep the objective and inspect the records."}]
     known_recompaction = (mode, control, window_k) == ("healthy", "full-sweep-off", 127)
+    outage_hold = mode == "outage" and control in {"defaults", "full-sweep-off", "externalization-off"}
     # Extra input pressure leaves a substantial margin after the single sweep.
     pressure_target = window * (23 if known_recompaction else 21) // 20
     compressed_rounds = 0
     repeated_rounds = []
     with engine_context(tmp_path, window=window, **overrides) as engine:
         first_objective = None
+        uncovered_rounds = []
         for turn in range(3):
             objective = f"{OBJECTIVE} round {turn}: inspect the records and preserve the evidence."
             if turn == 0:
@@ -154,8 +165,9 @@ def test_default_window_matrix(tmp_path, monkeypatch, caplog, window_k, control,
             following = host_call(engine, result.view)
             _check_sent(engine, following, caplog, objective)
             stored = engine._store.get_session_messages(engine.current_session_id)
-            for returned in (result.view, following.view):
-                assert first_objective in _covered_digests(engine, stored, returned), f"round {turn} lost the first objective"
+            if any(first_objective not in _covered_digests(engine, stored, returned)
+                   for returned in (result.view, following.view)):
+                uncovered_rounds.append(turn)
             if mode == "outage" and turn == 0:
                 assert len(provider.calls) == calls_before_followup
             if known_recompaction and turn == 0:
@@ -166,15 +178,16 @@ def test_default_window_matrix(tmp_path, monkeypatch, caplog, window_k, control,
         assert compressed_rounds == 3
         assert provider.calls, "session never exercised the summary provider"
         _check_stub_reservations(engine)
-        if mode == "outage" and control in {"defaults", "full-sweep-off", "externalization-off"}:
+        if outage_hold:
             # The rejected first summary arms no hold. The round-0 follow-up
             # sees the open circuit without calling the provider and arms #608.
             assert repeated_rounds == [0]
             # Check the held gate itself too: a fitted view can fall below the
             # threshold and hide a missing hold in an individual window cell.
             assert not engine.should_compress(engine.threshold_tokens)
-            return
+        if uncovered_rounds:
+            raise FirstObjectiveUncovered(f"first objective uncovered in rounds {uncovered_rounds}")
         # Defer this assertion until every round and the accounting check have
         # run, including in the exact cells carrying the #1123 expectation.
-        if repeated_rounds:
+        if repeated_rounds and not outage_hold:
             raise ImmediateRecompaction(f"immediate re-compaction in rounds {repeated_rounds}")

@@ -424,8 +424,9 @@ def test_seeded_lineage(seed, tmp_path, monkeypatch):
         # result. An equal-state replay (round 5) shows main does the same from the same state, so it is pinned by
         # row id: only stored row 116 (call_35_0), only at passes 19 to 21. Any other late loss fails here.
         late = {i: r["missing"] for i, r in enumerate(records) if i >= 13 and r["missing"]}
-        assert set(late) <= {19, 20, 21} and all(
-            list(m.values()) == [[116]] for m in late.values()), late
+        assert {i: list(m.values()) for i, m in late.items()} == {
+            19: [[116]], 20: [[116]], 21: [[116]],
+        }, f"#2920: {late}"
 
 
 # Main handles these name-only shapes. They catch regressions in the proposed guard.

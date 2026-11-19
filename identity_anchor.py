@@ -47,6 +47,7 @@ from .recognition_matching import (
     _reroute_for_null as _reroute_for_null,
 )
 from .config import identity_anchor_enabled
+from .externalize import extract_externalized_ref, is_externalized_placeholder, load_externalized_payload
 from .fresh_tail import _assistant_group_start, tool_group_safe_end
 from .message_analysis import _tool_call_id
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
@@ -1654,9 +1655,18 @@ class IdentityAnchorMixin:
             if (group and group[0]["store_id"] == caller_id and len(group) == len(call_ids) + 1
                     and {row["tool_call_id"] for row in group[1:] if row["role"] == "tool"} == call_ids):
                 rows = [row for row in group if row["tool_call_id"] == call_id]
-        if len(rows) == 1 and normalize_content_value(rows[0].get("content")) == normalize_content_value(message.get("content")):
-            return int(rows[0]["store_id"])
-        return None
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        stored = normalize_content_value(row.get("content"))
+        live = normalize_content_value(message.get("content"))
+        if stored != live and is_externalized_placeholder(stored):
+            payload = load_externalized_payload(extract_externalized_ref(stored),
+                                                config=self._config, hermes_home=self._hermes_home)
+            if (payload and payload.get("session_id") == row["session_id"] and payload.get("tool_call_id") == call_id
+                    and isinstance(payload.get("content"), str)):
+                stored = payload["content"]
+        return int(row["store_id"]) if stored == live else None
 
     def _identity_anchor_summary_input(self, chunk, full_map, view=(), raw_chunk=(), budget=None,
                                        accounted_ids=(), copy_lookup=None) -> Optional[list]:

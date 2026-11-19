@@ -1749,10 +1749,15 @@ class CompactionMixin:
             message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
         ]
         if cut < end:
-            # Claims on rehydrated rows and on host rows after the cut cannot advance this prefix.
             source_store_ids = [full_map[id(row)] for row in source_lineage_chunk if id(row) in full_map]
             consumed_store_ids = [full_map[id(row)] for row in source_lookup_chunk if id(row) in full_map]
-            claim_rows = source_lookup_chunk
+            # Keep rehydrated claims read before the first held host row in input order.
+            held = {id(row) for row in selected_raw_chunk[cut:]}
+            claim_rows = []
+            for row in compacted_chunk:
+                if id(row) in held:
+                    break
+                claim_rows.append(row)
         else:
             source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk, full_map)
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk, full_map)

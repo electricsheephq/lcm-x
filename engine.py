@@ -1451,6 +1451,7 @@ class LCMEngine(
         self._unregister_active_engine_binding()
         self._host_session_db = None  # #2624: a host reader never crosses profile homes
         self._session_id = ""
+        self._retained_anchor_orphan_id = 0
         self._session_platform = ""
         self._foreground_session_id = ""
         self._foreground_session_platform = ""
@@ -3931,7 +3932,7 @@ class LCMEngine(
         self._write_retained_user_anchor(None)
 
     def _clear_named_retained_anchor(self, published_ids) -> None:
-        store_id = getattr(self, "_retained_anchor_orphan_id", 0)
+        store_id = self._retained_anchor_orphan_id
         if store_id and store_id in published_ids:
             self._retained_anchor_orphan_id = 0
             self._write_retained_user_anchor(None)
@@ -4081,6 +4082,8 @@ class LCMEngine(
                 pass  # Diagnostics cannot change bind outcomes.
 
     def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
+        if self._session_id != session_id:
+            self._retained_anchor_orphan_id = 0
         self._session_id = session_id
         self._session_platform = str(kwargs.get("platform") or "")
         self._refresh_session_filters()

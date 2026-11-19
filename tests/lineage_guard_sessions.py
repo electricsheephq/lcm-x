@@ -5,6 +5,7 @@ import os
 import random
 import time
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from textwrap import wrap
 
@@ -39,6 +40,7 @@ class Sim:
         self.engine.on_session_start(SESSION, platform="cli", context_length=self.window * 1024, conversation_id="conv")
         eng = self.engine
         consume, publish, compress = eng._leaf_consumption, eng._publish_leaf_node, eng.compress
+        warn = eng._warn_unattributed_leaf
 
         def record_consumption(*args):
             result = consume(*args)
@@ -67,9 +69,14 @@ class Sim:
             self.publication_error |= "publication could not prove" in self.noop
             return result
 
+        def record_refusal(rows):
+            self.lineage_refusal = True
+            return warn(rows)
+
         eng._leaf_consumption = record_consumption
         eng._publish_leaf_node = record_publication
         eng.compress = record_compression
+        eng._warn_unattributed_leaf = record_refusal
         if claim := getattr(eng, "_tool_result_leaf_claim", None):
             def record_claim(message, caller=None):
                 store_id = claim(message, caller)
@@ -157,7 +164,6 @@ class Sim:
 
     def compress(self, step):
         rng = self.rng
-        eng = self.engine
         before = json.loads(json.dumps(self.view))
         inject = None
         if rng.random() < 0.15 and len(before) > 4 and self.edits:  # a transient host row never ingested
@@ -167,11 +173,24 @@ class Sim:
                           {"role": "user", "content": "[host note] continue"})
         events, self.events = self.events, []
         tok0 = count_messages_tokens(before)
+        kind = "forced" if rng.random() < 0.5 else "auto"
+        record = self.run_pass(before, kind, tok0, step, [*events, ["pass", step, kind, inject]])
+        if rng.random() < 0.7:
+            self.engine.on_session_start(SESSION, old_session_id=SESSION, boundary_reason="compression",
+                                         platform="cli", conversation_id="conv")
+        return record
+
+    def run_pass(self, before, kind, tok0, step, events):
+        eng = self.engine
         self.pending, self.consumed, self.leaf_count = [], [], 0
         self.weak_matches, self.group_matches = set(), set()
         self.status, self.noop, self.refused, self.publication_error = "idle", "", False, False
-        self.selected_leaf = False
-        kind = "forced" if rng.random() < 0.5 else "auto"
+        self.selected_leaf = self.lineage_refusal = False
+        before_state = None
+        if os.environ.get("LCMX_2890_SWEEP"):
+            from tests.test_issue_2890_lineage_guard import _digest
+
+            before_state = _digest([before, self.stored(eng), [asdict(node) for node in self.nodes(eng)]])
         if kind == "forced":
             returned = eng.compress(before, current_tokens=tok0, focus_topic=None, force=True)
         else:
@@ -189,20 +208,18 @@ class Sim:
         published = {store_id for _, sources in self.consumed for store_id in sources}
         needs_compaction = self.selected_leaf or tok0 >= eng.threshold_tokens
         refused = self.refused or (needs_compaction and not self.leaf_count and self.status in {"idle", "noop"})
-        rec = dict(step=step, events=[*events, ["pass", step, kind, inject]],
+        rec = dict(step=step, events=events,
                    status=self.status, needs_compaction=needs_compaction,
-                   noop=self.noop, refused=refused, publication_error=self.publication_error,
+                   noop=self.noop, refused=refused, lineage_refusal=self.lineage_refusal,
+                   publication_error=self.publication_error,
                    leaves=self.leaf_count, lineage_lost=lineage_lost, missing=missing, covered=sorted(present),
                    weak_sources=sorted(self.weak_matches & published), group_sources=sorted(self.group_matches & published),
-                   view=[len(before), len(returned)])
+                   view=[len(before), len(returned)], before_state=before_state)
         self.view = returned
-        if rng.random() < 0.7:
-            eng.on_session_start(SESSION, old_session_id=SESSION, boundary_reason="compression",
-                                 platform="cli", conversation_id="conv")
         return rec
 
 
-def simulate(seed, tmp_path, monkeypatch, summary, helpers, *, edits, drain=4, grow=2):
+def simulate(seed, tmp_path, monkeypatch, summary, helpers, *, edits, drain=4, grow=2, stop_after=None):
     rng = random.Random(seed)
     outage = rng.random() < 0.15
 
@@ -232,10 +249,14 @@ def simulate(seed, tmp_path, monkeypatch, summary, helpers, *, edits, drain=4, g
                 sim.mutate()
             if rng.random() < 0.3:
                 passes.append(sim.compress(step))
+                if len(passes) == stop_after:
+                    return passes
         for extra in range(drain):
             if extra < grow:
                 sim.turn()
             passes.append(sim.compress(f"drain{extra}"))
+            if len(passes) == stop_after:
+                return passes
     finally:
         sim.engine.shutdown()
     return passes
