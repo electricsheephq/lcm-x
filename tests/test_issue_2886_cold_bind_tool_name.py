@@ -189,12 +189,27 @@ def test_gateway_tool_name_projection_is_symmetric(bind, tmp_path, legacy, repla
         ]
 
 
-class UnstampedReplyCopies(AssertionError):
-    """Copies after a legacy duplicate set remain tracked by issue 1674."""
+class KnownColdBindCopies(AssertionError):
+    """Cold-bind counts that match the measured envelope for this case."""
 
 
-@pytest.mark.xfail(strict=True, raises=UnstampedReplyCopies, reason="issue 1674: unstamped replies")
-def test_gateway_with_legacy_copy_set(bind, tmp_path, monkeypatch):
+@pytest.mark.parametrize(("original_name", "known_counts"), [
+    pytest.param(
+        TOOL, [2, 4, 6], id="1674-unstamped-replies",
+        marks=pytest.mark.xfail(
+            strict=True, raises=KnownColdBindCopies,
+            reason="#1674: unstamped replies with both tool names present (2, 4, 6 extra rows)",
+        ),
+    ),
+    pytest.param(
+        None, [63, 65, 67], id="2886-copy-set-heal",
+        marks=pytest.mark.xfail(
+            strict=True, raises=KnownColdBindCopies,
+            reason="#2886: copy-set heal with an original NULL tool name (63–67 extra rows per bind)",
+        ),
+    ),
+])
+def test_gateway_with_legacy_copy_set(bind, tmp_path, monkeypatch, original_name, known_counts):
     transcript = Transcript("one")
     _seed(bind, transcript, gateway=True)
     _clear_stored_name(tmp_path)
@@ -203,10 +218,35 @@ def test_gateway_with_legacy_copy_set(bind, tmp_path, monkeypatch):
     with monkeypatch.context() as legacy:
         legacy.setattr(LCMEngine, "_missing_tool_name_matches", staticmethod(lambda *_: False), raising=False)
         assert _bind_counts(bind, transcript, count=1) == [63]
+
+    with closing(sqlite3.connect(tmp_path / "lcm.db")) as conn, conn:
+        tool_rows = conn.execute(
+            "SELECT store_id, tool_name FROM messages WHERE session_id = ? AND role = 'tool' "
+            "AND tool_call_id = ? ORDER BY store_id",
+            (SESSION, f"call_{60:012x}"),
+        ).fetchall()
+        assert [name for _, name in tool_rows] == [None, TOOL]
+        if original_name is not None:
+            conn.execute("UPDATE messages SET tool_name = ? WHERE store_id = ?", (original_name, tool_rows[0][0]))
+        before_store_id = conn.execute("SELECT max(store_id) FROM messages").fetchone()[0]
+
     counts = _bind_counts(bind, transcript, count=3)
-    print(f"legacy copy set: {counts}")
-    if counts != [0] * 3:
-        raise UnstampedReplyCopies(f"legacy copy set: {counts}")
+    print(f"legacy copy set with original name {original_name!r}: {counts}")
+    if counts == known_counts:
+        if original_name is not None:
+            with closing(sqlite3.connect(tmp_path / "lcm.db")) as conn:
+                copies = conn.execute(
+                    "SELECT copy.role, copy.tool_calls, EXISTS ("
+                    " SELECT 1 FROM messages AS original WHERE original.session_id = copy.session_id"
+                    " AND original.store_id < copy.store_id AND original.role = copy.role"
+                    " AND original.content = copy.content AND original.observed_at IS NOT NULL"
+                    ") FROM messages AS copy "
+                    "WHERE copy.session_id = ? AND copy.store_id > ? AND copy.observed_at IS NULL",
+                    (SESSION, before_store_id),
+                ).fetchall()
+            assert copies == [("assistant", None, 1)] * sum(known_counts)
+        raise KnownColdBindCopies(f"legacy copy set: {counts}")
+    assert counts == [0] * 3
 
 
 @pytest.mark.parametrize("stored_name", [TOOL, None], ids=["explicit", "inferred"])
@@ -246,6 +286,25 @@ def test_explicit_result_names_override_the_owning_call(bind):
         engine._ingest_messages(replay)
         rows = engine._store.get_session_messages(SESSION)
         assert [row["tool_name"] for row in rows if row["role"] == "tool"] == [TOOL, OTHER_TOOL]
+
+
+def test_missing_name_fallback_requires_literal_explicit_name(bind):
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call", "type": "function", "function": {"name": TOOL, "arguments": "{}"}},
+    ]}
+    nameless = {"role": "tool", "tool_call_id": "call", "content": "ok"}
+    named = dict(nameless, name=TOOL)
+    stored = [call, nameless]
+    with bind() as engine:
+        stored_identities = [engine._message_replay_identity(row, stored_row=True) for row in stored]
+        incoming_identities = [engine._message_replay_identity(row) for row in (call, named)]
+        assert engine._matches_session_with_missing_tool_names(
+            [call, named], incoming_identities, stored, stored_identities,
+        )
+        # The prepared identity still names TOOL, but the original result explicitly names OTHER_TOOL.
+        assert not engine._matches_session_with_missing_tool_names(
+            [call, dict(named, name=OTHER_TOOL)], incoming_identities, stored, stored_identities,
+        )
 
 
 @pytest.mark.parametrize(("stored_name", "incoming_name", "owners", "restamped", "replayed"), [
