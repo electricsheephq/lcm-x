@@ -891,6 +891,7 @@ def test_carried_row_oracle_requires_exact_evidence(carrier_session):
     assert _carried_row_fate(session, [carrier], [], [(1, {store_id})], applied) == (content, "named")
 
 
+@pytest.mark.parametrize("carrier_session", ["unset", "on"], indirect=True, ids=["off", "on"])
 def test_round3_compress_keeps_literal_paste(carrier_session):
     session = carrier_session
     engine = session.engine
@@ -975,6 +976,69 @@ def test_round3_whole_turn_fit_names_literal_paste(carrier_session):
     assert plan.count == 2
     assert plan.notice == notice
     assert notice in plan.fitted[0]["content"]
+
+
+@pytest.mark.parametrize("carrier_session", ["unset", "on"], indirect=True, ids=["off", "on"])
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("share", [0.9, 0.7])
+def test_fit_keeps_verified_prefix_of_literal_user_row(carrier_session, bound, share):
+    session = carrier_session
+    engine = session.engine
+    outer, inner = [_summary([_leaf(engine, label)]) for label in ("v1 leaf zero", "v1 leaf one")]
+    question = "my carried ask " + "oak " * 30
+    head = {"role": "user", "content": f"{outer}\n\n{inner}\n\n{question}"}
+    tail = [session.row(role="assistant" if i % 2 == 0 else "user", content=f"[t{i}] " + "pine " * 35)
+            for i in range(9)]
+    stored = [session.row(**head)]
+    if not bound:
+        stored += [session.row(role="assistant", content="[lit-reply] " + "fir " * 30),
+                   session.row(role="user", content=question)]
+    literal_id, *ids = [engine._store.append(engine._session_id, row, conversation_id=engine._conversation_id)
+                        for row in [*stored, *tail]]
+    if not bound:
+        engine._last_compacted_store_id = ids[0]
+    assert engine._get_store_id_map_for_messages([head, *tail]).get(id(head)) == (literal_id if bound else None)
+
+    result = [{"role": "system", "content": "sys"}, head, *tail]
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(result), False
+    before = engine._survival_measure(result)
+    budget = int(before * share)
+    rows_before = engine._store.get_session_messages(engine._session_id, limit=100)
+    plan, _ = engine._plan_survival_fit(result, result, before, before, budget, "test", exit_fit=False)
+
+    assert plan is not None and not plan.emergency
+    assert plan.fitted[1] == head
+    assert engine._survival_measure(plan.fitted) <= budget
+    dropped_tail_ids = [sid for row, sid in zip(tail, ids[-len(tail):], strict=True) if row not in plan.fitted]
+    assert dropped_tail_ids and plan.ids == dropped_tail_ids
+    assert plan.count == len(dropped_tail_ids)
+    assert engine._store.get_session_messages(engine._session_id, limit=100) == rows_before
+
+
+def test_fit_classifies_dropped_unbound_carriers_once(carrier_session, monkeypatch):
+    engine = carrier_session.engine
+    system = {"role": "system", "content": "sys"}
+    first = {"role": "user", "content": "first question"}
+    carriers = [{"role": "user", "content": f"{_summary([_leaf(engine, label)])}\n\n{label} question"}
+                for label in ("first carrier", "second carrier")]
+    tail = [{"role": "user", "content": f"[t{i}] " + "pine " * 40} for i in range(5)]
+    result = [system, first, *carriers, *tail]
+    notice = survival_fit._NOTICE.format(n=len(tail), first="-", last="-")
+    noticed = {**system, "content": engine._survival_with_notice(system["content"], notice)}
+    budget = engine._survival_measure([noticed, tail[-1]])
+    calls = []
+    carried_user_text = engine._carried_user_text
+
+    def record(row, store_id=None):
+        if row["role"] == "user":
+            calls.append((row["content"], store_id))
+        return carried_user_text(row, store_id)
+
+    monkeypatch.setattr(engine, "_carried_user_text", record)
+    cut = engine._survival_cut(result, 1, budget, True, "test", {}, True)
+
+    assert cut == ([noticed, tail[-1]], len(tail), [], False, notice)
+    assert calls == [(row["content"], None) for row in carriers]
 
 
 @pytest.mark.parametrize("invalid", ["span", "already-named"])

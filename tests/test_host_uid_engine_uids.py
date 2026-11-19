@@ -421,7 +421,11 @@ def _cut(engine, out, budget, absorbed):
     out[0]["_row_id"] = 3
     seen = []
     original = engine._survival_generated
-    engine._survival_generated = lambda message, store_id=None: seen.append(message) or original(message, store_id)
+    def record(message, store_id=None, *, carrier_cache=None):
+        seen.append(message)
+        return original(message, store_id, carrier_cache=carrier_cache)
+
+    engine._survival_generated = record
     store_ids = engine._get_store_id_map_for_messages(out)
     fitted = engine._survival_cut(out, 1, budget, True, "test", store_ids, True)[0]
     return fitted, next(m for m in seen if m["content"].startswith("question"))

@@ -173,10 +173,20 @@ class SurvivalFitMixin:
                 "window_cap": observed_tokens if _positive_int(observed_tokens) else self._survival_measure(messages),
                 "request_cap": int(threshold * _RECOVERY_THRESHOLD_SHARE) if threshold > 0 else None}
 
-    def _survival_generated(self, message, store_id=None) -> bool:
+    def _survival_generated(self, message, store_id=None, *, carrier_cache=None) -> bool:
         """LCM's own regenerated context (summaries, carriers): derived from stored rows, never a row."""
+        key = None
+        text = message.get("content")
+        if carrier_cache is not None and message.get("role") == "user" and isinstance(text, str):
+            key = (store_id, text)
+            cached = carrier_cache.get(key)
+            if cached is not None:
+                return cached
         if self._generated_context_carrier_remainder(message) is not None:
-            return self._carried_user_text(message, store_id) is not None
+            generated = self._carried_user_text(message, store_id) is not None
+            if key is not None:
+                carrier_cache[key] = generated
+            return generated
         return ((self._is_replayed_context_scaffold_message(message)
                  or self._is_context_summary_content(message.get("content")))
                 and not (message.get("role") == "user" and store_id
@@ -246,7 +256,8 @@ class SurvivalFitMixin:
         # when whole oldest turns can leave instead and the final list fits the budget; else the old rule.
         # Only rows of proven provenance are the prefix, never a phrase match: a summary row whose DAG node
         # exists in this session at the same depth with equal bytes, a preserved objective/todo row, or a
-        # verified carrier (#678). A genuine summary that fails verification falls back to the v0.24.6 rule.
+        # verified carrier (#678). A literal user row with a verified carrier prefix stays whole here (#2895).
+        # A genuine summary that fails verification falls back to the v0.24.6 rule.
         prefix = system
         # The ingest cursor indexes this list with nothing to reconcile: every row of it is persisted,
         # including rows the identity mapper cannot pin to one stored copy (duplicates, stubbed tools).
@@ -258,7 +269,7 @@ class SurvivalFitMixin:
         store_ids = self._get_store_id_map_for_messages(result[system:])
         while prefix < len(result) and isinstance(result[prefix], dict) and (
                 self._survival_scaffold(result[prefix], store_ids)
-                or self._carried_user_text(result[prefix], store_ids.get(id(result[prefix]))) is not None):
+                or self._generated_context_carrier_remainder(result[prefix]) is not None):
             prefix += 1
         if exit_fit:
             # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
@@ -375,6 +386,7 @@ class SurvivalFitMixin:
                         break
 
         body_ids = {id(m) for m in body}
+        carrier_cache = {}  # Reuse carrier classification across candidate cuts in this pass.
 
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._survival_scaffold(message, store_ids)
@@ -386,7 +398,8 @@ class SurvivalFitMixin:
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(naming_ids[id(message)] for message in dropped if id(message) in naming_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
-            counted = [m for m in dropped if not self._survival_generated(m, naming_ids.get(id(m)))]
+            counted = [m for m in dropped if not self._survival_generated(
+                m, naming_ids.get(id(m)), carrier_cache=carrier_cache)]
             ids = sorted(naming_ids[id(message)] for message in counted if id(message) in naming_ids)
             count = len(counted)
             # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
