@@ -628,3 +628,33 @@ def test_r4_non_json_content_equals_the_base_and_is_not_memoised(tmp_path, conte
         assert engine._message_replay_identity(row) == expected
         assert engine._message_replay_identity(row) == expected
         assert len(_memo(engine)) == 1  # only the warm row
+
+
+@pytest.mark.parametrize("kind", ["projection", "persisted"])
+def test_g1_an_impure_row_on_the_miss_path_computes_on_its_original_row(tmp_path, kind):
+    """A row the gate rejects reads keys the memo key does not hold: a projection's timestamp (its stamp check), a
+    persisted marker's session_id (its durable lookup). It must compute on the original row, never on a copy of the
+    key fields, or a stamped projection aliases its source and the marker loses its session."""
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        if kind == "persisted":
+            return _persisted_marker_keeps_its_session(engine, tmp_path)
+        source = {"role": "user", "content": "x" * 6000, "timestamp": 1000.0}
+        store_id = engine._store.append("S", source, conversation_id="conv")
+        projected = engine._survival_projection([source], {id(source): store_id}, 0)[0]
+        assert "[LCM survival fit: this " in projected["content"]
+        other_stamp = {**projected, "timestamp": 2000.0}  # a new occurrence: another stamp than the source's
+        identity = engine._message_replay_identity(other_stamp)
+        assert identity == ReconcileMixin._message_replay_identity_uncached(engine, other_stamp)
+        assert identity[1] != source["content"], "a differently stamped projection aliased its source"
+
+
+def _persisted_marker_keeps_its_session(engine, tmp_path):
+    marker = _write_output(tmp_path / "home" / "cache" / "spillover" / "call_spill.txt")
+    engine.ingest([{"role": "assistant", "content": "", "tool_calls": [
+                       {"id": "call_spill", "type": "function", "function": {"name": "dump", "arguments": "{}"}}]},
+                   {"role": "tool", "tool_call_id": "call_spill", "tool_name": "dump", "content": marker}])
+    engine.on_session_start("S9", platform="cli", context_length=200_000, conversation_id="conv")
+    row = {"role": "tool", "tool_call_id": "call_spill", "tool_name": "dump", "content": marker, "session_id": "S"}
+    assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+    assert all(key[4] != marker for key in _memo(engine))

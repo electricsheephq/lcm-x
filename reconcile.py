@@ -1116,10 +1116,9 @@ class ReconcileMixin:
         instance override of _generated_context_carrier_remainder or _survival_projection_source that reads
         state without a marker would need the memo bypassed."""
         uncached = ReconcileMixin._message_replay_identity_uncached
-        state = getattr(self, "__dict__", None)
         if (with_host_rewrite or store is not None or hermes_home is not None
                 or session_id is not None or conversation_id is not None or type(msg) is not dict
-                or state is None or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
+                or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
             return uncached(self, msg, stored_row=stored_row, with_host_rewrite=with_host_rewrite,
                             strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias, store=store,
                             hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
@@ -1147,15 +1146,20 @@ class ReconcileMixin:
             names = _REPLAY_IDENTITY_STORED_FIELDS if stored_row else _REPLAY_IDENTITY_FIELDS
             fields = tuple(msg.get(name) for name in names)  # each field the key uses, read once
             key, _frozen = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias, stored_row)
-            memo = state.get("_replay_identity_memo")
+            memo = getattr(self, "_replay_identity_memo", None)  # one plain instance attribute (no property)
             if memo is None or memo.epoch != epoch:
-                memo = state["_replay_identity_memo"] = _ReplayIdentityMemo(epoch)
+                memo = self._replay_identity_memo = _ReplayIdentityMemo(epoch)
             hit = memo.entries.get(key)
         except Exception:
             return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
                             allow_pruned_tool_alias=allow_pruned_tool_alias)
         if hit is not None:
             return hit
+        if _replay_identity_memo_gate(key[3], key[4], _frozen):
+            # Not admitted: the body may read keys the memo key does not hold (a projection's timestamp, a
+            # persisted marker's session id), so it computes on the ORIGINAL row.
+            return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
+                            allow_pruned_tool_alias=allow_pruned_tool_alias)
         # A miss computes on a private copy of the fields read above (plain JSON, so the copy is exact) and
         # remembers it under the copy's own key: a row another thread changes after the read can never store one
         # version's identity under the other's key. Nothing on the admitted path reads the row's object identity,
@@ -1166,12 +1170,9 @@ class ReconcileMixin:
         except Exception:
             return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
                             allow_pruned_tool_alias=allow_pruned_tool_alias)
-        if _replay_identity_memo_gate(key[3], key[4], frozen_calls):  # rejected: computed on the original row
-            return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
-                            allow_pruned_tool_alias=allow_pruned_tool_alias)
         result = uncached(self, dict(zip(names, fields)), stored_row=stored_row, strip_carrier=strip_carrier,
                           allow_pruned_tool_alias=allow_pruned_tool_alias)
-        if sys.get_int_max_str_digits() == epoch[4]:
+        if sys.get_int_max_str_digits() == epoch[4] and not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
             memo.remember(key, result, frozen_calls)
         return result
 
