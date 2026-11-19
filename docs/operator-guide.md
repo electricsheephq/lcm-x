@@ -1141,7 +1141,12 @@ What the main knobs do:
   The same budget covers a compaction with the sweep off, a manual `/compress`, a
   forced overflow recovery and a host recovery attempt, and their condensation
   passes; a manual `/compress` and a forced overflow recovery use the hard bound
-  only. When no call fits, a forced overflow recovery assembles to its cap with
+  only. A positive Hermes `compression.context_timeout_seconds` caps the budget at the host idle limit
+  minus the greater of 30 seconds and 10% of the limit. LCM-X uses its own hard bound if the host limit is
+  disabled or unreadable. If the host enforces an unreadable limit, keep the hard bound below it by the
+  same margin. When ingest completes after the deadline, the pass reports `deadline_yield`, returns the
+  original host list, and keeps the committed ingest.
+  When no call fits, a forced overflow recovery assembles to its cap with
   no call, and a recovery attempt is fitted under the threshold; time never makes
   a level 3 cut.
 - With the full sweep off, a leaf is sized to at most max(`LCM_LEAF_CHUNK_TOKENS`,
