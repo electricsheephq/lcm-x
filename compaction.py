@@ -2615,7 +2615,9 @@ class CompactionMixin:
                         if None in replay.values() or (not scope.uid_trimmed and hasattr(store_ids, "legacy_id")) else resumed)
                 exempt = set(base) | scaffold
                 scope.removed.update((id(working[i]), (sid, False, sid is None and i in exempt)) for i, sid in replay.items())
-                if not scope.uid_trimmed and base != resumed:
+                if scope.uid_trimmed and scope.legacy_replay is None:
+                    scope.legacy_replay = self._uid_trimmed_base_replay(scope.before, adopt_before_stop)
+                elif not scope.uid_trimmed and base != resumed:
                     base_drops = set() if adopt_before_stop and not base else drops.union(base)
                     scope.legacy_replay = ([row for i, row in enumerate(working) if i not in base_drops],
                                            bool(base_drops), bool(base), base[0] - start if base else 0)
@@ -2835,6 +2837,34 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
+    def _uid_trimmed_base_replay(
+        self, before: List[Dict[str, Any]], adopt_before_stop: bool,
+    ) -> Optional[tuple[List[Dict[str, Any]], bool, bool, int]]:
+        """Reconstruct the mode-unset replay decision from the pre-trim view."""
+        leading, tail = self._leading_anchor_count(before), self._fresh_tail_start(before)
+        if tail <= leading:
+            return None
+        start = leading
+        while start < tail and (
+            self._is_replayed_context_scaffold_message(before[start])
+            if self._compress_occurrences is None
+            else self._compress_occurrences.get(id(before[start]), (None, ()))[1] is None
+        ):
+            start += 1
+        resumed = self._committed_replay_drops(before, start, uid_first=False)[0]
+        drops = set() if adopt_before_stop and not resumed else set(range(leading, start)).union(resumed)
+        if not drops:
+            return None
+        working = [row for index, row in enumerate(before) if index not in drops]
+        if leading < len(working) and (remainder := self._generated_context_carrier_remainder(working[leading])) is not None:
+            absorbed = working[leading].get("_absorbed_message_uids") or ()
+            if len(absorbed) > 1:
+                return None
+            working[leading] = {"role": "user", "content": remainder}
+            if absorbed:
+                working[leading]["message_uid"] = absorbed[0]
+        return working, True, bool(resumed), resumed[0] - start if resumed else 0
+
     def _replayed_head_covers_frontier(self, state: _CompressionState) -> bool:
         from .engine import _summary_part_text
 
@@ -2867,19 +2897,28 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         if not state.leaf_compacted_this_turn:
+            uid_base = scope_legacy = False
             if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is not self:
                 scope = None
             if scope is not None and scope.uid_trimmed:
-                state.working_messages = scope.before
-                state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
+                if scope.legacy_replay is not None and scope.matches_binding() and not state.force_overflow:
+                    (state.working_messages, state.dropped_replayed_scaffold_messages,
+                     state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
+                    state.pressure_messages = state.working_messages
+                    uid_base = True
+                else:
+                    state.working_messages = scope.before
+                    state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
                 if scope.matches_binding():
                     self._compress_host_rows_consumed = 0
                     if state.sweep_stop_reason == "time_budget_exhausted":
                         self._no_progress_candidate = False
-                _UID_DROP_INPUT.set(None)
+                if not uid_base:
+                    _UID_DROP_INPUT.set(None)
             elif scope is not None and scope.legacy_replay is not None:
                 (state.working_messages, state.dropped_replayed_scaffold_messages,
                  state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
+                scope_legacy = True
             if state.pre_leaf_condensation_reason == "summary_result_rejected":
                 warn_rejected()
             if state.sweep_stop_reason == "time_budget_exhausted":
@@ -2920,7 +2959,7 @@ class CompactionMixin:
                 state.preexisting_dependent_reply_records,
             )
             kept_replayed_head = (  # #2854; under the uid mode the base's replay decision below stays
-                not uid_recognition_enabled(self)
+                (not uid_recognition_enabled(self) or uid_base or scope_legacy)
                 and state.dropped_replayed_scaffold_messages and not state.pre_leaf_condensation_passes
                 and not (state.resumed_prefix or state.ingest_cleanup_changed_active_context
                          or self._compress_dropped_ignored_rows or self._ingest_cursor_needs_reconcile)
@@ -2960,6 +2999,23 @@ class CompactionMixin:
                     active_context_messages,
                     insert_missing_tool_stubs=False,
                 )
+            if uid_base:
+                if not kept_replayed_head:
+                    guarded = self._guard_uid_covered_drop(sanitized_messages)
+                    # The assembly cap cannot drop uncovered tail rows in a no-leaf pass.
+                    tail_uids = {uid for row in state.working_messages[leading_anchor_count:]
+                                 if isinstance(uid := row.get("message_uid"), str) and uid}
+                    emitted_uids = {uid for row in sanitized_messages
+                                    for uid in (row.get("message_uid"), *(row.get("_absorbed_message_uids") or ()))
+                                    if isinstance(uid, str) and uid}
+                    if guarded is not sanitized_messages or not tail_uids <= emitted_uids:
+                        sanitized_messages = self._sanitize_active_context_messages(
+                            scope.before, insert_missing_tool_stubs=True,
+                        )
+                        self._ingest_cursor = len(sanitized_messages)
+                        state.working_messages = scope.before
+                        state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
+                _UID_DROP_INPUT.set(None)
             if not kept_replayed_head and (sanitized_messages != state.working_messages
                                            or state.ingest_cleanup_changed_active_context):
                 # _ingest_messages() already advanced the cursor to the original

@@ -4,6 +4,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -25,16 +26,9 @@ PAD = " alpha beta gamma delta" * 30
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
 pytestmark = pytest.mark.issue(2854)
 
-# Hotfix tree only: with the uid mode on, the mode's no-leaf path returns the restored rows without
-# re-assembly, so these cells fail with or without the #2854 change. Strict: they turn red once that
-# path is fixed, and the marks then come out.
 _MODE_ON_NO_LEAF_GAPS = {
-    "test_new_condensation_is_assembled[on]": "the newly stored condensation is not assembled",
-    "test_missing_result_behind_replayed_head_is_stubbed[on-at-end]": "no stub for an unanswered tool call",
-    "test_missing_result_behind_replayed_head_is_stubbed[on-before-user]": "no stub for an unanswered tool call",
-    "test_aged_results_behind_replayed_head_are_stubbed[on-one-result]": "aged large results are not stubbed",
-    "test_aged_results_behind_replayed_head_are_stubbed[on-two-results]": "aged large results are not stubbed",
-    "test_assembly_cap_trims_tail_behind_replayed_head[on]": "the list is not trimmed to the assembly cap",
+    "test_assembly_cap_trims_tail_behind_replayed_head[on]":
+        "with uid recognition active a no-leaf pass never drops an uncovered row to meet the assembly cap",
 }
 
 
@@ -42,8 +36,7 @@ _MODE_ON_NO_LEAF_GAPS = {
 def _mode_on_no_leaf_gap(request):
     gap = _MODE_ON_NO_LEAF_GAPS.get(request.node.name)
     if gap is not None:
-        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-            f"hotfix tree, uid mode on: the mode's no-leaf path returns rows without re-assembly: {gap}")))
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=gap))
 
 
 @pytest.fixture(params=["unset", "shadow", "on"])
@@ -311,6 +304,34 @@ def test_generated_list_keeps_api_only_row_and_direct_cleaners_keep_their_contra
     assert generated[0] is row
 
 
+def _compress_with_replay_observation(engine, view, uid_mode, tokens):
+    recognition, decisions = [], []
+    compress_impl = engine._compress_impl
+    replay = engine._uid_trimmed_base_replay
+
+    def observe_recognition(messages, *args, **kwargs):
+        recognition.append(engine._uid_recognition_enabled() and any(row.get("message_uid") for row in messages))
+        return compress_impl(messages, *args, **kwargs)
+
+    def observe_replay(*args, **kwargs):
+        decision = replay(*args, **kwargs)
+        decisions.append(decision)
+        return decision
+
+    with patch.object(engine, "_compress_impl", observe_recognition), patch.object(
+        engine, "_uid_trimmed_base_replay", observe_replay,
+    ):
+        output = engine.compress(view, current_tokens=tokens)
+
+    assert recognition == [uid_mode == "on"]
+    if uid_mode == "on":
+        assert decisions and isinstance(decisions[0], tuple), "the pass did not record a trimmed base replay decision"
+        assert engine._ingest_cursor == len(output)
+    else:
+        assert not decisions
+    return output
+
+
 def test_new_condensation_is_assembled(open_engine, uid_mode, summaries):
     engine = open_engine(survival_fit=False)
     previous = published_head(engine)
@@ -319,7 +340,7 @@ def test_new_condensation_is_assembled(open_engine, uid_mode, summaries):
     engine._dag.add_node(SummaryNode(session_id="S", summary=marker, depth=1, source_type="nodes",
                                     source_ids=[node.node_id for node in leaves], token_count=15))
     view = [*previous, user_row(0)]
-    output = engine.compress(view, current_tokens=4_000)
+    output = _compress_with_replay_observation(engine, view, uid_mode, 4_000)
     assert engine._last_compress_leaves[1] == 0
     assert output != view and marker in output[1]["content"]
     assert output[2:] == view[2:]
@@ -516,7 +537,7 @@ def test_missing_result_behind_replayed_head_is_stubbed(open_engine, uid_mode, s
     view.extend(following)
     snapshot = deepcopy(view)
 
-    output = engine.compress(view, current_tokens=4_000)
+    output = _compress_with_replay_observation(engine, view, uid_mode, 4_000)
 
     assert engine._last_compress_leaves[1] == 0
     assert output[len(head) + 1:] == [call, engine._missing_tool_result_stub("unanswered"), *following]
@@ -541,7 +562,7 @@ def test_aged_results_behind_replayed_head_are_stubbed(open_engine, uid_mode, su
     view.extend((user_row(result_count), {"role": "assistant", "content": "fresh reply"}))
     snapshot = deepcopy(view)
 
-    output = engine.compress(view, current_tokens=count_messages_tokens(view))
+    output = _compress_with_replay_observation(engine, view, uid_mode, count_messages_tokens(view))
 
     assert engine._last_compress_leaves[1] == 0
     assert not engine._last_stub_first_exit
