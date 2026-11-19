@@ -239,11 +239,12 @@ def conservation_violations(eng, out):
     # Only a row in the engine's own summary form (summary parts, alone, joined or behind the preserved objective)
     # credits a node; a tool or user row quoting a summary does not.
     texts = [_text(m) for m in out if LCMEngine._lcm_generated_marker(m) in ("summary", "summary_joined", "scaffold")]
-    joined = "\n".join(texts)
+    # Credit by provenance (the node id in an emitted summary header), never by matching summary text: two nodes can
+    # carry identical text over different sources.
     header_ids = {int(m.group(2)) for t in texts for m in _LCM_SUMMARY_PART_HEADER_RE.finditer(t)}
     covered = set()
     for node in eng._dag.get_session_nodes(sid, limit=100_000):
-        if node.node_id in header_ids or (node.summary and node.summary in joined):
+        if node.node_id in header_ids:
             covered.update(eng._dag.source_message_ids(node.node_id, limit=1_000_000))
     rows = [(r, _occurrence_digest(eng, r)) for r in eng._store.get_session_messages(sid, limit=100_000)]
     summarised = Counter(d for r, d in rows if r["store_id"] in covered)
@@ -766,3 +767,20 @@ def test_a_tool_output_that_quotes_a_pointer_is_its_own_row(engine, monkeypatch)
     assert _occurrence_digest(engine, row) == _digest(row)
     whole = {"role": "tool", "tool_call_id": "c1", "content": marker}
     assert _occurrence_digest(engine, whole) == _digest(dict(whole, content="PAYLOAD"))
+
+
+def test_conservation_credits_a_node_by_its_id_not_by_matching_summary_text(engine, monkeypatch):
+    """Nodes 7 and 8 share summary text over different sources; returning only node 7's summary covers only node 7's."""
+    from types import SimpleNamespace as NS
+    nodes = [NS(node_id=7, summary="same text"), NS(node_id=8, summary="same text")]
+    sources = {7: [1], 8: [2]}
+    monkeypatch.setattr(engine._dag, "get_session_nodes", lambda sid, limit=0: nodes)
+    monkeypatch.setattr(engine._dag, "source_message_ids", lambda nid, limit=0: sources[nid])
+    stored = [{"store_id": 1, "role": "user", "content": "first unique"},
+              {"store_id": 2, "role": "user", "content": "second unique"}]
+    monkeypatch.setattr(engine._store, "get_session_messages", lambda sid, limit=0: stored)
+    monkeypatch.setattr(LCMEngine, "_lcm_generated_marker", staticmethod(lambda m: m.get("marker")))
+    out = [{"role": "user", "marker": "summary", "content": "[Recent Summary (d0, node 7)]\nsame text"}]
+    violations = conservation_violations(engine, out)
+    assert ("missing", 2, "user", None) in violations
+    assert not any(v[0] == "missing" and v[1] == 1 for v in violations)
