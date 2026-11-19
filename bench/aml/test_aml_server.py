@@ -411,6 +411,13 @@ def test_t3_textual_literal_unchanged():
          'content': 'second', 'score': 0.5}]}
 
 
+@pytest.fixture(autouse=True)
+def default_switches(monkeypatch):
+    # Tests set these switches themselves; a value exported in the caller's shell must not leak in.
+    for switch in ('AML_ITEM_FIELDS', 'AML_ADAPTER_VERSION', 'LCMX_ADAPTER_VERSION'):
+        monkeypatch.delenv(switch, raising=False)
+
+
 def gateway_environment(tmp_path, mode):
     root = tmp_path / 'db'
     (root / '.model-cache' / 'models--qdrant--bge-small-en-v1.5-onnx-q').mkdir(parents=True)
