@@ -1066,15 +1066,19 @@ def test_item_fields_worker_and_degraded_receipt(tmp_path, monkeypatch, fields):
     with running_server(tmp_path, Service(env['AML_DB_ROOT'], 'synthetic-token', runner=run_worker)) as base:
         clean = call(base, '/aml/search', dict(user_id='u', query=ITEM_TEXT), {'X-Api-Key': 'synthetic-token'})
         degraded = call(base, '/aml/search', dict(user_id='u', query='degrade'), {'X-Api-Key': 'synthetic-token'})
+        rejected = call(base, '/aml/search', dict(user_id='u', query='q'), {'X-Api-Key': 'wrong-token'})
+        health = call(base, '/aml/health')
     expected = search_response(ITEM_TEXT, digest('u'), 100)
     assert clean[:2] == (200, aml_server.with_item_fields(expected) if fields == 'v2' else expected)
     assert degraded[:2] == (500, {'detail': {'reason': 'LCM-X worker failed'}})
+    assert (rejected[0], health[0]) == (401, 200)
     receipts = [json.loads(line) for line in (tmp_path / 'receipts.jsonl').read_text().splitlines()]
     if fields != 'v2':
         assert all(set(receipt) == V1_RECEIPT_KEYS for receipt in receipts)
     else:
         assert [(r['degraded'], r['degraded_reasons'], r['adapter_version']) for r in receipts] == [
-            (False, [], 1), (True, ['LCM-X degraded recall: 1 degraded payload(s): synthetic reason'], 1)]
+            (False, [], 1), (True, ['LCM-X degraded recall: 1 degraded payload(s): synthetic reason'], 1),
+            (False, [], 1), (False, [], 1)]  # the 401 and the health request carry the same schema
         bad = subprocess.run([sys.executable, '-B', aml_server.__file__], capture_output=True, text=True,
                              timeout=5, env=dict(env, AML_ITEM_FIELDS='v3'))
         assert bad.returncode and 'AML_ITEM_FIELDS must be v1 or v2' in bad.stderr

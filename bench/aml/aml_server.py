@@ -600,6 +600,8 @@ class Handler(BaseHTTPRequestHandler):
         self.deadline = self.started + self.server.service.timeout
         self.original_path = None
         self.metrics = dict(top_k=None, hits=0, response_bytes=0, rows_with_newline=0)
+        if self.server.item_fields == 'v2':  # one receipt schema in v2, rejected and health requests included
+            self.metrics.update(degraded=False, degraded_reasons=[], adapter_version=int(adapter_version()))
         self.logged, self.user_hash, self.request_hash = False, None, None
         timer = threading.Timer(self.server.service.timeout, self.expire)
         timer.daemon = True
@@ -779,8 +781,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.user_hash = digest(body['user_id']) if isinstance(body.get('user_id'), str) else None
                 self.request_hash = digest(body['request_id']) if isinstance(body.get('request_id'), str) else None
             reserved_slot, slot = slot, None
-            if self.server.item_fields == 'v2':
-                self.metrics.update(degraded=False, degraded_reasons=[], adapter_version=int(adapter_version()))
             response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
             self.respond(200, response)
