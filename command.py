@@ -3637,6 +3637,35 @@ def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int 
         logging.getLogger(__name__).debug("Could not record embedding catch-up state", exc_info=True)
 
 
+def _summary_backfill_privacy_migration(
+    config, profile: sqlite3.Row, *, retry_uncertain: bool,
+) -> EmbeddingIdentity | None:
+    """Plan the replacement identity for an ordinary backfill of filtered summaries."""
+    if retry_uncertain or getattr(config, "embedding_privacy_enabled", None) is True:
+        return None
+    revision, suffix = split_prefix_revision(str(profile["revision"] or ""))
+    if not revision.startswith("privacy:v"):
+        return None
+
+    provider_name = str(profile["provider"])
+    configured_provider = config_choices.normalize_embedding_provider(config.embedding_provider)
+    model = str(profile["model_name"])
+    dtype = str(profile["dtype"] or "float32")
+    if (
+        provider_name != embedding_provider_id(configured_provider)
+        or not embedding_provider_requires_privacy(provider_name)
+        or model != effective_embedding_model(configured_provider, config.embedding_model)
+        or suffix != embedding_prefix_suffix(config, provider_name)
+        or dtype != _resolve_storage_dtype(config)
+    ):
+        return None
+
+    return EmbeddingIdentity.canonical(
+        provider_name, model, "privacy:off" + suffix, profile["dim"], dtype,
+        profile["byteorder"], "summary+prefix" if suffix else "summary",
+    )
+
+
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
@@ -3699,6 +3728,10 @@ def _embedding_backfill_summary_run(
             if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
                 return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
+            replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+            if replacement is not None:
+                identity = replacement.identity_hash
+                profile_revision, _ = split_prefix_revision(replacement.revision)
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)
     except sqlite3.Error as exc:
         return "\n".join([
@@ -3801,22 +3834,14 @@ def _embedding_backfill_summary_run(
             ]), reason="lease_held")
         # Register the default-off summary identity alongside the old vectors.
         # Ordinary backfill discovers the summaries as pending under it.
-        if (
-            not retry_uncertain
-            and getattr(config, "embedding_privacy_enabled", None) is not True
-            and profile_revision.startswith("privacy:v")
-            and provider_name == embedding_provider_id(config.embedding_provider)
-            and embedding_provider_requires_privacy(provider_name)
-            and model == effective_embedding_model(config.embedding_provider, config.embedding_model)
-            and profile_suffix == embedding_prefix_suffix(config, provider_name)
-            and profile_dtype == _resolve_storage_dtype(config)
-        ):
+        replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+        if replacement is not None:
             with store._write_transaction():
                 if _embedding_current_profile(conn) == profile and lease.renew(force=True):
-                    profile_revision = "privacy:off"
+                    profile_revision, _ = split_prefix_revision(replacement.revision)
                     identity = store.register_profile(
-                        model, provider_name, profile["dim"], revision=profile_revision,
-                        revision_suffix=profile_suffix, dtype=profile_dtype, byteorder=profile["byteorder"],
+                        replacement.model_name, replacement.provider, replacement.dim, revision=profile_revision,
+                        revision_suffix=profile_suffix, dtype=replacement.dtype, byteorder=replacement.byteorder,
                     )
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)

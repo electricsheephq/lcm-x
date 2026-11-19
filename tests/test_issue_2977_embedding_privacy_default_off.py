@@ -61,11 +61,11 @@ def _open_store(config, tmp_path):
         )
 
 
-def _seed(engine):
-    store_id = engine._store.append("orchard", {"role": "user", "content": RAW})
+def _seed(engine, text=RAW, timestamp=1):
+    store_id = engine._store.append("orchard", {"role": "user", "content": text})
     engine._dag.add_node(SummaryNode(
-        session_id="orchard", depth=0, summary=RAW, source_ids=[store_id],
-        source_type="messages", created_at=1, latest_at=1,
+        session_id="orchard", depth=0, summary=text, source_ids=[store_id],
+        source_type="messages", created_at=timestamp, latest_at=timestamp,
     ))
 
 
@@ -121,6 +121,73 @@ def _vector_rows(db_path):
             ).fetchall()
             for task, table in (("summary", "lcm_embedding_vectors"), ("chunk", "lcm_chunk_vectors"))
         }
+
+
+@pytest.mark.issue(2977)
+@pytest.mark.parametrize("spelling", ["voyage", "VOYAGE", "voyageai", " VOYAGEAI "])
+def test_summary_backfill_migrates_provider_spellings(tmp_path, monkeypatch, providers, spelling):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", spelling)
+    monkeypatch.setenv("LCM_EMBEDDING_MODEL", "voyage-4-large")
+    config = LCMConfig.from_env()
+    config.database_path = str(tmp_path / "embeddings.db")
+    assert embedding_provider.resolve_provider(config, for_backfill=True).provider_id == "voyage"
+    protected = replace(config, embedding_provider="voyage", embedding_privacy_enabled=True)
+    with _open_store(protected, tmp_path) as engine:
+        _seed(engine)
+        assert "status: ready" in command.handle_lcm_command("embed warmup", engine)
+
+    result = command._embedding_backfill_summary_run(
+        config, config.database_path, apply=True, limit=10, retry_uncertain=False,
+    )
+    assert result["status"] == "complete", result
+    assert result["privacy_revision"] == "privacy:off"
+    assert result["embedded"] == 1
+    assert providers[config.embedding_model].documents == [[RAW]]
+
+
+@pytest.mark.issue(2977)
+def test_summary_backfill_previews_migration_without_writes(tmp_path, monkeypatch, providers):
+    db_path = tmp_path / "embeddings.db"
+    config = LCMConfig(
+        database_path=str(db_path), embeddings_enabled=True,
+        embedding_provider="voyage", embedding_model="voyage-4-large",
+    )
+    protected = replace(config, embedding_privacy_enabled=True)
+    with _open_store(protected, tmp_path) as engine:
+        _seed(engine)
+        assert "status: ready" in command.handle_lcm_command("embed warmup", engine)
+        assert "status: complete" in command.handle_lcm_command("embed backfill --apply", engine)
+        _seed(engine, "The second orchard has several young trees", timestamp=2)
+        _seed(engine, "The newest summary is also pending", timestamp=3)
+
+    selections = []
+    pending_rows = command._embedding_pending_rows
+
+    def observe_pending(conn, identity, limit):
+        pending, rows = pending_rows(conn, identity, limit)
+        selections.append((identity, [row["node_id"] for row in rows]))
+        return pending, rows
+
+    monkeypatch.setattr(command, "_embedding_pending_rows", observe_pending)
+    before = db_path.read_bytes()
+    options = {"limit": 10, "retry_uncertain": False}
+    preview = command._embedding_backfill_summary_run(config, db_path, apply=False, **options)
+    assert db_path.read_bytes() == before
+    assert providers[config.embedding_model].documents == [[FILTERED]]
+    applied = command._embedding_backfill_summary_run(config, db_path, apply=True, **options)
+
+    assert preview["status"] == "dry-run", preview
+    assert applied["status"] == "complete", applied
+    preview_selection, apply_selection = selections[:2]
+    assert preview_selection == apply_selection
+    assert preview["pending"] == applied["pending"] == 3
+    assert applied["embedded"] == 3
+    for field in ("selected", "estimated_tokens", "estimated_cost_tokens", "estimated_batches",
+                  "privacy_revision", "error"):
+        assert preview[field] == applied[field], field
+    assert preview["estimated_cost_tokens"] > 0
 
 
 @pytest.mark.issue(2977)
