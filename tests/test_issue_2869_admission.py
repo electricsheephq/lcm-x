@@ -62,8 +62,36 @@ def _coverage(tree, engine, result):
         part = tree["engine"]._summary_part_text(node)
         if any(part in text for text in summary_content):
             covered.update(engine._dag.source_message_ids(node.node_id, limit=len(rows)))
-    uncovered = [row["store_id"] for row in rows if row["store_id"] not in covered and row["content"] not in content]
+    first = result[0] if result else {}
+
+    def returned(row):
+        # A first compaction appends the LCM note to the leading system row, so match it by prefix there only.
+        return row["content"] in content or (
+            row.get("role") == "system" and first.get("role") == "system"
+            and str(first.get("content", "")).startswith(row["content"]))
+
+    uncovered = [row["store_id"] for row in rows if row["store_id"] not in covered and not returned(row)]
     return dict(stored=len(rows), uncovered=uncovered)
+
+
+def test_coverage_matches_the_system_row_only_as_the_first_returned_row():
+    class Store:
+        def get_session_messages(self, session_id, limit):
+            return [dict(store_id=1, role="system", content="SYSTEM PROMPT"),
+                    dict(store_id=2, role="user", content="hello")]
+
+    class Dag:
+        def get_session_nodes(self, session_id, limit):
+            return []
+
+    class Engine:
+        _store, _dag = Store(), Dag()
+
+    system = {"role": "system", "content": "SYSTEM PROMPT\n\nLCM note"}
+    user = {"role": "user", "content": "hello"}
+    assert _coverage(CANDIDATE, Engine(), [system, user])["uncovered"] == []
+    assert _coverage(CANDIDATE, Engine(), [user, system])["uncovered"] == [1]
+    assert _coverage(CANDIDATE, Engine(), [user])["uncovered"] == [1]
 
 
 def _run(tree, tmp_path, monkeypatch, clock, *, nodes, pre_work=0, pre_work_passes=None, estimate=None, seconds=8,
@@ -177,9 +205,7 @@ def _assert_coverage(base, candidate):
     new_gaps = _candidate_only_gaps(base, candidate)
     assert not new_gaps, new_gaps
     shared_gaps = [row["uncovered"] for row in candidate if row["uncovered"]]
-    if shared_gaps:
-        assert all(ids == [1] for ids in shared_gaps), shared_gaps
-        pytest.xfail("Stored system prompt (row 1) is absent from a returned view on pinned main too")
+    assert not shared_gaps, shared_gaps
 
 
 def _assert_progress(base, candidate):
@@ -258,14 +284,20 @@ def test_prefix_between_absolute_and_relative_targets_admits_leaf_first(tmp_path
     assert trace[0]["leaves"] >= 1
 
 
-@pytest.mark.parametrize(("window", "target"), [(520_000, 26_000), (1_000_000, 50_000)])
-def test_steady_session_condenses_at_the_same_target_as_main(base_tree, tmp_path, monkeypatch, clock, window, target):
+@pytest.mark.parametrize(("window", "target", "settings"), [
+    pytest.param(520_000, 26_000, {}, id="520000-26000"), pytest.param(1_000_000, 50_000, {}, id="1000000-50000"),
+    # Threshold 100,000: its quarter (25,000) binds below 5% of the window (50,000).
+    pytest.param(1_000_000, 25_000, {"context_threshold": 0.1}, id="1000000-25000-threshold-cap"),
+])
+def test_steady_session_condenses_at_the_same_target_as_main(base_tree, tmp_path, monkeypatch, clock, window, target,
+                                                             settings):
     new_turns = 20
     base, candidate, before, after = _compare(
-        base_tree, tmp_path, monkeypatch, clock, base_settings={"summary_prefix_target_tokens": target},
-        window=window, nodes=[(0, target // 4)] * 4, leaf=BACKLOG_LEAF * 3, turns_per_pass=new_turns,
+        base_tree, tmp_path, monkeypatch, clock, base_settings={**settings, "summary_prefix_target_tokens": target},
+        settings=settings, window=window, nodes=[(0, target // 4)] * 4, leaf=BACKLOG_LEAF * 3, turns_per_pass=new_turns,
         pre_work=25, estimate=20, seconds=20, passes=60, check_coverage=True,
     )
+    assert candidate[0]["target"] == target
     assert base == candidate
     assert before == after
     assert all(current["stored"] - previous["stored"] == 2 * new_turns
