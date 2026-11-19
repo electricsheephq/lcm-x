@@ -64,7 +64,7 @@ _NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages (store ids {first}..{
                   "live context; read each range with lcm_load_session and limit=200, paging with next_cursor: {calls}.]")
 _NOTICE_REST = "; and {count} earlier ranges (store ids {first}..{last}); lcm_grep reaches them"
 _NOTICE_MAX_RANGES = 8  # #2877: the newest ranges out of view are named with their calls; older ones are counted
-_NOTICE_MAX_TOKENS = 300  # the bound for store ids up to 12 digits and two sessions with ids up to 128 characters
+_NOTICE_MAX_TOKENS = 300  # the bound for 12-digit store ids and two sessions with ids up to 128 characters
 _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
                         r"but not in live context(?:; lcm_grep / lcm_load_session reach them|; read each range with "
                         r"lcm_load_session and limit=200, paging with next_cursor: [^\]]*)\.\]")
@@ -126,7 +126,8 @@ def survival_notice_text(count: int, ranges, rest=None) -> str:
         if not groups or groups[-1][0] != session:
             groups.append((session, []))
         groups[-1][1].append(f"after_store_id={first - 1} for store ids {first}..{last}")
-    calls = "; ".join(f"session_id={session}: " + ", ".join(items) for session, items in groups)
+    # a session id ends at a space and groups at ';', characters ids never hold (their ':' are common)
+    calls = "; ".join(f"session_id={session} " + ", ".join(items) for session, items in groups)
     calls += _NOTICE_REST.format(count=rest[0], first=rest[1], last=rest[2]) if rest else ""
     bounds = [x for _, first, last in ranges for x in (first, last)] + (list(rest[1:]) if rest else [])
     return _NOTICE_RANGES.format(n=count, first=min(bounds), last=max(bounds), calls=calls)

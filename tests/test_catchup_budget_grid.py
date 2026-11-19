@@ -442,8 +442,10 @@ def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
                          f"trigger {c['trigger']}, base {b['calls_started']}")
         if c["leaves_cum"] < b["leaves_cum"]:
             found.append(f"pass {b['pass']}: cumulative leaves {c['leaves_cum']} < base {b['leaves_cum']}")
-        if c["drained_cum"] < b["drained_cum"]:
-            found.append(f"pass {b['pass']}: cumulative drained {c['drained_cum']} < base {b['drained_cum']}")
+        # T1-285 / T1-293: drained = tokens removed by stored leaves and condensations, never a survival-fit cut or notice
+        if c["summary_drained_cum"] < b["summary_drained_cum"]:
+            found.append(f"pass {b['pass']}: cumulative drained {c['summary_drained_cum']} < base "
+                         f"{b['summary_drained_cum']}")
         if c["hold_armed"] and not b["hold_armed"]:
             found.append(f"pass {b['pass']}: the candidate armed a hold the base did not")
     return found
@@ -471,7 +473,7 @@ def test_a0_loss(grid, cell, tree, request):
     records = grid[tree]["by_cell"][cell]
     if tree == "base" and cell in KNOWN_2877_BASE or tree == "cand" and cell in KNOWN_2877_A0:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
-    if cell in D:
+    if cell in D and not (tree == "cand" and cell == "d-depth0-past-100"):  # T1-293: N1 names the rows the limit hides
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
     if cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2896))
