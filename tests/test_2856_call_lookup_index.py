@@ -5,12 +5,15 @@ The oracle below is the lookup as it stood on 0d01c2acd (main), scan included; e
 file by the call id stored in it, so names and contents may disagree freely here.
 """
 
+import errno
 import hashlib
 import json
 import os
 import pathlib
 import random
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import pytest
@@ -323,16 +326,35 @@ def _stored_id(path):
 _OPENED: list | None = None  # payload files read, in order, while a check records them
 
 
-def _record_reads(monkeypatch):
-    global _OPENED
-    real_read = pathlib.Path.read_text
+def _hook_payload_reads(monkeypatch, record):
+    """Call ``record(path)`` once per file read, whether through Path.read_text (the old scan) or Path.open
+    (the index, which needs the descriptor); read_text's own inner open is not counted twice."""
+    real_read, real_open = pathlib.Path.read_text, pathlib.Path.open
+    inside = threading.local()
 
     def read_text(self, *a, **k):
-        if _OPENED is not None and self.suffix == ".json":
-            _OPENED.append(self.name)
-        return real_read(self, *a, **k)
+        record(self)
+        inside.depth = getattr(inside, "depth", 0) + 1
+        try:
+            return real_read(self, *a, **k)
+        finally:
+            inside.depth -= 1
+
+    def open_(self, mode="r", *a, **k):
+        if "r" in mode and not getattr(inside, "depth", 0):
+            record(self)
+        return real_open(self, mode, *a, **k)
 
     monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+    monkeypatch.setattr(pathlib.Path, "open", open_)
+
+
+def _record_reads(monkeypatch):
+    def record(path):
+        if _OPENED is not None and path.suffix == ".json":
+            _OPENED.append(path.name)
+
+    _hook_payload_reads(monkeypatch, record)
 
 
 def _is_subsequence(part, whole):
@@ -504,9 +526,15 @@ class _Counts:
         self.target = os.fspath(folder_dir)
         self.listings = {"glob": 0, "iterdir": 0, "scandir": 0, "listdir": 0}
         self.reads = []
-        o_glob, o_iterdir, o_read = pathlib.Path.glob, pathlib.Path.iterdir, pathlib.Path.read_text
+        o_glob, o_iterdir = pathlib.Path.glob, pathlib.Path.iterdir
         o_scandir, o_listdir = os.scandir, os.listdir
         counts = self
+
+        def record(path):
+            if os.fspath(path.parent) == counts.target:
+                counts.reads.append(path.name)
+
+        _hook_payload_reads(monkeypatch, record)
 
         def glob(self, *a, **k):
             if os.fspath(self) == counts.target:
@@ -517,11 +545,6 @@ class _Counts:
             if os.fspath(self) == counts.target:
                 counts.listings["iterdir"] += 1
             return o_iterdir(self, *a, **k)
-
-        def read_text(self, *a, **k):
-            if os.fspath(self.parent) == counts.target:
-                counts.reads.append(self.name)
-            return o_read(self, *a, **k)
 
         def scandir(path=".", *a, **k):
             if not isinstance(path, int) and os.fspath(path) == counts.target:
@@ -535,7 +558,6 @@ class _Counts:
 
         monkeypatch.setattr(pathlib.Path, "glob", glob)
         monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
-        monkeypatch.setattr(pathlib.Path, "read_text", read_text)
         monkeypatch.setattr(os, "scandir", scandir)
         monkeypatch.setattr(os, "listdir", listdir)
 
@@ -617,7 +639,7 @@ def test_lookup_and_index_stay_inside_the_given_home(tmp_path, monkeypatch):
 
     touched = []
     o_stat, o_scandir, o_listdir = os.stat, os.scandir, os.listdir
-    o_glob, o_iterdir, o_read = pathlib.Path.glob, pathlib.Path.iterdir, pathlib.Path.read_text
+    o_glob, o_iterdir = pathlib.Path.glob, pathlib.Path.iterdir
 
     def record(path):
         if not isinstance(path, int):
@@ -643,14 +665,10 @@ def test_lookup_and_index_stay_inside_the_given_home(tmp_path, monkeypatch):
         record(self)
         return o_iterdir(self, *a, **k)
 
-    def read_text(self, *a, **k):
-        record(self)
-        return o_read(self, *a, **k)
-
     for owner, name, fn in ((os, "stat", stat), (os, "scandir", scandir), (os, "listdir", listdir),
-                            (pathlib.Path, "glob", glob), (pathlib.Path, "iterdir", iterdir),
-                            (pathlib.Path, "read_text", read_text)):
+                            (pathlib.Path, "glob", glob), (pathlib.Path, "iterdir", iterdir)):
         monkeypatch.setattr(owner, name, fn)
+    _hook_payload_reads(monkeypatch, record)
     for _ in range(3):  # a cold and two warm lookups
         assert find_externalized_tool_result_content_for_call(
             tool_call_id="call_1", config=folder.config, hermes_home=str(folder.home)) == "given"
@@ -660,3 +678,205 @@ def test_lookup_and_index_stay_inside_the_given_home(tmp_path, monkeypatch):
     assert touched and not outside, outside
     index = getattr(externalize, "_call_index", {})
     assert not any(os.path.realpath(key).startswith(os.path.realpath(decoy)) for key in index)
+
+
+# Round 4 (#2856 review): a listing error is never cached, an entry needs the descriptor actually read to
+# match the path, the cap holds after every lookup, and deleted names leave the index on a relist.
+
+def _fresh_index(monkeypatch, window_ns=30_000_000):
+    monkeypatch.setattr(externalize, "_CALL_INDEX_RACY_NS", window_ns, raising=False)
+    monkeypatch.setattr(externalize, "_call_index", OrderedDict(), raising=False)
+
+
+def _settle(window_ns=30_000_000):
+    time.sleep(window_ns / 1e9 + 0.03)
+
+
+def _kw(folder, call_id):
+    return {"tool_call_id": call_id, "config": folder.config, "hermes_home": str(folder.home)}
+
+
+def _payload_bytes(call_id, content, size=None):
+    data = json.dumps({"kind": "tool_result", "tool_call_id": call_id, "content": content})
+    return data + " " * (size - len(data)) if size else data
+
+
+def test_listing_error_is_never_cached(tmp_path, monkeypatch):
+    """Python 3.14's Path.glob hides an OSError from scandir (EMFILE, say) and yields nothing; that empty
+    listing must not be kept under the folder's unchanged signature."""
+    _fresh_index(monkeypatch)
+    folder = Folder(tmp_path, random.Random(2860))
+    (folder.dir / folder._name("call_1")).write_text(_payload_bytes("call_1", "kept"))
+    _settle()
+    failing = [True]
+    real_scandir, real_glob = os.scandir, pathlib.Path.glob
+
+    def scandir(path=".", *a, **k):
+        if failing[0] and not isinstance(path, int) and os.fspath(path) == os.fspath(folder.dir):
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_scandir(path, *a, **k)
+
+    def glob(self, *a, **k):  # Python 3.14: the error is swallowed and the listing comes back empty
+        try:
+            return iter(list(real_glob(self, *a, **k)))
+        except OSError:
+            return iter([])
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(pathlib.Path, "glob", glob)
+    assert find_externalized_tool_result_content_for_call(**_kw(folder, "call_1")) == oracle_lookup(
+        **_kw(folder, "call_1"))
+    failing[0] = False
+    assert find_externalized_tool_result_content_for_call(**_kw(folder, "call_1")) == "kept"
+
+
+def test_entry_needs_the_descriptor_read_to_match_the_path(tmp_path, monkeypatch):
+    """Both path stats see file A while the open reads file B (a symlink swapped and restored): B's id must
+    not be cached under A's signature."""
+    _fresh_index(monkeypatch)
+    folder = Folder(tmp_path, random.Random(2861))
+    real = folder.dir / folder._name("call_1")
+    real.write_text(_payload_bytes("call_1", "real"))
+    imposter = tmp_path / "imposter.json"
+    imposter.write_text(_payload_bytes("call_2", "imposter"))
+    _settle()
+    swapped = [True]
+    real_open = pathlib.Path.open
+
+    def open_(self, *a, **k):
+        if swapped[0] and self == real:
+            return real_open(imposter, *a, **k)
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "open", open_)
+    find_externalized_tool_result_content_for_call(**_kw(folder, "call_1"))  # races: its answer is not compared
+    swapped[0] = False
+    entries = externalize._call_index[folder.dir][2]
+    assert real.name not in entries
+    assert find_externalized_tool_result_content_for_call(**_kw(folder, "call_1")) == oracle_lookup(
+        **_kw(folder, "call_1")) == "real"
+
+
+def _cache_items():
+    return sum(len(f[1]) + len(f[2]) for f in externalize._call_index.values())
+
+
+def test_cap_holds_after_every_lookup(tmp_path, monkeypatch):
+    _fresh_index(monkeypatch)
+    monkeypatch.setattr(externalize, "_CALL_INDEX_MAX_ITEMS", 30, raising=False)
+    monkeypatch.setattr(externalize, "_CALL_INDEX_MAX_ENTRIES", 30, raising=False)  # round 3's name
+    folders = []
+    for index in range(2):
+        root = tmp_path / f"home{index}"
+        root.mkdir()
+        folder = Folder(root, random.Random(2862 + index))
+        for n in range(20):
+            (folder.dir / folder._name(f"call_{n}")).write_text(_payload_bytes(f"call_{n}", f"c{n}"))
+        folders.append(folder)
+    _settle()
+    for folder in folders * 2:
+        for call_id in ("call_missing", "call_5"):
+            assert find_externalized_tool_result_content_for_call(**_kw(folder, call_id)) == oracle_lookup(
+                **_kw(folder, call_id))
+            assert _cache_items() <= 30, _cache_items()
+
+
+def test_deleted_name_leaves_the_index_on_relist(tmp_path, monkeypatch):
+    _fresh_index(monkeypatch)
+    folder = Folder(tmp_path, random.Random(2863))
+    names = []
+    for n in range(5):
+        names.append(folder._name(f"call_{n}"))
+        (folder.dir / names[-1]).write_text(_payload_bytes(f"call_{n}", f"c{n}"))
+    _settle()
+    assert find_externalized_tool_result_content_for_call(**_kw(folder, "call_missing")) is None
+    assert names[2] in externalize._call_index[folder.dir][2]
+    (folder.dir / names[2]).rename(tmp_path / "moved-out.json")
+    _settle()
+    assert find_externalized_tool_result_content_for_call(**_kw(folder, "call_missing")) is None
+    assert names[2] not in externalize._call_index[folder.dir][2]
+
+
+class _AfterRead:
+    """A file object that runs ``after`` once its content has been read."""
+
+    def __init__(self, handle, after):
+        self._handle, self._after = handle, after
+
+    def read(self, *a):
+        try:
+            return self._handle.read(*a)
+        finally:
+            self._after()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.close()
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def _audit_index():
+    """Entries whose signature still matches the file must hold the call id the file holds now."""
+    wrong = []
+    for entries in (f[2] for f in externalize._call_index.values()):
+        for name, (signature, key) in list(entries.items()):
+            for folder_path in externalize._call_index:
+                path = folder_path / name
+                try:
+                    if externalize._stat_signature(os.stat(path)) != signature:
+                        continue
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(payload, dict) and key is not externalize._EVERY_CALL and key != payload.get("tool_call_id"):
+                    wrong.append((name, key, payload.get("tool_call_id")))
+    return wrong
+
+
+@pytest.mark.parametrize("scenario", ["aba_rename_swap", "hardlink_swap"])
+@pytest.mark.parametrize("window_ns", [0, 30_000_000])
+def test_file_swapped_during_the_read_is_not_cached(tmp_path, monkeypatch, scenario, window_ns):
+    """From the round-3 reviewer's race probes: another file sits under the name only while it is read."""
+    _fresh_index(monkeypatch, window_ns)
+    folder = Folder(tmp_path, random.Random(2864))
+    aside = tmp_path / "aside"
+    aside.mkdir()
+    (folder.dir / "m100.json").write_text(_payload_bytes("call_x", "x"))
+    target, other = folder.dir / "m500.json", folder.dir / "m900.json"
+    target.write_text(_payload_bytes("call_A", "AAAA", size=200))
+    other.write_text(_payload_bytes("call_B", "BBBB", size=200))
+    _settle(window_ns)
+    fired = []
+    real_open = pathlib.Path.open
+
+    def open_(self, *a, **k):
+        if self.name != "m500.json" or fired:
+            return real_open(self, *a, **k)
+        fired.append(1)
+        os.rename(target, aside / "a")
+        if scenario == "aba_rename_swap":
+            os.rename(other, target)
+        else:
+            os.link(other, target)
+        handle = real_open(self, *a, **k)
+
+        def restore():
+            os.rename(target, other if scenario == "aba_rename_swap" else aside / "link")
+            os.rename(aside / "a", target)
+
+        return _AfterRead(handle, restore)
+
+    monkeypatch.setattr(pathlib.Path, "open", open_)
+    _outcome(find_externalized_tool_result_content_for_call, **_kw(folder, "call_A"))  # races
+    assert fired
+    monkeypatch.setattr(pathlib.Path, "open", real_open)
+    for _ in range(3):
+        _settle(window_ns)
+        for call_id in ("call_A", "call_B", "call_x", "nope"):
+            expected = _outcome(oracle_lookup, **_kw(folder, call_id))
+            assert _outcome(find_externalized_tool_result_content_for_call, **_kw(folder, call_id)) == expected
+        assert not _audit_index()

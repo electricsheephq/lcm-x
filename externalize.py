@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import codecs
 import contextvars
+import fnmatch
 from contextlib import contextmanager
 import hashlib
 import json
@@ -1319,10 +1320,18 @@ def find_externalized_payload_for_message(
 # _EVERY_CALL when the old scan would skip or raise on it before its id test) and holds only while the
 # file's stat signature is unchanged. A lookup stops where the old scan stops, so the files it opens are
 # a subset of the old scan's, in the same order, and the payload it checks is read now, never cached.
-# Accepted limits: the racy window assumes timestamps no coarser than 2 s and a clock that does not step
-# back into a cached second; a stored call id that is not a string is indexed as absent (callers pass str).
+# An entry is stored only when the descriptor actually read (fstat) matches the path's stat before and
+# after the read; the stat after the read is defensive (not load-bearing on APFS in review probes).
+# Accepted limits: the racy window assumes timestamps no coarser than 2 s, file timestamps on the clock
+# of time.time_ns() that does not step back into a cached second, and a change time that moves on every
+# content change and rename (true on APFS and ext4; not on FAT/exFAT or some network mounts). A stored
+# call id that is not a string is indexed as absent (callers pass str). A folder the cap evicts pays the
+# cold path (each file parsed when first reached) again on its next lookups.
 _CALL_INDEX_RACY_NS = 2_000_000_000  # a change this recent may share its timestamp tick with the next one
-_CALL_INDEX_MAX_ENTRIES = 100_000  # about 12 reference folders of 8,559 files; some 40 MB at most
+# Listed paths plus entries over all folders, checked after each listing and each walk: about 6 folders
+# the size of the 8,559-file reference folder, some 50 MB; one walk may exceed it by its own entries until
+# it ends, and a folder larger than the cap alone is evicted after each lookup (it stays correct, cold).
+_CALL_INDEX_MAX_ITEMS = 100_000
 _EVERY_CALL = object()
 _call_index_lock = threading.Lock()
 _call_index: "OrderedDict[Path, list]" = OrderedDict()  # folder -> [signature or None, sorted paths, entries]
@@ -1340,57 +1349,75 @@ def _settled_signature(path: Path, now_ns: int) -> tuple[int, ...] | None:
     return signature if now_ns - max(signature[1], signature[3]) >= _CALL_INDEX_RACY_NS else None
 
 
-def _folder_call_index(storage_dir: Path, now_ns: int) -> list:
-    """The folder's sorted listing and entries, listed again when the folder's stat moved (LRU, bounded)."""
+def _call_index_items() -> int:
+    return sum(len(folder[1]) + len(folder[2]) for folder in _call_index.values())
+
+
+def _trim_call_index() -> None:
+    """Evict least recently used folders until the cache holds at most _CALL_INDEX_MAX_ITEMS items."""
+    with _call_index_lock:
+        while _call_index and _call_index_items() > _CALL_INDEX_MAX_ITEMS:
+            _call_index.popitem(last=False)
+
+
+def _folder_call_index(storage_dir: Path, now_ns: int) -> list | None:
+    """The folder's sorted listing and entries, listed again when the folder's stat moved; None when the
+    folder cannot be listed now (the caller then lists it as the old scan does, and nothing is cached)."""
     signature = _settled_signature(storage_dir, now_ns)
     with _call_index_lock:
         folder = _call_index.get(storage_dir)
     if folder is None or signature is None or folder[0] != signature:
-        os.stat(storage_dir)  # an unreadable folder raises here and the caller falls back to the old scan
-        folder = [signature, sorted(storage_dir.glob("*.json")), folder[2] if folder else {}]
+        try:
+            with os.scandir(storage_dir) as listing:
+                names = [entry.name for entry in listing if fnmatch.fnmatch(entry.name, "*.json")]
+        except OSError:
+            return None  # never cache a listing an error cut short
+        kept = folder[2] if folder else {}
+        folder = [signature, sorted(storage_dir / name for name in names), {n: kept[n] for n in names if n in kept}]
     with _call_index_lock:
         _call_index[storage_dir] = folder
         _call_index.move_to_end(storage_dir)
-        while len(_call_index) > 1 and sum(len(f[2]) for f in _call_index.values()) > _CALL_INDEX_MAX_ENTRIES:
-            _call_index.popitem(last=False)
+    _trim_call_index()
     return folder
 
 
 def _tool_call_payloads(storage_dir: Path, tool_call_id: str):
     """Yield, in the old scan's order, every payload the old scan's call-id test could pass or raise on."""
     now_ns = time.time_ns()
+    folder = _folder_call_index(storage_dir, now_ns)
+    paths, entries = (folder[1], folder[2]) if folder else (sorted(storage_dir.glob("*.json")), {})
     try:
-        _, paths, entries = _folder_call_index(storage_dir, now_ns)
-    except OSError:
-        paths, entries = sorted(storage_dir.glob("*.json")), {}
-    for path in paths:
-        before = _settled_signature(path, now_ns)
-        entry = entries.get(path.name)
-        if before is not None and entry is not None and entry[0] == before:
-            if entry[1] is not _EVERY_CALL and entry[1] != tool_call_id:
-                continue  # decided without opening: the old scan skips it at its kind or call-id test
-        key, parsed, error = _EVERY_CALL, False, None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            parsed = True
-        except json.JSONDecodeError:
-            key = None
-        except OSError:
-            pass  # skipped, and read again next time
-        except Exception as exc:  # the old scan raises here
-            error = exc
-        if parsed and isinstance(payload, dict):
-            call_id = payload.get("tool_call_id") or "" if payload.get("kind", "tool_result") == "tool_result" else None
-            key = call_id if isinstance(call_id, str) else None
-        if before is not None and before == _settled_signature(path, now_ns):  # unchanged across the read
-            if path.name in entries or len(entries) < _CALL_INDEX_MAX_ENTRIES:
+        for path in paths:
+            before = _settled_signature(path, now_ns)
+            entry = entries.get(path.name)
+            if before is not None and entry is not None and entry[0] == before:
+                if entry[1] is not _EVERY_CALL and entry[1] != tool_call_id:
+                    continue  # decided without opening: the old scan skips it at its kind or call-id test
+            key, parsed, error, opened = _EVERY_CALL, False, None, None
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    opened = _stat_signature(os.fstat(handle.fileno()))
+                    payload = json.loads(handle.read())
+                parsed = True
+            except json.JSONDecodeError:
+                key = None
+            except OSError:
+                pass  # skipped, and read again next time
+            except Exception as exc:  # the old scan raises here
+                error = exc
+            if parsed and isinstance(payload, dict):
+                call_id = payload.get("tool_call_id") or "" if payload.get("kind", "tool_result") == "tool_result" else None
+                key = call_id if isinstance(call_id, str) else None
+            if before is not None and opened == before == _settled_signature(path, now_ns):  # this file, unchanged
                 entries[path.name] = (before, key)
-        else:
-            entries.pop(path.name, None)
-        if error is not None:
-            raise error
-        if parsed and (key is _EVERY_CALL or key == tool_call_id):
-            yield payload
+            else:
+                entries.pop(path.name, None)
+            if error is not None:
+                raise error
+            if parsed and (key is _EVERY_CALL or key == tool_call_id):
+                yield payload
+    finally:
+        _trim_call_index()
 
 
 def find_externalized_tool_result_content_for_call(
