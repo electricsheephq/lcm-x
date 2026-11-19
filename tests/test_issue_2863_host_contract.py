@@ -191,11 +191,16 @@ def _digest(m):
 
 
 def pairing_problems(out, newest_id):
-    """Every tool result consumes exactly one matching call id of the assistant row it answers."""
-    open_ids, answered, problems = Counter(), set(), []
+    """Every tool result consumes exactly one matching call id of the assistant row it answers, and every retained call
+    has its result before its group closes (the next non-tool row, or the end of input)."""
+    open_ids, answered, problems, group = Counter(), set(), [], None
+
+    def close():
+        problems.extend(f"unanswered call {cid} of row {group}" for cid, n in open_ids.items() for _ in range(n))
     for i, m in enumerate(out):
         if m.get("role") == "assistant":
-            open_ids, answered = Counter(tc.get("id") for tc in (m.get("tool_calls") or [])), set()
+            close()
+            open_ids, answered, group = Counter(tc.get("id") for tc in (m.get("tool_calls") or [])), set(), i
         elif m.get("role") == "tool":
             cid = m.get("tool_call_id")
             if open_ids[cid] > 0:
@@ -204,7 +209,9 @@ def pairing_problems(out, newest_id):
             else:
                 problems.append(f"{'duplicate' if cid in answered else 'orphan'} tool row {i} {cid}")
         else:
+            close()
             open_ids, answered = Counter(), set()
+    close()
     if newest_id and not any(m.get("role") == "tool" and m.get("tool_call_id") == newest_id for m in out):
         problems.append(f"newest result {newest_id} missing")
     return problems
@@ -229,7 +236,9 @@ def conservation_violations(eng, out):
     summary is in `out`, or a copy of it is in `out`. A duplicate: `out` holds more copies of a row than the store has
     outside those nodes. A tool result is one occurrence in either form, payload or pointer."""
     sid = eng._session_id
-    texts = [_text(m) for m in out]
+    # Only a row in the engine's own summary form (summary parts, alone, joined or behind the preserved objective)
+    # credits a node; a tool or user row quoting a summary does not.
+    texts = [_text(m) for m in out if LCMEngine._lcm_generated_marker(m) in ("summary", "summary_joined", "scaffold")]
     joined = "\n".join(texts)
     header_ids = {int(m.group(2)) for t in texts for m in _LCM_SUMMARY_PART_HEADER_RE.finditer(t)}
     covered = set()
@@ -455,8 +464,9 @@ def test_a_refused_concurrent_compress_never_clears_the_owners_progress(engine, 
     # Two threads, one engine: the owner's pass makes the list smaller; a second call is refused during it.
     # The owner's host reads the flag after both calls have returned, so whichever order their exits take, it
     # must read True, and the refused call must never have written the flag.
-    in_pass, release, reported, owner = threading.Event(), threading.Event(), threading.Event(), {}
-    impl, made = engine._compress_impl, compaction._made_progress
+    in_pass, release, reported, held, owner = (threading.Event(), threading.Event(), threading.Event(),
+                                               threading.Event(), {})
+    impl, checked = engine._compress_impl, compaction.CompactionMixin.compress.__wrapped__
 
     def owned_pass(*args, **kwargs):
         owner["ident"] = threading.get_ident()
@@ -464,13 +474,17 @@ def test_a_refused_concurrent_compress_never_clears_the_owners_progress(engine, 
         assert release.wait(10)
         return impl(*args, **kwargs)
 
-    def late_report(before, returned):  # a refused call that reports anything does so after the owner's report
+    def late_return(self, messages, *args, **kwargs):
+        # The refused call's owner check has returned (outside the compaction gate); hold that return from the
+        # reporting wrapper until the owner has reported.
+        returned = checked(self, messages, *args, **kwargs)
         if threading.get_ident() != owner.get("ident"):
+            held.set()
             assert reported.wait(10)
-        return made(before, returned)
+        return returned
     monkeypatch.setattr(engine, "_compress_impl", owned_pass)
     if order == "refused call ends after the owner's report":
-        monkeypatch.setattr(compaction, "_made_progress", late_report)
+        monkeypatch.setattr(compaction.CompactionMixin, "compress", compaction._reports_progress(late_return))
     writes = _record_progress_writes(engine, monkeypatch)
     msgs, listed = msgs_at(12, R2_STEPS), list(msgs_at(12, R2_STEPS))
     with ThreadPoolExecutor(max_workers=2) as workers:
@@ -484,6 +498,8 @@ def test_a_refused_concurrent_compress_never_clears_the_owners_progress(engine, 
             time.sleep(0.01)
         release.set()
         out = primary.result(timeout=60)
+        if order == "refused call ends after the owner's report":  # the owner has reported; the refused call has not
+            assert not second.done() and held.is_set()
         reported.set()
         assert second.result(timeout=10) is listed
     assert engine._compress_reentry_refusals == 1
@@ -609,9 +625,21 @@ def _result(cid, text="ok"):
 
 def test_pairing_problems_flags_a_result_that_reuses_a_call_id():
     assert pairing_problems([dict(USER), _calls("a", "b"), _result("a"), _result("b")], "b") == []
-    problems = pairing_problems([dict(USER), _calls("a", "b"), _result("b"), _result("b")], "b")
-    assert problems == ["duplicate tool row 3 b"], problems
+    problems = pairing_problems([dict(USER), _calls("a", "b"), _result("a"), _result("b"), _result("b")], "b")
+    assert problems == ["duplicate tool row 4 b"], problems
     assert pairing_problems([dict(USER), _calls("a"), _result("a"), _result("c")], None) == ["orphan tool row 3 c"]
+
+
+def test_pairing_problems_flags_a_retained_call_without_a_result():
+    # At the end of input, and when the next row closes the group.
+    problems = pairing_problems([dict(USER), _calls("a", "b"), _result("b")], "b")
+    assert problems == ["unanswered call a of row 1"], problems
+    later = [{"role": "user", "content": "Go on."}, _calls("c"), _result("c")]
+    problems = pairing_problems([dict(USER), _calls("a", "b"), _result("b")] + later, "c")
+    assert problems == ["unanswered call a of row 1"], problems
+    # A complete group and a wholly removed group (its call row and every result gone) pass.
+    assert pairing_problems([dict(USER), _calls("a", "b"), _result("a"), _result("b")] + later, "c") == []
+    assert pairing_problems([dict(USER)] + later, "c") == []
 
 
 def test_conservation_violations_flags_a_duplicated_row_and_counts_stored_copies(engine):
@@ -644,17 +672,38 @@ def _fake_engine(rows, nodes):
     return SimpleNamespace(_session_id="s", _store=store, _dag=dag, _config=None, _hermes_home=None)
 
 
+def _summary_row(node_id, text):
+    """A summary row in the engine's own form (engine.py `_summary_part_text`)."""
+    return {"role": "user", "content": f"[Recent Summary (d0, node {node_id})]\n{text}\n"
+                                       f"[Expand for details: lcm_expand(node_id={node_id})]"}
+
+
 def test_conservation_violations_counts_a_restart_copy_as_covered():
     answer = {"role": "assistant", "content": "answer"}
     rows = [dict(USER, store_id=1), dict(answer, store_id=2), dict(USER, store_id=3)]
     # (a) the row is summarised as store id 1 and stored again as id 3 outside every node; the list holds the summary.
-    summary = {"role": "user", "content": "SUMMARY-SEVEN"}
+    summary = _summary_row(7, "SUMMARY-SEVEN")
     assert conservation_violations(_fake_engine(rows, {7: ("SUMMARY-SEVEN", [1])}), [summary, dict(answer)]) == []
     # ... but the summary and a raw copy of the summarised row would hold one copy more than the store has outside.
     found = conservation_violations(_fake_engine(rows, {7: ("SUMMARY-SEVEN", [1])}), [summary, dict(USER), dict(USER)])
     assert [v[0] for v in found] == ["missing", "duplicate"], found
     # (b) the row is stored twice and listed once.
     assert conservation_violations(_fake_engine(rows, {}), [dict(USER), dict(answer)]) == []
+
+
+@pytest.mark.parametrize("quote", [_summary_row(7, "SUMMARY-SEVEN")["content"], "grep hit: SUMMARY-SEVEN"],
+                         ids=["header", "summary-text"])
+def test_conservation_violations_does_not_credit_a_quoted_summary(quote):
+    # Node 7 summarises one unique row (store id 2). A tool result that quotes node 7's header or its summary text is
+    # not node 7's summary: with the summary itself absent, the unique row is missing.
+    unique = {"role": "assistant", "content": "the only copy of this answer"}
+    quoting = {"role": "tool", "tool_call_id": "q", "content": f"log before {quote} and after"}
+    rows = [dict(USER, store_id=1), dict(unique, store_id=2), dict(quoting, store_id=3)]
+    fake = _fake_engine(rows, {7: ("SUMMARY-SEVEN", [2])})
+    found = conservation_violations(fake, [dict(USER), quoting])
+    assert [v[:2] for v in found] == [("missing", 2)], found
+    # The emitted summary covers it.
+    assert conservation_violations(fake, [dict(USER), _summary_row(7, "SUMMARY-SEVEN"), quoting]) == []
 
 
 def _pointer(eng, row):
