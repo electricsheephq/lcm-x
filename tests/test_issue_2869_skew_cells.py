@@ -1,10 +1,11 @@
-"""#2869 review cells (red proof on the clamped target; local): a store whose mean depth-0 summary differs from the live
-frontier the sweep compares with its target.
+"""#2869 review cells (red on the first clamped-target head): a store whose mean depth-0 summary differs from the live
+frontier the sweep compares with its target. Raised mode now bounds the live count directly, so these hold by the
+count rule.
 
 Bar for the count cells: after one automatic sweep at a 1M window, no level holds more than the 100 uncondensed
 summaries the view shows (dag.py get_uncondensed_at_depth limit=100); a level past 100 leaves the rows under its oldest
-summaries out of the list with no pointer (A0). Bar for the unit cell: the raise fires for a store whose summaries cost
-the same in the sweep's own unit (node token counts) as an ASCII store's.
+summaries out of the list with no pointer (A0). Bar for the unit cell: a CJK store condenses exactly like an ASCII store
+whose summaries cost the same in the sweep's own unit (node token counts).
 """
 
 from __future__ import annotations
@@ -94,19 +95,20 @@ def _target_for(tmp_path, monkeypatch, name, text):
     try:
         instance.on_session_start("S", platform="cli", context_length=1_000_000, conversation_id="conv")
         cost = tokens.count_tokens(text)  # the sweep's unit: the node token count publication records
-        for _ in range(10):
+        for _ in range(70):  # 70 x 801 = 56,070: over the raised 50,000 target
             _node(instance, 0, cost, text=text)
-        return _sweep(instance)[0], cost
+        status = _sweep(instance)[1]
+        return (status["pre_leaf_condensation_passes"] + status["condensation_passes"], _live(instance, 0)), cost
     finally:
         instance.shutdown()
 
 
 def test_cjk_summaries_raise_like_an_ascii_store_of_the_same_sweep_cost(tmp_path, monkeypatch):
     """With the fallback counter, 1,200 CJK characters cost about 801 tokens in the sweep's unit; an ASCII store whose
-    summaries cost the same must get the same target."""
+    summaries cost the same condenses the same number of times and keeps the same live count."""
     monkeypatch.setattr(tokens, "count_tokens", tokens._fallback_token_estimate)
     cjk_target, cjk_cost = _target_for(tmp_path, monkeypatch, "cjk", "漢" * 1_200)
     ascii_text = "z" * (4 * (cjk_cost - 1))
     ascii_target, ascii_cost = _target_for(tmp_path, monkeypatch, "ascii", ascii_text)
     assert ascii_cost == cjk_cost > 700, (ascii_cost, cjk_cost)
-    assert cjk_target == ascii_target, f"CJK target {cjk_target}, ASCII target {ascii_target} at cost {cjk_cost}"
+    assert cjk_target == ascii_target and cjk_target[0] > 0, f"CJK {cjk_target}, ASCII {ascii_target} at cost {cjk_cost}"

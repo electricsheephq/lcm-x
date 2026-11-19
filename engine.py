@@ -152,7 +152,7 @@ from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin,
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
-from .compaction import CompactionMixin, select_oldest_leaf_chunk
+from .compaction import RAISED_MAX_LIVE, CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
@@ -10955,8 +10955,15 @@ class LCMEngine(
         }
         return [node for node in all_nodes if node.node_id not in referenced]
 
-    def _summary_frontier_tokens(self) -> int:
-        return sum(node.token_count for node in self._summary_frontier_nodes())
+    def _summary_frontier_tokens(self, *, with_count: bool = False):
+        nodes = self._summary_frontier_nodes()  # #2869: with_count adds the live node count from the same read
+        tokens = sum(node.token_count for node in nodes)
+        return (tokens, len(nodes)) if with_count else tokens
+
+    def _sweep_condensation_due(self, target_tokens: int, raise_tokens: int) -> bool:
+        """#2869 raised mode, at every check: over today's target AND (over the raised one OR more than 80 live)."""
+        tokens, live = self._summary_frontier_tokens(with_count=True)
+        return tokens > target_tokens and (tokens > raise_tokens or live > RAISED_MAX_LIVE)
 
     def _rendered_summary_frontier_tokens(self, nodes: Optional[List[SummaryNode]] = None) -> int:
         """#977: the frontier as assembly renders it (headers, expand hints, separators, message framing)."""
@@ -11010,7 +11017,9 @@ class LCMEngine(
     ) -> tuple[int, str]:
         """Condense an oversized summary frontier within the remaining sweep budget."""
         passes = 0
-        while self._summary_frontier_tokens() > target_tokens:
+        raise_tokens = getattr(self._foreground_call_budget(), "sweep_raise_tokens", 0)  # #2869: raised mode only
+        while (self._sweep_condensation_due(target_tokens, raise_tokens) if raise_tokens
+               else self._summary_frontier_tokens() > target_tokens):
             if passes >= pass_budget:
                 return passes, "pass_budget_exhausted"
             if time.monotonic() >= deadline:

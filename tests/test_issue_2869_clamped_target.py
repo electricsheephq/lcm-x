@@ -1,207 +1,196 @@
-"""#2869: above 480,000-token windows the default summary-prefix target follows the window, clamped by the mean stored
-size of the session's live summary frontier (the unit the sweep compares with its target), so at sweep start at most 80
-nodes are live unless today's default binds, and a level stays under the view's 100 (dag.py limit=100).
+"""#2869 raised mode at engine level: above 480,000-token windows an automatic sweep condenses only while the frontier is
+over today's target AND (over the raised target, min(5% of the window, the threshold cap), OR more than 80 nodes are
+live), re-evaluated at every check. Off on forced, overflow and recovery passes, with an explicit target and with
+background leaf preparation on, where every pass is byte-identical to main.
 
-target = max(today's default, min(5% of the window, 80 x the live frontier's mean token count, the threshold cap)), on
-automatic sweeps with background leaf preparation off. At or below 480,000, forced and overflow passes, explicit
-settings and preparation on keep today's target.
-The hole cell walks the grid runner on CAND_TREE (env LCMX_GRID_CAND, default this tree); the window-only target of the
-superseded change is reproduced in the runner process by a mean that never clamps, and, with env LCMX_2869_UNCLAMPED
-set to a tree of that change, on that tree too.
+Main's behaviour is this tree's with raised mode switched off (``_LARGE_SWEEP_WINDOW_TOKENS`` past every window).
+K2: four big live leaves condensed under the raised target with 96 live, then five more leaves: never 101 live.
+K4: the reference agent's shape gets the raised target and condenses no more than main.
+K5: the unchanged paths. K7: the frontier read returns the same tokens and its node count from one read.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import time
-from pathlib import Path
-
 import pytest
 
+import hermes_lcm.compaction as compaction
+import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
-from tests import test_catchup_budget_grid as grid
 
 pytestmark = pytest.mark.issue(2869)
 
 MESSAGES = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"FACT-{i} " + "alpha beta gamma delta " * 44}
             for i in range(48)] + [{"role": "user" if i % 2 == 0 else "assistant", "content": f"tail {i}"}
                                    for i in range(24)]
-AGGREGATE = "SUM(token_count)"
+QUIET = {"embeddings_enabled": False, "temporal_rollups_enabled": False, "large_output_externalization_enabled": False,
+         "large_output_active_replay_stubbing_enabled": False}
+PAD = " alpha beta gamma delta" * 160  # about 800 tokens a row
 
 
 @pytest.fixture
 def open_engine(tmp_path, monkeypatch):
-    engines = []
+    engines, clock = [], [1.0]
 
-    def open_at(window, nodes=0, mean=0, session="S", **config):
+    def open_at(window, nodes=(), **config):
         home = tmp_path / f"h{len(engines)}"
-        engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"), **config), hermes_home=str(home))
-        engine.on_session_start(session, platform="cli", context_length=window)
-        for _ in range(nodes):  # summary text of exactly ``mean`` tokens at 4 ASCII chars a token
-            engine._dag.add_node(SummaryNode(session_id=session, depth=0, summary="x" * (4 * mean), token_count=mean,
-                                             source_token_count=5, source_ids=[], created_at=time.time(),
-                                             expand_hint="turns"))
-        monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", lambda chunk, focus_topic=None, deadline=None: (
-            chunk, 100, "Earlier facts.\nExpand for details about: facts", 1, 0))
+        engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"), **{**QUIET, **config}),
+                           hermes_home=str(home))
+        engine.on_session_start("S", platform="cli", context_length=window, conversation_id="conv")
+        for depth, tokens, sources in nodes:  # (depth, stored token count, the node ids it condenses)
+            clock[0] += 1.0
+            engine._dag.add_node(SummaryNode(
+                session_id="S", depth=depth, summary="x" * (4 * tokens), token_count=tokens, source_token_count=5,
+                source_ids=list(sources), source_type="nodes" if sources else "messages", created_at=clock[0],
+                expand_hint="turns"))
         engines.append(engine)
         return engine
 
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kwargs: ("y" * 800, 1))  # 200 tokens
     yield open_at
     for engine in engines:
         engine.shutdown()
 
 
-def _target(engine, monkeypatch, force=False, current=None, **kwargs):
-    """(sweep target, sweep active, overflow) of the first compress pass."""
-    seen, prepare = [], engine._prepare_compression_sweep
+def _live(nodes):
+    return [(0, tokens, ()) for tokens in nodes]
 
-    def wrapped(state, *args, **kwargs):
-        out = prepare(state, *args, **kwargs)
-        seen.append((state.sweep_target_tokens, state.threshold_full_sweep_active, state.force_overflow))
+
+def _pass(engine, monkeypatch, *, messages=MESSAGES, current=None, main=False, **kwargs):
+    """One compress pass: (today's target, raised target, sweep active, overflow, condensations, checks)."""
+    seen, checks, condensed = [], [], [0]
+    prepare, due, condense = engine._prepare_compression_sweep, engine._sweep_condensation_due, engine._condense_summary_nodes
+
+    def wrapped(state, *args, **kw):
+        out = prepare(state, *args, **kw)
+        seen.append((state.sweep_target_tokens, getattr(state.budget, "sweep_raise_tokens", 0),
+                     state.threshold_full_sweep_active, state.force_overflow))
         return out
 
-    monkeypatch.setattr(engine, "_prepare_compression_sweep", wrapped)
-    engine.compress(MESSAGES, current_tokens=current or engine.threshold_tokens, force=force, **kwargs)
-    return seen[0]
+    def due_spy(target, raise_tokens):
+        result = due(target, raise_tokens)
+        checks.append((result, *engine._summary_frontier_tokens(with_count=True), target))
+        return result
+
+    def condense_spy(*args, **kw):
+        condensed[0] += 1
+        return condense(*args, **kw)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_prepare_compression_sweep", wrapped)
+        patch.setattr(engine, "_sweep_condensation_due", due_spy)
+        patch.setattr(engine, "_condense_summary_nodes", condense_spy)
+        if main:
+            patch.setattr(compaction, "_LARGE_SWEEP_WINDOW_TOKENS", 10 ** 15)
+        engine.ingest(messages)
+        engine.compress(messages, current_tokens=current or engine.threshold_tokens, **kwargs)
+    return (*seen[0], condensed[0], checks)
 
 
 def _today(engine):
     return min(int(engine._config.leaf_chunk_tokens), int(engine.threshold_tokens * 0.25))
 
 
-def test_benefit_1m_mean_1590_takes_the_window_share(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590)
-    assert _target(engine, monkeypatch) == (50_000, True, False) and _today(engine) == 24_000
+def _live_count(engine, depth=0):
+    return len(engine._dag.get_uncondensed_at_depth("S", depth, limit=10 ** 6))
 
 
-@pytest.mark.parametrize("window, mean, expected", [(1_000_000, 400, 32_000), (2_000_000, 800, 64_000)])
-def test_clamp_80_mean_summaries(open_engine, monkeypatch, window, mean, expected):
-    engine = open_engine(window, nodes=10, mean=mean)
-    assert _target(engine, monkeypatch) == (expected, True, False)
+# -- K4 and K5: the raised target, and the unchanged paths ---------------------------------------------------------------
+
+@pytest.mark.parametrize("window, raised", [(1_000_000, 50_000), (2_000_000, 100_000)])
+def test_k5_raised_target_is_the_window_share(open_engine, monkeypatch, window, raised):
+    engine = open_engine(window, _live([1_590] * 10))
+    target, raise_tokens, active, overflow, _n, _checks = _pass(engine, monkeypatch)
+    assert (target, raise_tokens, active, overflow) == (_today(engine), raised, True, False)
 
 
-def test_clamp_never_below_todays_default(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=100)  # 80 x 100 = 8,000 < 24,000
-    assert _target(engine, monkeypatch)[0] == _today(engine) == 24_000
-
-
-def test_empty_store_keeps_todays_default(open_engine, monkeypatch):
-    engine = open_engine(1_000_000)
-    assert _target(engine, monkeypatch) == (_today(engine), True, False)
-
-
-def test_other_sessions_summaries_do_not_count(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590, session="other")
-    engine.on_session_start("S", platform="cli", context_length=1_000_000)
-    assert _target(engine, monkeypatch)[0] == _today(engine)
+@pytest.mark.parametrize("nodes, head_condensations", [([1_590] * 30, 0), ([1_590] * 33, None)])
+def test_k4_reference_shape_condenses_no_more_than_main(open_engine, monkeypatch, nodes, head_condensations):
+    """30 live 1,590-token nodes (47,700): main condenses at 24,000, raised mode does not. 33 (52,470): both do, and
+    raised mode no more than main."""
+    head = _pass(open_engine(1_000_000, _live(nodes)), monkeypatch)
+    main = _pass(open_engine(1_000_000, _live(nodes)), monkeypatch, main=True)
+    assert main[4] > 0 and head[4] <= main[4], (head[4], main[4])
+    if head_condensations is not None:
+        assert head[4] == head_condensations
+    assert all(tokens > target for due, tokens, _live_n, target in head[5] if due)  # P1 at every check
 
 
 @pytest.mark.parametrize("window", [64_000, 272_000, 480_000])
-def test_unchanged_at_or_below_480k(open_engine, monkeypatch, window):
-    engine = open_engine(window, nodes=10, mean=1_590)
-    assert _target(engine, monkeypatch)[0] == _today(engine)
+def test_k5_unchanged_at_or_below_480k(open_engine, monkeypatch, window):
+    engine = open_engine(window, _live([1_590] * 10))
+    target, raise_tokens, *_rest, checks = _pass(engine, monkeypatch)
+    assert (target, raise_tokens, checks) == (_today(engine), 0, [])
 
 
-def test_unchanged_forced(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590)
-    assert _target(engine, monkeypatch, force=True)[0] == _today(engine)
+@pytest.mark.parametrize("mode", ["forced", "recovery", "prep"])
+def test_k5_unchanged_forced_recovery_and_prep(open_engine, monkeypatch, mode):
+    engine = open_engine(1_000_000, _live([1_590] * 10), background_leaf_prep_enabled=mode == "prep")
+    kwargs = {"force": True} if mode == "forced" else {"bypass_cooldown": True} if mode == "recovery" else {}
+    target, raise_tokens, *_rest, checks = _pass(engine, monkeypatch, **kwargs)
+    assert (target, raise_tokens, checks) == (_today(engine), 0, [])
 
 
-def test_unchanged_overflow(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590, max_assembly_tokens=1_000_000)
-    target, _active, overflow = _target(engine, monkeypatch, current=1_200_000)
-    assert overflow and target == _today(engine)
+def test_k5_unchanged_overflow(open_engine, monkeypatch):
+    engine = open_engine(1_000_000, _live([1_590] * 10), max_assembly_tokens=1_000_000)
+    target, raise_tokens, _active, overflow, _n, checks = _pass(engine, monkeypatch, current=1_200_000)
+    assert overflow and (target, raise_tokens, checks) == (_today(engine), 0, [])
 
 
 @pytest.mark.parametrize("config, expected", [({"summary_prefix_target_tokens": 30_000}, 30_000),
                                               ({"summary_prefix_target_ratio": 0.01}, 10_000)])
-def test_unchanged_explicit_settings(open_engine, monkeypatch, config, expected):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590, **config)
-    assert _target(engine, monkeypatch)[0] == expected
+def test_k5_unchanged_explicit_settings(open_engine, monkeypatch, config, expected):
+    engine = open_engine(1_000_000, _live([1_590] * 10), **config)
+    target, raise_tokens, *_rest, checks = _pass(engine, monkeypatch)
+    assert (target, raise_tokens, checks) == (expected, 0, [])
 
 
-def test_unchanged_on_a_recovery_pass(open_engine, monkeypatch):
-    """A host recovery attempt (bypass_cooldown) keeps today's target, as it keeps no depth target."""
-    engine = open_engine(1_000_000, nodes=10, mean=1_590)
-    target, active, overflow = _target(engine, monkeypatch, bypass_cooldown=True)
-    assert active and not overflow and target == _today(engine)
+# -- K2: Astra's case, checked at every check -----------------------------------------------------------------------------
+
+def test_k2_condensed_big_leaves_then_96_live_then_five_leaves_never_101(open_engine, monkeypatch):
+    """Two 200-token parents over eight historical leaves, four oldest live 2,500-token leaves, 96 live 300-token
+    leaves (102 live, 39,200 tokens), then a pass with five eligible leaf chunks of 200-token leaves."""
+    history = [(0, 2_500, ())] * 8
+    engine = open_engine(1_000_000, history, context_threshold=0.5, fresh_tail_count=2)
+    leaves = [node.node_id for node in engine._dag.get_session_nodes("S", limit=100)]
+    for group in range(2):
+        engine._dag.add_node(SummaryNode(session_id="S", depth=1, summary="x" * 800, token_count=200,
+                                         source_ids=leaves[4 * group:4 * group + 4], source_type="nodes",
+                                         created_at=50.0 + group, expand_hint="turns"))
+    for index, tokens in enumerate([2_500] * 4 + [300] * 96):
+        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary="x" * (4 * tokens), token_count=tokens,
+                                         source_ids=[], created_at=100.0 + index, expand_hint="turns"))
+    assert engine._summary_frontier_tokens(with_count=True) == (39_200, 102)
+    rows = [row for i in range(76) for row in ({"role": "user", "content": f"[U{i}] question{PAD}"},
+                                               {"role": "assistant", "content": f"[A{i}] answer{PAD}"})]
+    target, raise_tokens, *_rest, condensed, checks = _pass(engine, monkeypatch, messages=rows,
+                                                            current=engine.threshold_tokens + 140_000)
+    assert (target, raise_tokens) == (24_000, 50_000) and condensed > 0, (target, raise_tokens, condensed)
+    stops = [(tokens, live) for due, tokens, live, _t in checks if not due]
+    assert stops and all(live <= 80 or tokens <= target for tokens, live in stops), stops  # P2 at every check
+    assert all(tokens > target for due, tokens, _live_n, _t in checks if due)  # P1 at every check
+    status = engine.get_status()["threshold_full_sweep"]
+    assert status["leaf_passes"] >= 5, status
+    assert _live_count(engine) <= 92, _live_count(engine)
 
 
-def test_unchanged_with_background_leaf_prep_on(open_engine, monkeypatch):
-    """Chained promotions can add more than 20 leaves in one sweep, so preparation on keeps today's target."""
-    engine = open_engine(1_000_000, nodes=10, mean=1_590, background_leaf_prep_enabled=True)
-    assert _target(engine, monkeypatch)[0] == _today(engine)
+# -- K7: the frontier read --------------------------------------------------------------------------------------------
+
+def test_k7_frontier_read_same_tokens_and_its_count(open_engine):
+    engine = open_engine(1_000_000, _live([0, 5, 1_590, 300]) + [(1, 700, ())])
+    nodes = engine._summary_frontier_nodes()
+    tokens = sum(node.token_count for node in nodes)
+    assert engine._summary_frontier_tokens() == tokens == 2_595
+    assert engine._summary_frontier_tokens(with_count=True) == (tokens, len(nodes)) == (2_595, 5)
 
 
-def test_condensed_nodes_leave_the_mean(open_engine, monkeypatch):
-    """Only the live frontier counts: four 2,400-token leaves under one 600-token parent count as that parent."""
-    engine = open_engine(1_000_000, nodes=10, mean=400)
-    old = [engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary="x" * 9_600, token_count=2_400,
-                                            source_ids=[], created_at=time.time(), expand_hint="turns"))
-           for _ in range(4)]
-    engine._dag.add_node(SummaryNode(session_id="S", depth=1, summary="x" * 2_400, token_count=600, source_ids=old,
-                                     source_type="nodes", created_at=time.time(), expand_hint="turns"))
-    assert engine._dag.live_frontier_tokens("S") == (11, 4_000 + 600)
-    assert _target(engine, monkeypatch)[0] == 80 * (4_600 // 11) == 33_440
-
-
-def test_one_indexed_aggregate_per_sweep(open_engine, monkeypatch):
-    engine = open_engine(1_000_000, nodes=10, mean=1_590)
-    statements = []
-    engine._dag._conn.set_trace_callback(statements.append)
-    try:
-        _target(engine, monkeypatch)
-    finally:
-        engine._dag._conn.set_trace_callback(None)
-    aggregate = [s for s in statements if AGGREGATE in s]
-    assert len(aggregate) == 1, aggregate
-    plan = [str(row[-1]) for row in engine._dag._conn.execute("EXPLAIN QUERY PLAN " + aggregate[0])]
-    searches = [step for step in plan if "summary_nodes" in step]
-    assert searches and all(step.startswith("SEARCH") and "INDEX idx_nodes_session" in step for step in searches), plan
-    assert engine._dag.live_frontier_tokens("S") == (10, 15_900)
-
-
-# -- the hole: the view shows only the newest 100 uncondensed summaries per level ---------------------------------------
-
-HOLE = {"group": "D", "id": "d-hole-1m", "window": 1_000_000, "pre": 0, "estimate": None, "call": 2, "delta": 0,
-        "finalize": 32, "chunk": 1_500, "row_tokens": 250, "raw_tokens": 120_000, "over_tokens": 10_000,
-        "growth_tokens": 20_000, "passes": 20, "turn_gap": 60, "prefix": "none", "summary_tokens": 300,
-        "settings": {"dynamic_leaf_chunk_enabled": False}}
-UNCLAMPED = "mods['dag'].SummaryDAG.live_frontier_tokens = lambda self, session_id: (1, 10 ** 12)\n"
-
-
-def _depth0_peak(run) -> int:
-    return max(r["uncondensed"].get("0", 0) for r in run["by_cell"][HOLE["id"]])
-
-
-@pytest.fixture(scope="module")
-def hole(tmp_path_factory):
-    out = tmp_path_factory.mktemp("issue-2869")
-    grid.PATCHES.setdefault("unclamped_2869", UNCLAMPED)
-    extra = grid._extra_paths()
-    with pytest.MonkeyPatch.context() as patch:
-        if not any((Path(entry) / "agent" / "context_engine.py").is_file() for entry in extra):
-            # CI writes the host stub at the repo root, inside the tree the runner may not import from: hand it a copy.
-            import agent.context_engine as host
-            shutil.copytree(Path(host.__file__).parent, out / "host" / "agent")
-            patch.setattr(grid, "_extra_paths", lambda: [*extra, str(out / "host")])
-        runs = {"clamped": grid._run(grid.CAND_TREE, [HOLE], out, "clamped"),
-                "unclamped": grid._run(grid.CAND_TREE, [HOLE], out, "unclamped", patch="unclamped_2869")}
-        if os.environ.get("LCMX_2869_UNCLAMPED"):
-            runs["window_only_tree"] = grid._run(Path(os.environ["LCMX_2869_UNCLAMPED"]).resolve(), [HOLE], out, "tree")
-    return runs
-
-
-def test_hole_premise_the_window_only_target_passes_100(hole):
-    assert _depth0_peak(hole["unclamped"]) > grid.DEPTH_LIMIT, _depth0_peak(hole["unclamped"])
-    if "window_only_tree" in hole:
-        assert _depth0_peak(hole["window_only_tree"]) > grid.DEPTH_LIMIT, _depth0_peak(hole["window_only_tree"])
-
-
-def test_hole_the_clamped_target_stays_under_100(hole):
-    records = hole["clamped"]["by_cell"][HOLE["id"]]
-    assert len(records) == HOLE["passes"] and sum(r["leaves"] for r in records) > grid.DEPTH_LIMIT
-    assert _depth0_peak(hole["clamped"]) <= grid.DEPTH_LIMIT, _depth0_peak(hole["clamped"])
+def test_k7_unengaged_pass_never_reads_the_count(open_engine, monkeypatch):
+    """At 272,000 the frontier is over today's target and the sweep condenses through main's comparison only."""
+    engine = open_engine(272_000, _live([1_590] * 40))
+    calls = []
+    frontier = engine._summary_frontier_tokens
+    monkeypatch.setattr(engine, "_summary_frontier_tokens", lambda **kw: (calls.append(kw), frontier(**kw))[1])
+    _target, raise_tokens, *_rest, condensed, checks = _pass(engine, monkeypatch)
+    assert raise_tokens == 0 and checks == [] and condensed > 0
+    assert calls and all(kw == {} for kw in calls), calls

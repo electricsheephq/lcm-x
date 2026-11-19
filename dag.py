@@ -610,19 +610,6 @@ class SummaryDAG:
             samples[int(depth)] = [self._row_to_node(row) for row in rows]
         return samples
 
-    def live_frontier_tokens(self, session_id: str) -> tuple[int, int]:
-        """#2869: (live nodes, their stored token_count sum) of the session's summary frontier, the set and the unit
-        the sweep compares with its target (engine._summary_frontier_tokens), in one statement."""
-        with self._db_lock:
-            count, total = self._conn.execute(
-                """SELECT COUNT(*), COALESCE(SUM(token_count), 0) FROM summary_nodes
-                   WHERE session_id = ? AND node_id NOT IN (
-                       SELECT json_each.value FROM summary_nodes p, json_each(p.source_ids)
-                       WHERE p.session_id = ? AND p.source_type = 'nodes')""",
-                (session_id, session_id),
-            ).fetchone()
-        return int(count), int(total)
-
     def get_uncondensed_at_depth(self, session_id: str, depth: int,
                                   limit: int = 100, newest: bool = False) -> List[SummaryNode]:
         """Get nodes at a depth that haven't been condensed yet.
