@@ -836,15 +836,21 @@ def test_recovery_cells_bounded_lag(grid, cell):
         """Round 2 (4) and round 3 (3), T1-324: publications per pass over whole firing cycles, from the first firing
         to the last, with half of the first and half of the last firing's count inside that span (each borders a cycle
         outside it). The open cycle after the last firing is left out, unless it has run past one hold period (the
-        tree stopped firing), when it counts whole, to the end of the walk."""
+        tree stopped firing), when it counts whole, to the end of the walk. F4: an open tail of at least hold_passes
+        idle passes counts as stopped."""
         fired = [(r["pass"], r["leaves"] + r["condensations"]) for r in records if r["leaves"] + r["condensations"]]
         if not fired:
             return 0.0
-        if len(fired) == 1 or len(records) - fired[-1][0] > hold_passes:
+        if len(fired) == 1 or len(records) - 1 - fired[-1][0] >= hold_passes:
             return sum(n for _, n in fired) / (len(records) - fired[0][0])
         inside = fired[0][1] / 2 + sum(n for _, n in fired[1:-1]) + fired[-1][1] / 2
         return inside / (fired[-1][0] - fired[0][0])
     assert rate(cand) >= rate(base), f"{cell}: rate {rate(cand):.3f} < base {rate(base):.3f}"
+    # T1-337 (a): eligible work left unfired. Once the candidate has gone a hold period or more without a firing, a pass
+    # whose prompt is at or over its trigger is work it no longer does (a large early burst cannot buy that off)
+    last = max((r["pass"] for r in cand if r["leaves"] + r["condensations"]), default=-1)
+    starved = [r["pass"] for r in cand if r["pass"] - last >= hold_passes and r["prompt_before"] >= r["trigger"]]
+    assert not starved, f"{cell}: eligible work, no firing for a hold period or more, at passes {starved}"
 
 
 def test_stale_estimate_no_extension_leaf_below_the_mark(grid):
@@ -925,7 +931,8 @@ def test_no_candidate_only_frontier_scan_before_the_leaf(grid_dir):
 # on both trees. FAIL_IF sees ``n`` (the call's number in the walk), ``p`` (the pass), ``idx`` (the call's index in the
 # pass), ``ext`` (an extension-only call), ``fb`` (a call on the fallback route) and ``kind`` (a condensation while
 # _condense_summary_nodes runs, else a leaf); a failure ends at
-# ``END``. Per call the patch tags ``call_cut_flags``: a failure is "ext_fail" or "fail" (base-admitted), prefixed
+# ``END``. ``p`` starts at -2: reset_pass runs in the Provider's constructor and again before pass 0. Per call the
+# patch tags ``call_cut_flags``: a failure is "ext_fail" or "fail" (base-admitted), prefixed
 # "fb_" on the fallback route, and a fallback call that succeeds is "fb_call". At the end of each pass it adds
 # "pass:summary_failure" when the budget's sticky summary failure is set, and "pass:fb_open" while the fallback's
 # circuit is not closed. ``SETUP`` runs first.
@@ -934,7 +941,7 @@ _FAILING = (
     "SETUP\n"
     "_P = _sys.modules['__main__'].Provider\n"
     "_orig, _reset, _admit = _P.__call__, _P.reset_pass, escalation.ForegroundBudget.admit\n"
-    "_st = {'end': -1e9, 'n': 0, 'p': -1, 'ext': False, 'b': None, 'prov': None, 'cond': False}\n"
+    "_st = {'end': -1e9, 'n': 0, 'p': -2, 'ext': False, 'b': None, 'prov': None, 'cond': False}\n"
     "_cs = engine.LCMEngine._condense_summary_nodes\n"
     "def _cs_seen(self, *args, _cs=_cs, **kwargs):\n"
     "    _st['cond'] = True\n"
@@ -1043,7 +1050,7 @@ def test_extension_call_failure_counts_nothing(grid_dir, variant):
     route chain (no fallback call follows it in the pass) and leaves the budget's sticky summary failure as the base
     leaves it; base-admitted calls are charged as before. Per pass: the candidate's cumulative leaves at least the
     base's (A1's excuse: its prompt under its trigger and at or below the base's), at most one failed extension call,
-    no fallback call after one, no open circuit (primary or fallback) the base does not have, and a summary failure
+    no call of any route after one (only the pass: diagnostics follow it), no open circuit (primary or fallback) the base does not have, and a summary failure
     only with a base-admitted failure. With the primary route down (fb_down) the prompt is also never above the base's
     (with the same excuse)."""
     cell = _FAILING_CELLS[variant]
@@ -1058,8 +1065,8 @@ def test_extension_call_failure_counts_nothing(grid_dir, variant):
             f"{where}: circuit {c['circuit']}, base {b['circuit']}")
         assert flags.count("ext_fail") + flags.count("fb_ext_fail") <= 1, f"{where}: {flags}"
         failed = [i for i, flag in enumerate(flags) if flag in ("ext_fail", "fb_ext_fail")]
-        after = [flag for flag in flags[failed[0] + 1:] if str(flag).startswith("fb_")] if failed else []
-        assert not after, f"{where}: a fallback call after the extension-only failure: {flags}"
+        after = [flag for flag in flags[failed[0] + 1:] if not str(flag).startswith("pass:")] if failed else []
+        assert not after, f"{where}: a call after the extension-only failure: {flags}"
         assert "pass:fb_open" not in flags or "pass:fb_open" in b["call_cut_flags"], f"{where}: fallback circuit"
         assert "pass:summary_failure" not in flags or {"fail", "fb_fail"} & set(flags), (
             f"{where}: the sticky summary failure names an extension-only failure: {flags}")

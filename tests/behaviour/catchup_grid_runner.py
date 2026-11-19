@@ -277,6 +277,8 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
                 "context_threshold": 0.5, "threshold_full_sweep_enabled": True, "max_assembly_tokens": window,
                 "l3_truncate_tokens": 2, "summary_timeout_ms": 120_000,
                 "database_path": str(workdir / f"{cell['id']}.db"), **cell.get("settings", {})}
+    if Path(settings["database_path"]).exists():  # F3: a cell never starts on a store an earlier run left
+        raise SystemExit(f"refusing: {settings['database_path']} already exists")
     engine = mods["engine"].LCMEngine(config=mods["config"].LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=window, conversation_id="conv")
     if cell.get("depth_ratio"):

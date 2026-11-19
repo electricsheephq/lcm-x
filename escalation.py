@@ -1208,7 +1208,7 @@ def _invoke_summary_llm_routes(
         if extended and outcome.hang:  # design B: an extension-only call is never classed a hang
             outcome = replace(outcome, hang=False, record_hang=False)
         if extended and error is not None and outcome.kind is not SummaryOutcomeKind.FAILURE:
-            note_error(error)  # design B: an extension-only failure leaves summary_failure as the base leaves it
+            note_error(error)  # design B: the chain end covers a FAILURE only; other kinds keep the base handling
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)
