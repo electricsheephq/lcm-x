@@ -295,7 +295,7 @@ class TestChunkRetryUncertainSpans:
 
 
 class TestChunkRawTextConsentGate:
-    def _voyage_engine(self, tmp_path):
+    def _voyage_engine(self, tmp_path, *, privacy=None):
         tmp_path.mkdir(parents=True, exist_ok=True)
         db_path = tmp_path / "backfill.db"
         config = LCMConfig(
@@ -304,6 +304,7 @@ class TestChunkRawTextConsentGate:
             embedding_provider="voyage",
             embedding_model="voyage-3",
             sensitive_patterns_enabled=True,
+            embedding_privacy_enabled=privacy,
         )
         engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=db_path))
         _seed_messages(engine, _user_msgs(2), register=False)
@@ -330,7 +331,22 @@ class TestChunkRawTextConsentGate:
         assert "status: refused" in out
         assert "RAW, VERBATIM" in out
         assert "--confirm-raw-text" in out
+        # The filter is off by default (#2977): the refusal must not claim that anything is removed.
+        assert "No provider-input privacy filter is applied" in out
+        assert "privacy transform removes" not in out
         # Nothing was sent to the cloud provider and nothing was written.
+        assert provider.calls == []
+
+    def test_cloud_refusal_names_the_filter_only_when_opted_in(self, monkeypatch, tmp_path):
+        engine = self._voyage_engine(tmp_path, privacy=True)
+        provider = FakeProvider()
+        monkeypatch.setattr(command_mod, "resolve_provider", lambda _c, **_k: provider)
+
+        out = handle_lcm_command("embed backfill --corpus chunks --apply", engine)
+
+        assert "status: refused" in out
+        assert "privacy transform removes configured detector matches" in out
+        assert "No provider-input privacy filter is applied" not in out
         assert provider.calls == []
         assert _chunk_meta_ids(engine) == []
 

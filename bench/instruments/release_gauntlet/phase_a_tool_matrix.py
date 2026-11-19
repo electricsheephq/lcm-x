@@ -788,7 +788,8 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
     batteries = []
     try:
         outbound = []
-        cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-default-", dir=state_root)), "cloud", patterns=False)
+        # The planted-secret battery tests the opt-in filter (off by default since #2977), so it opts in.
+        cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-default-", dir=state_root)), "cloud", patterns=False, embedding_privacy=True)
         try:
             context = _seed(mod, cloud)
             try:
@@ -816,7 +817,7 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
             opt_out.shutdown()
 
         outbound = []
-        redacted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-durable-redaction-", dir=state_root)), "cloud", patterns=True)
+        redacted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-durable-redaction-", dir=state_root)), "cloud", patterns=True, embedding_privacy=True)
         try:
             known = _durable_redaction(mod, redacted, outbound, expect_365_fixed=expect_365_fixed)
             batteries.append(("durable-redaction", "KNOWN-LEAK-ON-BASE" if known else "PASS", "opt-in durable, dispatch, revision, recall checks passed"))
