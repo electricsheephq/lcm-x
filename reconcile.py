@@ -445,11 +445,11 @@ _REPLAY_IDENTITY_MEMO_MAX_BRACKETS = 200
 
 
 def _replay_identity_text_is_shallow(text: str) -> bool:
-    # A JSON string escapes a bracket as \u005b or \u007b; canonicalisation decodes nested JSON strings, so an
-    # escaped bracket becomes a real one a level down and counts toward the same bound.
-    folded = text.lower()
-    return (folded.count("[") + folded.count("{") + folded.count("\\u005b") + folded.count("\\u007b")
-            <= _REPLAY_IDENTITY_MEMO_MAX_BRACKETS)
+    # Canonicalisation decodes JSON strings found inside decoded JSON, and an escape can spell a bracket or another
+    # backslash (\u005b, \u005c...). Every escape starts with one backslash and decodes to one character, so the
+    # number of '[', '{' and '\\' characters never grows from one decode to the next: counting all three bounds the
+    # nesting any decode depth can reach.
+    return text.count("[") + text.count("{") + text.count("\\") <= _REPLAY_IDENTITY_MEMO_MAX_BRACKETS
 
 
 def _shallow_replay_identity_text(text: str) -> str:
@@ -458,19 +458,24 @@ def _shallow_replay_identity_text(text: str) -> str:
     return text
 
 
-def _freeze_replay_identity_value(value: Any) -> tuple:
+_REPLAY_IDENTITY_MEMO_MAX_DEPTH = 32  # containers nested deeper than this are never remembered (encoding depth)
+
+
+def _freeze_replay_identity_value(value: Any, depth: int = 0) -> tuple:
     """A hashable, type-tagged copy of a plain JSON value (exact str, int, float, bool, None, list, and dict with
     exact str keys, all the way down): True/1/1.0 never collide, dicts keep item order, floats compare by repr.
     Anything else raises TypeError (no memo): its identity may fall back to ``str(value)``."""
     kind = type(value)
+    if depth > _REPLAY_IDENTITY_MEMO_MAX_DEPTH:
+        raise TypeError("not a replay identity memo input")
     if kind is str:
         return ("s", _shallow_replay_identity_text(value))
     if kind is dict:
         if any(type(k) is not str or not _replay_identity_text_is_shallow(k) for k in value):
             raise TypeError("not a replay identity memo input")
-        return ("d", tuple((("s", k), _freeze_replay_identity_value(v)) for k, v in value.items()))
+        return ("d", tuple((("s", k), _freeze_replay_identity_value(v, depth + 1)) for k, v in value.items()))
     if kind is list:
-        return ("l", tuple(_freeze_replay_identity_value(v) for v in value))
+        return ("l", tuple(_freeze_replay_identity_value(v, depth + 1) for v in value))
     if kind is bool:
         return ("b", value)
     if kind is int:

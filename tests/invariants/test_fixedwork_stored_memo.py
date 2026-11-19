@@ -625,3 +625,20 @@ def test_deeply_bracketed_text_is_never_remembered(stored_row):
     nested = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": escaped}}]
     assert escaped.count("[") == 0
     assert not _admitted({"role": "assistant", "content": "x", "tool_calls": nested, "session_id": "S"}, stored_row)
+
+
+@pytest.mark.parametrize("stored_row", [False, True])
+def test_escape_chains_and_deep_containers_are_never_remembered(stored_row):
+    """Each JSON decode turns one escape (one backslash) into one character, so '[', '{' and '\\' together never grow
+    across decodes; a chain like \\u005cu005b that only becomes a bracket two decodes down still counts. Containers
+    nested past the depth bound are refused too."""
+    chain = r'{"a":"[\"' + r"\u005b" * 420 + "0" + "]" * 420 + r'\"]"}'
+    calls = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": chain}}]
+    assert not _admitted({"role": "assistant", "content": "x", "tool_calls": calls, "session_id": "S"}, stored_row)
+    deep = 0
+    for _ in range(reconcile._REPLAY_IDENTITY_MEMO_MAX_DEPTH + 2):
+        deep = [deep]
+    calls = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}, "extra": deep}]
+    assert not _admitted({"role": "assistant", "content": "x", "tool_calls": calls, "session_id": "S"}, stored_row)
+    shallow = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": '{"path": "a\\\\b"}'}}]
+    assert _admitted({"role": "assistant", "content": "x", "tool_calls": shallow, "session_id": "S"}, stored_row)
