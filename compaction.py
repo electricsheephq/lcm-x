@@ -65,6 +65,7 @@ from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 _UNPROVEN_FILTER_EXCLUSION = object()
 _RETAINED_NOOP_REASON = "leaf would end before an unresolved retained occurrence"  # #581; #1162 names the row
+_NO_LEAF_ASSEMBLY_SELECTION_ROOM = sys.maxsize
 
 logger = logging.getLogger(__name__)
 _compaction_binding_check = ContextVar("_compaction_binding_check", default=(None, None))
@@ -852,11 +853,16 @@ class CompactionMixin:
                 return messages
             self._compress_occurrences = None
             scope = _UID_DROP_INPUT.get()
+            restore_trimmed = False
             if budget.leaves and scope is not None:
                 if scope.matches_binding():
-                    result = self._guard_uid_covered_drop(result)
+                    guarded = self._guard_uid_covered_drop(result)
+                    restore_trimmed = scope.uid_trimmed and guarded is not result
+                    result = guarded
             elif scope is not None and scope.uid_trimmed and result is not messages:
-                result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=False)
+                restore_trimmed = True
+            if restore_trimmed:
+                result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=True)
                 if scope.matches_binding():
                     self._ingest_cursor = len(result)
                     self._compress_host_rows_consumed = 0
@@ -2857,11 +2863,15 @@ class CompactionMixin:
             return None
         working = [row for index, row in enumerate(before) if index not in drops]
         if leading < len(working) and (remainder := self._generated_context_carrier_remainder(working[leading])) is not None:
-            absorbed = working[leading].get("_absorbed_message_uids") or ()
-            if len(absorbed) > 1:
+            row = working[leading]
+            own = row.get("message_uid")
+            absorbed = row.get("_absorbed_message_uids") or ()
+            if len(absorbed) > 1 or not isinstance(own, str) or self._host_uid_engine_uids({own, *absorbed}) != {own}:
                 return None
             working[leading] = {"role": "user", "content": remainder}
             if absorbed:
+                # Deliberately differ from survival fit: the opening user's
+                # stored row can lack a UID binding until the next cold bind.
                 working[leading]["message_uid"] = absorbed[0]
         return working, True, bool(resumed), resumed[0] - start if resumed else 0
 
@@ -2897,7 +2907,7 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         if not state.leaf_compacted_this_turn:
-            uid_base = scope_legacy = False
+            uid_base = restored_uid_trim = False
             if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is not self:
                 scope = None
             if scope is not None and scope.uid_trimmed:
@@ -2909,6 +2919,7 @@ class CompactionMixin:
                 else:
                     state.working_messages = scope.before
                     state.dropped_replayed_scaffold_messages = state.resumed_prefix = False
+                    restored_uid_trim = True
                 if scope.matches_binding():
                     self._compress_host_rows_consumed = 0
                     if state.sweep_stop_reason == "time_budget_exhausted":
@@ -2918,7 +2929,6 @@ class CompactionMixin:
             elif scope is not None and scope.legacy_replay is not None:
                 (state.working_messages, state.dropped_replayed_scaffold_messages,
                  state.resumed_prefix, state.resumed_ahead) = scope.legacy_replay
-                scope_legacy = True
             if state.pre_leaf_condensation_reason == "summary_result_rejected":
                 warn_rejected()
             if state.sweep_stop_reason == "time_budget_exhausted":
@@ -2958,8 +2968,9 @@ class CompactionMixin:
                 state.working_messages,
                 state.preexisting_dependent_reply_records,
             )
+            adopted_assembly_cap = None
             kept_replayed_head = (  # #2854; under the uid mode the base's replay decision below stays
-                (not uid_recognition_enabled(self) or uid_base or scope_legacy)
+                (not uid_recognition_enabled(self) or uid_base)
                 and state.dropped_replayed_scaffold_messages and not state.pre_leaf_condensation_passes
                 and not (state.resumed_prefix or state.ingest_cleanup_changed_active_context
                          or self._compress_dropped_ignored_rows or self._ingest_cursor_needs_reconcile)
@@ -2973,19 +2984,27 @@ class CompactionMixin:
                 and (active_tail := active_context_messages[self._leading_anchor_count(active_context_messages):])
                 == self._stub_large_tool_results_for_active_replay(active_tail, write=False)
             )
+            leading_anchor_count = (
+                self._leading_anchor_count(active_context_messages)
+                if uid_base or (not kept_replayed_head and state.dropped_replayed_scaffold_messages) else 0
+            )
             if kept_replayed_head:
                 sanitized_messages = messages
             elif state.dropped_replayed_scaffold_messages:
-                leading_anchor_count = self._leading_anchor_count(active_context_messages)
                 if state.resumed_ahead == 1 and leading_anchor_count == 1 and active_context_messages[1].get("role") == "user":
                     leading_anchor_count = 2  # #457: attempt 1's retained anchor, kept, goes back ahead of its summary
                 anchor_leading_count = self._leading_anchor_count(state.anchor_source_messages)
                 self._pending_context_anchor_messages = state.anchor_source_messages[anchor_leading_count:]
                 try:
+                    if uid_base:
+                        adopted_assembly_cap = self._effective_assembly_token_cap()
                     sanitized_messages = self._assemble_context(
                         active_context_messages[0] if leading_anchor_count else None,
                         active_context_messages[leading_anchor_count:],
-                        assembly_cap_override=state.recovery_assembly_cap,
+                        assembly_cap_override=(
+                            _NO_LEAF_ASSEMBLY_SELECTION_ROOM if adopted_assembly_cap is not None
+                            else state.recovery_assembly_cap
+                        ),
                         **(
                             {"retained_user_message": active_context_messages[1]}
                             if leading_anchor_count == 2
@@ -2997,8 +3016,10 @@ class CompactionMixin:
             else:
                 sanitized_messages = self._sanitize_active_context_messages(
                     active_context_messages,
-                    insert_missing_tool_stubs=False,
+                    insert_missing_tool_stubs=restored_uid_trim,
                 )
+                if restored_uid_trim and scope.matches_binding():
+                    self._ingest_cursor = len(sanitized_messages)
             if uid_base:
                 if not kept_replayed_head:
                     guarded = self._guard_uid_covered_drop(sanitized_messages)
@@ -3008,7 +3029,9 @@ class CompactionMixin:
                     emitted_uids = {uid for row in sanitized_messages
                                     for uid in (row.get("message_uid"), *(row.get("_absorbed_message_uids") or ()))
                                     if isinstance(uid, str) and uid}
-                    if guarded is not sanitized_messages or not tail_uids <= emitted_uids:
+                    if (guarded is not sanitized_messages or not tail_uids <= emitted_uids
+                            or (adopted_assembly_cap is not None
+                                and count_messages_tokens(sanitized_messages) > adopted_assembly_cap)):
                         sanitized_messages = self._sanitize_active_context_messages(
                             scope.before, insert_missing_tool_stubs=True,
                         )
