@@ -341,10 +341,27 @@ class _TailReplayRun:
     engine_prefix_digests: dict[int, str] = field(init=False)
     session_end_prefix_digests: dict[int, str] = field(init=False)
     # Pure identity transforms, scoped to this reconciliation invocation.
+    # The prepared messages list retains every object used as an id key.
+    literal_pruned_identities: dict[int, tuple[str, str, str, str, str]] = field(default_factory=dict, init=False)
+    persisted_marker_texts: dict[int, str] = field(default_factory=dict, init=False)
+    cleanup_identities: dict[
+        tuple[str, str, str, str, str], tuple[str, str, str, str, str] | None
+    ] = field(default_factory=dict, init=False)
     generationless_identities: dict[
         tuple[str, str, str, str, str], tuple[str, str, str, str, str]
     ] = field(default_factory=dict, init=False)
     generationless_sanitized_tail: list[tuple[str, str, str, str, str]] | None = field(default=None, init=False)
+
+    def persisted_marker_text(self, msg: Dict[str, Any]) -> str:
+        text = self.persisted_marker_texts.get(id(msg))
+        if text is None:
+            text = ""
+            if str(msg.get("role") or "") == "tool":
+                content = normalize_content_value(msg.get("content")) or ""
+                if _is_hermes_persisted_output_marker(content):
+                    text = content
+            self.persisted_marker_texts[id(msg)] = text
+        return text
 
 
 @dataclass(eq=False, repr=False)
@@ -2273,11 +2290,7 @@ class ReconcileMixin:
         candidate_prefix = candidate.candidate_prefix
         matches_raw_tail = candidate.matches_raw_tail
 
-        candidate_has_persisted_marker = any(
-            str(msg.get("role") or "") == "tool"
-            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
-            for msg in candidate_identity_messages
-        )
+        candidate_has_persisted_marker = any(map(run.persisted_marker_text, candidate_identity_messages))
         matches_durable_persisted_output_full_replay = self._matches_persisted_output_durable_full_replay(
             candidate_identity_messages,
             candidate_prefix,
@@ -2285,10 +2298,9 @@ class ReconcileMixin:
             stored_tail_rows,
         )
         candidate_has_unrecoverable_persisted_marker = any(
-            str(msg.get("role") or "") == "tool"
-            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+            (text := run.persisted_marker_text(msg))
             and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or "",
+                text,
                 hermes_home=self._hermes_home,
             )
             is None
@@ -2317,10 +2329,15 @@ class ReconcileMixin:
                 generationless_candidate_prefix,
             )
         raw_tail_suffix = stored_tail[-len(candidate_prefix) :] if matches_raw_tail else []
-        raw_suffix_needs_cleanup_equivalence = any(
-            self._active_cleanup_replay_identity(identity) != identity
-            for identity in raw_tail_suffix
-        )
+        raw_suffix_needs_cleanup_equivalence = False
+        for identity in raw_tail_suffix:
+            if identity in run.cleanup_identities:
+                cleaned = run.cleanup_identities[identity]
+            else:
+                cleaned = run.cleanup_identities[identity] = self._active_cleanup_replay_identity(identity)
+            if cleaned != identity:
+                raw_suffix_needs_cleanup_equivalence = True
+                break
 
         candidate.candidate_has_persisted_marker = candidate_has_persisted_marker
         candidate.matches_durable_persisted_output_full_replay = matches_durable_persisted_output_full_replay
@@ -2587,6 +2604,21 @@ class ReconcileMixin:
         candidate.has_scaffold_suffix_replay = has_scaffold_suffix_replay
         candidate.has_raw_cleanup_replay = has_raw_cleanup_replay
 
+    def _literal_pruned_replay_identity(
+        self, run: _TailReplayRun, msg: Dict[str, Any],
+    ) -> tuple[str, str, str, str, str]:
+        # pruned_source_ids guarantees literal placeholder content and a tool role.
+        # With aliasing disabled, only a survival mark in tool calls could lead
+        # to a durable source and a subsequent payload read.
+        calls = msg.get("tool_calls")
+        if calls is not None and not (type(calls) is list and not calls):
+            return self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+        identity = run.literal_pruned_identities.get(id(msg))
+        if identity is None:
+            identity = self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+            run.literal_pruned_identities[id(msg)] = identity
+        return identity
+
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
@@ -2642,7 +2674,7 @@ class ReconcileMixin:
                 continue
 
             literal_visible_prefix = [
-                self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+                self._literal_pruned_replay_identity(run, msg)
                 if id(msg) in pruned_source_ids else active_identity(msg)
                 for msg in candidate_visible_messages
             ]
@@ -2667,10 +2699,9 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(stored_tail, candidate_visible_prefix, literal_visible_prefix)
             )
             early_candidate_has_unrecoverable_persisted_marker = any(
-                str(msg.get("role") or "") == "tool"
-                and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+                (text := run.persisted_marker_text(msg))
                 and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or "",
+                    text,
                     hermes_home=self._hermes_home,
                 )
                 is None
