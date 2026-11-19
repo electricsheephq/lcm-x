@@ -7,6 +7,7 @@ import hermes_lcm.engine as lcm_engine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
+from tests.test_issue_2890_lineage_guard import _rendered_sources, _summary_spans
 
 
 def _tool_chain(*, count: int = 8, content_size: int = 160) -> list[dict]:
@@ -601,6 +602,10 @@ def test_second_real_user_disqualifies_first_raw_anchor(
         anchor_metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )
+        rendered = {node for row in second_result for _, _, nodes in _summary_spans(engine, row.get("content") or "")
+                    for node in nodes}
+        assert engine._store.get(2)["content"] == first_user["content"]
+        assert 2 in _rendered_sources(engine, rendered)
     finally:
         engine.shutdown()
 

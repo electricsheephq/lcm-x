@@ -822,6 +822,10 @@
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
     },
+    "stop-reason-retained-escape": {
+      "outcome_sha": "e33ccaf1cd8b86a1f3c632324dd424aedb3ce539244007ac73d9e9aad1cb6a1a",
+      "reason": "#2890: a leaf no longer consumes a host row its node does not name. An empty unmapped assistant row is left to the active-context cleanup. The returned lists are identical."
+    },
     "transcript-gc-locked": {
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."

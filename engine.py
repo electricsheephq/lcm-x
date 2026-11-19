@@ -1455,6 +1455,7 @@ class LCMEngine(
         self._unregister_active_engine_binding()
         self._host_session_db = None  # #2624: a host reader never crosses profile homes
         self._session_id = ""
+        self._retained_anchor_orphan_id = 0
         self._session_platform = ""
         self._foreground_session_id = ""
         self._foreground_session_platform = ""
@@ -3917,7 +3918,7 @@ class LCMEngine(
                     self._replay_identity_sha256(messages[1]),
                 )
                 return registered_row
-            self._write_retained_user_anchor(None)
+            self._release_retained_user_anchor(registered_row)
             return None
         durable_users = self._durable_real_user_messages()
         if len(durable_users) != 1:
@@ -3935,6 +3936,20 @@ class LCMEngine(
             self._replay_identity_sha256(messages[1]),
         )
         return row
+
+    def _release_retained_user_anchor(self, row: Dict[str, Any]) -> None:
+        """#2890: keep a released, publication-excluded anchor mappable until a leaf names it."""
+        store_id = int(row.get("store_id") or 0)
+        if 0 < store_id <= int(self._last_compacted_store_id or 0) and not self._store_complete_node_covered([store_id]):
+            self._retained_anchor_orphan_id = store_id
+            return
+        self._write_retained_user_anchor(None)
+
+    def _clear_named_retained_anchor(self, published_ids) -> None:
+        store_id = self._retained_anchor_orphan_id
+        if store_id and store_id in published_ids:
+            self._retained_anchor_orphan_id = 0
+            self._write_retained_user_anchor(None)
 
     def _leading_anchor_count(self, messages: List[Dict[str, Any]]) -> int:
         """Return the number of non-compactable leading messages.
@@ -4081,6 +4096,8 @@ class LCMEngine(
                 pass  # Diagnostics cannot change bind outcomes.
 
     def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
+        if self._session_id != session_id:
+            self._retained_anchor_orphan_id = 0
         self._session_id = session_id
         self._session_platform = str(kwargs.get("platform") or "")
         self._refresh_session_filters()

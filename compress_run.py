@@ -10,6 +10,7 @@ class CompressRun:
     """The active map. compress() scopes its pass-level replacements to the pass (#2344); other replacements are temporary scopes."""
 
     store_ids_by_message_id: dict[int, int] = field(default_factory=dict)
+    leaf_claim_counts: dict[str, int] = field(default_factory=dict)
 
     def preserve_store_ids(self) -> AbstractContextManager[None]:
         """Capture now, then restore around the caller's existing protected body.
