@@ -128,11 +128,11 @@ def created_at(stamp):
     """ISO 8601 UTC for a timezone-aware time, else None (naive or free-text times are never guessed)."""
     try:
         parsed = datetime.fromisoformat(stamp.strip().replace('Z', '+00:00'))
-    except ValueError:
+        if parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    except (ValueError, OverflowError):  # unparseable, or past datetime's bounds in UTC
         return None
-    if parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def with_item_fields(result):
@@ -454,6 +454,8 @@ def configure_adapter(root):
                       PYTHONDONTWRITEBYTECODE='1')
     for variable in ('LCMX_EMBED_CACHE', 'LCM_LONGMEMEVAL_EMBED_CACHE', 'LCMX_SEARCH_SCOPE_BIAS'):
         os.environ.pop(variable, None)
+    # An inherited LCMX_ADAPTER_VERSION must not change delivery; only AML_ADAPTER_VERSION does.
+    os.environ['LCMX_ADAPTER_VERSION'] = adapter_version()
     sys.dont_write_bytecode = True
     omni_repo = os.environ.get('AML_OMNIMEMEVAL_REPO', '')
     if not omni_repo:
@@ -464,6 +466,10 @@ def configure_adapter(root):
     sys.path.insert(0, str(OMNI_REPO / 'scripts'))
     from client_factory.lcmx_client import LcmxClient
     return LcmxClient()
+
+
+def adapter_version():
+    return os.environ.get('AML_ADAPTER_VERSION') or '1'
 
 
 def prepare_model_cache(root):
@@ -774,7 +780,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.request_hash = digest(body['request_id']) if isinstance(body.get('request_id'), str) else None
             reserved_slot, slot = slot, None
             if self.server.item_fields == 'v2':
-                self.metrics.update(degraded=False, degraded_reasons=[])
+                self.metrics.update(degraded=False, degraded_reasons=[], adapter_version=int(adapter_version()))
             response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
             self.respond(200, response)
@@ -827,6 +833,8 @@ def main():
         parser.exit(1, 'AML_V1_ROUTES must be frozen, or v2 with AML_V2_DB_ROOT set\n')
     if (os.environ.get('AML_ITEM_FIELDS') or 'v1') not in ('v1', 'v2'):
         parser.exit(1, 'AML_ITEM_FIELDS must be v1 or v2\n')
+    if adapter_version() not in ('1', '2'):
+        parser.exit(1, 'AML_ADAPTER_VERSION must be 1 or 2\n')
     local_network_only()
     os.umask(0o077)
     token = os.environ.get('AML_ADDSEARCH_TOKEN', '')
@@ -871,6 +879,8 @@ def main():
                 start['v1_routes'] = 'v2'
             if server.item_fields == 'v2':
                 start['item_fields'] = 'v2'
+            if adapter_version() != '1':
+                start['adapter_version'] = int(adapter_version())
             print(json.dumps(start), flush=True)
             server.serve_forever()
 

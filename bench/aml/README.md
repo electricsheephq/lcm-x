@@ -61,6 +61,11 @@ Per-request receipts then carry `degraded` and `degraded_reasons`, the
 adapter's degraded or abort notice that a v1 worker loses. Other values prevent
 startup.
 
+Workers pin the adapter's `LCMX_ADAPTER_VERSION` to `AML_ADAPTER_VERSION`
+(`1`, the default, or `2`; other values prevent startup), so an inherited
+`LCMX_ADAPTER_VERSION` never changes delivery. A non-default version is named in
+the start event, and v2 receipts carry `adapter_version`.
+
 Use a Python environment with the pinned client's and LCM-X's dependencies.
 Load your token from your own secret store into `AML_ADDSEARCH_TOKEN`; do not
 put it in command history. Set the remaining environment variables:
