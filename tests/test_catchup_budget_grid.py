@@ -169,7 +169,8 @@ ISSUE_2877 = "issue 2877"
 # Known base cells (round 3 classification): rows leave the list behind a survival-fit notice (A0b) in all of them; in
 # s-600k-l40-prefix a later fit's notice no longer names 37 of the first fit's rows, which no leaf covers yet (A0).
 KNOWN_2877_BASE = ["g1-03", "g1-04", "g1-12", "g1-13", "g1-20", "g1-21", "g1-22", "g1-30", "g1-31", "g1-33", "g1-34",
-                   "g1-40", "g1-41", "g1-42", "g1-43", "g1-44", "s-600k-l40-prefix"]
+                   "g1-40", "g1-41", "g1-42", "g1-43", "g1-44", "s-600k-l40-prefix",
+                   "r-release-inside", "r-release-outside"]  # T1-289's boundary cells: the base fits at pass 9
 KNOWN_2877_A0 = ["s-600k-l40-prefix"]  # the candidate's pin is lifted: the catch-up change no longer loses these rows
 ARM_CELLS = S + [cell for cell in KNOWN_2877_BASE if cell.startswith("g1-")]  # steady cells, G1 cells with A0b
 ARM_PRE_SECONDS = 5
