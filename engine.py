@@ -11831,6 +11831,10 @@ class LCMEngine(
         # A rotating host (Hermes) otherwise publishes both rows, merges them in
         # memory, and re-flushes the merge as a new row; the durable child then
         # outgrows the live list and is adopted into the next compress().
+        if summary_message is not None and tail_selected:
+            # #2895: an incoming carrier kept as the first tail row (a leaf of hidden rows only) is never nested
+            # behind the new summary, which renders its prefix again: only its real row is carried.
+            tail_selected = [self._unwrap_incoming_carrier(tail_selected[0]), *tail_selected[1:]]
         if (
             summary_message is not None
             and leading_msg is None
@@ -11860,6 +11864,19 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
+
+    def _unwrap_incoming_carrier(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """``row``, or the real row behind it when it is a verified carrier at any nesting depth. As the
+        survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
+        single proven host uid; the carrier's API-side content is not the row's either."""
+        remainder = self._carried_user_text(row)
+        if remainder is None:
+            return row
+        unwrapped = {key: value for key, value in row.items() if key != "api_content"}
+        unwrapped["content"] = remainder
+        if identity_emit_enabled():
+            self._carrier_user_row_identity(row, unwrapped)
+        return unwrapped
 
     def _trim_preserved_objective_last_resort(
         self, result, generated_rows, assembly_cap, kept_reply,

@@ -296,6 +296,30 @@ class SurvivalFitMixin:
                 record_absorbed_message(row, absorbed_from)
         return row
 
+    def _carried_user_text(self, message) -> Optional[str]:
+        """#2895: the real row's text behind a verified carrier, through any nesting of summary prefixes, else None."""
+        remainder = self._generated_context_carrier_remainder(message)
+        while remainder is not None:
+            inner = self._generated_context_carrier_remainder({"role": "user", "content": remainder})
+            if inner is None:
+                break
+            remainder = inner
+        return remainder
+
+    def _carrier_user_row_identity(self, carrier: dict, row: dict):
+        """A carrier's user-only ``row`` copies no identity or address and gets back a single proven host uid
+        (never an engine uid, F3); returns the carrier's engine uid, which its summary part keeps."""
+        absorbed = carrier.get("_absorbed_message_uids")
+        absorbed = absorbed if isinstance(absorbed, list) else []
+        candidates = list(dict.fromkeys(u for u in [carrier.get("message_uid"), *absorbed] if _valid_uid(u)))
+        engine = self._host_uid_engine_uids(candidates)
+        for key in IDENTITY_KEYS + ADDRESS_KEYS:
+            row.pop(key, None)
+        hosts = self._host_uid_host_uids(candidates) - engine
+        if len(hosts) == 1:
+            row["message_uid"] = next(iter(hosts))
+        return next((u for u in candidates if u in engine), None)
+
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
                       whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
@@ -307,23 +331,14 @@ class SurvivalFitMixin:
         self._survival_cut_carrier = None
         head, body = list(result[:lead]), list(result[lead:])
         summary = summary_uid = formed = None
-        remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
+        # #2895: a nested carrier ("summary\n\nold summary\n\nrow") splits down to its real row, which is counted
+        remainder = self._carried_user_text(head[-1]) if whole_turns and head else None
         if remainder is not None:
             carrier = head.pop()
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
-            if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid; the user-only
-                # remainder copies no identity or address, and gets back a single proven host uid
-                absorbed = carrier.get("_absorbed_message_uids")
-                absorbed = absorbed if isinstance(absorbed, list) else []
-                candidates = list(dict.fromkeys(u for u in [carrier.get("message_uid"), *absorbed] if _valid_uid(u)))
-                engine = self._host_uid_engine_uids(candidates)
-                summary_uid = next((u for u in candidates if u in engine), None)
-                for key in IDENTITY_KEYS + ADDRESS_KEYS:
-                    body[0].pop(key, None)
-                hosts = self._host_uid_host_uids(candidates) - engine  # never an engine uid (F3)
-                if len(hosts) == 1:
-                    body[0]["message_uid"] = next(iter(hosts))
+            if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid
+                summary_uid = self._carrier_user_row_identity(carrier, body[0])
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
