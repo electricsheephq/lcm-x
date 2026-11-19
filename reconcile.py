@@ -18,6 +18,7 @@ avoid an import cycle (staticmethod resolution is identical).
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import re
@@ -510,6 +511,42 @@ class _ReplayIdentityMemo:
             self.entries, self.size = {}, 0
         self.entries[key] = result
         self.size += size
+
+
+def _store_generation_memo(owner, slot: str, key, load, copy):
+    """``load()``, remembered in one slot on ``owner`` per store write generation (#2856).
+
+    Filled and used only while the store's connection is outside a transaction and its ingest prelock:
+    ``total_changes`` is not decremented by a ROLLBACK and ``PRAGMA data_version`` ignores this connection,
+    so a value read inside a transaction could outlive the rows it saw. The connection object is part of the
+    key (a reopened store restarts both counters); a fill needs the same generation before and after the
+    load; a load that raises is not remembered; a hit returns a copy."""
+    state = getattr(owner, "__dict__", None)
+    try:
+        store = owner._store  # the load reads it next; opening storage here changes nothing it does
+        conn = store._conn
+        quiet = (state is not None and conn is not None and conn.in_transaction is False
+                 and store._ingest_is_prelock() is False)
+        generation = store.write_generation() if quiet else None
+    except Exception:  # an unreadable or stand-in store: read as before
+        quiet = False
+    if not quiet:
+        return load()
+    held = state.get(slot)
+    if held is not None and held[0] is store and held[1] is conn and held[2] == (generation, key):
+        return copy(held[3])
+    value = load()
+    try:
+        if conn.in_transaction is False and store.write_generation() == generation:
+            state[slot] = (store, conn, (generation, key), copy(value))
+    except Exception:
+        pass
+    return value
+
+
+def _copy_store_rows(rows):
+    """Fresh dicts with list and dict values (tool calls) deep-copied: no build shares a remembered row."""
+    return [{k: deepcopy(v) if isinstance(v, (list, dict)) else v for k, v in row.items()} for row in rows]
 
 
 class ReconcileMixin:
@@ -3968,6 +4005,36 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
+    def _page_store_id_map_candidates(self, carry_ranges) -> list[Dict[str, Any]]:
+        """The uncompacted session rows and the carry ranges' rows, as stored (before dedup or exclusion)."""
+        candidates: list[Dict[str, Any]] = []
+        next_candidate_after = self._last_compacted_store_id
+        while True:
+            page = self._store.get_session_messages_after(
+                self._session_id,
+                after_store_id=next_candidate_after,
+            )
+            if not page:
+                break
+            candidates.extend(page)
+            next_candidate_after = page[-1]["store_id"]
+        for source_session_id, range_start, range_end in carry_ranges:
+            next_candidate_id = max(
+                int(self._last_compacted_store_id or 0),
+                range_start,
+            ) + 1
+            while next_candidate_id <= range_end:
+                page = self._store.get_range(
+                    source_session_id,
+                    start_id=next_candidate_id,
+                    end_id=range_end,
+                )
+                if not page:
+                    break
+                candidates.extend(page)
+                next_candidate_id = int(page[-1]["store_id"]) + 1
+        return candidates
+
     def _get_store_id_map_for_messages(
         self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(),
     ) -> dict[int, int]:
@@ -4025,31 +4092,14 @@ class ReconcileMixin:
                 }.values()
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
-        next_candidate_after = self._last_compacted_store_id
-        while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
-            if not page:
-                break
-            candidates.extend(page)
-            next_candidate_after = page[-1]["store_id"]
-        for source_session_id, range_start, range_end in self._load_compression_carry_ranges():
-            next_candidate_id = max(
-                int(self._last_compacted_store_id or 0),
-                range_start,
-            ) + 1
-            while next_candidate_id <= range_end:
-                page = self._store.get_range(
-                    source_session_id,
-                    start_id=next_candidate_id,
-                    end_id=range_end,
-                )
-                if not page:
-                    break
-                candidates.extend(page)
-                next_candidate_id = int(page[-1]["store_id"]) + 1
+        # A pass rebuilds this map about four times per store write generation (#2856): the rows paged in are
+        # remembered per generation, keyed by everything the paging reads, and every build gets fresh copies
+        # (registries below key rows by id(), and _load_host_rewrite_overrides reads them).
+        carry_ranges = tuple(self._load_compression_carry_ranges())
+        candidates.extend(_store_generation_memo(
+            self, "_store_id_map_candidate_rows_memo",
+            (self._session_id, self._conversation_id, self._last_compacted_store_id, carry_ranges),
+            lambda: self._page_store_id_map_candidates(carry_ranges), _copy_store_rows))
         # #1286: the re-key's coverage guard passes the stored rows an earlier map already claimed.
         candidates = list({
             int(candidate["store_id"]): candidate for candidate in candidates

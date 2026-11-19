@@ -3,9 +3,12 @@
 Uses tiktoken when available, falls back to char-based estimate.
 """
 
+import functools
+import hashlib
 import logging
+import sys
 import threading
-from functools import lru_cache
+from collections import OrderedDict
 from typing import Any, Dict, List
 
 from .message_content import normalize_content_value, split_image_parts
@@ -155,7 +158,60 @@ def _count_tokens_core(text) -> int:
     return len(text) // _CHARS_PER_TOKEN + 1
 
 
-@lru_cache(maxsize=2048)
+class _TokenCountCache:
+    """A thread-safe LRU with lru_cache's call, ``cache_info`` and ``cache_clear`` shape, bounded by entries
+    and by the accounted size of the keys it holds, so one walk of a long list fits (#2856).
+
+    Strings up to _SHORT_KEY_CHARS are keyed by value (held by reference, accounted by ``sys.getsizeof``);
+    longer ones by a 128-bit blake2b digest of their UTF-8 bytes (``surrogatepass``: lone surrogates stay
+    distinct) plus their length, so the cache never pins a long string. The encoder generation is part of
+    every key exactly as before; least recently used entries are evicted past either bound."""
+
+    _SHORT_KEY_CHARS = 1_024
+    _MAX_ENTRIES = 65_536
+    _MAX_BYTES = 32 * 1024 * 1024
+
+    def __init__(self, fn):
+        functools.update_wrapper(self, fn)
+        self._fn, self._lock = fn, threading.Lock()
+        self.cache_clear()
+
+    def __call__(self, text: str, generation: int) -> int:
+        if len(text) <= self._SHORT_KEY_CHARS:
+            held, size = text, sys.getsizeof(text)
+        else:
+            held = (hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest(), len(text))
+            size = sys.getsizeof(held[0]) + sys.getsizeof(held[1])
+        key = (held, generation)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)
+                self._hits += 1
+                return entry[0]
+            self._misses += 1
+        value = self._fn(text, generation)
+        with self._lock:
+            if key not in self._entries:
+                self._entries[key] = (value, size)
+                self._bytes += size
+                while len(self._entries) > self._MAX_ENTRIES or self._bytes > self._MAX_BYTES:
+                    self._bytes -= self._entries.popitem(last=False)[1][1]
+        return value
+
+    def cache_info(self):
+        with self._lock:
+            return functools._CacheInfo(self._hits, self._misses, self._MAX_ENTRIES, len(self._entries))
+
+    def cache_clear(self) -> None:
+        with self._lock:
+            self._entries, self._bytes, self._hits, self._misses = OrderedDict(), 0, 0, 0
+
+    def accounted_bytes(self) -> int:
+        return self._bytes
+
+
+@_TokenCountCache
 def _count_tokens_cached(text: str, generation: int) -> int:
     # tiktoken encoding is the dominant per-turn cost: assembly and preflight
     # re-count the same content many times per turn. The counting function is
