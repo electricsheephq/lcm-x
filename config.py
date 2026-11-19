@@ -747,14 +747,19 @@ def _hermes_auxiliary_compression_timeout_ms_with_source(
         return default, "default"
 
 
-def _hermes_context_timeout_seconds_with_source(*, env: Mapping[str, str] | None = None) -> tuple[float, str]:
-    """Read the profile's host idle limit. Zero means no readable limit."""
+def _hermes_context_timeout_seconds_with_source(
+    auxiliary_timeout_ms: int, *, env: Mapping[str, str] | None = None
+) -> tuple[float, str]:
+    """Read the profile's effective host idle limit. Zero means no readable limit."""
     compression = _load_hermes_config_yaml_for_env(env).get("compression")
     value = compression.get("context_timeout_seconds") if isinstance(compression, dict) else None
     if value is not None and not isinstance(value, bool):
         try:
             seconds = float(value)
             if math.isfinite(seconds):
+                if seconds > 0:
+                    # Hermes raises a positive idle limit to its auxiliary compression timeout (floor 300 s).
+                    seconds = max(seconds, auxiliary_timeout_ms / 1000, 300.0)
                 return seconds, "config_yaml:compression.context_timeout_seconds"
         except (TypeError, ValueError, OverflowError):
             pass
@@ -1356,7 +1361,7 @@ class LCMConfig:
     # cuts a call short when less time is left.
     summary_timeout_ms: int = 120_000
     expansion_timeout_ms: int = 120_000
-    hermes_context_timeout_seconds: float = 0.0
+    hermes_context_timeout_seconds: float = 0.0  # effective host idle limit, if enabled
 
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
@@ -1888,7 +1893,9 @@ class LCMConfig:
             default_source=summary_timeout_source,
         )
         _record("summary_timeout_ms", source, warning)
-        c.hermes_context_timeout_seconds, source = _hermes_context_timeout_seconds_with_source(env=env)
+        c.hermes_context_timeout_seconds, source = _hermes_context_timeout_seconds_with_source(
+            summary_timeout_default if summary_timeout_source != "default" else 0, env=env
+        )
         _record("hermes_context_timeout_seconds", source)
         c.summary_prompt_version, source, warning = _parse_int_env_with_source(
             "LCM_SUMMARY_PROMPT_VERSION", c.summary_prompt_version

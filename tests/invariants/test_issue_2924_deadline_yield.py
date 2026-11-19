@@ -1,12 +1,12 @@
 """#2924 Step A: deadline yields preserve committed ingest (I1, I2, I11)."""
 
 import hashlib
-import time
 from copy import deepcopy
 from unittest.mock import Mock
 
 import pytest
 
+from hermes_lcm import compaction as compaction_module
 from hermes_lcm import engine as engine_module
 from hermes_lcm.config import LCMConfig
 from tests.harness import engine_context, pin_char_counter, stored_rows
@@ -36,25 +36,24 @@ def test_t1_slow_ingest_yields_after_commit(engine, view, monkeypatch, caplog):
     engine._config.foreground_hard_seconds = 2
     view[0]["content"] += "\ud800"  # The canonical view is a different list.
     ingest = engine._ingest_messages
-    finished = []
+    now = 100.0
 
     def slow(*args, **kwargs):
-        time.sleep(3)
+        nonlocal now
         result = ingest(*args, **kwargs)
-        finished.append(time.monotonic())
+        now += 3
         return result
 
     monkeypatch.setattr(engine, "_ingest_messages", slow)
     sweep = Mock(wraps=engine._prepare_compression_sweep)
     monkeypatch.setattr(engine, "_prepare_compression_sweep", sweep)
     before = deepcopy(view)
-    with caplog.at_level("INFO", logger="hermes_lcm.compaction"):
+    with monkeypatch.context() as patch, caplog.at_level("INFO", logger="hermes_lcm.compaction"):
+        patch.setattr(compaction_module.time, "monotonic", lambda: now)
         result = engine.compress(view, current_tokens=8000)
-    after = time.monotonic()
     assert engine.last_compression_status == "deadline_yield"
     assert result is view and view == before
     sweep.assert_not_called()
-    assert 0 <= after - finished[0] < 1
     assert engine._ingest_cursor == len(view)
     assert engine._foreground_budget is None
     assert sum("check=after_ingest" in line for line in caplog.messages) == 1
@@ -71,6 +70,25 @@ def _late_ingest(engine, monkeypatch):
 
     monkeypatch.setattr(engine, "_ingest_messages", slow)
     return clock
+
+
+@pytest.mark.parametrize("mode", ["forced", "recovery", "overflow"])
+def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeypatch, mode):
+    engine.context_length = 4000
+    engine.threshold_tokens = 500
+    engine._config.survival_reserve = 0.875
+    if mode == "overflow":
+        engine._config.max_assembly_tokens = 500
+    observed = engine._survival_measure(view)
+    assert 500 < observed < engine.context_length
+    _late_ingest(engine, monkeypatch)
+
+    result = engine.compress(view, current_tokens=observed, force=mode == "forced", bypass_cooldown=mode == "recovery")
+
+    assert engine.last_compression_status != "deadline_yield"
+    fit_cap = 499 if mode == "recovery" else 500
+    assert result and engine._survival_measure(result) <= fit_cap
+    assert _digests(stored_rows(engine)) == _digests(view)
 
 
 def _digests(rows):
@@ -95,12 +113,18 @@ def test_t4_three_yields_leave_failure_and_hold_state_clear(engine, view, monkey
     failure = Mock(wraps=engine._record_ingest_failure)
     monkeypatch.setattr(engine, "_record_ingest_failure", failure)
     before = engine._summary_circuit_breaker.route_status(["probe"])
+    streaks = {engine._hold_conversation_key(): {"passes": 1, "last_reason": "prior stop"}}
+    engine._zero_leaf_streaks = deepcopy(streaks)
+    engine._pressure_yield_invocation_verdict = "blocked"
+    engine._pressure_yield_blocked_streak = 1
     with monkeypatch.context() as patch:
         _late_ingest(engine, patch)
-        for _ in range(3):
-            assert engine.compress(view, current_tokens=8000) is view
+        for tokens in (engine.threshold_tokens, 8000, 8000):
+            assert engine.compress(view, current_tokens=tokens) is view
             assert engine.last_compression_status == "deadline_yield"
             assert not engine._automatic_compression_blocked()
+            assert (engine._zero_leaf_streaks, engine._pressure_yield_invocation_verdict,
+                    engine._pressure_yield_blocked_streak) == (streaks, "blocked", 1)
     failure.assert_not_called()
     assert engine._ingest_failure_count == engine._consecutive_ingest_failures == 0
     assert engine._no_progress_hold is None and not engine._retained_stop_hold_active()
@@ -125,23 +149,30 @@ def test_t5_host_uses_three_attempts_without_rearming(engine, monkeypatch):
     assert [(verdict, progress) for _, verdict, progress in host.verdicts] == [("aborted_no_progress", False)] * 3
 
 
-@pytest.mark.parametrize(("value", "hard", "source"), [
-    ("100", 70, "config_yaml:compression.context_timeout_seconds"),
-    ("400", 360, "config_yaml:compression.context_timeout_seconds"),
-    ("20", -10, "config_yaml:compression.context_timeout_seconds"),
-    ("0", 500, "config_yaml:compression.context_timeout_seconds"),
-    ("-10", 500, "config_yaml:compression.context_timeout_seconds"),
-    ("bad", 500, "default"),
-    (None, 500, "default"),
+@pytest.mark.parametrize(("value", "auxiliary", "configured_hard", "idle", "hard", "source"), [
+    ("20", None, None, 300, 120, "config_yaml:compression.context_timeout_seconds"),
+    ("400", None, 500, 400, 360, "config_yaml:compression.context_timeout_seconds"),
+    ("100", 600, 700, 600, 540, "config_yaml:compression.context_timeout_seconds"),
+    ("0", 600, 700, 0, 700, "config_yaml:compression.context_timeout_seconds"),
+    ("-1", None, 500, -1, 500, "config_yaml:compression.context_timeout_seconds"),
+    ("bad", None, 500, 0, 500, "default"),
+    (None, None, 500, 0, 500, "default"),
 ])
-def test_t6_host_idle_margin(engine, tmp_path, monkeypatch, value, hard, source):
+def test_t6_host_idle_margin(engine, tmp_path, monkeypatch, value, auxiliary, configured_hard, idle, hard, source):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("LCM_SUMMARY_TIMEOUT_MS", "900000")
     if value is not None:
-        (tmp_path / "config.yaml").write_text(f"compression:\n  context_timeout_seconds: {value}\n")
+        config = f"compression:\n  context_timeout_seconds: {value}\n"
+        if auxiliary is not None:
+            config += f"auxiliary:\n  compression:\n    timeout: {auxiliary}\n"
+        (tmp_path / "config.yaml").write_text(config)
     engine._config = LCMConfig.from_env()
-    engine._config.foreground_hard_seconds = 500
+    if configured_hard is not None:
+        engine._config.foreground_hard_seconds = configured_hard
+        engine._config.foreground_soft_seconds = configured_hard
     budget = engine._new_foreground_budget()
     assert budget.hard == hard
+    assert budget.soft == (60 if configured_hard is None else hard)
+    assert budget.configured_timeout == 900
+    assert engine._config.hermes_context_timeout_seconds == idle
     assert engine._config.config_sources["hermes_context_timeout_seconds"] == source
-    engine._config.foreground_hard_seconds = 120
-    assert engine._new_foreground_budget().hard == min(hard, 120)

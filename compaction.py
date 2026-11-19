@@ -1170,7 +1170,7 @@ class CompactionMixin:
         idle = self._config.hermes_context_timeout_seconds
         if idle > 0:
             hard = min(hard, idle - max(30.0, 0.1 * idle))
-        return ForegroundBudget(soft=soft, hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
+        return ForegroundBudget(soft=min(soft, hard), hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
                                 estimates=self.__dict__.setdefault("_foreground_estimates", ForegroundEstimates()))
 
     def _finish_foreground_budget(self, budget: ForegroundBudget, result, observed=None, *, automatic=False) -> None:
@@ -2380,7 +2380,9 @@ class CompactionMixin:
             self._record_ingest_success()
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
-        if self._compress_binding_changed() or self._yield_after_ingest(state):
+        if self._compress_binding_changed():
+            return "return", messages
+        if not (force or recovery_attempt or state.force_overflow) and self._yield_after_ingest(state):
             return "return", messages
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
