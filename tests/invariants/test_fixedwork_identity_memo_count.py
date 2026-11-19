@@ -103,7 +103,8 @@ def test_a4_live_identity_computations_per_ordinary_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(ReconcileMixin, name, counted)
     monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
     state_db(tmp_path)
-    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=64),
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=64,
+                                         embeddings_enabled=False, temporal_rollups_enabled=False),
                        hermes_home=str(tmp_path))
     engine.on_session_start("S", platform="telegram", context_length=50_000_000, conversation_id="conv")
     turns = []

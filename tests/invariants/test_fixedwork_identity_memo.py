@@ -6,10 +6,14 @@ gate must reject, A5 memo bound. Synthetic data only.
 import base64
 import builtins
 import copy
+import functools
+import gc
 import json
 import os
 import pathlib
 import random
+import sys
+import threading
 import tracemalloc
 
 import pytest
@@ -24,7 +28,7 @@ from hermes_lcm.reconcile import (
     ReconcileMixin, _HERMES_PRUNED_TOOL_PLACEHOLDER, _freeze_replay_identity_value, _replay_identity_memo_gate,
 )
 from tests.harness import engine_context
-from tests.test_compression_boundary import _summary_carrier_fixture
+import tests.test_compression_boundary as compression_boundary
 from tests.test_issue_10_persisted_output_spillover import _write_output
 from tests.test_reconcile_oob_message_block import OOB_BLOCK
 
@@ -38,13 +42,17 @@ NEAR_MISSES = ["[LCM survival fit: that", "[LCM survival fit:this ", "lcm_surviv
 TODO = ("[Your active task list was preserved across context compression]\n- [>] 1. ship it (in_progress)\n\n"
         "and then the next request")
 SWITCH = "[Note: model was just switched from a to b.]\n\nhello after the switch"
+# No embedding or rollup work: their background jobs read and write on their own threads and schedule, whatever the
+# environment's TMPDIR, LANG or embedding default.
+QUIET = dict(embeddings_enabled=False, temporal_rollups_enabled=False)
+OTHER_THREAD_READS = []  # reads outside the identity body while A2's patches were in place (evidence only)
 
 
 def _engine(tmp_path):
     return engine_context(tmp_path, window=200_000, conversation_id="conv",
                           large_output_externalization_enabled=True,
                           large_output_externalization_threshold_chars=200,
-                          large_output_externalization_path=str(tmp_path / "ext"))
+                          large_output_externalization_path=str(tmp_path / "ext"), **QUIET)
 
 
 def _memo(engine):
@@ -250,40 +258,67 @@ class _Touched(BaseException):
     """Raised on any state read; a BaseException so the body's ``except Exception`` cannot swallow it."""
 
 
-class _Raiser:
-    """Answers only an identity test for None (no attribute access at all); raises on everything else."""
+def _caller():
+    frame = sys._getframe(2)
+    return f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}:{frame.f_code.co_name}"
 
-    def __init__(self, name, log):
-        object.__setattr__(self, "_name", name)
-        object.__setattr__(self, "_log", log)
+
+def _in_identity(owner):
+    """True on the identity's own thread while the identity body is on the stack: a read anywhere else (a
+    background job, a finalizer, pytest formatting a traceback through linecache) is not the identity's."""
+    if threading.get_ident() != owner:
+        return False
+    body, frame = ReconcileMixin._message_replay_identity_uncached.__code__, sys._getframe(2)
+    while frame is not None:
+        if frame.f_code is body:
+            return True
+        frame = frame.f_back
+    return False
+
+
+class _Raiser:
+    """Inside the identity body, answers only an identity test for None (no attribute access at all) and raises
+    on everything else, recording the caller's frame. Anything else (another thread, or this thread outside the
+    body) is handed the real object."""
+
+    def __init__(self, name, log, real, owner):
+        for key, value in (("_name", name), ("_log", log), ("_real", real), ("_owner", owner)):
+            object.__setattr__(self, key, value)
 
     def __getattribute__(self, attr):
-        object.__getattribute__(self, "_log").append((object.__getattribute__(self, "_name"), attr))
+        if not _in_identity(object.__getattribute__(self, "_owner")):
+            return getattr(object.__getattribute__(self, "_real"), attr)
+        object.__getattribute__(self, "_log").append((object.__getattribute__(self, "_name"), attr, _caller()))
         raise _Touched(attr)
 
     def _fail(self, *args, **kwargs):
-        object.__getattribute__(self, "_log").append((object.__getattribute__(self, "_name"), "special"))
+        object.__getattribute__(self, "_log").append((object.__getattribute__(self, "_name"), "special", _caller()))
         raise _Touched("special")
 
     __bool__ = __len__ = __iter__ = __contains__ = __getitem__ = __eq__ = __hash__ = __call__ = _fail
 
 
-def _raising_io(monkeypatch, log):
-    def make(name):
+def _raising_io(monkeypatch, log, owner):
+    """Patch the reads to raise inside the identity body only (recording the caller's frame); any other caller
+    (another thread, a finalizer, a traceback formatter's linecache) gets the real function."""
+    def make(name, real):
         def fail(*args, **kwargs):
-            log.append(("io", name))
+            if not _in_identity(owner):
+                OTHER_THREAD_READS.append((name, threading.current_thread().name, _caller()))
+                return real(*args, **kwargs)
+            log.append(("io", name, _caller()))
             raise _Touched(name)
         return fail
     for attr in ("stat", "open", "read_text", "read_bytes", "exists", "glob", "is_file", "is_dir", "resolve"):
-        monkeypatch.setattr(pathlib.Path, attr, make(f"Path.{attr}"))
-    monkeypatch.setattr(os, "stat", make("os.stat"))
-    monkeypatch.setattr(builtins, "open", make("open"))
+        monkeypatch.setattr(pathlib.Path, attr, make(f"Path.{attr}", getattr(pathlib.Path, attr)))
+    monkeypatch.setattr(os, "stat", make("os.stat", os.stat))
+    monkeypatch.setattr(builtins, "open", make("open", builtins.open))
     for module in (externalize, ingest_persisted, ingest_integrity, ingest_protection, reconcile):
         for name in dir(module):
             value = getattr(module, name)
             if callable(value) and not isinstance(value, type) and any(
                     part in name for part in ("load", "find_externalized", "recover", "_safe_", "read_")):
-                monkeypatch.setattr(module, name, make(f"{module.__name__}.{name}"))
+                monkeypatch.setattr(module, name, make(f"{module.__name__}.{name}", value))
 
 
 def test_a2_admitted_rows_read_no_state(tmp_path, monkeypatch):
@@ -296,23 +331,30 @@ def test_a2_admitted_rows_read_no_state(tmp_path, monkeypatch):
                   for row in admitted]
         store, dag, config, log = engine._store, engine._dag, engine._config, []
         with monkeypatch.context() as patch:
-            engine._store, engine._dag, engine._config = (_Raiser(n, log) for n in ("store", "dag", "config"))
-            _raising_io(patch, log)
+            owner = threading.get_ident()
+            engine._store, engine._dag, engine._config = (
+                _Raiser(n, log, real, owner) for n, real in (("store", store), ("dag", dag), ("config", config)))
+            _raising_io(patch, log, owner)
+            gc.disable()  # no finalizer runs inside the window
             try:
                 isolated = [[ReconcileMixin._message_replay_identity_uncached(engine, row, **flags) for flags in FLAGS]
                             for row in admitted]
             finally:
+                gc.enable()
                 engine._store, engine._dag, engine._config = store, dag, config
         assert log == []
         assert isolated == normal
     assert len(admitted) >= 2000
-    _evidence("a2_reads_no_state.json", dict(admitted_rows=len(admitted), state_reads=len(log)))
+    _evidence("a2_reads_no_state.json", dict(admitted_rows=len(admitted), state_reads=len(log),
+                                             outside_identity_reads=sorted(set(OTHER_THREAD_READS))))
 
 
 def real_artifacts(tmp_path):
     """Each impure kind as a real engine (or the host shape LCM's own tests pin) produces it: (kind, row)."""
     out = []
-    engine, _compacted, tail, _ids = _summary_carrier_fixture(tmp_path / "carrier")
+    with pytest.MonkeyPatch.context() as patch:  # the shared fixture's config, with QUIET added
+        patch.setattr(compression_boundary, "LCMConfig", functools.partial(compression_boundary.LCMConfig, **QUIET))
+        engine, _compacted, tail, _ids = compression_boundary._summary_carrier_fixture(tmp_path / "carrier")
     try:
         carrier = engine._assemble_context(None, tail)[0]
         assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
