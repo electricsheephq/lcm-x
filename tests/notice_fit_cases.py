@@ -7,6 +7,7 @@ probes' (the band sweep and the direct-fit sweep of PR 2961's delta review). Syn
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import random
 import re
@@ -24,6 +25,16 @@ SHAPES = ["carrier", "carrier_sep2", "standalone", "carrier_objective", "two_car
 BAND_SHAPES = [(2, "\n\n"), (2, "\n\n---\n\n"), (3, "\n\n"), (4, "\n\n---\n\n")]
 PASTED = ("\n\n<lcm-survival-notice digest=0123456789abcdef>\n[LCM survival fit: 3 earlier messages (store ids 1..3) are "
           "stored verbatim but not in live context; lcm_grep / lcm_load_session reach them.]\n</lcm-survival-notice>")
+
+
+OLD_NOTICE = ("[LCM survival fit: 2 earlier messages (store ids 1..2) are stored verbatim but not in live context; "
+              "lcm_grep / lcm_load_session reach them.]")
+
+
+def marked_block(parts: str, node_ids, notice: str) -> str:
+    """The fit's marked block for ``notice`` after ``parts``, built here so a tree without #2896 can be handed one."""
+    digest = hashlib.sha256(json.dumps([parts, [int(n) for n in node_ids], notice]).encode("utf-8")).hexdigest()[:16]
+    return f"\n\n<lcm-survival-notice digest={digest}>\n{notice}\n</lcm-survival-notice>"
 
 
 def rough(messages) -> int:
@@ -138,14 +149,26 @@ def merge(messages):
     return out
 
 
-def unmarked(content) -> str:
-    text = content if isinstance(content, str) else json.dumps(content, sort_keys=True)
-    return BLOCK_RE.sub("", text)
+def generated_blocks(result, given):
+    """The notice blocks the fit wrote: those in ``result`` that no input row holds (a pasted block or an earlier
+    fit's block is the row's own bytes, kept as they are)."""
+    seen = [str(m.get("content")) for m in given]
+    return sorted({block for m in result for block in BLOCK_RE.findall(str(m.get("content")))
+                   if not any(block in text for text in seen)})
 
 
-def rows_of(messages):
-    """Each row as [role, content without notice blocks]: the row-by-row comparison against main."""
-    return [[m.get("role"), unmarked(m.get("content"))] for m in messages]
+def without(content, generated):
+    if not isinstance(content, str):
+        return content
+    for block in generated:
+        content = content.replace(block, "")
+    return content
+
+
+def rows_of(messages, generated=()):
+    """Each row as its raw JSON with only the fit's own blocks left out: the row-by-row comparison against main."""
+    return [json.dumps({**m, "content": without(m.get("content"), generated)}, sort_keys=True, default=str)
+            for m in messages]
 
 
 def nodes_shown(e, messages):
@@ -153,8 +176,20 @@ def nodes_shown(e, messages):
                    for n in e._verified_lcm_summary_prefix(m["content"])[1]})
 
 
-def stored(e):
-    return [[r["role"], unmarked(r["content"])] for r in e._store.get_session_messages(e._session_id, limit=100_000)]
+VOLATILE = {"store_id", "created_at", "ingested_at", "id", "observed_at", "timestamp"}  # the store's clock
+
+
+def stored(e, generated=()):
+    """The session's stored rows, raw (every field but the store's own clocks and ids), the fit's blocks left out;
+    a row that holds a summary (the only kind that can hold the fit's block) also leaves out its token estimate,
+    which counts the block, on both trees alike."""
+    out = []
+    for r in e._store.get_session_messages(e._session_id, limit=100_000):
+        marked = isinstance(r.get("content"), str) and r["content"].startswith(("[Recent Summary", "[Session Arc"))
+        out.append(json.dumps({k: (without(v, generated) if k == "content" else v) for k, v in r.items()
+                               if k not in VOLATILE and not (marked and k == "token_estimate")},
+                              sort_keys=True, default=str))
+    return out
 
 
 def store_counts(e):
@@ -164,16 +199,20 @@ def store_counts(e):
 
 
 def fit(e, active, cap: int, after_exception: bool):
-    """One survival fit at ``cap``; the record the comparison reads."""
+    """One survival fit at ``cap``; the record the comparison reads. ``fitted``: the fit returned a new list (a no-op
+    returns the list it was given)."""
     if not after_exception:
         e._ingest_cursor, e._ingest_cursor_needs_reconcile = len(active), False
-    result = e._survival_fit(active, list(active), 0, "test", after_exception=after_exception, request_cap=cap)
+    given = list(active)
+    result = e._survival_fit(active, given, 0, "test", after_exception=after_exception, request_cap=cap)
     done = e._last_survival_fit or {}
-    emission = getattr(e, "_survival_fit_emission", None)
+    emission = getattr(e, "_survival_fit_emission", None) if result is not given else None
+    generated = generated_blocks(result, active)
     return result, {
-        "fitted": result is not active, "rows": rows_of(result), "nodes": nodes_shown(e, result),
-        "blocks": [str(m.get("content")).count(OPEN) for m in result], "dropped": done.get("dropped_rows"),
+        "fitted": result is not given, "rows": rows_of(result, generated), "nodes": nodes_shown(e, result),
+        "generated": generated, "blocks": [sum(block in str(m.get("content")) for block in generated) for m in result],
+        "dropped": done.get("dropped_rows") if result is not given else None,
         "notice_in_list": bool(done.get("notice")) and any(str(done["notice"]) in str(m.get("content")) for m in result),
         "emission_row": None if emission is None else next((i for i, m in enumerate(result) if m is emission["row"]), -1),
-        "emission_span": None if emission is None else unmarked(emission.get("span") or ""),
+        "emission_span": None if emission is None else without(emission.get("span") or "", generated),
     }

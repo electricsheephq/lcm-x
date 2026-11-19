@@ -8,7 +8,9 @@ come from this tree's tests/notice_fit_cases.py, which uses only engine surface 
   band    the band sweep: [C(summary + U0), A0, ...] at 2, 3 and 4 turns, every third cap up to 1,500 below the list.
   d1      the direct-fit sweep: carrier, carrier_sep2, two_carriers and twofits, 6 seeded cases x 45 caps each.
   random  the randomised differential: every direct-fit shape plus pasted blocks and ignore patterns; per case a
-          fit, then the host's replay (as returned, merged, a new turn, session end) and a cold process.
+          fit bound as the exception path binds it, then the host's replay (as returned, merged, a new turn, session
+          end) and a cold process.
+  review  the full-diff review's scenarios R1 to R6 (one record each, keyed by scenario and cap).
 Synthetic data only; one engine and one store per cap, under --workdir. ``--limit``: at most n caps (or cases) per
 shape, for a smoke run of the script itself.
 """
@@ -121,34 +123,156 @@ def randomised(cases, work: Path, limit: int):
             cap = rng.randint(max(50, full // 5), full - 1)
             after_exception = rng.random() < 0.5
             result, record["fit"] = cases.fit(e, active, cap, after_exception)
+            e._bind_survival_fit_emission(active, result)  # as the exception path binds it (#1000)
+            generated = list(record["fit"]["generated"])
             if shape == "twofits" and record["fit"]["fitted"]:
                 grown, cap2 = _grown(cases, e, result, rng)
                 result, record["second"] = cases.fit(e, grown, cap2, after_exception)
+                e._bind_survival_fit_emission(grown, result)
+                generated += record["second"]["generated"]
             new = [{"role": "user", "content": rng.choice(["[NEW] newest question", "ok thanks", "heartbeat",
                                                            "hello\n\nworld"]), "timestamp": 9_000.0},
                    {"role": "assistant", "content": "[NEWA] answer"}]
             merged = cases.merge(result)
             stages = {}
             e.ingest(result)
-            stages["returned"] = cases.stored(e)
+            stages["returned"] = cases.stored(e, generated)
             e.ingest(merged)
-            stages["merged"] = cases.stored(e)
+            stages["merged"] = cases.stored(e, generated)
             e.ingest([*merged, *new])
-            stages["new"] = cases.stored(e)
+            stages["new"] = cases.stored(e, generated)
             e.on_session_end("S", [*merged, *new])
-            stages["end"] = cases.stored(e)
+            stages["end"] = cases.stored(e, generated)
             record["counts_warm"] = cases.store_counts(e)
         finally:
             e.shutdown()
         cold = cases.engine(path, patterns)
         try:
             cold.ingest([*merged, *new])
-            stages["cold"] = cases.stored(cold)
+            stages["cold"] = cases.stored(cold, generated)
             record["counts_cold"] = cases.store_counts(cold)
         finally:
             cold.shutdown()
         record["stages"] = stages
         records.append(record)
+    return records
+
+
+def _replay(cases, e, result, generated, new_text="[NEW] newest question"):
+    """The host's replay of a fitted list: as returned, merged, a new turn, session end. The stored rows after each."""
+    merged = cases.merge(result)
+    new = [{"role": "user", "content": new_text, "timestamp": 9_000.0}, {"role": "assistant", "content": "[NEWA] ok"}]
+    stages = {}
+    for stage, rows in (("returned", result), ("merged", merged), ("new", [*merged, *new])):
+        e.ingest(rows)
+        stages[stage] = cases.stored(e, generated)
+    return stages
+
+
+def _map_of(e, rows):
+    ids = e._get_store_id_map_for_messages(rows)
+    return [ids.get(id(row)) for row in rows]
+
+
+def review(cases, work: Path, limit: int):
+    records = []
+    # R1: a second fit at one token under the first fit's cap, the first fit's rows persisted
+    for cap in (1108, 1150, 1200)[:limit or None]:
+        e = cases.engine(_dir(work, f"r1-{cap}"))
+        try:
+            first, one = cases.fit(e, cases.build_case(e, random.Random(0), "carrier"), cap, True)
+            e.ingest(first)
+            _, two = cases.fit(e, first, cap - 1, False)
+            records.append({"key": f"r1/{cap}", "first": one, "second": two})
+        finally:
+            e.shutdown()
+    # R2: the complete carrier summary + U stored right after the distinct row U, the carrier ahead of an objective
+    for seed in range(limit or 3):
+        for room in (60, 200):
+            rng = random.Random(seed)
+            e = cases.engine(_dir(work, f"r2-{seed}-{room}"))
+            try:
+                raw = [m for i in range(6) for m in (
+                    {"role": "user", "content": f"[U{i}] " + cases.words(rng, rng.randint(40, 200)),
+                     "timestamp": 10.0 * i},
+                    {"role": "assistant", "content": f"[A{i}] " + cases.words(rng, rng.randint(40, 300))})]
+                summary = cases.part(e, "summary " + cases.words(rng, 30))
+                carrier = {"role": "user", "content": f"{summary}\n\n{raw[0]['content']}"}
+                for message in [raw[0], carrier, *raw[1:]]:  # a host stored the composite too
+                    e._store.append("S", dict(message), conversation_id="conv")
+                active = [carrier, {"role": "user", "content": f"{cases.OBJ}\nfinish it"}, *[dict(m) for m in raw[1:]]]
+                before = _map_of(e, active)
+                result, record = cases.fit(e, active, e._survival_measure(active) - room, True)
+                e._bind_survival_fit_emission(active, result)
+                emissions = (getattr(e, "_last_emission_descriptors", None) or {}).get("emissions") or []
+                records.append({"key": f"r2/{seed}/{room}", "fit": record, "map_before": before[0],
+                                "map_after": _map_of(e, result)[0],
+                                "retained": [(d.get("retained_source") or {}).get("store_id") for d in emissions],
+                                "stages": _replay(cases, e, result, record["generated"])})
+            finally:
+                e.shutdown()
+    # R3: [carrier A, carrier B, objective] on the exception path, no prior proof
+    for case in range(limit or 3):
+        seed = cases.SHAPES.index("two_carriers") * 1000 + case
+        e = cases.engine(_dir(work, f"r3-{case}"))
+        try:
+            built = cases.build_case(e, random.Random(seed), "two_carriers")
+            active = [*built[:2], {"role": "user", "content": f"{cases.OBJ}\nfinish it"}, *built[2:]]
+            before = _map_of(e, active)
+            result, record = cases.fit(e, active, e._survival_measure(active) - 60, True)
+            e._bind_survival_fit_emission(active, result)
+            records.append({"key": f"r3/{case}", "fit": record, "map_before": before[:2],
+                            "map_after": _map_of(e, result)[:2], "stages": _replay(cases, e, result, record["generated"])})
+        finally:
+            e.shutdown()
+    # R4: patterns "session_id=S " and "confirm\Z"; a fresh turn ending in confirm plus a pasted counted notice,
+    # merged behind the fitted carrier
+    for cap in (1200, 1400)[:limit or None]:
+        e = cases.engine(_dir(work, f"r4-{cap}"), [r"session_id=S ", r"confirm\Z"])
+        try:
+            result, record = cases.fit(e, cases.build_case(e, random.Random(0), "carrier"), cap, True)
+            fresh = "[FRESH] please confirm" + cases.PASTED
+            merged = {"role": "user", "content": result[0]["content"] + "\n\n" + fresh, "timestamp": 9e3}
+            ignored = e._matches_ignore_message_patterns(merged)
+            e.ingest([merged, {"role": "assistant", "content": "[FRESHA] ok"}])
+            kept = any("[FRESH] please confirm" in json.dumps(r["content"])
+                       for r in e._store.get_session_messages(e._session_id, limit=100_000))
+            records.append({"key": f"r4/{cap}", "fit": record, "ignored": ignored, "fresh_stored": kept})
+        finally:
+            e.shutdown()
+    # R5: a leading system row and [marked carrier, objective, old turns, newest]; caps that keep the head
+    for seed in range(limit or 3):
+        rng = random.Random(100 + seed)
+        e = cases.engine(_dir(work, f"r5-{seed}"))
+        try:
+            system = {"role": "system", "content": "synthetic system prompt"}
+            raw = [m for i in range(5) for m in (
+                {"role": "user", "content": f"[U{i}] " + cases.words(rng, rng.randint(40, 200)), "timestamp": 10.0 * i},
+                {"role": "assistant", "content": f"[A{i}] " + cases.words(rng, rng.randint(40, 300))})]
+            raw.append({"role": "user", "content": "[NEWEST] " + cases.words(rng, 30), "timestamp": 99.0})
+            e.ingest([system, *raw])
+            summary = cases.part(e, "summary " + cases.words(rng, 30))
+            nodes = e._verified_lcm_summary_prefix(summary)[1]
+            carrier = {"role": "user", "content": summary + cases.marked_block(summary, nodes, cases.OLD_NOTICE)
+                       + "\n\n" + raw[0]["content"]}
+            active = [dict(system), carrier, {"role": "user", "content": f"{cases.OBJ}\nfinish it"},
+                      *[dict(m) for m in raw[1:]]]
+            result, record = cases.fit(e, active, e._survival_measure(active) - 80, False)
+            records.append({"key": f"r5/{seed}", "fit": record, "head": [json.dumps(m, sort_keys=True, default=str)
+                                                                       for m in result[:3]]})
+        finally:
+            e.shutdown()
+    # R6 (the harness): a user-pasted marker kept in view, at a cap that cuts and at one that is a no-op
+    for cap in (900, 100_000)[:limit or None]:
+        e = cases.engine(_dir(work, f"r6-{cap}"))
+        try:
+            active = cases.build_case(e, random.Random(0), "carrier")
+            active[-2] = {**active[-2], "content": active[-2]["content"] + cases.PASTED}
+            _, record = cases.fit(e, active, cap, True)
+            records.append({"key": f"r6/{cap}", "fit": record,
+                            "raw_markers": sum(str(m.get("content")).count(cases.OPEN) for m in _)})
+        finally:
+            e.shutdown()
     return records
 
 
@@ -161,7 +285,7 @@ def _dir(work: Path, name: str) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tree", required=True)
-    parser.add_argument("--sweep", required=True, choices=["band", "d1", "random"])
+    parser.add_argument("--sweep", required=True, choices=["band", "d1", "random", "review"])
     parser.add_argument("--out", required=True)
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--syspath", action="append", default=[])
@@ -171,7 +295,7 @@ def main() -> int:
     logging.disable(logging.WARNING)
     cases = load(tree, args.syspath)
     work = Path(args.workdir)
-    records = {"band": band, "d1": d1, "random": randomised}[args.sweep](cases, work, args.limit)
+    records = {"band": band, "d1": d1, "random": randomised, "review": review}[args.sweep](cases, work, args.limit)
     modules = sorted({str(Path(m.__file__).resolve()) for name, m in sys.modules.items()
                       if name.startswith("hermes_lcm.") and getattr(m, "__file__", None)})
     Path(args.out).write_text(json.dumps({"tree": str(tree), "modules": modules, "records": records}, sort_keys=True))
