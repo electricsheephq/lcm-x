@@ -1,7 +1,11 @@
 # Store contract
 
-Contract version: 1
-Digest: sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9
+Contract version: 2
+Digest: sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0
+
+Version 2 adds the partial `idx_msg_session_tool_call` index for tool-row lookups by call ID (#2975).
+A writable store open adds the index to existing stores. The SQLite schema stamp stays at 5.
+Version 2 readers accept version 1 stores and replicas. A version 1 cloud reader refuses a version 2 replica with `replica_newer_contract`.
 
 ## What a consumer may read
 
@@ -20,7 +24,7 @@ Column entries below give name, declared type, nullability, default SQL and prim
 | `ledger_meta` | key: TEXT; nullable; no default; pk=1; value: BLOB; NOT NULL; no default; pk=0 | sqlite_autoindex_ledger_meta_1 |
 | `lineage_marks` | lineage: TEXT; nullable; no default; pk=1; max_store_id: INTEGER; nullable; no default; pk=0; legacy_proof_digest: BLOB; nullable; no default; pk=0; max_leaf_id: INTEGER; nullable; no default; pk=0; stamp_policy: TEXT; NOT NULL; 'normal'; pk=0 | sqlite_autoindex_lineage_marks_1 |
 | `message_relations` | relation_id: INTEGER; nullable; no default; pk=1; store_id: INTEGER; NOT NULL; no default; pk=0; kind: TEXT; NOT NULL; no default; pk=0; related_store_id: INTEGER; nullable; no default; pk=0; ordinal: INTEGER; nullable; no default; pk=0; observed_at: REAL; nullable; no default; pk=0; created_at: REAL; nullable; no default; pk=0 | idx_msg_relations_observed, idx_msg_relations_related, idx_msg_relations_store |
-| `messages` | store_id: INTEGER; nullable; no default; pk=1; session_id: TEXT; NOT NULL; no default; pk=0; source: TEXT; nullable; ''; pk=0; conversation_id: TEXT; nullable; ''; pk=0; role: TEXT; NOT NULL; no default; pk=0; content: TEXT; nullable; no default; pk=0; tool_call_id: TEXT; nullable; no default; pk=0; tool_calls: TEXT; nullable; no default; pk=0; tool_name: TEXT; nullable; no default; pk=0; timestamp: REAL; NOT NULL; no default; pk=0; token_estimate: INTEGER; nullable; 0; pk=0; pinned: INTEGER; nullable; 0; pk=0; ingested_at: REAL; nullable; no default; pk=0; observed_at: REAL; nullable; no default; pk=0; observed_at_source: TEXT; nullable; no default; pk=0; sender_id: TEXT; nullable; no default; pk=0; sender_source: TEXT; nullable; no default; pk=0 | idx_msg_conversation_observed, idx_msg_conversation_session, idx_msg_session, idx_msg_session_ts, idx_msg_source_session |
+| `messages` | store_id: INTEGER; nullable; no default; pk=1; session_id: TEXT; NOT NULL; no default; pk=0; source: TEXT; nullable; ''; pk=0; conversation_id: TEXT; nullable; ''; pk=0; role: TEXT; NOT NULL; no default; pk=0; content: TEXT; nullable; no default; pk=0; tool_call_id: TEXT; nullable; no default; pk=0; tool_calls: TEXT; nullable; no default; pk=0; tool_name: TEXT; nullable; no default; pk=0; timestamp: REAL; NOT NULL; no default; pk=0; token_estimate: INTEGER; nullable; 0; pk=0; pinned: INTEGER; nullable; 0; pk=0; ingested_at: REAL; nullable; no default; pk=0; observed_at: REAL; nullable; no default; pk=0; observed_at_source: TEXT; nullable; no default; pk=0; sender_id: TEXT; nullable; no default; pk=0; sender_source: TEXT; nullable; no default; pk=0 | idx_msg_conversation_observed, idx_msg_conversation_session, idx_msg_session, idx_msg_session_tool_call, idx_msg_session_ts, idx_msg_source_session |
 | `metadata` | key: TEXT; nullable; no default; pk=1; value: TEXT; nullable; no default; pk=0 | sqlite_autoindex_metadata_1 |
 | `occurrence_bindings` | occ_id: INTEGER; nullable; no default; pk=1; lineage: TEXT; NOT NULL; no default; pk=0; ordinal: INTEGER; nullable; no default; pk=0; store_id: INTEGER; nullable; no default; pk=0; identity_digest: BLOB; NOT NULL; no default; pk=0; stamp: TEXT; nullable; no default; pk=0; disposition: TEXT; NOT NULL; no default; pk=0; tag: TEXT; nullable; no default; pk=0; key_rank: INTEGER; nullable; no default; pk=0; view_seq: INTEGER; NOT NULL; no default; pk=0 | idx_occ_lineage_digest, idx_occ_lineage_ordinal, idx_occ_lineage_stamp_digest, idx_occ_store |
 | `session_lineage` | child_session_id: TEXT; nullable; no default; pk=1; parent_session_id: TEXT; NOT NULL; no default; pk=0; child_subagent_id: TEXT; nullable; no default; pk=0; parent_subagent_id: TEXT; nullable; no default; pk=0; child_role: TEXT; nullable; no default; pk=0; source: TEXT; NOT NULL; no default; pk=0; created_at: REAL; nullable; no default; pk=0 | idx_session_lineage_parent, sqlite_autoindex_session_lineage_1 |
@@ -82,7 +86,7 @@ These existing private dependencies are not promoted in version 1. Locations ref
 
 ## Invariants
 
-Preserve one stored row per host occurrence per lineage ([I1](invariants.md), with its named exceptions); no stored row deleted or altered ([I2](invariants.md)); summary nodes, provenance and frontier committed together ([I14](invariants.md)); every emitted tool result after its call ([I8](invariants.md)), with assistant/tool groups never split by the fresh tail or a leaf cut ([I9](invariants.md)); the newest user turn reaching the model ([I4](invariants.md)); stable message ids across hosts; and session ownership and chronology. Order message rows by `store_id` within their session, not pointer arrival or diagnostic time; forks retain their own lineage. This contract adds no writer-sharing protocol or migration.
+Preserve one stored row per host occurrence per lineage ([I1](invariants.md), with its named exceptions); no stored row deleted or altered ([I2](invariants.md)); summary nodes, provenance and frontier committed together ([I14](invariants.md)); every emitted tool result after its call ([I8](invariants.md)), with assistant/tool groups never split by the fresh tail or a leaf cut ([I9](invariants.md)); the newest user turn reaching the model ([I4](invariants.md)); stable message ids across hosts; and session ownership and chronology. Order message rows by `store_id` within their session, not pointer arrival or diagnostic time; forks retain their own lineage. This contract adds no writer-sharing protocol.
 The SHA-256 covers UTF-8 canonical JSON (`sort_keys=True`, compact separators, `ensure_ascii=False`): sorted tables with their ordered PRAGMA table_info rows and sorted index names, callables keyed by sorted module-qualified name with annotation-free signatures, and SCHEMA_VERSION. A fresh isolated store enables the contracted named features before inspection; no stored user content is hashed.
 Run `tests/compat/test_store_contract.py`. For a surface change, raise the contract version by exactly one, refresh the digest and add a dated changelog row with that digest and a one-line reason. An unchanged digest keeps the same version. `scripts/store_contract_gate.py --base-ref <ref>` checks that discipline against the PR base; introduction without a base doc requires version 1.
 
@@ -93,3 +97,4 @@ Run `tests/compat/test_store_contract.py`. For a surface change, raise the contr
 | Version | Digest | Date | Reason |
 | --- | --- | --- | --- |
 | 1 | sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9 | 2026-11-16 | Record the shared store, capture ledger and reader surface. |
+| 2 | sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0 | 2026-11-19 | Index tool-row lookups by call ID (#2975). |
