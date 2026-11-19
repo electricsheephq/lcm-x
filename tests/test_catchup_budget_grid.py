@@ -144,6 +144,20 @@ def _depth_cells() -> list[dict]:
              "settings": {"dynamic_leaf_chunk_enabled": False, "summary_prefix_target_tokens": 50_000_000}}]
 
 
+ISSUE_2896 = "issue 2896"
+NO_SYSTEM_ORIGINALS = ["s-1m-l40", "s-1m-l45-d15", "s-600k-l40-prefix", "s-1m-cond-then-leaf",
+                       "g1-04", "g1-13", "g1-22", "g1-30", "g1-31", "g1-40", "g1-44", "d-depth0-past-100"]
+
+
+def _no_system_twins(cells: list[dict]) -> list[dict]:
+    """Issue 2896: twins whose host view has no leading system row (the reference host's shape), so a notice main
+    writes only into a system row has nowhere to go. Group N: the A0, A0b, A2 and duplicate tests run on them; the
+    group tests of their originals (A1, A6, the depth premise) do not."""
+    by_id = {cell["id"]: cell for cell in cells}
+    return [{**by_id[cell], "group": "N", "id": f"{cell}-nosys", "no_system_row": True, "twin_of": cell}
+            for cell in NO_SYSTEM_ORIGINALS]
+
+
 def _reference_cells() -> list[dict]:
     """T1-285, issue 2878: shipped budgets with the reference agent's timing (37 s pre-call work, a 44 s condensation, a
     38 s leaf, the route estimate 44 s) and a prefix over target: the condensation and a leaf land in the same pass."""
@@ -156,11 +170,17 @@ def _reference_cells() -> list[dict]:
 
 
 CELLS = _g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells() + _reference_cells()
+CELLS += _no_system_twins(CELLS)
 BY_ID = {cell["id"]: cell for cell in CELLS}
 G1 = [cell["id"] for cell in CELLS if cell["group"] == "G1"]
 G2 = [cell["id"] for cell in CELLS if cell["group"] == "G2"]
 L = [cell["id"] for cell in CELLS if cell["group"] == "L"]
 S = [cell["id"] for cell in CELLS if cell["group"] == "S"]
+N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
+# Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
+# the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
+KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
+KNOWN_2896_A0 = list(N)  # twins with A0 rows on main, so the candidate A0 test fails too while CAND = main
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
@@ -289,10 +309,15 @@ def _run(tree: Path, cells: list[dict], out_dir: Path, name: str, patch: str = "
 
 def _trigger_share(run: dict, key: str = "triggered") -> dict:
     share = {}
-    for group in ("G1", "G2", "L", "S", "D"):
+    for group in ("G1", "G2", "L", "S", "D", "N"):
         records = [r for cell in CELLS if cell["group"] == group for r in run["by_cell"][cell["id"]]]
         share[group] = f"{sum(bool(r[key]) for r in records)}/{len(records)}"
     return share
+
+
+def _a0_totals(records: list[dict]) -> dict:
+    """A0 (no pointer in the returned list) and A0b (named by a pointer in the returned list), summed over passes."""
+    return {"A0": sum(r["loss"]["missing_count"] for r in records if r["loss"]), "A0b": sum(a0b_rows(records))}
 
 
 def _uncondensed_max(records: list[dict]) -> dict:
@@ -367,6 +392,9 @@ def grid(grid_dir):
         "unshown_rows_max": {tree: {cell: max((r["loss"]["unshown_rows"] for r in run["by_cell"][cell] if r["loss"]),
                                               default=0) for cell in D}
                              for tree, run in (("base", base), ("cand", cand))},
+        "no_system_twins": {cell: {tree: {"twin": _a0_totals(run["by_cell"][cell]),
+                                          "original": _a0_totals(run["by_cell"][BY_ID[cell]["twin_of"]])}
+                                   for tree, run in (("base", base), ("cand", cand))} for cell in N},
         "duplicate_rows_max": {tree: {cell: max(r["duplicate_rows"] for r in run["by_cell"][cell]) for cell in ALL
                                       if max(r["duplicate_rows"] for r in run["by_cell"][cell])}
                                for tree, run in (("base", base), ("cand", cand))},
@@ -469,6 +497,8 @@ def test_a0_loss(grid, cell, tree, request):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
     if cell in D:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
+    if cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2896))
     found = a0_violations(records)
     if tree == "base":
         found += [f"pass {r['pass']}: {n} row(s) behind a survival-fit notice (A0b)"
