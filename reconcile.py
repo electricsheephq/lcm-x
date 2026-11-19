@@ -18,9 +18,12 @@ avoid an import cycle (staticmethod resolution is identical).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
+import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -45,7 +48,8 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
-from .ingest_persisted import _safe_hermes_spillover_file, _safe_temp_hermes_results_file
+from .ingest_content import _EXTERNALIZED_PLACEHOLDER_PREFIX
+from .ingest_persisted import _PERSISTED_OUTPUT_TAG, _safe_hermes_spillover_file, _safe_temp_hermes_results_file
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -63,6 +67,7 @@ from .ingest_protection import (
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
 from .store import _normalize_observed_at
+from .survival_codec import _PROJECTED_PREFIX
 
 import logging
 
@@ -420,6 +425,127 @@ def _strip_volatile_host_scaffolding(content: str) -> str:
         if _bracket_end != -1:
             content = content[_bracket_end + 1:].lstrip("\n")
     return content
+
+
+# Live replay identities of rows that read no state are remembered (#2856). The gate's kinds name
+# every branch of the identity that reads the store, the DAG, disk, the config or engine state; a row carrying
+# none of their markers (in its content or in any string of its tool calls) has an identity that is a function
+# of its key alone. Markers with no importable constant are named once here: _EXTERNALIZED_REF_RE's two heads
+# (externalize.py), survival_codec.bounded_call's argument key, and the line closing every rendered summary part
+# (engine.py _verified_lcm_summary_prefix requires it before it reads the DAG).
+_EXTERNALIZED_REF_HEADS = ("[Externalized ", "[GC'd externalized ")
+_SURVIVAL_FIT_CALL_KEY = "lcm_survival_fit"
+_SUMMARY_EXPAND_MARKER = "[Expand for details:"
+_REPLAY_IDENTITY_MEMO_GATE = (
+    ("projection", (_PROJECTED_PREFIX, _SURVIVAL_FIT_CALL_KEY)),
+    ("pruned", (_HERMES_PRUNED_TOOL_PLACEHOLDER,)),
+    ("oob", (_OOB_MESSAGE_BLOCK_MARKER,)),
+    ("persisted", (_PERSISTED_OUTPUT_TAG,)),
+    ("externalized", _EXTERNALIZED_REF_HEADS),
+    ("ingest_placeholder", (_EXTERNALIZED_PLACEHOLDER_PREFIX,)),
+    ("summary", (_SUMMARY_EXPAND_MARKER,)),
+)
+_REPLAY_IDENTITY_MEMO_MAX_ENTRIES = 65_536
+_REPLAY_IDENTITY_MEMO_MAX_BYTES = 32 * 1024 * 1024  # R3: this memo's share of 64 MB with the token cache
+_REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES = 1024 * 1024
+
+
+def _freeze_replay_identity_value(value: Any) -> tuple:
+    """A hashable, type-tagged copy of a plain JSON value (exact str, int, float, bool, None, list, and dict with
+    exact str keys, all the way down): True/1/1.0 never collide, dicts keep item order, floats compare by repr.
+    Anything else raises TypeError (no memo): its identity may fall back to ``str(value)``."""
+    kind = type(value)
+    if kind is str:
+        return ("s", value)
+    if kind is dict:
+        if any(type(k) is not str for k in value):
+            raise TypeError("not a replay identity memo input")
+        return ("d", tuple((("s", k), _freeze_replay_identity_value(v)) for k, v in value.items()))
+    if kind is list:
+        return ("l", tuple(_freeze_replay_identity_value(v) for v in value))
+    if kind is bool:
+        return ("b", value)
+    if kind is int:
+        return ("i", value)
+    if kind is float:
+        return ("f", repr(value))
+    if value is None:
+        return ("n",)
+    raise TypeError("not a replay identity memo input")
+
+
+def _frozen_replay_identity_walk(frozen: tuple) -> tuple[list, int]:
+    """(every string of a frozen value, dict keys included, as survival_codec reads ``str(arguments)``;
+    the summed ``sys.getsizeof`` of its tuples and leaves)."""
+    strings, size, stack = [], 0, [frozen]
+    while stack:
+        node = stack.pop()
+        tag, size = node[0], size + sys.getsizeof(node)
+        if tag == "d":
+            size += sys.getsizeof(node[1]) + sum(map(sys.getsizeof, node[1]))
+            stack.extend(item for pair in node[1] for item in pair)
+        elif tag == "l":
+            size += sys.getsizeof(node[1])
+            stack.extend(node[1])
+        elif len(node) > 1:
+            size += sys.getsizeof(node[1])
+            if tag == "s":
+                strings.append(node[1])
+    return strings, size
+
+
+def _replay_identity_memo_gate(role: str, content: str, frozen_calls: tuple) -> frozenset[str]:
+    """The impure kinds a live row carries; empty = its identity reads no state and may be remembered.
+    Unconditional on ``role`` and on the identity flags: over-approximation only costs a memo entry."""
+    texts = [content, *_frozen_replay_identity_walk(frozen_calls)[0]]
+    return frozenset(kind for kind, markers in _REPLAY_IDENTITY_MEMO_GATE
+                     if any(marker in text for text in texts for marker in markers))
+
+
+_REPLAY_IDENTITY_FIELDS = ("role", "content", "tool_calls", "tool_call_id", "tool_name", "name")
+
+
+def _replay_identity_memo_key(fields: tuple, strip_carrier: bool, allow_pruned_tool_alias: bool) -> tuple:
+    """(key, frozen calls) from a live row's _REPLAY_IDENTITY_FIELDS, each read from the row once; TypeError when
+    role, tool_call_id, tool_name or name is not an exact str/None, or content and tool calls are not plain JSON
+    all the way down (a subclass could compare equal to another value, an object falls back to its str())."""
+    role, content, calls, call_id, tool_name, name = fields
+    if type(content) not in (str, list, dict, type(None)) or any(
+            type(value) not in (str, type(None)) for value in (role, call_id, tool_name, name)):
+        raise TypeError("not a replay identity memo input")
+    if type(content) is not str:
+        _freeze_replay_identity_value(content)
+    frozen_calls = _freeze_replay_identity_value(calls)
+    role = role or "unknown"
+    return (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role, normalize_content_value(content) or "",
+            call_id or "", frozen_calls, (tool_name or name or "") if role == "tool" else ""), frozen_calls
+
+
+class _ReplayIdentityMemo:
+    """One epoch's remembered live identities; replaced whole on an epoch change or overflow."""
+    __slots__ = ("epoch", "entries", "size", "lock")
+
+    def __init__(self, epoch):
+        self.epoch, self.entries, self.size, self.lock = epoch, {}, 0, threading.Lock()
+
+    def __deepcopy__(self, memo):  # a copied engine starts with an empty memo and its own lock
+        return _ReplayIdentityMemo(self.epoch)
+
+    def remember(self, key: tuple, result: tuple, frozen_calls: tuple) -> None:
+        # Accounted: every distinct string the key and the result hold, both tuples and every node of the
+        # frozen calls. A race may count a row twice (an over-count) or compute it twice; a get never
+        # returns another key's value, because an entry is only ever its own key's result.
+        strings = {id(text): text for text in (*key[3:6], key[7], *result) if type(text) is str}
+        size = (sum(map(sys.getsizeof, strings.values())) + sys.getsizeof(key) + sys.getsizeof(result)
+                + _frozen_replay_identity_walk(frozen_calls)[1])
+        if size > _REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES:
+            return
+        with self.lock:  # the bound check and the insert are one step: concurrent inserts never pass the caps
+            if (len(self.entries) >= _REPLAY_IDENTITY_MEMO_MAX_ENTRIES
+                    or self.size + size > _REPLAY_IDENTITY_MEMO_MAX_BYTES):
+                self.entries, self.size = {}, 0
+            self.entries[key] = result
+            self.size += size
 
 
 class ReconcileMixin:
@@ -982,6 +1108,67 @@ class ReconcileMixin:
         return candidates[0][2] if len({row[2] for row in candidates}) == 1 else None
 
     def _message_replay_identity(
+        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
+        strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
+        session_id=None, conversation_id=None,
+    ) -> tuple[str, str, str, str, str]:
+        """The replay identity; a live row whose identity reads no state is computed once per epoch (#2856).
+
+        Remembered only for a ReconcileMixin (ingest_classifier binds this function into an adapter that is not
+        one: it always computes) on a bound engine (no detached-store arguments), a live row (stored rows are
+        not remembered yet), no host-rewrite overlay, a plain dict, storage already open (a miss opens it as
+        before), a key that builds and an empty gate. The memo is dropped when the config object, the session,
+        the conversation, the Hermes home or the interpreter's integer-digit limit changes, and on overflow.
+        Purity relies on the admitted path's helpers reading state only behind the gate's markers: a subclass or
+        instance override of _generated_context_carrier_remainder or _survival_projection_source that reads
+        state without a marker would need the memo bypassed."""
+        uncached = ReconcileMixin._message_replay_identity_uncached
+        if (stored_row or with_host_rewrite or store is not None or hermes_home is not None
+                or session_id is not None or conversation_id is not None or type(msg) is not dict
+                or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
+            return uncached(self, msg, stored_row=stored_row, with_host_rewrite=with_host_rewrite,
+                            strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias, store=store,
+                            hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
+        epoch = (id(getattr(self, "_config", None)), getattr(self, "_session_id", None),
+                 getattr(self, "_conversation_id", None), getattr(self, "_hermes_home", None),
+                 sys.get_int_max_str_digits())  # the digit limit decides which tool-call JSON strings parse
+        # The key holds, by value, everything the body reads for an admitted row: the flags, the role string,
+        # the normalised content (the body reads raw content only through normalize_content_value), the call id,
+        # the tool calls (read by _survival_projection_source's mark scan and _stable_tool_calls_identity) and
+        # the tool name (tool rows only). Not read on an admitted row: timestamp and message_uid (the survival
+        # stamp check runs only on a projection mark), session_id and store_id (stored rows and persisted-output
+        # proofs only), and ``name`` on other roles (a participant label, never part of the identity).
+        try:
+            fields = tuple(msg.get(name) for name in _REPLAY_IDENTITY_FIELDS)  # each field the key uses, read once
+            key, _frozen = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias)
+            memo = getattr(self, "_replay_identity_memo", None)  # one plain instance attribute (no property)
+            if memo is None or memo.epoch != epoch:
+                memo = self._replay_identity_memo = _ReplayIdentityMemo(epoch)
+            hit = memo.entries.get(key)
+        except Exception:
+            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+        if hit is not None:
+            return hit
+        if _replay_identity_memo_gate(key[3], key[4], _frozen):
+            # Not admitted: the body may read keys the memo key does not hold (a projection's timestamp, a
+            # persisted marker's session id), so it computes on the ORIGINAL row, exactly as before.
+            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+        # A miss computes on a private copy of the fields read above (plain JSON, so the copy is exact) and
+        # remembers it under the copy's own key: a row another thread changes after the read can never store one
+        # version's identity under the other's key. Nothing on the admitted path reads the row's object identity,
+        # and on an admitted row the body reads no other field. It is remembered only if the digit limit held.
+        try:
+            fields = copy.deepcopy(fields)
+            key, frozen_calls = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias)
+        except Exception:
+            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+        result = uncached(self, dict(zip(_REPLAY_IDENTITY_FIELDS, fields)), strip_carrier=strip_carrier,
+                          allow_pruned_tool_alias=allow_pruned_tool_alias)
+        if sys.get_int_max_str_digits() == epoch[4] and not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
+            memo.remember(key, result, frozen_calls)
+        return result
+
+    def _message_replay_identity_uncached(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
         strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
         session_id=None, conversation_id=None,

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.behaviour.reconcile_trace_harness import (
+    CACHE_ATTRIBUTES,
     GOLDEN,
     OBSERVED_ATTRIBUTES,
     SCENARIOS,
@@ -33,15 +34,21 @@ def test_reconcile_golden(case: Any, tmp_path: Path) -> None:
 
 def test_observed_attribute_inventory_is_complete() -> None:
     discovered = engine_attributes(Path(reconcile.__file__).read_text())
-    assert discovered <= OBSERVED_ATTRIBUTES, (
-        f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES)}; update OBSERVED_ATTRIBUTES.\n"
-        + TRACE_GUIDANCE)
+    assert discovered <= OBSERVED_ATTRIBUTES | CACHE_ATTRIBUTES, (
+        f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES - CACHE_ATTRIBUTES)}; "
+        "update OBSERVED_ATTRIBUTES.\n" + TRACE_GUIDANCE)
     # Prove this guard is sensitive to new state used by a transitive helper,
     # independently of the frozen constant and without editing product source.
     source = Path(reconcile.__file__).read_text()
     source = source.replace('return f"{prefix}:', 'self._trace_inventory_probe\n        return f"{prefix}:', 1)
     assert "_trace_inventory_probe" in engine_attributes(source)
     assert "_trace_inventory_probe" not in OBSERVED_ATTRIBUTES
+
+
+def test_cache_attribute_inventory_is_pinned() -> None:
+    # Each name is read but never snapshotted; one more needs this edit and a reason beside it in the harness.
+    assert CACHE_ATTRIBUTES == frozenset({"_replay_identity_memo", "_storage_ready"})
+    assert not CACHE_ATTRIBUTES & OBSERVED_ATTRIBUTES
 
 
 def test_fixture_scenario_inventory_and_size() -> None:
