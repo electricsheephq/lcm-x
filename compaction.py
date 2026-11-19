@@ -109,7 +109,9 @@ def _made_progress(before, returned) -> bool:
 def _reports_progress(operation):
     """#2863: the host arms its compaction-cleared re-check only when the engine reports progress
     (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False. A call the
-    one-owner guard refuses returns its own list and leaves the owner's report alone: it never writes the flag."""
+    one-owner guard refuses returns its own list and does not report on exit. Known limits with overlapping calls: a call
+    that entered before the owner claimed the engine resets the flag at entry, and a call that met an owner at entry and
+    then owned the engine without progress can read the other thread's report once (one extra re-check, no data)."""
     @wraps(operation)
     def reporting(self, messages, *args, **kwargs):
         refusals = self._compress_reentry_refusals
