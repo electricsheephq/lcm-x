@@ -241,7 +241,12 @@ def test_compactions_increment_total_atomically_across_engines(
 
     @contextmanager
     def deterministic_test_busy_timeout(connections, timeout_ms):
-        assert timeout_ms == 100
+        if timeout_ms != 100:
+            # Only the 100 ms telemetry wait is lengthened. Other bounded waits,
+            # such as the best-effort index build at open, keep their own budget.
+            with runtime_busy_timeout(connections, timeout_ms):
+                yield
+            return
         with runtime_busy_timeout(connections, 5_000):
             yield
 
