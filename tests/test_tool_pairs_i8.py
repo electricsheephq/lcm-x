@@ -40,7 +40,7 @@ def missing(call_id: str) -> Row:
         ([assistant("a"), tool("a")], [0, 1]),
         ([assistant("a"), tool("a"), tool("a")], [0, 1]),
         ([assistant("a", "b"), tool("a"), tool("b")], [0, 1, 2]),
-        ([assistant("a", "b"), tool("b"), tool("a")], [0, 2, "b"]),
+        ([assistant("a", "b"), tool("b"), tool("a")], [0, 2, 1]),  # #2894: both real results kept, in call order (this row pinned the loss of b)
         ([assistant("a"), {"role": "user", "content": "next"}, tool("a")], [0, "a", 1]),
         ([assistant("same", "same"), tool("same")], [0, 1, "same"]),
         ([assistant("same"), assistant("same"), tool("same")], [0, "same", 1, 2]),
