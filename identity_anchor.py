@@ -48,6 +48,7 @@ from .recognition_matching import (
 )
 from .config import identity_anchor_enabled
 from .fresh_tail import tool_group_safe_end
+from .message_analysis import _tool_call_id
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
@@ -395,11 +396,15 @@ class IdentityAnchorMixin:
 
         self._observe_alias_uid_conflicts(
             rows, canonical_stamps, diag_keys_of, occurrences, identity_messages)
+        stamp_proven_calls = set()
         for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
                 plan["replayed"].add(idx)
+                message = messages[idx]
+                if idx not in recovery_identities and message.get("role") == "assistant" and message.get("tool_calls"):
+                    stamp_proven_calls.add(idx)
         for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
             if idx in ledger_pairs:
                 continue
@@ -497,7 +502,10 @@ class IdentityAnchorMixin:
                 self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
-        self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
+        self._identity_anchor_tool_segments(
+            messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()),
+            stamp_proven_calls=stamp_proven_calls,
+        )
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
@@ -1580,11 +1588,49 @@ class IdentityAnchorMixin:
             group.append(options[0])
         return group
 
-    def _identity_anchor_tool_segments(self, messages, cursor: int, hits: set, matched, proven=()) -> None:
+    def _identity_anchor_tool_contents(self) -> Optional[dict]:
+        """Literal tool contents by call ID, within the complete owned R7 scope and presence budget."""
+        session = str(self._session_id)
+        chain = self._identity_anchor_chain()
+        conversation = str(self._conversation_id or "").strip()
+        contents = defaultdict(set)
+        rows_left, bytes_left = _PRESENCE_WINDOW_ROWS, _PRESENCE_WINDOW_BYTES
+        try:
+            for source in [session, *chain]:
+                # Limit the indexed session walk before filtering. A LIMIT on matching tool rows alone
+                # could scan the entire session. SQL withholds content too large for the byte budget.
+                rows = self._store._conn.execute(
+                    "SELECT role, tool_call_id, conversation_id, "
+                    "CASE WHEN role = 'tool' THEN length(CAST(content AS BLOB)) END, "
+                    "CASE WHEN role = 'tool' AND length(CAST(content AS BLOB)) <= ? THEN content END "
+                    "FROM messages INDEXED BY idx_msg_session WHERE session_id = ? ORDER BY store_id LIMIT ?",
+                    (bytes_left, source, rows_left + 1),
+                )
+                try:
+                    for role, call_id, owner, size, content in rows:
+                        rows_left -= 1
+                        if rows_left < 0:
+                            return None
+                        if role == "tool" and call_id and str(owner or "").strip() in ("", conversation):
+                            bytes_left -= size or 0
+                            if bytes_left < 0:
+                                return None
+                            contents[call_id].add(content)
+                finally:
+                    rows.close()
+        except sqlite3.Error:
+            return None
+        return contents
+
+    def _identity_anchor_tool_segments(self, messages, cursor: int, hits: set, matched, proven=(), *,
+                                       stamp_proven_calls=None) -> None:
         """An assistant tool-call segment is replayed whole or not at all, except a stored segment whose
         only new rows are trailing results resuming in place on its session's newest row. ``proven``
-        rows (the audited prefix's positional replays) stay replayed."""
+        rows (the audited prefix's positional replays) stay replayed. An R1 call also stays replayed
+        when all unmatched rows are changed answers to that call (#2781)."""
         index, n = max(cursor, 0), len(messages)
+        tool_contents = None
+        read_tool_contents = False
         while index < n:
             if str(messages[index].get("role") or "") == "assistant" and messages[index].get("tool_calls"):
                 end = index + 1
@@ -1598,7 +1644,22 @@ class IdentityAnchorMixin:
                     tail = self._store.get_session_tail(str(last["session_id"]), limit=1) if last else None
                     resumes = bool(tail) and int(tail[-1]["store_id"]) == int(last["store_id"])
                 if len(held) != end - index and not resumes:
-                    hits.difference_update(k for k in range(index, end) if k not in proven)
+                    keep_call = False
+                    if stamp_proven_calls and index in stamp_proven_calls and index in hits:
+                        calls = messages[index]["tool_calls"]
+                        call_ids = {_tool_call_id(call) for call in calls} - {""} if isinstance(calls, list) else set()
+                        answers = [messages[k] for k in range(index + 1, end) if k not in hits]
+                        if answers and all(answer.get("tool_call_id") in call_ids for answer in answers):
+                            if not read_tool_contents:
+                                tool_contents = self._identity_anchor_tool_contents()
+                                read_tool_contents = True
+                            keep_call = tool_contents is not None and all(
+                                normalize_content_value(answer.get("content"))
+                                not in tool_contents.get(answer["tool_call_id"], ())
+                                for answer in answers
+                            )
+                    drop_from = index + 1 if keep_call else index
+                    hits.difference_update(k for k in range(drop_from, end) if k not in proven)
                 index = end
             else:
                 index += 1
