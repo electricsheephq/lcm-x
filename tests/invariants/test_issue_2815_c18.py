@@ -425,7 +425,7 @@ def test_carrier_adopts_with_proven_engine_uid(tmp_path, monkeypatch, summaries,
         [(scope, _, _)] = entries
         assert scope.uid_trimmed and scope.removed
         assert len(decisions) == 1 and decisions[0][1] is not None
-        assert observations == [{own}]
+        assert observations == [{own}] * (2 if cold or origin == "engine" else 1)  # Include reconciliation.
         assert assembly.call_count == 1
         remainder = {"role": "user", "content": engine._generated_context_carrier_remainder(view[0]),
                      "message_uid": absorbed}

@@ -3431,7 +3431,10 @@ class ReconcileMixin:
         uid_cursor = 0
         if recognition:
             bound_uids = set()
-            uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids)
+            probe = self._host_uid_carrier_probe(messages)
+            uid_matches = self._host_uid_resolve(probe, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids)
+            if probe is not messages and 0 in uid_matches:
+                logger.info("LCM UID cold bind: carrier head resolved via absorbed uid")
             uid_cursor = next((i for i in range(len(messages)) if i not in uid_matches), len(messages))
             if uid_cursor == len(messages):
                 return self._record_uid_cursor(messages, uid_cursor, session_count, 0)

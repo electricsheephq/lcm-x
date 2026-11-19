@@ -243,9 +243,8 @@ def _assert_carrier_decline(engine, monkeypatch, view, origin):
     if origin == "cold-host":
         assert output is view and output == expected
         assert reconcile.call_count >= 1
-        assert not split_lookups
     else:
         assert output == expected + [engine._missing_tool_result_stub(CALL)]
-        assert len(split_lookups) == 1
+    assert len(split_lookups) == (1 if origin == "cold-host" else 2)  # Include reconciliation.
     assert decisions == [(False, None)]
     assert engine._ingest_cursor == len(output)

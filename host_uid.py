@@ -321,6 +321,30 @@ class HostUidShadowMixin:
         if not name or not source.get("tool_name") or source["tool_name"] == name:
             return source
 
+    def _host_uid_carrier_probe(self, messages):
+        """Expose the folded user row to cold-bind UID recognition."""
+        try:
+            head = messages[0]
+            if (not isinstance(head, dict) or head.get("role") != "user"
+                    or not isinstance(content := head.get("content"), str)
+                    or head.get("tool_calls") or head.get("tool_call_id")):
+                return messages
+            absorbed = head.get("_absorbed_message_uids")
+            if not isinstance(absorbed, list) or len(absorbed) != 1:
+                return messages
+            absorbed_uid, = absorbed
+            own = head.get("message_uid")
+            if not _valid_uid(absorbed_uid) or not _valid_uid(own) or absorbed_uid == own:
+                return messages
+            if (end := self._verified_lcm_summary_prefix_end(content)) is None or not content.startswith("\n\n", end):
+                return messages
+            rest = content[end + 2:]
+            if not rest.strip() or self._host_uid_engine_uids({own, absorbed_uid}) != {own}:
+                return messages
+            return [{"role": "user", "content": rest, "message_uid": absorbed_uid}, *messages[1:]]
+        except Exception:
+            return messages
+
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
                           bound_uids=None, held=None, avoid=()):
         """Resolve durable occurrences and optionally report placeholder versions superseded by their source."""
