@@ -5513,14 +5513,25 @@ def _chunk_backfill_run(
     # acknowledgment before sending that to a CLOUD provider; local providers
     # (fastembed/ollama) keep the text on this machine and are exempt (F1).
     if not _is_local_embedding_provider(provider_name) and not confirm_raw_text:
+        if embedding_privacy_revision(config) == "privacy:off":
+            # The filter is off by default (#2977): say plainly that nothing is removed.
+            privacy_note = (
+                "No provider-input privacy filter is applied (it is off unless "
+                "LCM_EMBEDDING_PRIVACY_ENABLED is set), so the text is sent as stored. "
+                "Re-run with `--confirm-raw-text` to acknowledge sending it, "
+            )
+        else:
+            privacy_note = (
+                "The v0.23.1 provider-input privacy transform removes configured "
+                "detector matches but cannot classify every possible sensitive fact. "
+                "Re-run with `--confirm-raw-text` to acknowledge the residual content boundary, "
+            )
         return _refused(
             f"the chunk corpus derives provider input from RAW, VERBATIM message text — including "
             f"tool-result and error/traceback content that the summary corpus "
             f"never exposes — to the '{provider_name}' cloud embedding provider. "
-            f"The v0.23.1 provider-input privacy transform removes configured "
-            f"detector matches but cannot classify every possible sensitive fact. "
-            f"Re-run with `--confirm-raw-text` to acknowledge the residual content "
-            f"boundary, or switch to a local provider (fastembed/ollama)."
+            f"{privacy_note}"
+            f"or switch to a local provider (fastembed/ollama)."
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
