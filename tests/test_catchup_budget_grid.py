@@ -747,15 +747,18 @@ def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
 @pytest.mark.parametrize("cell", V)
 def test_regression_cells_never_behind_the_base(grid, cell):
     """On every pass, no lag: cumulative leaves and cumulative leaves + condensations at least the base's, rows behind a
-    notice (A0b) at most the base's, and no hung strike the base lacks."""
+    notice (A0b) at most the base's, and no hung strike the base lacks. A1's excuse (the RM's ruling on round 1): a
+    count shortfall is excused at a pass where the candidate's prompt is under its trigger AND at or below the base's."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
     assert len(base) == len(cand), f"{cell}: walks of {len(base)} and {len(cand)} passes"
     done = {"base": 0, "cand": 0}
     for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
         done["base"] += b["leaves"] + b["condensations"]
         done["cand"] += c["leaves"] + c["condensations"]
-        assert c["leaves_cum"] >= b["leaves_cum"], f"{cell} pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}"
-        assert done["cand"] >= done["base"], f"{cell} pass {b['pass']}: leaves + condensations {done}"
+        excused = c["prompt_before"] < c["trigger"] and c["prompt_before"] <= b["prompt_before"]
+        assert excused or c["leaves_cum"] >= b["leaves_cum"], (
+            f"{cell} pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}")
+        assert excused or done["cand"] >= done["base"], f"{cell} pass {b['pass']}: leaves + condensations {done}"
         assert nc <= nb, f"{cell} pass {b['pass']}: A0b {nc} > base {nb}"
         assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
 
