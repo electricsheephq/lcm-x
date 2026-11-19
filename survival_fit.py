@@ -25,9 +25,11 @@ through the host's automatic-compaction status hook. LCM_SURVIVAL_FIT=false turn
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import time
+from collections import namedtuple
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -58,9 +60,99 @@ _WARNING = _WARNING_SUMMARY_FAILED
 _WARNING_FITTED = ("To keep this conversation within the model's context window, {n} older messages left live context "
                    "during LCM context fitting; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
                    "/lcm doctor reports why.")
-_NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
-                        r"but not in live context; lcm_grep / lcm_load_session reach them\.\]")
+_NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages of this session are stored verbatim but not in live context. "
+                  "Each range loads with the call as written, paging with next_cursor: {calls}.]")
+_NOTICE_CALL = "store ids {first}..{last}: lcm_load_session(session_id={session}, after_store_id={after}, limit=200)"
+_NOTICE_REST = "; and {count} earlier ranges (store ids {first}..{last}); lcm_grep reaches them"
+_NOTICE_MAX_RANGES = 8  # #2877: the newest ranges out of view are named with their calls; older ones are counted
+_NOTICE_MAX_TOKENS = 700  # the notice's bound for store ids up to 12 digits and session ids up to 128 characters
+_CALL_RE = r'store ids \d+\.\.\d+: lcm_load_session\(session_id="(?:[^"\\]|\\.)*", after_store_id=\d+, limit=200\)'
+_NOTICE_RE = re.compile(r"(?:\n\n)?(?:\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
+                        r"but not in live context; lcm_grep / lcm_load_session reach them\.\]"
+                        r"|\[LCM survival fit: \d+ earlier messages of this session are stored verbatim but not in live "
+                        r"context\. Each range loads with the call as written, paging with next_cursor: "
+                        + _CALL_RE + "(?:; " + _CALL_RE + r")*(?:; and \d+ earlier ranges \(store ids \d+\.\.\d+\); "
+                        r"lcm_grep reaches them)?\.\])")
+_OUT_OF_VIEW_SQL = (
+    "WITH RECURSIVE walk(root, node_id) AS (SELECT CAST(value AS INTEGER), CAST(value AS INTEGER) FROM json_each(?) "
+    "UNION SELECT walk.root, CAST(source.value AS INTEGER) FROM walk JOIN summary_nodes AS node ON node.node_id = "
+    "walk.node_id, json_each(node.source_ids) AS source WHERE node.source_type != 'messages'), "
+    "covered(store_id, root) AS (SELECT CAST(source.value AS INTEGER), walk.root FROM walk JOIN summary_nodes AS node "
+    "ON node.node_id = walk.node_id, json_each(node.source_ids) AS source WHERE node.source_type = 'messages') "
+    "SELECT message.store_id, message.role, length(message.content), group_concat(covered.root) FROM messages AS "
+    "message LEFT JOIN covered ON covered.store_id = message.store_id WHERE message.session_id = ? "
+    "GROUP BY message.store_id ORDER BY message.store_id")
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
+
+
+OutOfViewRead = namedtuple("OutOfViewRead", "roots_read kept order position roots uncovered by_root keys key_roots")
+
+
+def read_out_of_view(store: Any, session_id: str, node_ids, kept=None) -> OutOfViewRead:
+    """This session's non-system rows in order with the read roots covering each (the statement above), then one bounded
+    read of the digests the copy check needs; it answers any shown set from ``kept`` (default all) to ``node_ids`` alike."""
+    roots_read = frozenset(int(node) for node in node_ids)
+    kept = roots_read if kept is None else frozenset(int(node) for node in kept)
+    order, roots, by_root, uncovered, sizes = [], {}, {}, [], {}
+    for store_id, role, size, covering in store.connection.execute(
+            _OUT_OF_VIEW_SQL, (json.dumps(sorted(roots_read)), session_id)).fetchall():
+        if role == "system":
+            continue  # the system slot is always carried
+        order.append(store_id)
+        sizes[store_id] = (role, size)
+        if not covering:
+            uncovered.append(store_id)
+            continue
+        roots[store_id] = {int(node) for node in str(covering).split(",")}
+        for node in roots[store_id]:
+            by_root.setdefault(node, []).append(store_id)
+    wanted = {sizes[store_id] for store_id in order if not roots.get(store_id, set()) & kept}
+    ids = [store_id for store_id in order if store_id not in roots or sizes[store_id] in wanted]
+    keys, key_roots = {}, {}
+    for store_id, role, content in store.connection.execute(
+            "SELECT store_id, role, content FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),)).fetchall():
+        keys[store_id] = key = hashlib.sha256(f"{role}\x00{content}".encode()).hexdigest()
+        for node in roots.get(store_id, ()):
+            key_roots.setdefault(key, set()).add(node)
+    position = {store_id: index for index, store_id in enumerate(order)}
+    return OutOfViewRead(roots_read, kept, order, position, roots, uncovered, by_root, keys, key_roots)
+
+
+def survival_fit_notice(engine: Any, messages, shown_node_ids, *, store_ids=None,
+                        read: Optional[OutOfViewRead] = None) -> Optional[str]:
+    """#2877: for a list about to be returned whose summary heads show ``shown_node_ids``, every range (in session
+    order) of this session's rows out of view, each with the call that loads it, else None. A row is in view when it
+    or a byte-equal stored copy is in the list or under a shown node. ``store_ids`` and ``read`` only save work."""
+    session, shown = str(engine._session_id or ""), {int(node) for node in shown_node_ids}
+    if read is None or not read.kept <= shown <= read.roots_read:
+        read = read_out_of_view(engine._store, session, shown)
+    if store_ids is None:
+        store_ids = engine._get_store_id_map_for_messages([m for m in messages if m.get("role") != "system"])
+    listed = {store_ids[id(m)] for m in messages if id(m) in store_ids}
+    in_view = {read.keys[store_id] for store_id in listed if store_id in read.keys}
+    candidates = set(read.uncovered).union(*(read.by_root.get(node, ()) for node in read.roots_read - shown))
+    out = []
+    for store_id in candidates:
+        key = read.keys.get(store_id)
+        if (store_id in listed or read.roots.get(store_id, set()) & shown
+                or key is not None and (key in in_view or read.key_roots.get(key, set()) & shown)):
+            continue
+        out.append(read.position[store_id])
+    ranges = []
+    for index in sorted(out):
+        if ranges and ranges[-1][1] == index - 1:
+            ranges[-1][1] = index
+        else:
+            ranges.append([index, index])
+    if not ranges:
+        return None
+    ranges = [[read.order[first], read.order[last]] for first, last in ranges]
+    named, rest = ranges[-_NOTICE_MAX_RANGES:], ranges[:-_NOTICE_MAX_RANGES]
+    calls = "; ".join(_NOTICE_CALL.format(first=first, last=last, session=json.dumps(session, ensure_ascii=False),
+                                          after=first - 1) for first, last in named)
+    calls += _NOTICE_REST.format(count=len(rest), first=rest[0][0], last=rest[-1][1]) if rest else ""
+    return _NOTICE_RANGES.format(n=len(out), calls=calls)
 
 
 def survival_counter_store_key(store: Any) -> str:
@@ -194,6 +286,7 @@ class SurvivalFitMixin:
         """``result``, or the fitted list when ``result`` is over the survival budget."""
         if not self._session_id or self._bypasses_lcm_context_management():
             return result
+        self._survival_view_read = None  # #2877: one read of the session per fit (a re-planned fit reads again)
         exit_fit = reason.startswith("exit_fit:")
         # #668: an exit fit's budget without the exit cap; a list over it is a session at risk, not headroom
         window_budget = self._survival_fit_budget(messages, observed_tokens) if exit_fit else None
@@ -328,6 +421,20 @@ class SurvivalFitMixin:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
         body_ids = {id(m) for m in body}
+        # #2877: nodes the kept head shows, nodes each body row shows (an emergency cut drops some), one read per fit
+        kept_head = [*head, *([carrier] if remainder is not None else [])]  # the carrier's summary stays
+        shows = {id(row): set(self._verified_lcm_summary_prefix(row["content"])[1]) for row in [*kept_head, *body]
+                 if row.get("role") == "user" and isinstance(row.get("content"), str)}
+        always = set().union(*(shows.get(id(row), ()) for row in kept_head))
+        optional = {id(row): shows[id(row)] for row in body if shows.get(id(row))}
+        read = getattr(self, "_survival_view_read", None)
+        if read is None or read[0] is not result or read[1] is not None and not read[1].kept <= always:
+            try:
+                read = (result, read_out_of_view(self._store, self._session_id, always.union(*optional.values()), always))
+            except Exception:  # the notice then names this cut's rows only, as before
+                logger.debug("LCM survival fit: the out-of-view read failed", exc_info=True)
+                read = (result, None)
+            self._survival_view_read = read
 
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
@@ -342,8 +449,17 @@ class SurvivalFitMixin:
             ids = sorted(store_ids[id(message)] for message in dropped
                          if id(message) in store_ids and not self._survival_generated(message))
             count = sum(1 for message in dropped if not self._survival_generated(message))
-            # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
-            notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
+            # #2877: every row of the session out of view after this cut, with its call; else (or no read) today's
+            gone, notice = {id(m) for m in dropped}, None
+            try:
+                notice = read[1] and survival_fit_notice(
+                    self, [*head, *(m for m in body if id(m) not in gone)],
+                    always.union(*(nodes for key, nodes in optional.items() if key not in gone)),
+                    store_ids=store_ids, read=read[1])
+            except Exception:
+                logger.debug("LCM survival fit: the cumulative notice failed", exc_info=True)
+            notice = notice or _NOTICE.format(n=count, first=mapped[0] if mapped else "-",
+                                              last=mapped[-1] if mapped else "-")
             out = list(head)
             if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
                 out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
