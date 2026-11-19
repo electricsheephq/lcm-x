@@ -59,6 +59,8 @@ def restore_ingest_payload_placeholders(
     if not isinstance(text, str) or _EXTERNALIZED_PLACEHOLDER_PREFIX not in text:
         return text
 
+    json_container = _maybe_parse_json_string(text) is not None
+
     def replace(match: re.Match[str]) -> str:
         ref = match.group(1).strip()
         payload = load_externalized_payload(ref, config=config, hermes_home=hermes_home)
@@ -68,7 +70,14 @@ def restore_ingest_payload_placeholders(
         if session_id and payload_session_id and payload_session_id != session_id:
             return match.group(0)
         content = payload.get("content")
-        return content if isinstance(content, str) else match.group(0)
+        if not isinstance(content, str):
+            return match.group(0)
+        # The sanitizer stores a parsed argument field's decoded bytes. Only
+        # those bytes need quoting when spliced back into serialized JSON.
+        field_path = payload.get("field_path") or ""
+        if json_container and (".arguments." in field_path or ".arguments[" in field_path):
+            return json.dumps(content, ensure_ascii=False)[1:-1]
+        return content
 
     return _INGEST_PLACEHOLDER_RE.sub(replace, text)
 

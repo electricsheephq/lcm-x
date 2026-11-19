@@ -47,7 +47,8 @@ from .recognition_matching import (
     _reroute_for_null as _reroute_for_null,
 )
 from .config import identity_anchor_enabled
-from .fresh_tail import tool_group_safe_end
+from .fresh_tail import _assistant_group_start, tool_group_safe_end
+from .message_analysis import _tool_call_id
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
@@ -1640,6 +1641,23 @@ class IdentityAnchorMixin:
 
     # -- R4: coverage bound to the summarizer input ----------------------------
 
+    def _tool_result_leaf_claim(self, message, caller=None) -> Optional[int]:
+        call_id = message.get("tool_call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return None
+        rows = self._store.find_session_tool_rows(self._session_id, call_id,
+                                                  conversation_id=self._conversation_id, tool_name="")
+        if len(rows) > 1 and caller is not None:
+            caller_id, call_ids = caller
+            group = self._store.get_range(self._session_id, caller_id, limit=len(call_ids) + 1,
+                                          conversation_id=self._conversation_id, include_blank_conversation=True)
+            if (group and group[0]["store_id"] == caller_id and len(group) == len(call_ids) + 1
+                    and {row["tool_call_id"] for row in group[1:] if row["role"] == "tool"} == call_ids):
+                rows = [row for row in group if row["tool_call_id"] == call_id]
+        if len(rows) == 1 and normalize_content_value(rows[0].get("content")) == normalize_content_value(message.get("content")):
+            return int(rows[0]["store_id"])
+        return None
+
     def _identity_anchor_summary_input(self, chunk, full_map, view=(), raw_chunk=(), budget=None,
                                        accounted_ids=(), copy_lookup=None) -> Optional[list]:
         """The summarizer input for ``chunk`` built TOGETHER with what each input row may claim:
@@ -1726,11 +1744,30 @@ class IdentityAnchorMixin:
         if bound is not None and any(store_id > bound for store_id in claimed):
             claims = {key: [store_id for store_id in ids if store_id < bound] for key, ids in claims.items()}
             claimed = {store_id for ids in claims.values() for store_id in ids}
-        if budget is None:
-            budget = count_messages_tokens(chunk)
-        return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
-                                          max(budget, count_messages_tokens(chunk)), accounted_ids,
-                                          copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
+        budget = max(budget or 0, count_messages_tokens(chunk))
+        def walk():
+            return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
+                                              budget, accounted_ids,
+                                              copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
+
+        result = walk()
+        emitted = {id(row): ids for row, ids in result} if result is not None else dict.fromkeys(map(id, chunk))
+        last = max((i for i, row in enumerate(chunk) if id(row) in emitted), default=-1)
+        retry = False
+        for last in range(last, -1, -1):
+            row = chunk[last]
+            if id(row) in full_map or emitted.get(id(row)):
+                break
+            if row.get("role") != "tool":
+                continue
+            opener = chunk[_assistant_group_start(chunk, last)]
+            caller = (full_map[id(opener)], {_tool_call_id(c) for c in opener["tool_calls"]}) if id(opener) in full_map else None
+            sid = self._tool_result_leaf_claim(row, caller)
+            if sid and frontier < sid and (bound is None or sid < bound) and sid not in mapped | claimed:
+                claims[id(row)] = [sid]
+                claimed.add(sid)
+                retry = True
+        return walk() if retry else result
 
     def _retained_escape_memo(self) -> dict:
         """Escape-covered identities for the session and its compression ancestors; never a source claim."""

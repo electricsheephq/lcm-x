@@ -1706,14 +1706,18 @@ class CompactionMixin:
         """What a leaf summarised from ``compacted_chunk`` consumes (the leaf loop's derivation; #787 promotion
         matches a prepared leaf with it): the compacted rows as host rows, their positions in the selected chunk,
         the consumed host prefix, the summary lineage ids and the consumed store ids."""
-        anchor_claimed_ids = sorted({  # #436 R4: only claims whose text the summarizer actually read
-            store_id for message in compacted_chunk for store_id in anchor_claims.get(id(message), ())
-        })
+        claims_by_row = {id(sources.get(id(message), message)): anchor_claims[id(message)]
+                         for message in compacted_chunk if id(message) in anchor_claims}
         compacted_chunk = [sources.get(id(message), message) for message in compacted_chunk]
         compacted_summary_ids = {id(message) for message in compacted_chunk}
         compacted_positions = [
             idx for idx, message in enumerate(selected_raw_chunk) if id(message) in compacted_summary_ids
         ]
+        full_map = self._compress_run.store_ids_by_message_id or {}  # #535: the pass maps the whole list
+        # Leave synthetic blanks to cleanup while keeping independently read retained sources.
+        while (compacted_positions and (tail := selected_raw_chunk[compacted_positions[-1]]) ==
+               {"role": "assistant", "content": ""} and id(tail) not in full_map and id(tail) not in claims_by_row):
+            compacted_positions.pop()
         last_compacted_raw_pos = max(compacted_positions) if compacted_positions else len(compacted_chunk) - 1
         if anchored_input and not compacted_positions:
             # #436 T6 / #581: a leaf of stored rows alone (hidden rows, or a rescue prefix of them)
@@ -1727,16 +1731,35 @@ class CompactionMixin:
             and id(selected_raw_chunk[last_consumed_raw_pos + 1]) in dependent_reply_message_ids
         ):
             last_consumed_raw_pos += 1
-        source_lookup_chunk = selected_raw_chunk[: last_consumed_raw_pos + 1]
+        end = last_consumed_raw_pos + 1
+        # #2890: keep trailing unnamed rows with their groups. A later named row proves the walk read
+        # the preceding stored prefix, and a live copy of covered history (#1162) is exempt.
+        positions, cut, later_named = set(compacted_positions), end, False
+        for idx in range(end - 1, -1, -1):
+            message = selected_raw_chunk[idx]
+            named = id(message) in full_map or id(message) in claims_by_row
+            if (not named and not later_named and id(message) not in dependent_reply_message_ids
+                    and not self._identity_anchor_covered_view(message, full_map)):
+                cut = idx
+            later_named = later_named or (named and idx in positions)
+        if cut < end and (safe_end := tool_group_safe_end(selected_raw_chunk, cut)) != cut:
+            cut = safe_end if safe_end < cut else 0
+        source_lookup_chunk = selected_raw_chunk[:cut]
         source_lineage_chunk = [
             message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
         ]
-        full_map = self._compress_run.store_ids_by_message_id  # #535: the pass maps the whole list
-        source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk, full_map)
-        source_store_ids = sorted(dict.fromkeys(source_store_ids + anchor_claimed_ids))
-        consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk, full_map)
-        consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids + anchor_claimed_ids))
-        return compacted_chunk, compacted_positions, source_lookup_chunk, source_store_ids, consumed_store_ids
+        if cut < end:
+            # Claims on rehydrated rows and on host rows after the cut cannot advance this prefix.
+            source_store_ids = [full_map[id(row)] for row in source_lineage_chunk if id(row) in full_map]
+            consumed_store_ids = [full_map[id(row)] for row in source_lookup_chunk if id(row) in full_map]
+            claim_rows = source_lookup_chunk
+        else:
+            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk, full_map)
+            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk, full_map)
+            claim_rows = compacted_chunk
+        claimed_ids = {sid for row in claim_rows for sid in claims_by_row.get(id(row), ())}
+        return (compacted_chunk, compacted_positions, source_lookup_chunk,
+                sorted(claimed_ids.union(source_store_ids)), sorted(claimed_ids.union(consumed_store_ids)))
 
     def _leaf_summary_input(self, anchored_input, selected_input):
         """The leaf loop's summariser input for a selected chunk: (rows, carrier rows by input row id, claims by
@@ -3512,6 +3535,7 @@ class CompactionMixin:
         self._last_compacted_store_id = leaf.published_frontier
         published_ids = set(leaf.source_store_ids)
         escaped = [row for row in leaf.pending_escapes if row[0] in published_ids]
+        self._clear_named_retained_anchor(published_ids)  # #2890
         self._record_retained_escape(escaped)
         if escaped and not self._compress_escaped:
             sid, role, kind = escaped[0]

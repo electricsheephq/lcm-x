@@ -11,6 +11,7 @@ from tests.harness import (
     ScriptedSummarizer, assistant, call, engine_context, host_call,
     pin_char_counter, prose, tool, user,
 )
+from tests.test_issue_2890_lineage_guard import _content_digest, _covered_digests
 
 
 WINDOWS = (16, 24, 32, 48, 64, 96, 127)
@@ -119,8 +120,11 @@ def test_default_window_matrix(tmp_path, monkeypatch, caplog, window_k, control,
     compressed_rounds = 0
     repeated_rounds = []
     with engine_context(tmp_path, window=window, **overrides) as engine:
+        first_objective = None
         for turn in range(3):
             objective = f"{OBJECTIVE} round {turn}: inspect the records and preserve the evidence."
+            if turn == 0:
+                first_objective = _content_digest(engine, user(objective))
             view.append(user(objective))
             # Short assistant rows exercise rc7's #1227 outage rescue. Include
             # one larger tool payload to exercise default externalization too.
@@ -149,6 +153,9 @@ def test_default_window_matrix(tmp_path, monkeypatch, caplog, window_k, control,
             caplog.clear()
             following = host_call(engine, result.view)
             _check_sent(engine, following, caplog, objective)
+            stored = engine._store.get_session_messages(engine.current_session_id)
+            for returned in (result.view, following.view):
+                assert first_objective in _covered_digests(engine, stored, returned), f"round {turn} lost the first objective"
             if mode == "outage" and turn == 0:
                 assert len(provider.calls) == calls_before_followup
             if known_recompaction and turn == 0:
