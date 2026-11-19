@@ -761,9 +761,11 @@ def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
     per_leaf = {tree: max(r["summary_area"] for r in records) / max(1, records[-1]["leaves_cum"])
                 for tree, records in (("base", base), ("cand", cand))}
     assert per_leaf["cand"] <= per_leaf["base"] + 1, f"{cell}: summary area per stored leaf {per_leaf}"
-    # T1-327: the end prompt is compared with the base's LAST NON-FIT prompt (a lossy fit cut is not the base doing
-    # better), and the mean prompt over the walk must also be at most the base's
-    non_fit = [r for r, n in zip(base, a0b_rows(base)) if not n and not (r["loss"] or {}).get("survival_fit_notice")]
+    # T1-327: the end prompt is compared with the base's prompt on its last pass that was not itself a fit pass (one that
+    # moved more rows behind a notice than the pass before: a lossy fit cut is not the base doing better), and the mean
+    # prompt over the walk must also be at most the base's
+    behind = a0b_rows(base)
+    non_fit = [r for i, r in enumerate(base) if behind[i] <= (behind[i - 1] if i else 0)]
     base_end = (non_fit or base)[-1]["prompt_after"]
     assert cand[-1]["prompt_after"] <= base_end, f"{cell}: end prompt {cand[-1]['prompt_after']} > base {base_end}"
     mean = {tree: sum(r["prompt_after"] for r in records) / len(records) for tree, records in (("base", base),
