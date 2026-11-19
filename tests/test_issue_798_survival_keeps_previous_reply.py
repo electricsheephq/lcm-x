@@ -60,9 +60,9 @@ def _fit(engine, view, budget):
     return engine._survival_fit(view, view, 0, "issue_798", request_cap=budget)
 
 
-def _base_without_reply(view, ids, engine):
+def _base_without_reply(view, ids):
     """Exact base shape when only the newest whole turn fits (including notice bytes)."""
-    notice = survival_fit.survival_fit_notice(engine, [view[0], view[-1]], set())
+    notice = survival_fit.survival_notice_text(2, [("S", ids[0], ids[1])])
     return [{**view[0], "content": survival_fit.SurvivalFitMixin._survival_with_notice(
         view[0]["content"], notice)}, view[-1]]
 
@@ -73,7 +73,7 @@ def test_1_verbatim_reply_object_and_notice_excludes_reply(engine, rough_counts)
     assert fitted[1] is view[2] and fitted[2] is view[3]
     ids = [row["store_id"] for row in _rows(engine)]
     assert engine._last_survival_fit["dropped_rows"] == 1
-    assert engine._last_survival_fit["notice"] == survival_fit.survival_fit_notice(engine, fitted, set())
+    assert engine._last_survival_fit["notice"] == survival_fit.survival_notice_text(1, [("S", ids[0], ids[0])])
     assert rough_counts(fitted) <= 100
 
 
@@ -121,7 +121,7 @@ def test_3_middle_band_and_no_room_keep_base_bytes(engine, rough_counts, length,
     view = _view("a" * length)
     fitted = _fit(engine, view, budget)
     ids = [row["store_id"] for row in _rows(engine)]
-    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids, engine), sort_keys=True)
+    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids), sort_keys=True)
     assert not any(row["role"] == "assistant" for row in fitted)
 
 
@@ -234,7 +234,7 @@ def test_9_unstamped_short_reply_is_byte_identical_to_base(engine, rough_counts,
         view[2]["timestamp"] = stamp
     fitted = _fit(engine, view, 100)
     ids = [row["store_id"] for row in _rows(engine)]
-    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids, engine), sort_keys=True)
+    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids), sort_keys=True)
 
 
 @pytest.mark.parametrize("budget", [600, 3000])
@@ -242,7 +242,7 @@ def test_10_unstamped_long_reply_is_byte_identical_to_base(engine, rough_counts,
     view = _view("[A1] " + "long " * 2000, stamped=False)
     fitted = _fit(engine, view, budget)
     ids = [row["store_id"] for row in _rows(engine)]
-    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids, engine), sort_keys=True)
+    assert json.dumps(fitted, sort_keys=True) == json.dumps(_base_without_reply(view, ids), sort_keys=True)
 
 
 def test_11_stamped_short_verbatim_reply_survives_cold_resume(tmp_path, rough_counts):

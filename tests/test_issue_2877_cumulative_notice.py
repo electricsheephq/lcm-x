@@ -10,6 +10,8 @@
 - The builder's text is pinned by literals, called directly (outside any fit): one range, several ranges, and the
   list the emergency cut returns after dropping the summary prefix; the fit's own notice equals that call.
 - The builder's optional store-id map and read only save work: without them it returns byte-identical text.
+- Never fewer than the base: the rows a fit drops are named in any case, a rotation's parent rows under the parent's
+  session id.
 """
 
 from __future__ import annotations
@@ -188,7 +190,7 @@ def test_builder_text_on_the_emergency_path_is_pinned_by_a_literal(engine, monke
     # the out-of-view read: the emergency path reads twice (the prefix cut, then the cut that may drop the prefix),
     # each one recursive statement and one bounded content read, for every cut it tries
     assert sum("WITH RECURSIVE walk(root, node_id)" in s for s in statements) == 2, statements
-    assert sum("SELECT store_id, role, content FROM messages WHERE store_id IN" in s for s in statements) == 2
+    assert sum("SELECT store_id, session_id, role, content FROM messages WHERE store_id IN" in s for s in statements) == 2
     plan = " ".join(str(row) for row in engine._store.connection.execute(
         "EXPLAIN QUERY PLAN " + _OUT_OF_VIEW_SQL, ("[1]", "S")).fetchall())
     assert "idx_msg_session" in plan, plan
@@ -206,7 +208,7 @@ def test_a_normal_fit_reads_the_session_once(engine, monkeypatch):
         engine._store.connection.set_trace_callback(None)
     assert len(result) == 3 and engine._last_survival_fit["notice"] == survival_fit_notice(engine, result, set())
     assert sum("WITH RECURSIVE walk(root, node_id)" in s for s in statements) == 1, statements
-    assert sum("SELECT store_id, role, content FROM messages WHERE store_id IN" in s for s in statements) == 1
+    assert sum("SELECT store_id, session_id, role, content FROM messages WHERE store_id IN" in s for s in statements) == 1
 
 
 def test_b_twelve_ranges_name_the_newest_eight_and_count_the_rest(engine):
@@ -223,7 +225,7 @@ def test_b_twelve_ranges_name_the_newest_eight_and_count_the_rest(engine):
 def test_b_the_notice_bound_holds_for_long_ids():
     """The constant's case: 12-digit store ids and a 128-character session id, far more ranges than are named."""
     order = [10 ** 12 - 2 * 60 + i for i in range(120)]
-    read = OutOfViewRead(frozenset(), frozenset(), order, {s: i for i, s in enumerate(order)}, {}, order, {}, {}, {})
+    read = OutOfViewRead(frozenset(), frozenset(), order, {s: i for i, s in enumerate(order)}, {}, order, {}, {}, {}, {})
     listed = [{"role": "user", "content": "kept"} for _ in order[1::2]]
     stub = SimpleNamespace(_session_id="0123456789abcdef" * 8, _store=None)
     notice = survival_fit_notice(stub, listed, set(), store_ids={id(m): s for m, s in zip(listed, order[1::2])},
@@ -316,11 +318,50 @@ def test_the_optional_map_and_read_only_save_work(engine):
                                               source_ids=[3, 4], expand_hint="turns"))
     wide = read_out_of_view(engine._store, "S", {first, second}, kept={first})
     cases = 0
+    parent = [engine._store.append("P", {"role": "user", "content": f"parent {i}"}, conversation_id="conv")
+              for i in range(3)]
     for keep in ({9, 10}, {5, 9, 11, 12}, {11, 12}, set(), set(range(1, 13))):
         messages, ids = _listed(rows, keep)
         for shown in ({first}, {first, second}, set(), {second}):
-            plain = survival_fit_notice(engine, messages, shown)
-            assert survival_fit_notice(engine, messages, shown, store_ids=ids) == plain, (keep, shown)
-            assert survival_fit_notice(engine, messages, shown, store_ids=ids, read=wide) == plain, (keep, shown)
-            cases += plain is not None
-    assert cases >= 12
+            for left in ((), (1, 5), (*parent, 7)):
+                plain = survival_fit_notice(engine, messages, shown, left=left)
+                args = (keep, shown, left)
+                assert survival_fit_notice(engine, messages, shown, left=left, store_ids=ids) == plain, args
+                assert survival_fit_notice(engine, messages, shown, left=left, store_ids=ids, read=wide) == plain, args
+                cases += plain is not None
+    assert cases >= 36
+
+
+def test_rows_that_left_are_named_in_any_case(engine):
+    """``left`` (the rows a fit dropped, as the base's notice names them) is named even when a copy is in view."""
+    rows = _store(engine, ["same words", "r2", "u3", "r4", "same words", "r6"])
+    messages, ids = _listed(rows, {1, 2, 3, 4, 6})
+    assert survival_fit_notice(engine, messages, set(), store_ids=ids) is None  # row 5's copy (1) is in the list
+    assert survival_fit_notice(engine, messages, set(), left=[5], store_ids=ids) == (
+        "[LCM survival fit: 1 earlier messages of this session are stored verbatim but not in live context. Each "
+        "range loads with the call as written, paging with next_cursor: store ids 5..5: "
+        'lcm_load_session(session_id="S", after_store_id=4, limit=200).]')
+
+
+def test_after_a_rotation_a_dropped_parent_row_is_named_with_its_session(engine, monkeypatch):
+    """The list maps two rows into the parent session, as a rotation's carry range does (the map is stubbed to add
+    them); the fit drops them, and the notice names them under the parent's session id with a call that loads them."""
+    _rough(monkeypatch)
+    pad = " older words" * 100
+    parent = [engine._store.append("P", {"role": role, "content": f"[P{i}]{pad}"}, conversation_id="conv")
+              for i, role in enumerate(("user", "assistant"))]
+    rows = _store(engine, [f"[R{i}]{pad}" for i in range(1, 5)] + ["[N] the newest question", "[N] answer " * 150])
+    carried = [{"role": "user", "content": f"[P0]{pad}"}, {"role": "assistant", "content": f"[P1]{pad}"}]
+    active = [{"role": "system", "content": "system prompt"}, *carried, *(row for _, row in rows)]
+    real = engine._get_store_id_map_for_messages
+    monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda messages, *a, **k: {
+        **real(messages, *a, **k), **{id(m): s for m, s in zip(carried, parent) if any(m is x for x in messages)}})
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+    result = engine._survival_fit(active, list(active), 0, "test", request_cap=900)
+    assert [row["content"] for row in result[1:]] == [rows[-2][1]["content"], rows[-1][1]["content"]]
+    notice = engine._last_survival_fit["notice"]
+    named = {(a, b): dict((k, json.loads(v)) for k, v in ARG.findall(args)) for a, b, args in CALL.findall(notice)}
+    assert named[(str(parent[0]), str(parent[1]))]["session_id"] == "P", notice
+    loaded = [m for m in _load(engine, CALL.findall(notice)[0][2]) if m["store_id"] <= parent[1]]
+    assert [m["content"] for m in loaded] == [f"[P0]{pad}", f"[P1]{pad}"]
+    assert named[(str(rows[0][0]), str(rows[3][0]))]["session_id"] == "S", notice
