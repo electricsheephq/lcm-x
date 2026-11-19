@@ -212,7 +212,11 @@ def pairing_problems(out, newest_id):
 
 def _occurrence_digest(eng, m):
     """One key for both forms of a tool result: a pointer row counts as the payload it names."""
-    refs = extract_externalized_refs(m.get("content") or "") if is_stub(m) else []
+    text = (m.get("content") or "") if isinstance(m.get("content"), str) else ""
+    whole = text.strip()
+    # Only a row that IS one pointer counts as its payload; a tool output that quotes a pointer stays its own text.
+    is_pointer_row = whole.startswith("[Externalized tool output:") and whole.endswith("]") and whole.count("[Externalized tool output:") == 1
+    refs = extract_externalized_refs(text) if (is_pointer_row and is_stub(m)) else []
     if len(refs) == 1:
         payload = (load_externalized_payload(refs[0], config=eng._config, hermes_home=eng._hermes_home) or {})
         if payload.get("content") is not None:
@@ -703,3 +707,13 @@ def test_conservation_violations_tells_calls_apart_by_name_and_arguments(engine)
 def test_summary_target_ratio_is_the_host_default():
     # agent/context_compressor.py:2801; read by idle compaction (turn_context_compaction.py:171).
     assert LCMEngine.summary_target_ratio == 0.20
+
+
+def test_a_tool_output_that_quotes_a_pointer_is_its_own_row(engine, monkeypatch):
+    """A result quoting a valid pointer marker inside other text is not replaced by the payload it names."""
+    monkeypatch.setitem(globals(), "load_externalized_payload", lambda *a, **k: {"content": "PAYLOAD"})
+    marker = "[Externalized tool output: tool=t; tool_call_id=c1; chars=3; bytes=3; read it with lcm_expand(externalized_ref=\"x.json\"); ref=x.json]"
+    row = {"role": "tool", "tool_call_id": "c2", "content": "log line before " + marker + " and after"}
+    assert _occurrence_digest(engine, row) == _digest(row)
+    whole = {"role": "tool", "tool_call_id": "c1", "content": marker}
+    assert _occurrence_digest(engine, whole) == _digest(dict(whole, content="PAYLOAD"))
