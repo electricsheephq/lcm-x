@@ -382,8 +382,17 @@ def test_t5_covered_copy_leaves_tail(tmp_path, summaries, lines, monkeypatch):
             p.setattr(engine, "_retained_escape_covered_view", lambda _m, _frontier=None: False)
             assert engine._identity_anchor_extend_chunk([retained], candidates) == [retained]
         view += [r for i in range(20, 23) for r in _turn(f"C{i}", 100.0 * i)]
-        _, trace = _passes(engine, view, 8, lines)
-        assert not any(t["reason"] == "selected leaf chunk lacks raw store lineage" for t in trace), trace
+        # #2901: a carrier-led leaf is charged at its remainder, so the walk drains one pass sooner; both trees then
+        # reach the same drained no-op. A lineage refusal fails only while stored raw rows remain outside the fresh tail.
+        tail, refused = int(engine._config.fresh_tail_count), []
+        for index in range(12):
+            view, trace = _passes(engine, view, 1, lines)
+            above = [int(r["store_id"]) for r in _rows(engine) if int(r["store_id"]) > _frontier(engine)]
+            backlog = above[:max(0, len(above) - tail)]
+            if trace[0]["reason"] == "selected leaf chunk lacks raw store lineage" and backlog:
+                refused.append((index, backlog, trace[0]))
+        assert not refused, refused
+        assert _frontier(engine) == 16 and len(_rows(engine)) == 17  # main's drained end state
     finally:
         engine.shutdown()
 
