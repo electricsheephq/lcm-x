@@ -350,3 +350,104 @@ def test_1_the_no_system_twin_leaves_no_cut_row_without_a_pointer(tmp_path, reco
     later = [r["pass"] for r in records if r["loss"] and r["pass"] > fits[0] and not r["loss"]["survival_fit_notice"]]
     record_property("passes_after_a_fit_without_a_notice", len(later))
     print(f"\n#2896 twin: fits at passes {fits}; passes after the first fit with no notice: {later}")
+
+
+# -- review round 1 (Astra): each cell red on 9e69e970 ------------------------------------------------------------
+
+from hermes_lcm.emission_projection import _project_emitted_occurrences  # noqa: E402
+from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX  # noqa: E402
+from tests.test_issue_650_survival_fit_keeps_summary import _BOUNDARY  # noqa: E402
+
+
+class _Pattern:  # the optional regex package's search(text, timeout=...), over stdlib re
+    def __init__(self, text):
+        self.pattern = __import__("re").compile(text)
+
+    def search(self, text, timeout=None):
+        return self.pattern.search(text)
+
+
+def test_a1_a_header_shaped_user_turn_behind_the_block_keeps_its_own_text(engine):
+    """A1: the host row glued behind the block starts with a summary-shaped header that verifies as no part (a quoted
+    header): the block is still the summary's, the remainder is the host row, and an ignore pattern on the notice's
+    words does not match the carrier. Main (no block): the remainder is the same host row."""
+    parts = _part(engine)
+    turn = "[Recent Summary (d0, node 999)]\nmy actual question"
+    carrier = {"role": "user", "content": f"{parts}{_block(engine, parts)}\n\n{turn}"}
+    assert engine._generated_context_carrier_remainder(carrier) == turn
+    engine._compiled_ignore_message_patterns = [_Pattern("LCM survival fit")]
+    assert not engine._matches_ignore_message_patterns(carrier)
+
+
+def test_a2_a_late_callback_for_another_binding_never_matches_the_notice(engine):
+    """A2: a session-end suffix of session S's list arrives while the engine is bound to B: the carrier's block is the
+    fit's, so an ignore pattern on the notice's words never drops the host row behind it. Main: no block, no match."""
+    parts = _part(engine)
+    carrier = {"role": "user", "content": f"{parts}{_block(engine, parts)}\n\na fresh user turn"}
+    engine._compiled_ignore_message_patterns = [_Pattern("LCM survival fit")]
+    engine._session_id = "B"
+    assert not engine._matches_ignore_message_patterns(carrier)
+
+
+def test_a3_an_exception_path_fit_binds_its_marked_standalone_summary(tmp_path, host, monkeypatch):
+    """A3: a compress that fails runs the fit on its exception path; the summary row it keeps (list user rows: no
+    carrier) takes the block, and the fit's in-memory proof projects the exact row it returned as LCM's. Main: the row
+    has no block, and the fit registers no emission for a standalone summary."""
+    engine = _hermes_engine(tmp_path)
+    try:
+        view = _hidden_backlog(engine, list_users=True, stamped_replies=True)
+        first = engine.compress(view, current_tokens=host(view))
+        engine.on_session_start("S", **_BOUNDARY)
+        grown = [*first, *[r for i in range(12) for r in _turn(f"G{i:02d}", 20_000.0 + 10 * i, True, True)]]
+        engine.ingest(grown)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("summariser down")
+
+        monkeypatch.setattr(engine, "_compress_impl", fail)
+        fitted = engine.compress(grown, current_tokens=host(grown))
+        assert OPEN in fitted[0]["content"] and engine._last_survival_fit is not None
+        projection = _project_emitted_occurrences(fitted, proof=engine._last_emission_descriptors)
+        assert projection.entries[0].generated_span == fitted[0]["content"], projection.entries[0]
+    finally:
+        engine.shutdown()
+
+
+def test_a4_a_carrier_ahead_of_a_preserved_objective_takes_the_block(engine, monkeypatch, caplog):
+    """A4: the kept prefix is [verified carrier, preserved objective]; the fit cuts an old stored turn: the carrier
+    takes the notice, which names the cut rows. Main: no system row, no notice (the rows have no pointer)."""
+    _rough(monkeypatch)
+    pad = " older words" * 100
+    rows = _store_turns(engine, [f"[U{i}]{pad}" for i in range(3)])
+    parts = _part(engine, "the first turns")
+    carrier = {"role": "user", "content": f"{parts}\n\n{rows[0][1]['content']}"}
+    assert engine._generated_context_carrier_remainder(carrier) == rows[0][1]["content"]
+    objective = {"role": "user", "content": f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\nfinish the report"}
+    active = [carrier, objective, *(row for _, row in rows[1:])]
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+    with caplog.at_level("WARNING", logger="hermes_lcm"):
+        result = engine._survival_fit(active, list(active), 0, "test", request_cap=_rough(monkeypatch)(active) - 50)
+    assert result is not active and len(result) < len(active)
+    assert "no system row and no summary head" not in caplog.text
+    assert OPEN in result[0]["content"], [str(m["content"])[:60] for m in result]
+
+
+def _rough(monkeypatch):
+    def count(message):
+        return len(str(message.get("content") or "")) // 4
+
+    def measure(messages):
+        return sum(count(message) for message in messages)
+
+    monkeypatch.setattr(survival_fit, "count_message_tokens", count)
+    monkeypatch.setattr(survival_fit, "count_messages_tokens", measure)
+    monkeypatch.setattr(survival_fit, "_host_estimate", measure)
+    return measure
+
+
+def _store_turns(engine, users):
+    out = []
+    for i, text in enumerate(users):
+        for row in ({"role": "user", "content": text}, {"role": "assistant", "content": f"reply {i}" + " v" * 200}):
+            out.append((engine._store.append("S", dict(row), conversation_id="conv"), row))
+    return out
