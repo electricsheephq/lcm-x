@@ -32,13 +32,13 @@ def uid_on(monkeypatch):
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
 
 
-def _open(path):
+def _open(path, *, hermes_home=None):
     engine = LCMEngine(config=LCMConfig(
         database_path=str(path / "lcm.db"), fresh_tail_count=8, leaf_chunk_tokens=400, dynamic_leaf_chunk_enabled=False,
         threshold_full_sweep_enabled=False, temporal_rollups_enabled=False,
         survival_fit=False, embeddings_enabled=False,
         large_output_active_replay_stubbing_enabled=False,
-    ), hermes_home=str(path))
+    ), hermes_home=str(hermes_home or path))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     engine.threshold_tokens = 8_000
     return engine
@@ -160,52 +160,138 @@ def _pairs(output):
     ("carrier", "refused"), ("carrier", "two-absorbed"),
 ])
 def test_restore_stubs(tmp_path, monkeypatch, summaries, shape, exit_case):
-    with _closing(_seed(tmp_path / "store")) as engine:
-        raw, published = _publish(engine, shape)
-        view = _shape(engine, raw, published, shape)
-        if shape == "carrier":
-            # The split retains the opening user. A separate covered occurrence
-            # lets UID trim run while the carrier itself remains in the view.
-            view.insert(1, raw[0])
-        if exit_case == "fresh":
-            view = view[:2]  # The first durable row after the frontier is fresh.
-        if exit_case == "hidden":
-            later = _view(8)[21:]
-            engine.ingest([*view, *later])
-            visible = next(row for row in reversed(later) if row["role"] == "user")
-            view = [view[0], visible]  # Omit the uncovered backlog before this bound row.
+    _compare_no_leaf(tmp_path, monkeypatch, shape, exit_case)
 
-            def refuse_hidden(*args, **kwargs):
-                assert engine._last_hidden_backlog
-                raise SweepBudgetExhausted("foreground_soft_target")
 
-            monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", refuse_hidden)
-        if exit_case == "refused":
-            engine._config.survival_fit = True
-            monkeypatch.setattr(engine, "_summary_route_available", lambda: False)
-            if shape == "plain":
-                view.extend(_view(8)[21:])
-        if exit_case == "two-absorbed":
-            view[0]["_absorbed_message_uids"].append("c18-unbound")
-        if exit_case not in {"fresh", "hidden"}:
-            view.append(_new_user())
-        view.append(_missing())
-        if exit_case in {"fresh", "hidden"}:
-            engine._config.fresh_tail_count = 2
+def _compare_no_leaf(tmp_path, monkeypatch, shape, exit_case):
+    _state_db(tmp_path, [("S", None, None), ("B", None, None)])
+    baseline = _no_leaf_arm(tmp_path / "unset", monkeypatch, shape, exit_case, on=False)
+    current = _no_leaf_arm(tmp_path / "on", monkeypatch, shape, exit_case, on=True)
+    base_view, base, base_status, base_reason, base_cursor, _, _ = baseline
+    view, output, status, reason, cursor, scopes, drop_sets = current
+    assert view == base_view
+    unchanged = exit_case in {"refused", "two-absorbed"}
+    assert (base is base_view) == unchanged
+    if unchanged:
+        assert output is view
+        assert (status, reason) == (base_status, base_reason)
+        assert CALL not in _pairs(output)[1]
+    elif exit_case == "carrier-conflict":
+        # The error exit returns a copy even when its rows stay equal.
+        assert output == view == base
+        assert (status, reason) == (base_status, base_reason)
+        assert CALL not in _pairs(output)[1]
+    else:
+        assert _pairs(output) == _pairs(base)
+        assert [row for row in output if row in view] == view
+        assert CALL in _pairs(output)[1]
+    assert cursor == len(output) and base_cursor == len(base)
+    [scope] = scopes
+    assert scope.uid_trimmed
+    assert (scope.legacy_replay is not None) == (exit_case in {"plain-conflict", "missing-uid"})
+    if drop_sets is not None:  # The HEAD receipts precede the extracted helper.
+        assert drop_sets == ([set(), set()] if unchanged or exit_case == "carrier-conflict" else [{0}])
+    print(f"{shape} {exit_case}: unset={'own' if base is base_view else 'equal copy' if base == base_view else 'changed'}; "
+          f"mode={'own' if output is view else 'equal copy' if output == view else 'changed'}; "
+          f"status/reason={base_status, base_reason, status, reason}; drops={drop_sets}")
+
+
+def _no_leaf_arm(path, monkeypatch, shape, exit_case, *, on):
+    path.mkdir()
+    with monkeypatch.context() as fault, _closing(_open(path, hermes_home=path.parent)) as engine:
+        hidden_calls = []
+        conflicts = []
+        if exit_case in {"plain-conflict", "missing-uid"}:
+            view = _adoptable_plain(engine)
+        else:
+            view = _seed_no_leaf_view(engine, fault, shape, exit_case, hidden_calls)
         _assert_bound(engine, view)
-        entries = _spy_finish(engine, monkeypatch)
+        resolved = engine._host_uid_resolve(view)
+        assert any(view[index].get("message_uid") and row["store_id"] > engine._last_compacted_store_id
+                   for index, row in resolved.items())
+        if exit_case.endswith("conflict"):
+            engine._config.leaf_chunk_tokens = 1
+
+            def refuse_publication(*args, **kwargs):
+                conflicts.append(_UID_DROP_INPUT.get())
+                raise sqlite3.OperationalError("database is locked")
+
+            fault.setattr(engine, "_publish_leaf_node", refuse_publication)
+        if exit_case == "missing-uid" and on:
+            uid = view[1]["message_uid"]
+            assembly = engine._assemble_context
+
+            def lose_uid(*args, **kwargs):
+                rows = [dict(row) for row in assembly(*args, **kwargs)]
+                for row in rows:
+                    if row.get("message_uid") == uid:
+                        row.pop("message_uid")
+                    elif uid in row.get("_absorbed_message_uids", ()):
+                        row["_absorbed_message_uids"] = [item for item in row["_absorbed_message_uids"] if item != uid]
+                return rows
+
+            fault.setattr(engine, "_assemble_context", lose_uid)
+        entries = _spy_finish(engine, fault)
+        drops = None
+        compute_drops = getattr(engine, "_uid_pretrim_replay_drops", None)
+        if on and compute_drops is not None:
+            drops = []
+
+            def observe_drops(*args):
+                decision = compute_drops(*args)
+                drops.append(decision[0])
+                return decision
+
+            fault.setattr(engine, "_uid_pretrim_replay_drops", observe_drops)
+        if not on:
+            fault.delenv("LCM_HOST_MESSAGE_UID")
+        fault.setattr(engine, "_c20_subject_pass", on, raising=False)
         output = _run(engine, view)
-        [(scope, forced, _)] = entries
-        assert scope.uid_trimmed and scope.legacy_replay is None and not forced
-        _assert_restored(engine, output, scope.before)
-        monkeypatch.delenv("LCM_HOST_MESSAGE_UID")
-        base = _run(engine, view)
-        calls, results = _pairs(base)
-        if exit_case in {"refused", "two-absorbed"}:
-            # These inputs' legacy exits already leave this call unanswered.
-            assert calls[-1] == CALL and CALL not in results
-            results.append(CALL)
-        assert _pairs(output) == (calls, results)
+        if exit_case == "hidden" and on:
+            assert len(hidden_calls) >= 1
+        if exit_case.endswith("conflict"):
+            assert conflicts and not entries
+        else:
+            assert len(entries) == 1 and not entries[0][1]
+        scopes = conflicts or [scope for scope, _, _ in entries]
+        return (view, output, engine._last_compression_status, engine._last_compression_noop_reason,
+                engine._ingest_cursor, scopes, drops)
+
+
+def _seed_no_leaf_view(engine, fault, shape, exit_case, hidden_calls):
+    raw, published = _publish(engine, shape)
+    view = _shape(engine, raw, published, shape)
+    if shape == "carrier":
+        # The split retains the opening user. A separate covered occurrence
+        # lets UID trim run while the carrier itself remains in the view.
+        view.insert(1, raw[0])
+    if exit_case == "fresh":
+        view = view[:2]  # The first durable row after the frontier is fresh.
+    if exit_case == "hidden":
+        later = _view(8)[21:]
+        engine.ingest([*view, *later])
+        visible = next(row for row in reversed(later) if row["role"] == "user")
+        view = [view[0], visible]  # Omit the uncovered backlog before this bound row.
+
+        def refuse_hidden(*args, **kwargs):
+            assert engine._last_hidden_backlog
+            hidden_calls.append(engine._last_hidden_backlog)
+            raise SweepBudgetExhausted("foreground_soft_target")
+
+        fault.setattr(engine, "_summarize_leaf_chunk_with_rescue", refuse_hidden)
+    if exit_case == "refused":
+        engine._config.survival_fit = True
+        fault.setattr(engine, "_summary_route_available", lambda: False)
+        if shape == "plain":
+            view.extend(_view(8)[21:])
+    if exit_case == "two-absorbed":
+        view[0]["_absorbed_message_uids"].append("c18-unbound")
+    if exit_case not in {"fresh", "hidden"}:
+        view.append(_new_user())
+    view.append(_missing())
+    if exit_case in {"fresh", "hidden"}:
+        engine._config.fresh_tail_count = 2
+    return view
 
 
 @pytest.mark.parametrize("victim", ["uidless-tail", "summary"])
@@ -237,12 +323,14 @@ def test_cap_preserves_uncovered_context(tmp_path, monkeypatch, summaries, victi
             assert _output_sources(engine, output)
 
 
-def _carrier_replay(engine, origin, *, re_glue=True, two_leaves=False):
+def _carrier_replay(engine, origin, *, re_glue=True, two_leaves=False, coalesce_replies=False):
     # The first pass has a sole real opening user. Its retained anchor is
     # below the frontier but absent from the new leaf's source IDs.
     raw = _view(6)
     opening = raw[0]
     replies = [row for row in raw if row["role"] != "user"]
+    if coalesce_replies:
+        replies = engine._sanitize_active_context_messages(replies, insert_missing_tool_stubs=False)
     retained_pass = [{"role": "system", "content": "Synthetic test system."}, opening, *replies]
     engine._config.fresh_tail_count = 3
     if two_leaves:

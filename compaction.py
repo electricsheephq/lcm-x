@@ -118,6 +118,11 @@ def _counted_compaction(operation):
 
 
 @dataclass
+class _CompactionUidDropState(_UidDropState):
+    adopt_before_stop: bool = False
+
+
+@dataclass
 class _CompressionState:
     """Per-invocation phase results; engine-owned state stays on the engine."""
 
@@ -821,7 +826,9 @@ class CompactionMixin:
         # map must too, or a later ingest can match a reused address and store a carried ignored placeholder.
         store_id_scope = self._compress_run.preserve_store_ids()
         store_id_scope.__enter__()
-        uid_drop_scope = _UID_DROP_INPUT.set(_UidDropState(self, [], uid_binding) if uid_binding is not None else None)
+        uid_drop_scope = _UID_DROP_INPUT.set(
+            _CompactionUidDropState(self, [], uid_binding) if uid_binding is not None else None
+        )
         copy_sources_scope = _UID_COPY_SOURCES.set({} if uid_binding is not None else None)
         binding_scope = _compaction_binding_check.set((self, binding_changed))
         try:
@@ -874,15 +881,23 @@ class CompactionMixin:
             self._compress_occurrences = None
             scope = _UID_DROP_INPUT.get()
             restore_trimmed = False
+            guarded_restore = stubbed_guard_restore = None
             if budget.leaves and scope is not None:
                 if scope.matches_binding():
                     guarded = self._guard_uid_covered_drop(result)
                     restore_trimmed = scope.uid_trimmed and guarded is not result
+                    if restore_trimmed:
+                        guarded_restore = guarded
                     result = guarded
             elif scope is not None and scope.uid_trimmed and result is not messages:
                 restore_trimmed = True
             if restore_trimmed:
-                result = self._sanitize_active_context_messages(scope.before, insert_missing_tool_stubs=True)
+                result = self._sanitize_active_context_messages(
+                    scope.before,
+                    insert_missing_tool_stubs=guarded_restore is not None or self._uid_restore_needs_tool_stubs(scope),
+                )
+                if guarded_restore is not None:
+                    stubbed_guard_restore = result
                 if scope.matches_binding():
                     self._ingest_cursor = len(result)
                     self._compress_host_rows_consumed = 0
@@ -908,9 +923,10 @@ class CompactionMixin:
                                                                   and self._last_compression_status != "error"))
             if binding_changed():
                 return messages
+            comparison = guarded_restore if guarded_restore is not None and result is stubbed_guard_restore else result
             if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
-                    and len(result) >= len(messages)
-                    and count_messages_tokens(result) >= count_messages_tokens(messages)):
+                    and len(comparison) >= len(messages)
+                    and count_messages_tokens(comparison) >= count_messages_tokens(messages)):
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
@@ -2577,6 +2593,8 @@ class CompactionMixin:
         route_stop = self._summary_route_stop_applies(state.force_overflow)
         # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
         adopt_before_stop = route_stop and leaf_passes == 0 and not state.resumed_prefix
+        if (scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self:
+            scope.adopt_before_stop = adopt_before_stop
         # #628: no level 3 leaf while every route is refused; a source stored whole with no call (#605 F2)
         # needs no route, so the stop is decided at the selected source.
         state.no_call_only = route_stop and not adopt_before_stop
@@ -2879,13 +2897,13 @@ class CompactionMixin:
                     self._start_sweep_budget_hold(turn_paced=first_hang)
 
 
-    def _uid_trimmed_base_replay(
+    def _uid_pretrim_replay_drops(
         self, before: List[Dict[str, Any]], adopt_before_stop: bool,
-    ) -> Optional[tuple[List[Dict[str, Any]], bool, bool, int]]:
-        """Reconstruct the mode-unset replay decision from the pre-trim view."""
+    ) -> tuple[set[int], int, int, list[int]]:
+        """Return the mode-unset replay drops and the indexes used for adoption."""
         leading, tail = self._leading_anchor_count(before), self._fresh_tail_start(before)
         if tail <= leading:
-            return None
+            return set(), leading, leading, []
         start = leading
         while start < tail and (
             self._is_replayed_context_scaffold_message(before[start])
@@ -2895,14 +2913,30 @@ class CompactionMixin:
             start += 1
         resumed = self._committed_replay_drops(before, start, uid_first=False)[0]
         drops = set() if adopt_before_stop and not resumed else set(range(leading, start)).union(resumed)
+        return drops, leading, start, resumed
+
+    def _uid_restore_needs_tool_stubs(self, scope: _CompactionUidDropState) -> bool:
+        return scope.legacy_replay is not None or bool(
+            self._uid_pretrim_replay_drops(scope.before, scope.adopt_before_stop)[0]
+        )
+
+    def _uid_trimmed_base_replay(
+        self, before: List[Dict[str, Any]], adopt_before_stop: bool,
+    ) -> Optional[tuple[List[Dict[str, Any]], bool, bool, int]]:
+        """Reconstruct the mode-unset replay decision from the pre-trim view."""
+        drops, leading, start, resumed = self._uid_pretrim_replay_drops(before, adopt_before_stop)
         if not drops:
             return None
         working = [row for index, row in enumerate(before) if index not in drops]
         if leading < len(working) and (remainder := self._generated_context_carrier_remainder(working[leading])) is not None:
             row = working[leading]
             own = row.get("message_uid")
-            absorbed = row.get("_absorbed_message_uids") or ()
-            if len(absorbed) > 1 or not isinstance(own, str) or self._host_uid_engine_uids({own, *absorbed}) != {own}:
+            absorbed = row.get("_absorbed_message_uids", ())
+            if not isinstance(own, str) or not own or not isinstance(absorbed, (list, tuple)) or len(absorbed) > 1:
+                return None
+            if absorbed and (not isinstance(absorbed[0], str) or not absorbed[0] or absorbed[0] == own):
+                return None
+            if self._host_uid_engine_uids({own, *absorbed}) != {own}:
                 return None
             working[leading] = {"role": "user", "content": remainder}
             if absorbed:
@@ -3052,7 +3086,7 @@ class CompactionMixin:
             else:
                 sanitized_messages = self._sanitize_active_context_messages(
                     active_context_messages,
-                    insert_missing_tool_stubs=restored_uid_trim,
+                    insert_missing_tool_stubs=restored_uid_trim and self._uid_restore_needs_tool_stubs(scope),
                 )
                 if restored_uid_trim and scope.matches_binding():
                     self._ingest_cursor = len(sanitized_messages)
