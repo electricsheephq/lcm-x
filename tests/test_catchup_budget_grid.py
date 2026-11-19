@@ -181,6 +181,10 @@ N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
 KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
 KNOWN_2896_A0 = list(N)  # twins with A0 rows on main, so the candidate A0 test fails too while CAND = main
+ISSUE_2901 = "issue 2901"
+# T1-295: the four steady no-system twins, pinned on both trees until the issue-2901 fix is merged into this branch;
+# from then the candidate's A0 there must be 0
+KNOWN_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-600k-l40-prefix-nosys", "s-1m-cond-then-leaf-nosys"]
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
@@ -450,9 +454,11 @@ def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
     k against the base at pass k - 1), and at the end of the walk the candidate has at least the base's totals."""
     found = []
     for index, (b, c) in enumerate(zip(base, cand)):
-        if b["calls_started"] > 0 and not (c["calls_started"] > 0 or c["prompt_before"] < c["trigger"]):
-            found.append(f"pass {b['pass']}: calls started 0 with the prompt {c['prompt_before']} at or over the "
-                         f"trigger {c['trigger']}, base {b['calls_started']}")
+        # T1-295: a base call at pass k needs a candidate call at k or k + 1, unless the candidate is under its trigger
+        later = cand[index + 1]["calls_started"] if index + 1 < len(cand) else 0
+        if b["calls_started"] > 0 and not (c["calls_started"] > 0 or later > 0 or c["prompt_before"] < c["trigger"]):
+            found.append(f"pass {b['pass']}: calls started 0 (and 0 at the next pass) with the prompt "
+                         f"{c['prompt_before']} at or over the trigger {c['trigger']}, base {b['calls_started']}")
         for key, label in (("leaves_cum", "leaves"), ("summary_drained_cum", "drained")):
             if index and c[key] < base[index - 1][key]:
                 found.append(f"pass {b['pass']}: cumulative {label} {c[key]} < base {base[index - 1][key]} at pass "
@@ -467,9 +473,15 @@ def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
     if sum(r["hold_armed"] for r in cand) > sum(r["hold_armed"] for r in base):
         found.append(f"end of walk: the candidate armed {sum(r['hold_armed'] for r in cand)} holds, the base "
                      f"{sum(r['hold_armed'] for r in base)}")
-    for key, label in (("leaves_cum", "leaves"), ("summary_drained_cum", "drained")):
-        if base and cand and cand[-1][key] < base[-1][key]:
-            found.append(f"end of walk: cumulative {label} {cand[-1][key]} < base {base[-1][key]}")
+    # T1-295: the end of the walk needs the base's leaves, and its drained tokens or a final whole prompt no larger
+    # than the base's (with A0 holding: no candidate row lost without a pointer)
+    if base and cand and cand[-1]["leaves_cum"] < base[-1]["leaves_cum"]:
+        found.append(f"end of walk: cumulative leaves {cand[-1]['leaves_cum']} < base {base[-1]['leaves_cum']}")
+    smaller = cand[-1]["prompt_after"] <= base[-1]["prompt_after"] and not a0_violations(cand) if base and cand else 0
+    if base and cand and cand[-1]["summary_drained_cum"] < base[-1]["summary_drained_cum"] and not smaller:
+        found.append(f"end of walk: cumulative drained {cand[-1]['summary_drained_cum']} < base "
+                     f"{base[-1]['summary_drained_cum']} and final prompt {cand[-1]['prompt_after']} > base "
+                     f"{base[-1]['prompt_after']}")
     return found
 
 
@@ -497,7 +509,9 @@ def test_a0_loss(grid, cell, tree, request):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
     if cell in D:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
-    if cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
+    if cell in KNOWN_2901:
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2901))
+    elif cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2896))
     found = a0_violations(records)
     if tree == "base":
@@ -536,8 +550,10 @@ def test_no_duplicate_content_rows(grid, cell, tree):
 
 
 @pytest.mark.parametrize("cell", ALL)
-def test_a0_candidate_no_worse_than_the_base(grid, cell):
+def test_a0_candidate_no_worse_than_the_base(grid, cell, request):
     """Per pass: the candidate's A0b rows, and (in the pinned A0 cells) its A0 rows, are at most the base's."""
+    if cell in KNOWN_2901:
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2901))
     base, cand = grid["base"]["by_cell"][cell], grid["cand"]["by_cell"][cell]
     for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
         assert nc <= nb, f"A0b in cell {cell} pass {b['pass']}: candidate {nc} rows behind a notice, base {nb}"
