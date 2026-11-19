@@ -360,3 +360,67 @@ def test_owner_is_released_at_every_exit(tmp_path, monkeypatch, exit_name):
             assert overlap == [(True, 0)], "another caller entered before the first pass exited"
             assert engine._compress_owner is None
             assert engine._compress_owner_depth == 0
+
+
+def _managed_runs(engine, worker, visited):
+    """A managed pass from another thread enters the owned pass instead of being refused."""
+    view = [{"role": "user", "content": "Other caller's synthetic turn"}]
+    before, refusals = len(visited), engine._compress_reentry_refusals
+    assert worker.submit(engine.compress, view, 100).result(timeout=2) is view
+    return len(visited) - before, engine._compress_reentry_refusals - refusals
+
+
+def test_late_bypass_releases_the_claim(tmp_path, monkeypatch):
+    thread = get_ident()
+    view = [{"role": "user", "content": "Late auxiliary caller's synthetic turn"}]
+    child = [{"role": "assistant", "content": "Synthetic child result"}]
+    with _closing(_open(tmp_path)) as engine, ThreadPoolExecutor(max_workers=1) as worker:
+        late, seen, visited = [], [], []
+
+        def reclassify():
+            if get_ident() == thread:
+                seen.append(("claimed", engine._compress_owner, engine._compress_owner_depth))
+                late.append(True)
+
+        def bypassed(*_args):
+            seen.append(("bypass", engine._compress_owner, engine._compress_owner_depth))
+            return child
+
+        def owned(messages, *_args, **_kwargs):
+            visited.append(get_ident())
+            return messages
+
+        monkeypatch.setattr(engine, "_bypasses_lcm_context_management", lambda: bool(late) and get_ident() == thread)
+        monkeypatch.setattr(engine, "_maybe_reclassify_late_auxiliary_before_compaction_write", reclassify)
+        monkeypatch.setattr(engine, "_bypass_lcm_session_id", lambda: "child")
+        monkeypatch.setattr(engine, "_compress_delegate_child_bypassed", bypassed)
+        monkeypatch.setattr(engine, "_compress_owned", owned)
+        assert engine.compress(view, 100) is child
+        assert seen == [("claimed", thread, 1), ("bypass", None, 0)], "the late bypass kept the claim"
+        assert not visited
+        late.clear()
+        assert _managed_runs(engine, worker, visited) == (1, 0), "another thread was refused after a late bypass"
+        assert (engine._compress_owner, engine._compress_owner_depth) == (None, 0)
+
+
+def test_nested_release_is_depth_counted(tmp_path, monkeypatch):
+    thread = get_ident()
+    outer = [{"role": "user", "content": "Outer synthetic turn"}]
+    inner = [{"role": "user", "content": "Inner synthetic turn"}]
+    with _closing(_open(tmp_path)) as engine, ThreadPoolExecutor(max_workers=1) as worker:
+        visited, during = [], {}
+
+        def owned(messages, *_args, **_kwargs):
+            visited.append(get_ident())
+            if messages == outer and get_ident() == thread:
+                assert engine.compress(inner, 100) == inner
+                during["claim"] = (engine._compress_owner, engine._compress_owner_depth)
+                during["other"] = _managed_runs(engine, worker, visited)
+            return messages
+
+        monkeypatch.setattr(engine, "_compress_owned", owned)
+        assert engine.compress(outer, 100) == outer
+        assert during["claim"] == (thread, 1), "the inner return dropped the outer claim"
+        assert during["other"] == (0, 1), "another thread ran while the outer call held the claim"
+        assert (engine._compress_owner, engine._compress_owner_depth) == (None, 0)
+        assert _managed_runs(engine, worker, visited) == (1, 0), "another thread was refused after both returned"
