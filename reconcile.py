@@ -2691,6 +2691,11 @@ class ReconcileMixin:
                 and not matches_durable_persisted_output_full_replay
                 and not has_durable_compacted_snapshot_replay
             ):
+                if (cursor == raw_session_count == len(stored_tail) == len(stored_tail_rows or ()) == len(candidate_prefix)
+                        and not candidate_has_unrecoverable_persisted_marker
+                        and self._matches_session_with_missing_tool_names(
+                            candidate_messages, candidate_prefix, stored_tail_rows, stored_tail)):
+                    return cursor
                 continue
 
             self._collect_singleton_replay_evidence(run, candidate)
@@ -3535,6 +3540,48 @@ class ReconcileMixin:
             return cursor
 
         return self._reconcile_unmatched_store_history(run)
+
+    @staticmethod
+    def _missing_tool_name_matches(rows, index, call_id, name):
+        """Resolve a nameless result from its own contiguous assistant/tool group."""
+        row = rows[index]
+        if row.get("tool_name") or row.get("name") or row.get("tool_call_id") != call_id:
+            return False
+        owner = index - 1
+        while owner >= 0 and rows[owner].get("role") == "tool":
+            owner -= 1
+        if owner < 0 or rows[owner].get("role") != "assistant":
+            return False
+        calls = rows[owner].get("tool_calls")
+        if not isinstance(calls, list):
+            return False
+        matches = [call.get("function") for call in calls if isinstance(call, dict) and call.get("id") == call_id]
+        return len(matches) == 1 and isinstance(matches[0], dict) and matches[0].get("name") == name
+
+    def _matches_session_with_missing_tool_names(self, messages, incoming_identities, rows, stored_identities):
+        """Add a name-only fallback to the position-bound cold replay comparison."""
+        resolved = False
+        for index, (message, incoming, row, stored) in enumerate(zip(messages, incoming_identities, rows, stored_identities)):
+            if _has_lossy_redacted_identity(incoming):
+                return False
+            stamp = _normalize_observed_at(message.get("timestamp"))
+            if stamp is not None and row.get("observed_at") is not None and stamp != row["observed_at"]:
+                return False
+            if incoming == stored:
+                continue
+            role, content, call_id, _, name = incoming
+            if (role != "tool" or not call_id or incoming[:4] != stored[:4] or bool(name) == bool(stored[4])
+                    or content == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                    or content != (normalize_content_value(message.get("content")) or "")
+                    or content != (normalize_content_value(row.get("content")) or "")):
+                return False
+            explicit = message if name else row
+            if str(explicit.get("tool_name") or explicit.get("name") or "") != (name or stored[4]):
+                return False
+            if not self._missing_tool_name_matches(rows if name else messages, index, call_id, name or stored[4]):
+                return False
+            resolved = True
+        return resolved
 
     def _replayed_tool_segment_indexes_after_cursor(
         self,
