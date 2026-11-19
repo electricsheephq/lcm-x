@@ -374,6 +374,9 @@ def test_environment_read_inventory():
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("runtime_identity.py", "_git"):
+            "GIT_OPTIONAL_LOCKS=0 subprocess for the git status probe: the process environment is passed through "
+            "to git, not profile configuration (#2884)",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
         ("cloud_restore.py", "_safe_path"): "HERMES_HOME: scalar restore destination guard, not profile configuration",
         ("adapters/claude-code/bin/lcmx_hook.py", "main"):
