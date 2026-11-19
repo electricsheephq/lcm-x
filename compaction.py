@@ -23,7 +23,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial
+from functools import partial, wraps
 from threading import get_ident
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -83,6 +83,50 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "condensation_no_progress",
     "no_same_depth_condensation_group",
 })
+
+
+_PROGRESS_FIELDS = ("role", "content", "tool_call_id", "tool_calls")
+
+
+def _progress_view(messages):
+    """The fields a progress report compares; count_message_tokens reads only content and tool_calls from them."""
+    try:
+        return [{field: message.get(field) for field in _PROGRESS_FIELDS} for message in messages]
+    except Exception:
+        return None
+
+
+def _made_progress(before, returned) -> bool:
+    """#2863: true only when the returned list differs from the input by content and is smaller by the counter."""
+    after = _progress_view(returned) if isinstance(returned, list) else None
+    if before is None or after is None or after == before:
+        return False
+    try:
+        return count_messages_tokens(after) < count_messages_tokens(before)
+    except Exception:
+        return False
+
+
+def _reports_progress(operation):
+    """#2863: the host arms its compaction-cleared re-check only when the engine reports progress
+    (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False. A call the
+    one-owner guard refuses returns its own list and does not report on exit. Known limit: the flag is one per engine,
+    so with overlapping calls on one engine it can be wrong once per overlap (one extra or one missing re-check, no data)."""
+    @wraps(operation)
+    def reporting(self, messages, *args, **kwargs):
+        refusals = self._compress_reentry_refusals
+        if self._compress_owner in (None, get_ident()):  # another owner means this call is likely refused
+            self._last_compression_made_progress = False
+        before = _progress_view(messages)
+        try:
+            returned = operation(self, messages, *args, **kwargs)
+        except BaseException:
+            self._last_compression_made_progress = False
+            raise
+        if returned is not messages or self._compress_reentry_refusals == refusals:  # else refused
+            self._last_compression_made_progress = _made_progress(before, returned)
+        return returned
+    return reporting
 
 
 @dataclass
@@ -195,11 +239,14 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
+    carrier_remainder: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
     for msg in candidate_raw:
-        msg_tokens = count_message_tokens(msg)
+        # #2901: a generated summary carrier is charged at the row the summariser reads (_leaf_summary_input)
+        remainder = carrier_remainder(msg) if carrier_remainder is not None else None
+        msg_tokens = count_message_tokens(msg if remainder is None else {**msg, "content": remainder})
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
             break
         selected.append(msg)
@@ -719,7 +766,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, self._generated_context_carrier_remainder)
 
     def _stop_pass_for_shutdown(self) -> None:
         """#2101: a pass that stops for shutdown leaves the state of an identity no-op."""
@@ -748,6 +795,7 @@ class CompactionMixin:
         if not self._compress_owner_depth:
             self._compress_owner = None
 
+    @_reports_progress
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
