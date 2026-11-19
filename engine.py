@@ -10707,9 +10707,10 @@ class LCMEngine(
 
         Raw store and DAG history remain lossless. This guardrail only sanitizes
         the active context emitted back to providers, where assistant tool calls
-        must be followed immediately by their contiguous tool results. Late,
-        duplicate, out-of-order, and orphan tool results are dropped; missing
-        direct results get synthetic stubs.
+        must be followed immediately by their contiguous tool results. Results
+        that arrive out of order within a call's group are emitted in call
+        order; late, surplus-duplicate and orphan tool results are dropped;
+        missing direct results get synthetic stubs.
         """
         sanitized, dropped_tool_results, inserted_stub_results = repair_tool_pairs(
             messages,
