@@ -660,6 +660,7 @@ class SurvivalFitMixin:
                 logger.debug("LCM exit fit: the coverage read failed; no cut", exc_info=True)
                 covered = set()
         shorter_fit = None
+        shorter_parts = shorter_carrier = None  # bound with shorter_fit, read only once it is set
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
