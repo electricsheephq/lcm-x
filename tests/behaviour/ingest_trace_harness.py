@@ -59,6 +59,9 @@ DIAGNOSTIC_ATTRIBUTES = frozenset({
     "_auxiliary_lineage_session_ids", "_auxiliary_session_ids", "_auxiliary_session_lock",
     "_diagnostic_engine_token", "_lcm_current_start_allows_bypass_lineage",
     "_session_diagnostic_logs", "_thread_context",
+    # #2856: read by the replay-identity wrapper only, never an ingest outcome: the live identity memo
+    # (output-neutral by its own oracle and the session differential) and the storage-open flag that gates it.
+    "_replay_identity_memo", "_storage_ready",
 })
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
