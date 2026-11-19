@@ -71,8 +71,10 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 _EXTRACTION_HEADROOM_SECONDS = 2.0  # overhead between the extraction timeout and the next admit
 _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE = 0.25
-# #2869: above this window the default summary-prefix target follows the window (5% of it), clamped to 80 mean-sized
-# depth-0 summaries so a level stays under the view's 100 uncondensed summaries; never below today's default.
+# #2869: above this window the default summary-prefix target follows the window (5% of it), clamped to 80 live
+# frontier nodes of their mean stored size (the trigger's own unit), so at sweep start at most 80 nodes are live unless
+# today's default binds, and a level stays under the view's 100. Never below today's default; off while background
+# leaf preparation is on (chained promotions can add more than 20 leaves in one sweep).
 _LARGE_SWEEP_WINDOW_TOKENS = 480_000
 _LARGE_WINDOW_PREFIX_SHARE = 0.05
 _TARGET_MEAN_SUMMARIES = 80
@@ -2548,11 +2550,11 @@ class CompactionMixin:
                 threshold_cap = int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE)
                 state.sweep_target_tokens = min(state.sweep_target_tokens, threshold_cap)
                 if (state.threshold_full_sweep_active and self.context_length > _LARGE_SWEEP_WINDOW_TOKENS
-                        and not (force or state.force_overflow)):
-                    mean = self._dag.mean_depth0_summary_tokens(self._session_id) if self._session_id else 0
-                    if mean > 0:  # no depth-0 summary yet: today's default
+                        and not (force or state.force_overflow) and not self._config.background_leaf_prep_enabled):
+                    live, total = self._dag.live_frontier_tokens(self._session_id) if self._session_id else (0, 0)
+                    if live:  # no live summary yet: today's default
                         clamp = min(int(self.context_length * _LARGE_WINDOW_PREFIX_SHARE),
-                                    _TARGET_MEAN_SUMMARIES * mean, threshold_cap)
+                                    _TARGET_MEAN_SUMMARIES * (total // live), threshold_cap)
                         state.sweep_target_tokens = max(state.sweep_target_tokens, clamp)
         state.sweep_target_tokens = max(1, state.sweep_target_tokens)
         state.sweep_summary_prefix_before = (

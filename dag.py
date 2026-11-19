@@ -32,7 +32,6 @@ from .db_bootstrap import (
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .message_content import canonical_text
-from .tokens import _CHARS_PER_TOKEN
 from .search_query import (
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
@@ -611,16 +610,18 @@ class SummaryDAG:
             samples[int(depth)] = [self._row_to_node(row) for row in rows]
         return samples
 
-    def mean_depth0_summary_tokens(self, session_id: str) -> int:
-        """#2869: the mean depth-0 summary size in tokens, from the summary text (token_count can read 0); 0 when the
-        session has none. One aggregate, searched on (session_id, depth): idx_nodes_session_depth_node (SQLite may pick
-        idx_nodes_session_depth, the same prefix)."""
+    def live_frontier_tokens(self, session_id: str) -> tuple[int, int]:
+        """#2869: (live nodes, their stored token_count sum) of the session's summary frontier, the set and the unit
+        the sweep compares with its target (engine._summary_frontier_tokens), in one statement."""
         with self._db_lock:
-            count, chars = self._conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(summary)), 0) FROM summary_nodes WHERE session_id = ? AND depth = 0",
-                (session_id,),
+            count, total = self._conn.execute(
+                """SELECT COUNT(*), COALESCE(SUM(token_count), 0) FROM summary_nodes
+                   WHERE session_id = ? AND node_id NOT IN (
+                       SELECT json_each.value FROM summary_nodes p, json_each(p.source_ids)
+                       WHERE p.session_id = ? AND p.source_type = 'nodes')""",
+                (session_id, session_id),
             ).fetchone()
-        return int(chars) // int(count) // _CHARS_PER_TOKEN if count else 0
+        return int(count), int(total)
 
     def get_uncondensed_at_depth(self, session_id: str, depth: int,
                                   limit: int = 100, newest: bool = False) -> List[SummaryNode]:

@@ -9,8 +9,6 @@ the same in the sweep's own unit (node token counts) as an ASCII store's.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 import hermes_lcm.engine as engine_module

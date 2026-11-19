@@ -1,8 +1,10 @@
-"""#2869: above 480,000-token windows the default summary-prefix target follows the window, clamped by the mean size of
-this session's depth-0 summaries, so a level stays under the view's 100 uncondensed summaries (dag.py limit=100).
+"""#2869: above 480,000-token windows the default summary-prefix target follows the window, clamped by the mean stored
+size of the session's live summary frontier (the unit the sweep compares with its target), so at sweep start at most 80
+nodes are live unless today's default binds, and a level stays under the view's 100 (dag.py limit=100).
 
-target = max(today's default, min(5% of the window, 80 x the mean depth-0 summary tokens, the threshold cap)), on
-automatic sweeps only. At or below 480,000, forced and overflow passes, and explicit settings keep today's target.
+target = max(today's default, min(5% of the window, 80 x the live frontier's mean token count, the threshold cap)), on
+automatic sweeps with background leaf preparation off. At or below 480,000, forced and overflow passes, explicit
+settings and preparation on keep today's target.
 The hole cell walks the grid runner on CAND_TREE (env LCMX_GRID_CAND, default this tree); the window-only target of the
 superseded change is reproduced in the runner process by a mean that never clamps, and, with env LCMX_2869_UNCLAMPED
 set to a tree of that change, on that tree too.
@@ -11,7 +13,7 @@ set to a tree of that change, on that tree too.
 from __future__ import annotations
 
 import os
-import re
+import shutil
 import time
 from pathlib import Path
 
@@ -27,7 +29,7 @@ pytestmark = pytest.mark.issue(2869)
 MESSAGES = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"FACT-{i} " + "alpha beta gamma delta " * 44}
             for i in range(48)] + [{"role": "user" if i % 2 == 0 else "assistant", "content": f"tail {i}"}
                                    for i in range(24)]
-AGGREGATE = "SUM(LENGTH(summary))"
+AGGREGATE = "SUM(token_count)"
 
 
 @pytest.fixture
@@ -39,7 +41,7 @@ def open_engine(tmp_path, monkeypatch):
         engine = LCMEngine(config=LCMConfig(database_path=str(home / "lcm.db"), **config), hermes_home=str(home))
         engine.on_session_start(session, platform="cli", context_length=window)
         for _ in range(nodes):  # summary text of exactly ``mean`` tokens at 4 ASCII chars a token
-            engine._dag.add_node(SummaryNode(session_id=session, depth=0, summary="x" * (4 * mean), token_count=0,
+            engine._dag.add_node(SummaryNode(session_id=session, depth=0, summary="x" * (4 * mean), token_count=mean,
                                              source_token_count=5, source_ids=[], created_at=time.time(),
                                              expand_hint="turns"))
         monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", lambda chunk, focus_topic=None, deadline=None: (
@@ -121,6 +123,24 @@ def test_unchanged_explicit_settings(open_engine, monkeypatch, config, expected)
     assert _target(engine, monkeypatch)[0] == expected
 
 
+def test_unchanged_with_background_leaf_prep_on(open_engine, monkeypatch):
+    """Chained promotions can add more than 20 leaves in one sweep, so preparation on keeps today's target."""
+    engine = open_engine(1_000_000, nodes=10, mean=1_590, background_leaf_prep_enabled=True)
+    assert _target(engine, monkeypatch)[0] == _today(engine)
+
+
+def test_condensed_nodes_leave_the_mean(open_engine, monkeypatch):
+    """Only the live frontier counts: four 2,400-token leaves under one 600-token parent count as that parent."""
+    engine = open_engine(1_000_000, nodes=10, mean=400)
+    old = [engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary="x" * 9_600, token_count=2_400,
+                                            source_ids=[], created_at=time.time(), expand_hint="turns"))
+           for _ in range(4)]
+    engine._dag.add_node(SummaryNode(session_id="S", depth=1, summary="x" * 2_400, token_count=600, source_ids=old,
+                                     source_type="nodes", created_at=time.time(), expand_hint="turns"))
+    assert engine._dag.live_frontier_tokens("S") == (11, 4_000 + 600)
+    assert _target(engine, monkeypatch)[0] == 80 * (4_600 // 11) == 33_440
+
+
 def test_one_indexed_aggregate_per_sweep(open_engine, monkeypatch):
     engine = open_engine(1_000_000, nodes=10, mean=1_590)
     statements = []
@@ -131,11 +151,10 @@ def test_one_indexed_aggregate_per_sweep(open_engine, monkeypatch):
         engine._dag._conn.set_trace_callback(None)
     aggregate = [s for s in statements if AGGREGATE in s]
     assert len(aggregate) == 1, aggregate
-    plan = " ".join(str(row[-1]) for row in engine._dag._conn.execute(
-        "EXPLAIN QUERY PLAN SELECT COUNT(*), COALESCE(SUM(LENGTH(summary)), 0) FROM summary_nodes "
-        "WHERE session_id = ? AND depth = 0", ("S",)))
-    assert re.search(r"SEARCH summary_nodes USING (COVERING )?INDEX idx_nodes_session_depth\w* \(session_id=\? AND depth=\?\)",
-                     plan), plan
+    plan = [str(row[-1]) for row in engine._dag._conn.execute("EXPLAIN QUERY PLAN " + aggregate[0])]
+    searches = [step for step in plan if "summary_nodes" in step]
+    assert searches and all(step.startswith("SEARCH") and "INDEX idx_nodes_session" in step for step in searches), plan
+    assert engine._dag.live_frontier_tokens("S") == (10, 15_900)
 
 
 # -- the hole: the view shows only the newest 100 uncondensed summaries per level ---------------------------------------
@@ -144,7 +163,7 @@ HOLE = {"group": "D", "id": "d-hole-1m", "window": 1_000_000, "pre": 0, "estimat
         "finalize": 32, "chunk": 1_500, "row_tokens": 250, "raw_tokens": 120_000, "over_tokens": 10_000,
         "growth_tokens": 20_000, "passes": 20, "turn_gap": 60, "prefix": "none", "summary_tokens": 300,
         "settings": {"dynamic_leaf_chunk_enabled": False}}
-UNCLAMPED = "mods['dag'].SummaryDAG.mean_depth0_summary_tokens = lambda self, session_id: 10 ** 9\n"
+UNCLAMPED = "mods['dag'].SummaryDAG.live_frontier_tokens = lambda self, session_id: (1, 10 ** 12)\n"
 
 
 def _depth0_peak(run) -> int:
@@ -155,10 +174,17 @@ def _depth0_peak(run) -> int:
 def hole(tmp_path_factory):
     out = tmp_path_factory.mktemp("issue-2869")
     grid.PATCHES.setdefault("unclamped_2869", UNCLAMPED)
-    runs = {"clamped": grid._run(grid.CAND_TREE, [HOLE], out, "clamped"),
-            "unclamped": grid._run(grid.CAND_TREE, [HOLE], out, "unclamped", patch="unclamped_2869")}
-    if os.environ.get("LCMX_2869_UNCLAMPED"):
-        runs["window_only_tree"] = grid._run(Path(os.environ["LCMX_2869_UNCLAMPED"]).resolve(), [HOLE], out, "tree")
+    extra = grid._extra_paths()
+    with pytest.MonkeyPatch.context() as patch:
+        if not any((Path(entry) / "agent" / "context_engine.py").is_file() for entry in extra):
+            # CI writes the host stub at the repo root, inside the tree the runner may not import from: hand it a copy.
+            import agent.context_engine as host
+            shutil.copytree(Path(host.__file__).parent, out / "host" / "agent")
+            patch.setattr(grid, "_extra_paths", lambda: [*extra, str(out / "host")])
+        runs = {"clamped": grid._run(grid.CAND_TREE, [HOLE], out, "clamped"),
+                "unclamped": grid._run(grid.CAND_TREE, [HOLE], out, "unclamped", patch="unclamped_2869")}
+        if os.environ.get("LCMX_2869_UNCLAMPED"):
+            runs["window_only_tree"] = grid._run(Path(os.environ["LCMX_2869_UNCLAMPED"]).resolve(), [HOLE], out, "tree")
     return runs
 
 
