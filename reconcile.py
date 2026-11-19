@@ -1138,6 +1138,10 @@ class ReconcileMixin:
             return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
         if hit is not None:
             return hit
+        if _replay_identity_memo_gate(key[3], key[4], _frozen):
+            # Not admitted: the body may read keys the memo key does not hold (a projection's timestamp, a
+            # persisted marker's session id), so it computes on the ORIGINAL row, exactly as before.
+            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
         # A miss computes on a private copy of the fields read above (plain JSON, so the copy is exact) and
         # remembers it under the copy's own key: a row another thread changes after the read can never store one
         # version's identity under the other's key. Nothing on the admitted path reads the row's object identity,
