@@ -54,6 +54,23 @@ and `CODING_TOTAL_CHARS = 40000`. It preserves ranked order and full-content
 IDs while returning excerpts through the same endpoints. Use a separate
 `AML_DB_ROOT` per mode.
 
+`AML_ITEM_FIELDS=v2` (default `v1`, byte-identical) adds `text` (a copy of
+`content`) to each search item, and `created_at` (ISO 8601 UTC) when the item
+starts with a timezone-aware bracketed time; naive or free-text times get none.
+Per-request receipts then carry `degraded` and `degraded_reasons`, the
+adapter's degraded or abort notice that a v1 worker loses. Other values prevent
+startup.
+
+Workers pin the adapter's `LCMX_ADAPTER_VERSION` to `AML_ADAPTER_VERSION`
+(`1`, the default, or `2`; other values prevent startup), so an inherited
+`LCMX_ADAPTER_VERSION` never changes delivery. A non-default version is named in
+the start event, and v2 receipts carry `adapter_version`.
+These v2 receipt fields describe the client only from OmniMemEval commit
+`dd0bc7292f64ff1e2d9f17ce3b8d4e1e3988f662` on, a client that reads `LCMX_ADAPTER_VERSION` and
+aborts on degraded recall. The client pinned above ignores `LCMX_ADAPTER_VERSION` and reports
+degraded recall only on stderr, so with that pin keep `AML_ITEM_FIELDS=v1` and leave
+`AML_ADAPTER_VERSION` unset.
+
 Use a Python environment with the pinned client's and LCM-X's dependencies.
 Load your token from your own secret store into `AML_ADDSEARCH_TOKEN`; do not
 put it in command history. Set the remaining environment variables:

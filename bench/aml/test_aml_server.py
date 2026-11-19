@@ -411,6 +411,13 @@ def test_t3_textual_literal_unchanged():
          'content': 'second', 'score': 0.5}]}
 
 
+@pytest.fixture(autouse=True)
+def default_switches(monkeypatch):
+    # Tests set these switches themselves; a value exported in the caller's shell must not leak in.
+    for switch in ('AML_ITEM_FIELDS', 'AML_ADAPTER_VERSION', 'LCMX_ADAPTER_VERSION'):
+        monkeypatch.delenv(switch, raising=False)
+
+
 def gateway_environment(tmp_path, mode):
     root = tmp_path / 'db'
     (root / '.model-cache' / 'models--qdrant--bge-small-en-v1.5-onnx-q').mkdir(parents=True)
@@ -1013,3 +1020,103 @@ def test_v1_routes_switch_fails_closed_without_v2(tmp_path, v2module):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+ITEM_TEXT = ('[2023-05-01T09:00:00Z] user: I adopted a beagle named Biscuit.\n'
+             '[2023-05-08T18:30:00+00:00] (session summary) user: Biscuit turned two.\n'
+             'no time prefix here\n'
+             '[1:56 pm on 8 May, 2023] Biscuit is a great name.')
+ITEM_HITS = [dict(content='def f():\n    return 1\n', role='assistant', event_time='2023-05-01T09:00:00Z',
+                  trajectory=2, summary=False, stored_id=1),
+             dict(content='summary text', role=None, event_time=None, trajectory=None, summary=True,
+                  stored_id='summary:1')]
+V1_RECEIPT_KEYS = {'timestamp', 'route', 'op', 'status', 'ms', 'user_digest', 'top_k', 'hits',
+                   'response_bytes', 'rows_with_newline'}
+
+
+def test_item_fields_v1_golden_and_v2_fields():
+    # sha256 of the encoded items captured from 0ff64e73, before AML_ITEM_FIELDS existed.
+    textual, coding = search_response(ITEM_TEXT, 'u', 100), aml_server.coding_search_response(ITEM_TEXT, 'u', 100)
+    v2 = aml_server.v2_search_response(ITEM_HITS, 'u', 10, 'f')
+    assert [digest(aml_server.encoded(r).decode()) for r in (textual, coding, v2)] == [
+        'dcae6ca2eb952809f233483f8c9ae8aba162edc0736d9ba24491245c2d16a925'] * 2 + [
+        'f959c231fa2d091d997487e5e1a364e2eeda62c83e7e5c980c6aa1105b7c84c6']
+    for result in (textual, coding, v2):
+        before = json.loads(json.dumps(result))
+        rows = aml_server.with_item_fields(result)['data']
+        assert all(row['text'] == row['content'] and {k: row[k] for k in ('id', 'content', 'score')} == old
+                   for row, old in zip(rows, before['data']))
+    assert [row.get('created_at') for row in textual['data']] == [
+        '2023-05-01T09:00:00Z', '2023-05-08T18:30:00Z', None, None]  # absent: no time, free-text time
+    assert [row.get('created_at') for row in v2['data']] == ['2023-05-01T09:00:00Z', None]
+    assert aml_server.created_at('2023-05-08T18:30:00+07:00') == '2023-05-08T11:30:00Z'
+    assert aml_server.created_at('2023-05-08') is None  # naive: never assume a zone
+    for edge in ('9999-12-31T23:59:59-01:00', '0001-01-01T00:00:00+01:00'):  # past datetime's UTC bounds
+        assert aml_server.created_at(edge) is None
+        row = aml_server.with_item_fields(search_response(f'[{edge}] user: edge', 'u', 1))['data'][0]
+        assert 'created_at' not in row and row['text'] == row['content']
+
+
+@pytest.mark.parametrize('fields', [None, 'v1', 'v2'])
+def test_item_fields_worker_and_degraded_receipt(tmp_path, monkeypatch, fields):
+    env, _ = gateway_environment(tmp_path, None)
+    Path(env['AML_OMNIMEMEVAL_REPO'], 'scripts/client_factory/lcmx_client.py').write_text(
+        'class LcmxClient:\n'
+        '    def search(self, query, user_id, top_k):\n'
+        '        if query == "degrade":\n'
+        '            raise SystemExit("LCM-X degraded recall: 1 degraded payload(s): synthetic reason")\n'
+        '        return query\n')
+    for key, value in dict(env, AML_RECEIPTS=str(tmp_path / 'receipts.jsonl')).items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('AML_ITEM_FIELDS', raising=False) if fields is None else monkeypatch.setenv(
+        'AML_ITEM_FIELDS', fields)
+    with running_server(tmp_path, Service(env['AML_DB_ROOT'], 'synthetic-token', runner=run_worker)) as base:
+        clean = call(base, '/aml/search', dict(user_id='u', query=ITEM_TEXT), {'X-Api-Key': 'synthetic-token'})
+        degraded = call(base, '/aml/search', dict(user_id='u', query='degrade'), {'X-Api-Key': 'synthetic-token'})
+        rejected = call(base, '/aml/search', dict(user_id='u', query='q'), {'X-Api-Key': 'wrong-token'})
+        health = call(base, '/aml/health')
+    expected = search_response(ITEM_TEXT, digest('u'), 100)
+    assert clean[:2] == (200, aml_server.with_item_fields(expected) if fields == 'v2' else expected)
+    assert degraded[:2] == (500, {'detail': {'reason': 'LCM-X worker failed'}})
+    assert (rejected[0], health[0]) == (401, 200)
+    receipts = [json.loads(line) for line in (tmp_path / 'receipts.jsonl').read_text().splitlines()]
+    if fields != 'v2':
+        assert all(set(receipt) == V1_RECEIPT_KEYS for receipt in receipts)
+    else:
+        assert [(r['degraded'], r['degraded_reasons'], r['adapter_version']) for r in receipts] == [
+            (False, [], 1), (True, ['LCM-X degraded recall: 1 degraded payload(s): synthetic reason'], 1),
+            (False, [], 1), (False, [], 1)]  # the 401 and the health request carry the same schema
+        bad = subprocess.run([sys.executable, '-B', aml_server.__file__], capture_output=True, text=True,
+                             timeout=5, env=dict(env, AML_ITEM_FIELDS='v3'))
+        assert bad.returncode and 'AML_ITEM_FIELDS must be v1 or v2' in bad.stderr
+
+
+@pytest.mark.parametrize('inherited,switch,expected', [(None, None, '1'), ('2', None, '1'), ('2', '1', '1'),
+                                                      (None, '2', '2')])
+def test_worker_pins_adapter_version_to_gateway_switch(tmp_path, monkeypatch, inherited, switch, expected):
+    env, _ = gateway_environment(tmp_path, None)
+    Path(env['AML_OMNIMEMEVAL_REPO'], 'scripts/client_factory/lcmx_client.py').write_text(
+        'import os\n'
+        'class LcmxClient:\n'
+        '    def search(self, query, user_id, top_k):\n'
+        '        return os.environ["LCMX_ADAPTER_VERSION"]\n')
+    for key, value in dict(env, LCMX_ADAPTER_VERSION=inherited, AML_ADAPTER_VERSION=switch).items():
+        monkeypatch.delenv(key, raising=False) if value is None else monkeypatch.setenv(key, value)
+    result = run_worker(Path(env['AML_DB_ROOT']), 'search', dict(user_id='u', query='q', top_k=100),
+                        time.monotonic() + 30)
+    assert [row['content'] for row in result['data']] == [expected]
+
+
+def test_gateway_adapter_version_switch_at_startup(tmp_path):
+    env, _ = gateway_environment(tmp_path, None)
+    bad = subprocess.run([sys.executable, '-B', aml_server.__file__], capture_output=True, text=True,
+                         timeout=5, env=dict(env, AML_ADAPTER_VERSION='3'))
+    assert bad.returncode and 'AML_ADAPTER_VERSION must be 1 or 2' in bad.stderr
+    with subprocess.Popen([sys.executable, '-B', aml_server.__file__], env=dict(env, AML_ADAPTER_VERSION='2'),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+        try:
+            assert json.loads(process.stdout.readline()) == {'event': 'start', 'search_mode': 'textual',
+                                                             'adapter_version': 2}
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
