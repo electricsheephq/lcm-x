@@ -161,7 +161,8 @@ def test_c5_two_carriers_one_block_in_a_carrier_that_stays_glued(tmp_path, host,
         if swept["fitted"] and not sum(swept["blocks"]):
             assert caplog.text.count("it is not placed") == 1, cap
             assert (NOT_FIT in caplog.text) is (swept["head_glued"] or any(
-                r == "user" and c.startswith("[Recent") and "\n\n[U" in c for r, c in swept["rows"])), cap
+                row["role"] == "user" and str(row["content"]).startswith("[Recent") and "\n\n[U" in str(row["content"])
+                for row in map(json.loads, swept["rows"]))), cap
 
 
 N_OLD = ("[LCM survival fit: 2 earlier messages (store ids 1..2) are stored verbatim but not in live context; "
@@ -247,7 +248,7 @@ def _gap_store(tmp_path, cap, name, main=None):
                {"role": "assistant", "content": "[NEWA] ok"}]
         e.ingest([*merged, *new])
         e.on_session_end("S", [*merged, *new])
-        return cases.stored(e), any("[NEW] synthetic" in str(r[1]) for r in cases.stored(e))
+        return cases.stored(e), any("[NEW] synthetic" in row for row in cases.stored(e))
     finally:
         e.shutdown()
 
