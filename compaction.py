@@ -94,15 +94,34 @@ def _progress_view(messages):
         return None
 
 
-def _made_progress(before, returned) -> bool:
-    """#2863: true only when the returned list differs from the input by content and is smaller by the counter."""
+def _landing_line(engine, current_tokens):
+    """#2863 D6: (P, (1 - m) x threshold) for the projected-landing rule, or None without a positive P."""
+    try:
+        positive = isinstance(current_tokens, int) and not isinstance(current_tokens, bool) and current_tokens > 0
+        pressure = current_tokens if positive else max(int(getattr(engine, "last_prompt_tokens", 0) or 0), 0)
+        threshold, margin = int(engine.threshold_tokens or 0), float(engine._config.progress_landing_margin_ratio)
+        line = (1.0 - (margin if 0.0 <= margin <= 0.5 else 0.0)) * threshold  # out of range in a built config: 0
+        return (pressure, line) if pressure > 0 and threshold > 0 else None
+    except Exception:
+        return None
+
+
+def _made_progress(before, returned, landing=None) -> bool:
+    """#2863: true only when the returned list differs from the input by content and is smaller by the counter.
+    D6: with a positive pressure P (the host's current_tokens, else the last real prompt), the pass must also land
+    at or under (1 - m) x threshold: L = P - (est_in - est_out). It removes the near-threshold re-arm loop, where a
+    pass that saves about one request's regrowth re-armed the host's per-turn budget on every request. Measured on a
+    modelled host over 460 committed passes, L reads high by a median of about +2,100 tokens (about 4-5% of a 48,000
+    trigger) and is on the wrong side of the line in about 21% of passes at m=0; in one measured shape the rule ends a
+    turn's budget higher than the base. Issue #2879's landing target replaces this projection with an unbiased one."""
     after = _progress_view(returned) if isinstance(returned, list) else None
     if before is None or after is None or after == before:
         return False
     try:
-        return count_messages_tokens(after) < count_messages_tokens(before)
+        est_in, est_out = count_messages_tokens(before), count_messages_tokens(after)
     except Exception:
         return False
+    return est_out < est_in and (landing is None or landing[0] - (est_in - est_out) <= landing[1])
 
 
 def _counted_compaction(operation):
@@ -132,8 +151,9 @@ def _counted_compaction(operation):
         # (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False.
         self._last_compression_made_progress = False
         before = _progress_view(messages)
+        landing = _landing_line(self, args[0] if args else kwargs.get("current_tokens"))
         returned = counted_pass(self, messages, *args, **kwargs)
-        self._last_compression_made_progress = _made_progress(before, returned)
+        self._last_compression_made_progress = _made_progress(before, returned, landing)
         return returned
     return counted
 

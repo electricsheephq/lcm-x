@@ -1931,12 +1931,12 @@ class LCMEngine(
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
         self._record_turn_compaction_telemetry()
-        if not self._bypasses_lcm_context_management():
+        if not self.side_channel_active:
             # #2863: any response on the foreground path ends the host's post-compaction wait, with or without a
             # count, as the host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host
             # reads the verify flag before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume
-            # the wait when a provider omits usage (turn_usage.py 3b421578:87-91). A response while an ignored or
-            # stateless binding holds the engine (a side channel such as cron or debug) leaves both flags alone.
+            # the wait when a provider omits usage (turn_usage.py 3b421578:87-91). A side channel's response (an ignored
+            # or stateless session such as cron, over a bound foreground) leaves both; such a session alone clears them.
             self._verify_compaction_cleared_threshold = False
             self.awaiting_real_usage_after_compression = False
 

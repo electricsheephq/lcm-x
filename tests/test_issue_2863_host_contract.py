@@ -474,6 +474,28 @@ def test_side_channel_response_leaves_both_host_flags_until_the_foreground_answe
         eng.shutdown()
 
 
+@pytest.mark.parametrize("kind", ["stateless", "ignore"])
+def test_standalone_ignored_or_stateless_session_response_clears_both_host_flags(tmp_path, monkeypatch, kind):
+    # A process whose only binding is an ignored or stateless session (a cron process of its own): no foreground
+    # binding exists, so it is not a side channel and its own responses end the host's post-compaction wait.
+    force_char_estimate(monkeypatch)
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **{f"{kind}_session_patterns": ["side-*"]})
+    eng = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        eng.on_session_start("side-1", platform="cron", model="probe-model", context_length=WINDOW)
+        assert not eng.side_channel_active and eng._bypasses_lcm_context_management()
+        _arm_host_flags(eng)
+        eng.update_from_response({"prompt_tokens": 900, "completion_tokens": 5, "total_tokens": 905})
+        assert _host_flags(eng) == (False, False)
+        _arm_host_flags(eng)
+        eng.update_from_response({})
+        assert _host_flags(eng) == (False, False)
+    finally:
+        eng.shutdown()
+
+
 # ---------------------------------------------------------------- the checks themselves flag what they guard
 def _calls(*ids):
     return {"role": "assistant", "content": "", "tool_calls": [
