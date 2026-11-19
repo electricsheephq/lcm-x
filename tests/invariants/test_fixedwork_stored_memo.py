@@ -621,3 +621,7 @@ def test_deeply_bracketed_text_is_never_remembered(stored_row):
     keyed = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}, deep: 1}]
     assert not _admitted({"role": "assistant", "content": "x", "tool_calls": keyed, "session_id": "S"}, stored_row)
     assert not _admitted({**base, "content": [{"type": "text", "text": deep}]}, stored_row)
+    escaped = json.dumps({"a": "[" * (limit + 1) + "]" * (limit + 1)}, ensure_ascii=True).replace("[", "\\u005b")
+    nested = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": escaped}}]
+    assert escaped.count("[") == 0
+    assert not _admitted({"role": "assistant", "content": "x", "tool_calls": nested, "session_id": "S"}, stored_row)

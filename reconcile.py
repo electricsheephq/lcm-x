@@ -445,7 +445,11 @@ _REPLAY_IDENTITY_MEMO_MAX_BRACKETS = 200
 
 
 def _replay_identity_text_is_shallow(text: str) -> bool:
-    return text.count("[") + text.count("{") <= _REPLAY_IDENTITY_MEMO_MAX_BRACKETS
+    # A JSON string escapes a bracket as \u005b or \u007b; canonicalisation decodes nested JSON strings, so an
+    # escaped bracket becomes a real one a level down and counts toward the same bound.
+    folded = text.lower()
+    return (folded.count("[") + folded.count("{") + folded.count("\\u005b") + folded.count("\\u007b")
+            <= _REPLAY_IDENTITY_MEMO_MAX_BRACKETS)
 
 
 def _shallow_replay_identity_text(text: str) -> str:
