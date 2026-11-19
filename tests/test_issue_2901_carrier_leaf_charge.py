@@ -13,7 +13,9 @@ the full-size charge in the runner process, so the premise is checked on the sam
 from __future__ import annotations
 
 import json
+import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -63,8 +65,15 @@ def walks(tmp_path_factory):
     out = tmp_path_factory.mktemp("issue-2901")
     cells = [{**grid.BY_ID[cell], "passes": PASSES} for cell in (TWIN, ORIGINAL)]
     grid.PATCHES.setdefault("old_charge_2901", OLD_CHARGE)
-    return {"new": grid._run(grid.CAND_TREE, cells, out, "new")["by_cell"],
-            "old": grid._run(grid.CAND_TREE, cells, out, "old", patch="old_charge_2901")["by_cell"]}
+    extra = grid._extra_paths()
+    with pytest.MonkeyPatch.context() as patch:
+        if not any((Path(entry) / "agent" / "context_engine.py").is_file() for entry in extra):
+            # CI writes the host stub at the repo root, inside the tree the runner may not import from: hand it a copy.
+            import agent.context_engine as host
+            shutil.copytree(Path(host.__file__).parent, out / "host" / "agent")
+            patch.setattr(grid, "_extra_paths", lambda: [*extra, str(out / "host")])
+        return {"new": grid._run(grid.CAND_TREE, cells, out, "new")["by_cell"],
+                "old": grid._run(grid.CAND_TREE, cells, out, "old", patch="old_charge_2901")["by_cell"]}
 
 
 def test_twin_premise_the_full_size_charge_stalls_and_fits(walks):
