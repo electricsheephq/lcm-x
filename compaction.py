@@ -108,13 +108,21 @@ def _made_progress(before, returned) -> bool:
 
 def _reports_progress(operation):
     """#2863: the host arms its compaction-cleared re-check only when the engine reports progress
-    (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False."""
+    (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False. A call the
+    one-owner guard refuses returns its own list and leaves the owner's report alone: it never writes the flag."""
     @wraps(operation)
     def reporting(self, messages, *args, **kwargs):
-        self._last_compression_made_progress = False
+        refusals = self._compress_reentry_refusals
+        if self._compress_owner in (None, get_ident()):  # another owner means this call is likely refused
+            self._last_compression_made_progress = False
         before = _progress_view(messages)
-        returned = operation(self, messages, *args, **kwargs)
-        self._last_compression_made_progress = _made_progress(before, returned)
+        try:
+            returned = operation(self, messages, *args, **kwargs)
+        except BaseException:
+            self._last_compression_made_progress = False
+            raise
+        if returned is not messages or self._compress_reentry_refusals == refusals:  # else refused
+            self._last_compression_made_progress = _made_progress(before, returned)
         return returned
     return reporting
 

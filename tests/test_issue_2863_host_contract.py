@@ -19,17 +19,21 @@ H6 verdict (conversation_compression.py:3442-3475): output == input -> no-progre
 
 import copy
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import random
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import tokens as T
+from hermes_lcm import compaction, tokens as T
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine, _LCM_SUMMARY_PART_HEADER_RE
-from hermes_lcm.externalize import extract_externalized_refs, get_large_output_storage_dir, load_externalized_payload
+from hermes_lcm.externalize import (extract_externalized_refs, get_large_output_storage_dir, load_externalized_payload,
+                                    maybe_externalize_tool_output)
 from hermes_lcm.tokens import count_messages_tokens
 
 pytestmark = pytest.mark.issue(2863)
@@ -206,11 +210,20 @@ def pairing_problems(out, newest_id):
     return problems
 
 
+def _occurrence_digest(eng, m):
+    """One key for both forms of a tool result: a pointer row counts as the payload it names."""
+    refs = extract_externalized_refs(m.get("content") or "") if is_stub(m) else []
+    if len(refs) == 1:
+        payload = (load_externalized_payload(refs[0], config=eng._config, hermes_home=eng._hermes_home) or {})
+        if payload.get("content") is not None:
+            return _digest(dict(m, content=payload["content"]))
+    return _digest(m)
+
+
 def conservation_violations(eng, out):
-    """By content digest, counting occurrences in both directions. For each digest, its copies in `out` plus its
-    stored copies under a node whose summary is in `out` cover every stored copy; `out` holds no more copies than the
-    store has outside those nodes. A stored tool row may instead appear in `out` as its externalized pointer, or as
-    the payload of the pointer the store holds; each such list row stands for one stored row."""
+    """By content, with copies (copies count). A stored row is covered when any stored copy of it is under a node whose
+    summary is in `out`, or a copy of it is in `out`. A duplicate: `out` holds more copies of a row than the store has
+    outside those nodes. A tool result is one occurrence in either form, payload or pointer."""
     sid = eng._session_id
     texts = [_text(m) for m in out]
     joined = "\n".join(texts)
@@ -219,32 +232,16 @@ def conservation_violations(eng, out):
     for node in eng._dag.get_session_nodes(sid, limit=100_000):
         if node.node_id in header_ids or (node.summary and node.summary in joined):
             covered.update(eng._dag.source_message_ids(node.node_id, limit=1_000_000))
-    rows = eng._store.get_session_messages(sid, limit=100_000)
-    summarised = Counter(_digest(r) for r in rows if r["store_id"] in covered)
-    outside_rows = [r for r in rows if r["store_id"] not in covered]
-    outside = Counter(_digest(r) for r in outside_rows)
-    listed = Counter(_digest(m) for m in out)
-    spare, short, violations = listed.copy(), [], []
-    for row in outside_rows:  # each list copy covers one stored copy
-        digest = _digest(row)
-        if spare[digest] > 0:
-            spare[digest] -= 1
-        else:
-            short.append(row)
-    for row in short:  # a tool row in its other form: one unused list row with its call id
-        cid, alt = row.get("tool_call_id"), None
-        if row.get("role") == "tool":
-            payloads = [(load_externalized_payload(ref, config=eng._config, hermes_home=eng._hermes_home) or {})
-                        .get("content") for ref in extract_externalized_refs(row.get("content") or "")]
-            alt = next((m for m in out if m.get("role") == "tool" and m.get("tool_call_id") == cid
-                        and spare[_digest(m)] > 0 and (is_stub(m) or _text(m) in payloads)), None)
-        if alt is None:
-            violations.append(("missing", row["store_id"], row.get("role"), cid))
-        else:
-            spare[_digest(alt)] -= 1
+    rows = [(r, _occurrence_digest(eng, r)) for r in eng._store.get_session_messages(sid, limit=100_000)]
+    summarised = Counter(d for r, d in rows if r["store_id"] in covered)
+    outside = Counter(d for r, d in rows if r["store_id"] not in covered)
+    keys = [_occurrence_digest(eng, m) for m in out]
+    listed = Counter(keys)
+    violations = [("missing", r["store_id"], r.get("role"), r.get("tool_call_id")) for r, d in rows
+                  if r["store_id"] not in covered and d not in summarised and d not in listed]
     for digest, n in listed.items():
         if (digest in outside or digest in summarised) and n > outside[digest]:
-            m = next(x for x in out if _digest(x) == digest)
+            m = out[keys.index(digest)]
             violations.append(("duplicate", n, outside[digest], m.get("role"), m.get("tool_call_id")))
     return violations
 
@@ -422,6 +419,75 @@ def test_compress_reports_progress_on_every_exit(engine, monkeypatch):
     assert engine._last_compression_made_progress is False
 
 
+def _record_progress_writes(engine, monkeypatch):
+    """Every write of the progress flag, with the writing thread."""
+    state, writes = {"value": engine.__dict__.pop("_last_compression_made_progress", False)}, []
+
+    def write(_self, value):
+        writes.append((threading.get_ident(), value))
+        state["value"] = value
+    monkeypatch.setattr(type(engine), "_last_compression_made_progress",
+                        property(lambda _self: state["value"], write), raising=False)
+    return writes
+
+
+@pytest.mark.parametrize("prior", [True, False])
+def test_a_refused_compress_leaves_the_progress_flag_as_it_was(engine, monkeypatch, prior):
+    # Another thread owns the engine (the one-owner guard's state): this call is refused and returns its own list.
+    engine._last_compression_made_progress = prior
+    writes = _record_progress_writes(engine, monkeypatch)
+    refusals, listed = engine._compress_reentry_refusals, list(msgs_at(12, R2_STEPS))
+    engine._compress_owner, engine._compress_owner_depth = -1, 1
+    try:
+        assert engine.compress(listed, current_tokens=60_000) is listed
+    finally:
+        engine._compress_owner, engine._compress_owner_depth = None, 0
+    assert engine._compress_reentry_refusals == refusals + 1
+    assert engine._last_compression_made_progress is prior and writes == []
+
+
+@pytest.mark.parametrize("order", ["refused call ends inside the pass", "refused call ends after the owner's report"])
+def test_a_refused_concurrent_compress_never_clears_the_owners_progress(engine, monkeypatch, order):
+    # Two threads, one engine: the owner's pass makes the list smaller; a second call is refused during it.
+    # The owner's host reads the flag after both calls have returned, so whichever order their exits take, it
+    # must read True, and the refused call must never have written the flag.
+    in_pass, release, reported, owner = threading.Event(), threading.Event(), threading.Event(), {}
+    impl, made = engine._compress_impl, compaction._made_progress
+
+    def owned_pass(*args, **kwargs):
+        owner["ident"] = threading.get_ident()
+        in_pass.set()
+        assert release.wait(10)
+        return impl(*args, **kwargs)
+
+    def late_report(before, returned):  # a refused call that reports anything does so after the owner's report
+        if threading.get_ident() != owner.get("ident"):
+            assert reported.wait(10)
+        return made(before, returned)
+    monkeypatch.setattr(engine, "_compress_impl", owned_pass)
+    if order == "refused call ends after the owner's report":
+        monkeypatch.setattr(compaction, "_made_progress", late_report)
+    writes = _record_progress_writes(engine, monkeypatch)
+    msgs, listed = msgs_at(12, R2_STEPS), list(msgs_at(12, R2_STEPS))
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        primary = workers.submit(engine.compress, list(msgs), 60_000)
+        assert in_pass.wait(10)
+        second = workers.submit(engine.compress, listed, 60_000)
+        if order == "refused call ends inside the pass":
+            assert second.result(timeout=10) is listed
+        deadline = time.monotonic() + 10
+        while engine._compress_reentry_refusals < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        release.set()
+        out = primary.result(timeout=60)
+        reported.set()
+        assert second.result(timeout=10) is listed
+    assert engine._compress_reentry_refusals == 1
+    assert out != msgs and count_messages_tokens(out) < count_messages_tokens(msgs)
+    assert engine._last_compression_made_progress is True  # the owner's host reads after both calls returned
+    assert {ident for ident, _value in writes} == {owner["ident"]}, writes
+
+
 def test_new_engine_reports_no_progress(engine):
     assert engine._last_compression_made_progress is False
 
@@ -561,9 +627,62 @@ def test_conservation_violations_flags_a_duplicated_row_and_counts_stored_copies
     found = conservation_violations(engine, again + [dict(USER)])
     assert [v[0] for v in found] == ["duplicate"], found
     assert [v[0] for v in conservation_violations(engine, again[:-2] + again[-1:])] == ["missing"]
-    # Two identical unsummarised user rows represented once: one stored copy is missing.
-    found = conservation_violations(engine, msgs)
-    assert [v[0] for v in found] == ["missing"] and found[0][2] == "user", found
+    # Copies count: a row stored twice (a restart stores it again) and listed once is covered.
+    assert conservation_violations(engine, msgs) == []
+
+
+def _fake_engine(rows, nodes):
+    """A hand-built store: `nodes` maps a node id to (its summary, the store ids it covers)."""
+    store = SimpleNamespace(get_session_messages=lambda sid, limit=0: [dict(r) for r in rows])
+    dag = SimpleNamespace(
+        get_session_nodes=lambda sid, limit=0: [SimpleNamespace(node_id=n, summary=s) for n, (s, _) in nodes.items()],
+        source_message_ids=lambda nid, limit=0: list(nodes[nid][1]))
+    return SimpleNamespace(_session_id="s", _store=store, _dag=dag, _config=None, _hermes_home=None)
+
+
+def test_conservation_violations_counts_a_restart_copy_as_covered():
+    answer = {"role": "assistant", "content": "answer"}
+    rows = [dict(USER, store_id=1), dict(answer, store_id=2), dict(USER, store_id=3)]
+    # (a) the row is summarised as store id 1 and stored again as id 3 outside every node; the list holds the summary.
+    summary = {"role": "user", "content": "SUMMARY-SEVEN"}
+    assert conservation_violations(_fake_engine(rows, {7: ("SUMMARY-SEVEN", [1])}), [summary, dict(answer)]) == []
+    # ... but the summary and a raw copy of the summarised row would hold one copy more than the store has outside.
+    found = conservation_violations(_fake_engine(rows, {7: ("SUMMARY-SEVEN", [1])}), [summary, dict(USER), dict(USER)])
+    assert [v[0] for v in found] == ["missing", "duplicate"], found
+    # (b) the row is stored twice and listed once.
+    assert conservation_violations(_fake_engine(rows, {}), [dict(USER), dict(answer)]) == []
+
+
+def _pointer(eng, row):
+    made = maybe_externalize_tool_output(row["content"], tool_call_id=row["tool_call_id"], session_id=eng._session_id,
+                                         config=eng._config, hermes_home=eng._hermes_home, force=True,
+                                         tool_name="terminal")
+    return dict(row, content=made["placeholder"])
+
+
+def test_conservation_violations_counts_a_tool_result_once_in_either_form(engine):
+    result = _result("a", "the full output")
+    msgs = [dict(USER), _calls("a"), result]
+    engine.ingest(list(msgs))
+    pointer = _pointer(engine, result)
+    assert is_stub(pointer) and not is_stub(result)
+    assert conservation_violations(engine, msgs[:2] + [pointer]) == []
+    # One stored payload returned as the payload AND as its pointer: one copy too many.
+    found = conservation_violations(engine, msgs + [pointer])
+    assert [v[0] for v in found] == ["duplicate"] and found[0][1:3] == (2, 1), found
+
+
+def test_conservation_violations_matches_two_pointers_to_a_payload_and_a_pointer(engine):
+    # The same result stored twice, once as its payload and once (after a restart) as its pointer.
+    result = _result("a", "the full output")
+    engine.ingest([dict(USER), _calls("a"), result])
+    pointer = _pointer(engine, result)
+    engine.ingest([dict(USER), _calls("a"), result, pointer])
+    stored = [r for r in engine._store.get_session_messages(engine._session_id) if r.get("role") == "tool"]
+    assert sorted(is_stub(r) for r in stored) == [False, True], stored
+    assert conservation_violations(engine, [dict(USER), _calls("a"), pointer, dict(pointer)]) == []
+    found = conservation_violations(engine, [dict(USER), _calls("a"), pointer, dict(pointer), dict(result)])
+    assert [v[0] for v in found] == ["duplicate"], found
 
 
 def test_conservation_violations_tells_calls_apart_by_name_and_arguments(engine):
