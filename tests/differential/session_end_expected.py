@@ -15,7 +15,10 @@ LCMX_DIFF_SESSION_END_BASELINE overrides the pin locally;
 CI keeps the pinned SHA.
 """
 BASELINE = '5866a853debbf342923ddf2df24a543e67c4f3e2'
-INTENDED_DIFFERENCES = []
+INTENDED_DIFFERENCES = [
+    ('warm-busy', '*', 'end-of-on_session_end', 'pending', '#2751'),
+    ('warm-busy', '*', 'direct-end', 'pending', '#2751'),
+]
 SHRINKING_TABLES = {'ingest_views': 'ingest_ledger.py _prune_views keeps only the last two views per kind.',
                     'lineage_marks': 'ingest_ledger.merge_provisional deletes the provisional lineage mark.'}
 CELLS = {f'{shape}-{route}': '#2543 proven'

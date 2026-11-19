@@ -1092,6 +1092,11 @@ class LCMEngine(
         self._pending_context_anchor_messages: Optional[List[Dict[str, Any]]] = None
         self._compress_run = CompressRun()
         self._current_compress_placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
+        self._active_replay_cache_generation = 0
+        self._deferred_active_replay_cache_generation = None
+        self._ordinary_active_replay_cache_generation = 0
+        self._active_replay_cache_freeze_sequence = 0
+        self._applied_active_replay_cache_sequence = 0
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
@@ -6851,12 +6856,49 @@ class LCMEngine(
         self._generated_ignored_active_replay_placeholder_message_ids = set(current_placeholders)
         self._generated_ignored_active_replay_placeholder_messages = current_placeholders
 
+    def _freeze_active_replay_cache_update(self, original, active, unaudited_from, cursor):
+        """Freeze the successful remember path, including #1353's paired prefix proof."""
+        identities = [self._message_replay_identity(row, strip_carrier=False) for row in original]
+        replay = list(active)
+        if unaudited_from is not None:
+            end = min(cursor, len(self._last_active_replay_source_identities),
+                      len(self._last_active_replay_messages), len(identities), len(replay))
+            identities[unaudited_from:end] = self._last_active_replay_source_identities[unaudited_from:end]
+            replay[unaudited_from:end] = self._last_active_replay_messages[unaudited_from:end]
+        generated = [idx for idx, row in enumerate(replay)
+                     if id(row) in self._generated_ignored_active_replay_placeholder_message_ids]
+        return (self._ordinary_active_replay_cache_generation, copy.deepcopy(identities), copy.deepcopy(replay),
+                generated, None)
+
+    def _apply_active_replay_cache_update(self, update):
+        generation, identities, replay, generated, sequence = update
+        # Only an ordinary write supersedes a frozen generation.
+        # The sequence check also rejects retired updates from chained tails.
+        if (generation != self._ordinary_active_replay_cache_generation
+                or sequence <= self._applied_active_replay_cache_sequence):
+            return
+        self._applied_active_replay_cache_sequence = sequence
+        self._active_replay_cache_generation += 1
+        self._deferred_active_replay_cache_generation = self._active_replay_cache_generation
+        self._last_active_replay_source_identities = identities
+        self._last_active_replay_messages = replay
+        for idx in generated:
+            row = replay[idx]
+            self._generated_ignored_active_replay_placeholder_message_ids.add(id(row))
+            self._generated_ignored_active_replay_placeholder_messages[id(row)] = row
+        self._refresh_generated_active_replay_placeholder_retention(replay)
+        # The failed ingest supplied no completed replay proof. Do not observe it a second time
+        # during retry, or retain a digest for the cache view that this update just replaced.
+        self._no_progress_replay = None
+
     def _remember_active_replay_messages(
         self,
         original_messages: List[Dict[str, Any]],
         active_replay_messages: List[Dict[str, Any]],
         *, persist_placeholder_evidence: bool = True,
     ) -> List[Dict[str, Any]]:
+        self._active_replay_cache_generation += 1
+        self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
         self._last_active_replay_source_identities = [  # full identity (#488): no carrier aliasing
             self._message_replay_identity(message, strip_carrier=False) for message in original_messages
         ]
@@ -6950,6 +6992,8 @@ class LCMEngine(
                     self._copy_active_replay_messages_preserving_generated_ids(cached),
                     original_messages if fresh_replay_messages is None else fresh_replay_messages,
                 )
+                self._active_replay_cache_generation += 1
+                self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
                 self._last_active_replay_messages = current
                 self._refresh_generated_active_replay_placeholder_retention(
                     original_messages,
@@ -7953,7 +7997,9 @@ class LCMEngine(
                     "_generated_ignored_active_replay_placeholder_hash_counts",
                     "_generated_ignored_active_replay_placeholder_hash_ordinals",
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
-                    "_pending_session_tails",
+                    "_pending_session_tails", "_active_replay_cache_freeze_sequence",
+                    "_applied_active_replay_cache_sequence",
+                    "_deferred_active_replay_cache_generation",
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -8123,7 +8169,10 @@ class LCMEngine(
                             self.__dict__.pop("_ingest_read_only", None)
                             self._store._read_only_ingest_thread = read_only_thread
                             for name, value in snapshots.items():
-                                if name != "_pending_session_tails":
+                                # A frozen tail keeps its number, its retirement and its disarm with it (#2751).
+                                if name not in ("_pending_session_tails", "_active_replay_cache_freeze_sequence",
+                                                "_deferred_active_replay_cache_generation",
+                                                "_applied_active_replay_cache_sequence"):
                                     if value is missing:
                                         self.__dict__.pop(name, None)
                                     else:
@@ -9135,7 +9184,9 @@ class LCMEngine(
         # BEFORE filtering and pre-match so every exposed row is handled.
         # Missing metadata on either side retains the legacy positional proof.
         cached_active_replay_messages = getattr(self, "_last_active_replay_messages", ())
-        if (not self._ingest_cursor_needs_reconcile and current_prefix_identities is not None
+        if ((not self._ingest_cursor_needs_reconcile
+             or getattr(self, "_deferred_active_replay_cache_generation", None) == self._active_replay_cache_generation)
+                and current_prefix_identities is not None
                 # After compaction the cursor indexes its output, not this cache
                 # of the last ingested list; the commit proof owns that boundary.
                 and self._ingest_cursor == len(cached_source_identities)):
@@ -9176,6 +9227,9 @@ class LCMEngine(
             self._ingest_cursor = max(today, ledger_run["k"])
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
+        # A committed deferred cache proves known-new stamps even when retry requested reconciliation.
+        if new_prefix_occurrences:
+            cursor = self._ingest_cursor = min(cursor, min(new_prefix_occurrences))
         durable = None
         if reconciled_existing_session:
             try:
@@ -9187,11 +9241,13 @@ class LCMEngine(
             proven_cursor = self._cursor_from_durable_commit_proof(reconcile_messages) if durable else None
             if proven_cursor is not None:
                 metadata = self._remapped_output_metadata(messages, durable, min(cursor, proven_cursor))
-                new_prefix_occurrences = {
+                durable_new_prefix_occurrences = {
                     idx for idx, previous in metadata.items()
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
-                restamp_metadata.update({idx: (self._session_id, metadata[idx]) for idx in new_prefix_occurrences})
+                restamp_metadata.update({idx: (self._session_id, metadata[idx])
+                                         for idx in durable_new_prefix_occurrences})
+                new_prefix_occurrences |= durable_new_prefix_occurrences
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -9424,6 +9480,8 @@ class LCMEngine(
             if unaudited_from is not None:
                 end = min(cursor, len(cached_source_identities), len(previous_replay),
                           len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
+                self._active_replay_cache_generation += 1
+                self._ordinary_active_replay_cache_generation = self._active_replay_cache_generation
                 self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
                 self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
                 for message in self._last_active_replay_messages[unaudited_from:end]:
@@ -9511,6 +9569,8 @@ class LCMEngine(
         store_ids = self._store_ingest_rows(
             messages_to_store_with_index=messages_to_store_with_index,
             protected_messages=protected_messages,
+            cache_update=lambda: self._freeze_active_replay_cache_update(
+                messages, active_replay_messages, unaudited_from, cursor),
             sender_originals=[(idx, messages[idx]) for idx, _msg in messages_to_store_with_index],
             sender_excluded=anchor_remainders,
             after_commit=after_commit,
@@ -10099,6 +10159,7 @@ class LCMEngine(
         sender_originals=(), sender_excluded=(),
         after_commit=None,
         view_only=None,
+        cache_update=None,
     ) -> list[int]:
         estimates = [view_only["estimates"][index] if view_only is not None and index in view_only["estimates"]
                      and view_only["counter"] == self._ingest_token_counter_key()
@@ -10124,6 +10185,8 @@ class LCMEngine(
                 # Freeze the already filtered/protected rows, not the host's
                 # mutable history or the next session's ingest cursor.
                 pending = {**batch, "kind": "warm", "after_store_id": pending_after_store_id}
+                if cache_update is not None:
+                    pending["cache_update"] = cache_update()
                 self.__dict__["_frozen_tail_reached"] = True
                 frozen = getattr(self, "_frozen_ledger_prepared", None)
                 indexes = [idx for idx, _row in messages_to_store_with_index]
@@ -10142,7 +10205,14 @@ class LCMEngine(
                 if "senders" in pending:
                     pending["senders"] = copy.deepcopy(pending["senders"])
                 if not any(self._tail_key(old) == self._tail_key(pending) for old in self._pending_session_tails):
+                    if "cache_update" in pending:
+                        self._active_replay_cache_freeze_sequence += 1
+                        pending["cache_update"] = (*pending["cache_update"][:4], self._active_replay_cache_freeze_sequence)
                     self._pending_session_tails.append(pending)
+                    # Chained tails keep main's behaviour: no frozen view applies, and none applied earlier stays armed (#2751, #2778).
+                    if len(self._pending_session_tails) > 1:
+                        self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
+                        self._deferred_active_replay_cache_generation = None
                     if getattr(self, "_ingest_read_only", None) is not None:
                         self._ledger_count("ledger.tail.queued.warm")
                         if inserted:
@@ -12803,6 +12873,9 @@ class LCMEngine(
             tail["fallback_lineage"] = fallback_lineage
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
+            if len(self._pending_session_tails) > 1:
+                self._applied_active_replay_cache_sequence = self._active_replay_cache_freeze_sequence
+                self._deferred_active_replay_cache_generation = None
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
         logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
@@ -13161,6 +13234,11 @@ class LCMEngine(
                             if ids and rule == "digest":
                                 self._write_tail_bindings(batch, ids, left, after_commit)
                         committed = True
+                        if ids and store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
+                            # Retire only the frozen view's evidence; a newer host occurrence
+                            # must remain detectable by #1179, and a newer cache wins the guard.
+                            if (update := tail.get("cache_update")) is not None:
+                                self._apply_active_replay_cache_update(update)
                         after_commit.append(lambda n=covered: self._ledger_count("ledger.tail.retry.replay_rows", amount=n))
                     committed = True
                     after_commit.extend([

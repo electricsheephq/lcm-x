@@ -565,8 +565,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "c8ce01f5d6cdcfd3f531d7342d51f702a1630f237e36f97f90180ad38d9e3192",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "06282e2624dd38a5f2041e4fbe2236ec21661960b2802307b7d3c668c646aced",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "protect-large-assistant": {
       "outcome_sha": "b13645e0987309b318d49f96c14ecdc690b5dc9023f02f2334744f05bb61f2ba",
@@ -605,8 +605,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "33474d00806c48a2f415c3270372ec5a3560904d095d4970e371932a946d2aa0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "91873c6970a3f27d12cf60ff64263b8ac5bc96ddab17823144b48f72d42643aa",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; retained-copy labels renumbered; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "row-filter-ignored-append-error": {
       "outcome_sha": "eb4bd089208db13599496286680fe550a8a6e76e5e524b0db66686231d66cdbb",
@@ -637,24 +637,24 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "702139d7b61dfcdb50f1b9ea3277e11f1056d4d8e47126d5a32f8b1bc20e8cc2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3d66cca4435ad1e85fb24e190fd81b66f63a9306afffd5b5123754a5518fb3f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "051df811a1ef0b0b74d1b1da080a4125e2add334c436db0526060ed78817045c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "ac2489d7292b14da42484cbb324b490be15b481ff3d95ee026735f8e41c57096",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged; then #2751: a frozen update is numbered when its tail is queued, and a rolled-back attempt's number rolls back with the tail; durable rows unchanged"
     },
     "sqlite-durable": {
       "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "sqlite-locked": {
-      "outcome_sha": "514af1553229c77a2df0e30021cc8e3440cba3c21094f34cc946d0d5791d6c1a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "6ab627fd92bee206a482ac2f4e1915b395ff206b23c55e07f31e10a228aa59fa",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links); then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged; then #2751: a frozen update is numbered when its tail is queued, and a rolled-back attempt's number rolls back with the tail; durable rows unchanged"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "a1f5b8966f775ff29d98f57f860c15ba9e467b00d19ae8eb7d4fd72a4378bd13",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a22a2fcb9a5d46c4b8252f314d83695d75c99b81de40e237e1222c5577ea748b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2751: pending tail carries its frozen cache update; durable rows unchanged; then #2751: frozen cache updates carry their freeze sequence so chained deferred applies compose in order; durable rows unchanged"
     },
     "sqlite-metadata": {
       "outcome_sha": "9f42b0bcef170e51636e96a1bb5e4c3f29fad2b9ca590fb07698975c09c8f6e8",

@@ -1,0 +1,2973 @@
+{
+  "0": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "restamp",
+        1,
+        1002.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        1,
+        4002.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        1,
+        6002.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "reply-0",
+          6002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "reply-0",
+          4002.0
+        ],
+        [
+          "reply-0",
+          6002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "1": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "busy_once"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "2": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
+      ],
+      "routes": {
+        "retry": 1,
+        "end": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "3": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "end"
+      ],
+      [
+        "end"
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "4": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
+      ],
+      "routes": {
+        "retry": 1,
+        "end": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "5": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "restamp",
+        1,
+        1002.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "6": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "ingest"
+      ],
+      [
+        "retry"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "7": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        true
+      ],
+      [
+        "restamp",
+        1,
+        1002.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        3001.0
+      ],
+      [
+        "end"
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "restamp",
+        1,
+        6002.0
+      ],
+      [
+        "restamp",
+        0,
+        7001.0
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          3001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          3001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "8": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "restamp",
+        0,
+        2001.0
+      ],
+      [
+        "restamp",
+        0,
+        3001.0
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "9": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "restamp",
+        1,
+        1002.0
+      ],
+      [
+        "retry"
+      ],
+      [
+        "busy_end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [
+          "warm"
+        ]
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "10": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "ingest"
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "append"
+      ],
+      [
+        "busy_drain",
+        false
+      ],
+      [
+        "ingest"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "11": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "busy_drain",
+        false
+      ],
+      [
+        "restamp",
+        1,
+        2002.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          2002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          2002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "12": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "cold_end"
+      ],
+      [
+        "busy_once"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "13": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "14": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "append"
+      ],
+      [
+        "sibling"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "append"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "sibling"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "question-2",
+          41.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ],
+        [
+          "reply-2",
+          42.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0
+      ],
+      "routes": {
+        "sibling": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "question-2",
+          41.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ],
+        [
+          "reply-2",
+          42.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "15": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
+      ],
+      "routes": {
+        "retry": 1,
+        "end": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "16": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "17": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        false
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "sibling"
+      ],
+      [
+        "end"
+      ],
+      [
+        "append"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "18": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "append"
+      ],
+      [
+        "cold_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        1,
+        4002.0
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "19": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "sibling"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": true,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        2,
+        0
+      ],
+      "routes": {
+        "sibling": 1,
+        "end": 2
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm",
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "20": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
+      ],
+      "routes": {
+        "retry": 1,
+        "end": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "21": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        false
+      ],
+      [
+        "append"
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "cold_end"
+      ],
+      [
+        "busy_once"
+      ],
+      [
+        "cold_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "question-1",
+          21.0
+        ],
+        [
+          "reply-1",
+          22.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "22": {
+    "events": [
+      [
+        "ingest",
+        "user",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
+      ],
+      "routes": {
+        "retry": 1,
+        "end": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        [
+          "warm"
+        ],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "23": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        true
+      ],
+      [
+        "restamp",
+        1,
+        1002.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        1,
+        4002.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        1,
+        6002.0
+      ],
+      [
+        "busy_drain",
+        true
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "reply-0",
+          6002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "reply-0",
+          1002.0
+        ],
+        [
+          "reply-0",
+          4002.0
+        ],
+        [
+          "reply-0",
+          6002.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  },
+  "24": {
+    "events": [
+      [
+        "ingest",
+        "turn",
+        true
+      ],
+      [
+        "restamp",
+        0,
+        1001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "retry"
+      ],
+      [
+        "restamp",
+        0,
+        4001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "restamp",
+        0,
+        6001.0
+      ],
+      [
+        "busy_end"
+      ],
+      [
+        "end"
+      ]
+    ],
+    "M": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {
+        "retry": 1
+      },
+      "pending_kinds": [
+        [],
+        [],
+        [
+          "warm"
+        ],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    },
+    "K_m": {
+      "rows": [
+        [
+          "",
+          3.0
+        ],
+        [
+          "question-0",
+          1.0
+        ],
+        [
+          "question-0",
+          1001.0
+        ],
+        [
+          "question-0",
+          4001.0
+        ],
+        [
+          "question-0",
+          6001.0
+        ],
+        [
+          "reply-0",
+          2.0
+        ],
+        [
+          "result-0",
+          4.0
+        ]
+      ],
+      "errors": [],
+      "chain": false,
+      "boundaries": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "routes": {},
+      "pending_kinds": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ]
+    }
+  }
+}
