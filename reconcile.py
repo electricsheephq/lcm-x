@@ -439,16 +439,18 @@ _REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES = 1024 * 1024
 
 
 def _freeze_replay_identity_value(value: Any) -> tuple:
-    """A hashable, type-tagged copy of a JSON-shaped value: True/1/1.0, list/tuple and int/str dict keys never
-    collide, dicts keep item order, floats compare by repr. Any other type raises TypeError (no memo)."""
+    """A hashable, type-tagged copy of a plain JSON value (exact str, int, float, bool, None, list, and dict with
+    exact str keys, all the way down): True/1/1.0 never collide, dicts keep item order, floats compare by repr.
+    Anything else raises TypeError (no memo): its identity may fall back to ``str(value)``."""
     kind = type(value)
     if kind is str:
         return ("s", value)
     if kind is dict:
-        return ("d", tuple((_freeze_replay_identity_value(k), _freeze_replay_identity_value(v))
-                           for k, v in value.items()))
-    if kind is list or kind is tuple:
-        return ("l" if kind is list else "t", tuple(_freeze_replay_identity_value(v) for v in value))
+        if any(type(k) is not str for k in value):
+            raise TypeError("not a replay identity memo input")
+        return ("d", tuple((("s", k), _freeze_replay_identity_value(v)) for k, v in value.items()))
+    if kind is list:
+        return ("l", tuple(_freeze_replay_identity_value(v) for v in value))
     if kind is bool:
         return ("b", value)
     if kind is int:
@@ -470,7 +472,7 @@ def _frozen_replay_identity_walk(frozen: tuple) -> tuple[list, int]:
         if tag == "d":
             size += sys.getsizeof(node[1]) + sum(map(sys.getsizeof, node[1]))
             stack.extend(item for pair in node[1] for item in pair)
-        elif tag == "l" or tag == "t":
+        elif tag == "l":
             size += sys.getsizeof(node[1])
             stack.extend(node[1])
         elif len(node) > 1:
@@ -488,18 +490,23 @@ def _replay_identity_memo_gate(role: str, content: str, frozen_calls: tuple) -> 
                      if any(marker in text for text in texts for marker in markers))
 
 
-def _replay_identity_memo_key(msg: Dict[str, Any], strip_carrier: bool, allow_pruned_tool_alias: bool) -> tuple:
-    """(key, frozen calls) of a live row, or TypeError when a raw value the key reads is not an exact str/None
-    (role, tool_call_id, tool_name, name) or an exact str/list/dict/None (content): a subclass could make two
-    different values compare equal."""
-    if type(msg.get("content")) not in (str, list, dict, type(None)) or any(
-            type(msg.get(name)) not in (str, type(None)) for name in ("role", "tool_call_id", "tool_name", "name")):
+_REPLAY_IDENTITY_FIELDS = ("role", "content", "tool_calls", "tool_call_id", "tool_name", "name")
+
+
+def _replay_identity_memo_key(fields: tuple, strip_carrier: bool, allow_pruned_tool_alias: bool) -> tuple:
+    """(key, frozen calls) from a live row's _REPLAY_IDENTITY_FIELDS, each read from the row once; TypeError when
+    role, tool_call_id, tool_name or name is not an exact str/None, or content and tool calls are not plain JSON
+    all the way down (a subclass could compare equal to another value, an object falls back to its str())."""
+    role, content, calls, call_id, tool_name, name = fields
+    if type(content) not in (str, list, dict, type(None)) or any(
+            type(value) not in (str, type(None)) for value in (role, call_id, tool_name, name)):
         raise TypeError("not a replay identity memo input")
-    frozen_calls = _freeze_replay_identity_value(msg.get("tool_calls"))
-    role = str(msg.get("role") or "unknown")
-    return (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role,
-            normalize_content_value(msg.get("content")) or "", str(msg.get("tool_call_id") or ""),
-            frozen_calls, str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else ""), frozen_calls
+    if type(content) is not str:
+        _freeze_replay_identity_value(content)
+    frozen_calls = _freeze_replay_identity_value(calls)
+    role = role or "unknown"
+    return (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role, normalize_content_value(content) or "",
+            call_id or "", frozen_calls, (tool_name or name or "") if role == "tool" else ""), frozen_calls
 
 
 class _ReplayIdentityMemo:
@@ -1121,7 +1128,8 @@ class ReconcileMixin:
         # stamp check runs only on a projection mark), session_id and store_id (stored rows and persisted-output
         # proofs only), and ``name`` on other roles (a participant label, never part of the identity).
         try:
-            key, _frozen = _replay_identity_memo_key(msg, strip_carrier, allow_pruned_tool_alias)
+            fields = tuple(msg.get(name) for name in _REPLAY_IDENTITY_FIELDS)  # each field the key uses, read once
+            key, _frozen = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias)
             memo = state.get("_replay_identity_memo")
             if memo is None or memo.epoch != epoch:
                 memo = state["_replay_identity_memo"] = _ReplayIdentityMemo(epoch)
@@ -1130,16 +1138,18 @@ class ReconcileMixin:
             return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
         if hit is not None:
             return hit
-        # A miss computes on a private copy and remembers it under the copy's own key, so a row another thread
-        # changes between the key and the computation can never store one version's identity under the other's
-        # key. Nothing on the admitted path reads the row's object identity.
+        # A miss computes on a private copy of the fields read above (plain JSON, so the copy is exact) and
+        # remembers it under the copy's own key: a row another thread changes after the read can never store one
+        # version's identity under the other's key. Nothing on the admitted path reads the row's object identity,
+        # and on an admitted row the body reads no other field. It is remembered only if the digit limit held.
         try:
-            snap = copy.deepcopy(msg)
-            key, frozen_calls = _replay_identity_memo_key(snap, strip_carrier, allow_pruned_tool_alias)
+            fields = copy.deepcopy(fields)
+            key, frozen_calls = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias)
         except Exception:
             return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
-        result = uncached(self, snap, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
-        if not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
+        result = uncached(self, dict(zip(_REPLAY_IDENTITY_FIELDS, fields)), strip_carrier=strip_carrier,
+                          allow_pruned_tool_alias=allow_pruned_tool_alias)
+        if sys.get_int_max_str_digits() == epoch[4] and not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
             memo.remember(key, result, frozen_calls)
         return result
 
