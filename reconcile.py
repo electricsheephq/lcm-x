@@ -1111,10 +1111,9 @@ class ReconcileMixin:
         instance override of _generated_context_carrier_remainder or _survival_projection_source that reads
         state without a marker would need the memo bypassed."""
         uncached = ReconcileMixin._message_replay_identity_uncached
-        state = getattr(self, "__dict__", None)
         if (stored_row or with_host_rewrite or store is not None or hermes_home is not None
                 or session_id is not None or conversation_id is not None or type(msg) is not dict
-                or state is None or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
+                or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
             return uncached(self, msg, stored_row=stored_row, with_host_rewrite=with_host_rewrite,
                             strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias, store=store,
                             hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
@@ -1130,9 +1129,9 @@ class ReconcileMixin:
         try:
             fields = tuple(msg.get(name) for name in _REPLAY_IDENTITY_FIELDS)  # each field the key uses, read once
             key, _frozen = _replay_identity_memo_key(fields, strip_carrier, allow_pruned_tool_alias)
-            memo = state.get("_replay_identity_memo")
+            memo = getattr(self, "_replay_identity_memo", None)  # one plain instance attribute (no property)
             if memo is None or memo.epoch != epoch:
-                memo = state["_replay_identity_memo"] = _ReplayIdentityMemo(epoch)
+                memo = self._replay_identity_memo = _ReplayIdentityMemo(epoch)
             hit = memo.entries.get(key)
         except Exception:
             return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
