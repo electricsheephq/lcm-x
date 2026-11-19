@@ -1146,10 +1146,10 @@ What the main knobs do:
   raises the idle limit to at least that value and 300 seconds. An unset auxiliary timeout uses the 300-second floor.
   Other literal auxiliary timeout values leave the idle limit at its configured value. LCM-X uses its own hard bound
   if the host limit is disabled or unreadable. If the host enforces an unreadable limit, keep the hard bound below it by the
-  same margin. When ingest reaches the deadline on an automatic pass, the pass reports `deadline_yield`, returns the
-  original host list, and keeps the committed ingest. Manual compression, forced overflow recovery, host recovery
-  attempts, and automatic passes that are held for a fit or reach an enabled survival fit ceiling continue through their
-  normal paths.
+  same margin. When ingest reaches the deadline on an identified automatic pre-API pass, the pass reports
+  `deadline_yield`, returns the original host list, and keeps the committed ingest. Post-tool passes, calls without
+  an identifiable trigger, manual compression, forced overflow recovery, and host recovery attempts continue through
+  their normal paths. So do automatic passes held for a fit or at an enabled survival fit ceiling.
   When no call fits, a forced overflow recovery assembles to its cap with
   no call, and a recovery attempt is fitted under the threshold; time never makes
   a level 3 cut.

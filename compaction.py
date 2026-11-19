@@ -2351,6 +2351,22 @@ class CompactionMixin:
 
         return "next", None
 
+    def _is_host_pre_api_compression(self) -> bool:
+        # Hermes sets the seed under its compression lease, then sets the dispatch generation
+        # for the worker's call to compress(). A seed can outlive its attempt or be replaced
+        # by a retry, so require the active dispatch and its generation on this engine.
+        seed = getattr(self, "_compression_telemetry_seed", None)
+        if self._compress_owner_depth != 1 or not isinstance(seed, dict) or seed.get("trigger_source") != "pre_api":
+            return False
+        host = sys.modules.get("agent.conversation_compression")
+        dispatch = getattr(host, "_COMPRESSOR_ATTEMPT_GENERATION", None)
+        if not isinstance(dispatch, ContextVar):
+            return False
+        generation = dispatch.get(None)
+        return bool(generation and generation == getattr(self, "_compression_cancelled_check_owner", None)
+                    == getattr(self, "_compression_working_attempt_generation", None)
+                    == getattr(self, "_compression_attempt_generation", None))
+
     def _yield_after_ingest(self, state: _CompressionState) -> bool:
         now = time.monotonic()
         if now < state.sweep_deadline:
@@ -2361,6 +2377,10 @@ class CompactionMixin:
             and (ceiling := self._survival_ceiling()) is not None
             and state.observed_prompt_tokens >= ceiling
         ):
+            return False
+        # Post-tool unchanged output spends a host attempt. At this point no leaf or
+        # condensation has been published, so only automatic pre-API compaction can yield.
+        if not self._is_host_pre_api_compression():
             return False
         self._last_compression_status = "deadline_yield"
         self._pressure_yield_invocation_verdict = "neutral"

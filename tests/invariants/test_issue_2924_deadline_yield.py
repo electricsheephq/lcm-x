@@ -1,7 +1,11 @@
 """#2924 Step A: deadline yields preserve committed ingest (I1, I2, I11)."""
 
 import hashlib
+import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -32,7 +36,30 @@ def view():
     return [row for i in range(8) for row in _turn(f"T{i}", 100.0 + i, tool=i == 0)]
 
 
-def test_t1_slow_ingest_yields_after_commit(engine, view, monkeypatch, caplog):
+@pytest.fixture
+def host_dispatch(engine, monkeypatch):
+    generation = ContextVar("hermes_compressor_attempt_generation", default=None)
+    monkeypatch.setitem(sys.modules, "agent.conversation_compression",
+                        SimpleNamespace(_COMPRESSOR_ATTEMPT_GENERATION=generation))
+
+    @contextmanager
+    def dispatch(trigger):
+        attempt = getattr(engine, "_compression_attempt_generation", 0) + 1
+        engine._compression_attempt_generation = attempt
+        engine._compression_telemetry_seed = {"trigger_source": trigger}
+        engine._compression_cancelled_check_owner = attempt
+        engine._compression_working_attempt_generation = attempt
+        token = generation.set(attempt)
+        try:
+            yield
+        finally:
+            generation.reset(token)
+            engine._compression_cancelled_check_owner = None
+
+    return dispatch
+
+
+def test_t1_slow_ingest_yields_after_commit(engine, view, monkeypatch, caplog, host_dispatch):
     engine._config.foreground_hard_seconds = 2
     view[0]["content"] += "\ud800"  # The canonical view is a different list.
     ingest = engine._ingest_messages
@@ -50,7 +77,8 @@ def test_t1_slow_ingest_yields_after_commit(engine, view, monkeypatch, caplog):
     before = deepcopy(view)
     with monkeypatch.context() as patch, caplog.at_level("INFO", logger="hermes_lcm.compaction"):
         patch.setattr(compaction_module.time, "monotonic", lambda: now)
-        result = engine.compress(view, current_tokens=8000)
+        with host_dispatch("pre_api"):
+            result = engine.compress(view, current_tokens=8000)
     assert engine.last_compression_status == "deadline_yield"
     assert result is view and view == before
     sweep.assert_not_called()
@@ -72,8 +100,31 @@ def _late_ingest(engine, monkeypatch):
     return clock
 
 
+@pytest.mark.parametrize("trigger", ["post_tool", None], ids=["post-tool", "unidentified"])
+def test_slow_ingest_keeps_ordinary_pass(engine, view, monkeypatch, host_dispatch, trigger):
+    _late_ingest(engine, monkeypatch)
+    sweep = Mock(wraps=engine._prepare_compression_sweep)
+    monkeypatch.setattr(engine, "_prepare_compression_sweep", sweep)
+
+    if trigger is None:
+        # A completed host dispatch leaves a seed behind on the compressor.
+        with host_dispatch("pre_api"):
+            pass
+        result = engine.compress(view, current_tokens=8000)
+    else:
+        with host_dispatch(trigger):
+            result = engine.compress(view, current_tokens=8000)
+
+    assert engine.last_compression_status != "deadline_yield"
+    sweep.assert_called_once()
+    assert result == view
+    assert not engine._last_compression_made_progress
+    assert not engine._dag.get_session_nodes(engine._session_id)
+    assert _digests(stored_rows(engine)) == _digests(view)
+
+
 @pytest.mark.parametrize("mode", ["forced", "recovery", "overflow"])
-def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeypatch, mode):
+def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeypatch, mode, host_dispatch):
     engine.context_length = 4000
     engine.threshold_tokens = 500
     engine._config.survival_reserve = 0.875
@@ -83,7 +134,9 @@ def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeyp
     assert 500 < observed < engine.context_length
     _late_ingest(engine, monkeypatch)
 
-    result = engine.compress(view, current_tokens=observed, force=mode == "forced", bypass_cooldown=mode == "recovery")
+    trigger = "manual" if mode == "forced" else "overflow"
+    with host_dispatch(trigger):
+        result = engine.compress(view, current_tokens=observed, force=mode == "forced", bypass_cooldown=mode == "recovery")
 
     assert engine.last_compression_status != "deadline_yield"
     fit_cap = 499 if mode == "recovery" else 500
@@ -92,7 +145,7 @@ def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeyp
 
 
 @pytest.mark.parametrize("held", [True, False], ids=["hold-fit-only", "default-caps-at-ceiling"])
-def test_slow_ingest_still_fits_automatic_passes(engine, monkeypatch, held):
+def test_slow_ingest_still_fits_automatic_passes(engine, monkeypatch, held, host_dispatch):
     engine.context_length = 6_000
     ceiling = engine._survival_ceiling()
     assert ceiling == 5_100
@@ -109,7 +162,8 @@ def test_slow_ingest_still_fits_automatic_passes(engine, monkeypatch, held):
     assert not engine._should_force_overflow_recovery(observed, view)
     _late_ingest(engine, monkeypatch)
 
-    result = engine.compress(view, current_tokens=observed)
+    with host_dispatch("pre_api"):
+        result = engine.compress(view, current_tokens=observed)
 
     assert result and engine._survival_measure(result) <= ceiling
     assert engine.last_compression_status != "deadline_yield"
@@ -123,10 +177,11 @@ def _digests(rows):
     return [(row["role"], hashlib.sha256((row["content"] or "").encode()).hexdigest()) for row in rows]
 
 
-def test_t3_next_pass_keeps_each_row_once_and_publishes(engine, view, monkeypatch):
+def test_t3_next_pass_keeps_each_row_once_and_publishes(engine, view, monkeypatch, host_dispatch):
     with monkeypatch.context() as patch:
         _late_ingest(engine, patch)
-        assert engine.compress(view, current_tokens=8000) is view
+        with host_dispatch("pre_api"):
+            assert engine.compress(view, current_tokens=8000) is view
         assert engine.last_compression_status == "deadline_yield"
     assert engine._ingest_cursor == len(view)
     assert _digests(stored_rows(engine)) == _digests(view)
@@ -137,7 +192,7 @@ def test_t3_next_pass_keeps_each_row_once_and_publishes(engine, view, monkeypatc
     assert result != view and engine._last_compress_leaves[1] > 0
 
 
-def test_t4_three_yields_leave_failure_and_hold_state_clear(engine, view, monkeypatch):
+def test_t4_three_yields_leave_failure_and_hold_state_clear(engine, view, monkeypatch, host_dispatch):
     failure = Mock(wraps=engine._record_ingest_failure)
     monkeypatch.setattr(engine, "_record_ingest_failure", failure)
     before = engine._summary_circuit_breaker.route_status(["probe"])
@@ -148,7 +203,8 @@ def test_t4_three_yields_leave_failure_and_hold_state_clear(engine, view, monkey
     with monkeypatch.context() as patch:
         _late_ingest(engine, patch)
         for tokens in (engine.threshold_tokens, 8000, 8000):
-            assert engine.compress(view, current_tokens=tokens) is view
+            with host_dispatch("pre_api"):
+                assert engine.compress(view, current_tokens=tokens) is view
             assert engine.last_compression_status == "deadline_yield"
             assert not engine._automatic_compression_blocked()
             assert (engine._zero_leaf_streaks, engine._pressure_yield_invocation_verdict,
@@ -162,13 +218,20 @@ def test_t4_three_yields_leave_failure_and_hold_state_clear(engine, view, monkey
     assert engine._last_compress_leaves[1] > 0
 
 
-def test_t5_host_uses_three_attempts_without_rearming(engine, monkeypatch):
-    host = Host(engine, ["S"] * 5, _late_ingest(engine, monkeypatch))
+def test_t5_host_uses_three_attempts_without_rearming(engine, monkeypatch, host_dispatch):
+    clock = _late_ingest(engine, monkeypatch)
+    # Let the ordinary sweep hold expire before the next tool result, so the
+    # engine hold does not mask the host's separate attempt cap.
+    clock.dt = engine_module._SWEEP_BUDGET_HOLD_SECONDS + 1
+    host = Host(engine, ["S"] * 5, clock)
     compress = engine.compress
 
     def observe(*args, **kwargs):
-        result = compress(*args, **kwargs)
-        assert engine.last_compression_status == "deadline_yield"
+        # The host model sets last_pre immediately before its pre-API call.
+        trigger = "pre_api" if host.last_pre is not None else "post_tool"
+        with host_dispatch(trigger):
+            result = compress(*args, **kwargs)
+        assert (engine.last_compression_status == "deadline_yield") == (trigger == "pre_api")
         return result
 
     monkeypatch.setattr(engine, "compress", observe)
