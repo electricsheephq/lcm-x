@@ -51,8 +51,10 @@ from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 logger = logging.getLogger(__name__)
 
 SURVIVAL_FIT_COUNTER_KEY = "survival_fit:counter"
+_NOTICE_END = "; lcm_grep / lcm_load_session reach them.]"
+_NOTICE_CALLS = "; read with lcm_load_session, "
 _NOTICE = ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in "
-           "live context; lcm_grep / lcm_load_session reach them.]")
+           "live context" + _NOTICE_END)
 _WARNING_SUMMARY_FAILED = ("LCM could not summarise part of this conversation in time. To keep the session alive, {n} older "
                            "messages left live context; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
                            "/lcm doctor reports it.")
@@ -61,7 +63,7 @@ _WARNING_FITTED = ("To keep this conversation within the model's context window,
                    "during LCM context fitting; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
                    "/lcm doctor reports why.")
 _NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in "
-                  "live context; read with lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: "
+                  "live context" + _NOTICE_CALLS + "next_cursor, and lcm_expand(store_id) if truncated: "
                   "{calls}.]")
 _NOTICE_REST = "; and {count} earlier ranges (store ids {first}..{last}); lcm_grep reaches them"
 _NOTICE_MAX_RANGES = 8  # #2877: the newest ranges out of view are named with their calls; older ones are counted
@@ -624,7 +626,7 @@ class SurvivalFitMixin:
                 else:
                     out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
                                                                summary_uid, "survival_summary", taken=out + kept))
-            return out + kept or result[-1:], count, ids, notice, per_cut
+            return out + kept or result[-1:], count, ids, notice
 
         def accepted(fitted, count, ids, kept, notice):
             """The returned cut: its carrier is recorded only when its user row is a mapped stored row."""
@@ -661,6 +663,7 @@ class SurvivalFitMixin:
                 covered = set()
         shorter_fit = None
         shorter_parts = shorter_carrier = None  # bound with shorter_fit, read only once it is set
+        cumulative_fits = False
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
@@ -676,21 +679,25 @@ class SurvivalFitMixin:
                     continue  # scaffold alone is not cut; a longer region may add covered stored rows
             if not index:
                 continue
-            fitted, count, ids, notice, per_cut = build(index, kept, reply)
+            fitted, count, ids, notice = build(index, kept, reply)
             if self._survival_measure(fitted) <= budget:
                 if shorter_fit is None or shorter_parts <= always.union(*(optional.get(id(m), ()) for m in kept)):
                     return accepted(fitted, count, ids, kept, notice)
+                cumulative_fits = True
                 break
-            # T1-341 (2): remember the first cut that fits with its own notice and keeps verified parts.
+            # T1-345: shorten the notice without changing its cumulative count or store-id span.
             # Give a later cumulative fit the preference while it keeps every one of those parts.
-            if shorter_fit is None and notice != per_cut and head and head[0].get("role") == "system":
+            header, calls, _ = notice.partition(_NOTICE_CALLS)
+            if shorter_fit is None and calls and head and head[0].get("role") == "system":
                 shown_parts = always.union(*(optional.get(id(m), ()) for m in kept))
                 if shown_parts:
-                    short = [noticed_system(per_cut), *fitted[1:]]
+                    short_notice = header + _NOTICE_END
+                    short = [noticed_system(short_notice), *fitted[1:]]
                     if self._survival_measure(short) <= budget:
-                        shorter_fit = (short, count, ids, kept, per_cut)
+                        shorter_fit = (short, count, ids, kept, short_notice)
                         shorter_parts, shorter_carrier = shown_parts, formed
-        if shorter_fit is not None:
+        # A headroom-only exit keeps the input if no cumulative cut fits.
+        if shorter_fit is not None and (covered is None or cumulative_fits):
             formed = shorter_carrier
             return accepted(*shorter_fit)
         if whole_turns:
@@ -705,7 +712,7 @@ class SurvivalFitMixin:
         kept = self._survival_projection(body[cut:], store_ids, budget - head_tokens,
                                          hard_cap=None if hard_cap is None else hard_cap - head_tokens)
         kept, reply = keep_reply(cut, kept)
-        fitted, count, ids, notice, _ = build(cut, kept, reply)
+        fitted, count, ids, notice = build(cut, kept, reply)
         return accepted(fitted, count, ids, kept, notice)
 
     @staticmethod

@@ -585,6 +585,39 @@ def _summary(nodes):
     return "\n\n---\n\n".join(engine_module._summary_part_text(node) for node in nodes)
 
 
+def test_headroom_exit_keeps_the_previous_notice_when_no_cumulative_cut_fits(carrier_session, monkeypatch):
+    engine = carrier_session.engine
+    engine._config.fresh_tail_count = 2
+    monkeypatch.setattr(survival_fit, "count_messages_tokens",
+                        lambda messages: sum(len(row["content"]) // 4 for row in messages))
+
+    def stored(role, content):
+        row = carrier_session.row(role=role, content=content)
+        store_id = engine._store.append(engine._session_id, row, conversation_id=engine._conversation_id)
+        return store_id, row
+
+    old_ids = [stored("user" if i % 2 else "assistant", f"old {i}")[0] for i in range(1, 5)]
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id=engine._session_id, summary="arc " + "saved history " * 20, token_count=1,
+        source_ids=old_ids, expand_hint="turns",
+    ))
+    summary = _summary([engine._dag.get_node(node_id)])
+    turns = [stored("user" if i % 2 else "assistant", f"[t{i}]" + "w" * size)
+             for i, size in enumerate((400, 400, 400, 400, 8, 8, 400, 400), start=5)]
+    _leaf(engine, "cover later turns", source_ids=[store_id for store_id, _ in turns])
+    rows = [{"role": "system", "content": "system prompt"}, {"role": "user", "content": summary},
+            *(row for _, row in turns)]
+
+    def fit(view, cap):
+        engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(view), False
+        return engine._survival_fit(view, list(view), 0, "exit_fit:test", request_cap=cap)
+
+    first = fit(rows, 560)
+    assert "2 earlier messages (store ids 5..6)" in first[0]["content"]
+    assert "after_store_id=4 limit=2 to 6" in first[0]["content"]
+    assert fit(first, 340) == first
+
+
 def _tail(session):
     return [session.row(role=role, content=label + (" elm" * 30)) for role, label in (
         ("user", "carried question"), ("assistant", "answer"),
