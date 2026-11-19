@@ -726,7 +726,8 @@ class StoreCompleteMixin:
                         positions = caller_positions.get(call_id, ())
                         index = bisect_right(positions, at)
                         end = positions[index] if index < len(positions) else float("inf")
-                        if has_answer(skipped_answers.get(call_id, ()), at, end):
+                        owned = any(owner_id == id(message) for *_, owner_id in waiting.get(call_id, ()))
+                        if not owned and has_answer(skipped_answers.get(call_id, ()), at, end):
                             continue
                         only_caller = len(positions) <= 1 and index == len(positions)
                         count += has_answer(stored_answers.get(call_id, ()), at, end) or any(
@@ -745,8 +746,11 @@ class StoreCompleteMixin:
             last = max((s for m, ids in out for s in ids_of(m, ids)), default=0)
             hole = next((int(row["store_id"]) for row in rows
                          if int(row["store_id"]) < last and int(row["store_id"]) not in accounted), None)
+            cut = (next(i for i, (m, ids) in enumerate(out) if any(s > hole for s in ids_of(m, ids)))
+                   if hole is not None else None)
+            # The escape and lift can run only if the cut empties the leaf.
             restore = hole is not None and before_pending is not None and not (
-                allow_retained_escape and self._retained_escape_enabled and (
+                cut == 0 and allow_retained_escape and self._retained_escape_enabled and (
                     (self._store_complete_blocked and not escape_retained)
                     or (lift_allowed and (self._context_aware_leaf_cap() or max(budget, 1) * _SCAN_EXTEND) > budget)))
             if hole is None or restore:
@@ -777,7 +781,7 @@ class StoreCompleteMixin:
                         if scope is not None and scope.owner is self:
                             scope.open_tool_group_logged = True
                 break
-            out = out[:next(i for i, (m, ids) in enumerate(out) if any(s > hole for s in ids_of(m, ids)))]
+            out = out[:cut]
             complete = False
             if not out:
                 self._store_complete_empty_reason = "leaf input cannot form a contiguous stored prefix"
