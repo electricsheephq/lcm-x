@@ -312,6 +312,28 @@ def _todo_annotation_span(content: str, start: int) -> int:
     return end
 
 
+# Keep the syntax in sync with PlaceholderLedgerMixin._is_ignored_active_replay_placeholder.
+# A match still needs the live ledger check.
+_IGNORED_REPLAY_PLACEHOLDER_RE = re.compile(
+    r"\[LCM active replay placeholder: message ignored; "
+    r"kind=ignored_message; "
+    r"scope=ignored_message_pattern; field=content; "
+    r"chars=\d+; bytes=\d+; sha256=[0-9a-f]{16}\]"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayProjectionRow:
+    role: Any
+    content: Any
+    digit_limit: int
+    text: str
+    volatile_placeholder: bool
+    possible_ignored_placeholder: bool
+    identity: tuple[str, str, str, str, str]
+    quarantined_identity: bool
+
+
 @dataclass(eq=False, repr=False)
 class _TailReplayRun:
     """Stack-local inputs and prepared identities for one tail replay scan."""
@@ -353,6 +375,13 @@ class _TailReplayRun:
         tuple[str, str, str, str, str], tuple[str, str, str, str, str]
     ] = field(default_factory=dict, init=False)
     generationless_sanitized_tail: list[tuple[str, str, str, str, str]] | None = field(default=None, init=False)
+
+    scaffold_positions: list[int] = field(init=False)
+    projection_rows: dict[int, _ReplayProjectionRow] = field(default_factory=dict, init=False)
+    projection_visible: list[Dict[str, Any]] = field(default_factory=list, init=False)
+    projection_identity_messages: list[Dict[str, Any]] = field(default_factory=list, init=False)
+    projection_visible_prefix: list[tuple[str, str, str, str, str]] = field(default_factory=list, init=False)
+    projection_prefix: list[tuple[str, str, str, str, str]] = field(default_factory=list, init=False)
 
     def persisted_marker_text(self, msg: Dict[str, Any]) -> str:
         role = msg.get("role")
@@ -2069,6 +2098,7 @@ class ReconcileMixin:
         run.occurrence_by_id = occurrence_by_id
         run.v4 = v4
         run.scaffold_ids = scaffold_ids
+        run.scaffold_positions = [index for index, msg in enumerate(messages) if id(msg) in scaffold_ids]
         run.objective_ids = objective_ids
         run.active_identity = active_identity
         run.pruned_source_ids = pruned_source_ids
@@ -2089,64 +2119,98 @@ class ReconcileMixin:
     def _project_replay_candidate(
         self, run: _TailReplayRun, candidate: _TailReplayCandidate,
     ) -> None:
-        candidate_messages = candidate.candidate_messages
-        scaffold_ids = run.scaffold_ids
-        active_identity = run.active_identity
-
-        candidate_visible_messages = [
-            msg
-            for msg in candidate_messages
-            if id(msg) not in scaffold_ids
-            and not self._matches_ignore_message_patterns(msg)
-        ]
-        candidate_non_placeholder_messages = [
-            msg
-            for msg in candidate_visible_messages
-            if not self._is_volatile_ignored_quarantine_placeholder(
-                msg,
-                text_content_for_pattern_matching(msg.get("content")) or "",
-            )
-            and not self._is_ignored_active_replay_placeholder(
-                msg,
-                text_content_for_pattern_matching(msg.get("content")) or "",
-            )
-            and not (
-                self._compiled_ignore_message_patterns
-                and self._is_quarantined_assistant_replay_identity(
-                    active_identity(msg)
+        visible = run.projection_visible
+        identity_messages = run.projection_identity_messages
+        visible_prefix = run.projection_visible_prefix
+        prefix = run.projection_prefix
+        visible_count = identity_count = 0
+        first_quarantined = candidate.cursor
+        limit = sys.get_int_max_str_digits()
+        for index, msg in enumerate(candidate.candidate_messages):
+            row_id = id(msg)
+            if row_id in run.scaffold_ids:
+                continue
+            role, content = msg.get("role"), msg.get("content")
+            row = run.projection_rows.get(row_id)
+            if (
+                row is None
+                or (role is not row.role and (type(role) is not str or role != row.role))
+                or (content is not row.content and (type(content) is not str or content != row.content))
+                or row.digit_limit != limit
+            ):
+                text = text_content_for_pattern_matching(content) or ""
+                cacheable = type(msg) is dict and type(role) is str and type(content) is str
+                # Every non-scaffold row has a prepared occurrence identity. The
+                # fallback on scaffold rows can read externalized data and stays live.
+                identity = run.active_identity(msg)
+                row = _ReplayProjectionRow(
+                    role, content, limit, text,
+                    # Use the same role sample as the key when publishing a memo entry.
+                    self._is_volatile_ignored_quarantine_placeholder({"role": role} if cacheable else msg, text),
+                    bool(_IGNORED_REPLAY_PLACEHOLDER_RE.fullmatch(text.strip())),
+                    identity, self._is_quarantined_assistant_replay_identity(identity),
                 )
-                and self._matches_ignore_message_patterns(msg, stored_row=True)
-            )
-        ]
-        filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
-        candidate_has_scaffold_evidence = any(
-            id(msg) in scaffold_ids for msg in candidate_messages
-        )
-        candidate_has_quarantined_replay_evidence = any(
-            self._is_quarantined_assistant_replay_identity(active_identity(msg))
-            for msg in candidate_messages
-        )
-        candidate_identity_messages = (
-            candidate_non_placeholder_messages
-            if candidate_non_placeholder_messages or filtered_candidate_placeholders
-            else candidate_visible_messages
-        )
-        candidate_visible_prefix = [
-            active_identity(msg)
-            for msg in candidate_visible_messages
-        ]
-        candidate_prefix = [
-            active_identity(msg)
-            for msg in candidate_identity_messages
-        ]
+                if cacheable:
+                    run.projection_rows[row_id] = row
+            if row.quarantined_identity and first_quarantined == candidate.cursor:
+                first_quarantined = index
 
-        candidate.candidate_visible_messages = candidate_visible_messages
-        candidate.filtered_candidate_placeholders = filtered_candidate_placeholders
-        candidate.candidate_has_scaffold_evidence = candidate_has_scaffold_evidence
-        candidate.candidate_has_quarantined_replay_evidence = candidate_has_quarantined_replay_evidence
-        candidate.candidate_identity_messages = candidate_identity_messages
-        candidate.candidate_visible_prefix = candidate_visible_prefix
-        candidate.candidate_prefix = candidate_prefix
+            # The empty text/pattern cases are deterministic. Configured regexes
+            # can time out, so those searches still run against the live patterns.
+            if (row.text and self._compiled_ignore_message_patterns
+                    and self._matches_ignore_message_patterns(msg)):
+                continue
+            if visible_count == len(visible):
+                visible.append(msg)
+                visible_prefix.append(row.identity)
+            elif visible[visible_count] is not msg or visible_prefix[visible_count] is not row.identity:
+                visible[visible_count] = msg
+                visible_prefix[visible_count] = row.identity
+            visible_count += 1
+
+            if (
+                row.volatile_placeholder
+                or (row.possible_ignored_placeholder
+                    and self._is_ignored_active_replay_placeholder(msg, row.text))
+                or (
+                    self._compiled_ignore_message_patterns
+                    and self._is_quarantined_assistant_replay_identity(run.active_identity(msg))
+                    and self._matches_ignore_message_patterns(msg, stored_row=True)
+                )
+            ):
+                continue
+            if identity_count == len(identity_messages):
+                identity_messages.append(msg)
+                prefix.append(row.identity)
+            elif identity_messages[identity_count] is not msg or prefix[identity_count] is not row.identity:
+                identity_messages[identity_count] = msg
+                prefix[identity_count] = row.identity
+            identity_count += 1
+
+        # All consumers finish within this cursor iteration. Rewrite only slots
+        # whose membership moved, then discard the unused suffix in place.
+        del visible[visible_count:]
+        del visible_prefix[visible_count:]
+        del identity_messages[identity_count:]
+        del prefix[identity_count:]
+
+        has_quarantined = first_quarantined < candidate.cursor
+        for index in run.scaffold_positions:
+            if index >= first_quarantined:
+                break
+            if self._is_quarantined_assistant_replay_identity(run.active_identity(run.messages[index])):
+                has_quarantined = True
+                break
+
+        candidate.candidate_visible_messages = visible
+        candidate.filtered_candidate_placeholders = identity_count < visible_count
+        candidate.candidate_has_scaffold_evidence = (
+            bool(run.scaffold_positions) and run.scaffold_positions[0] < candidate.cursor
+        )
+        candidate.candidate_has_quarantined_replay_evidence = has_quarantined
+        candidate.candidate_identity_messages = identity_messages
+        candidate.candidate_visible_prefix = visible_prefix
+        candidate.candidate_prefix = prefix
 
     def _collect_replay_anchors(
         self, run: _TailReplayRun, candidate: _TailReplayCandidate,
