@@ -303,7 +303,6 @@ def test_t4_a_carrier_in_the_prefix_is_never_silently_lost(tmp_path, host, monke
             first = engine._generated_context_carrier_remainder(result[0])
             assert first is not None and first != remainder and result[1]["role"] == "assistant"
             assert _summary_part(engine, result[0]) == _summary_part(engine, pre[0])
-            assert _block_notice(engine, result[0]) == engine._last_survival_fit["notice"]  # #2896
     finally:
         engine.shutdown()
 

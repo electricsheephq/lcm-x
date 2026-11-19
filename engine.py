@@ -6753,7 +6753,10 @@ class LCMEngine(
             return False
         content = msg.get("content")
         if isinstance(content, str) and not stored_row and "\n\n<lcm-survival-notice digest=" in content:
-            content = _NOTICE_BLOCK_RE.sub("", content)  # #2896: a notice block, the fit's or pasted, is never matched
+            # #2896: ignored only when the text matches with and without its notice blocks (a block only keeps a row)
+            return all(matches_message_pattern(text_content_for_pattern_matching(text) or "",
+                                               self._compiled_ignore_message_patterns)
+                       for text in (content, _NOTICE_BLOCK_RE.sub("", content)))
         text = (
             stored_text_content_for_pattern_matching(content)
             if stored_row

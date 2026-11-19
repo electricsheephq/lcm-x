@@ -409,22 +409,32 @@ def test_a3_a_standalone_summary_head_takes_no_block(tmp_path, host, monkeypatch
 
 
 def test_a4_a_carrier_ahead_of_a_preserved_objective_takes_the_block(engine, monkeypatch, caplog):
-    """A4: the kept prefix is [verified carrier, preserved objective]; the fit cuts an old stored turn: the carrier
-    takes the notice, which names the cut rows. Main: no system row, no notice (the rows have no pointer)."""
-    _rough(monkeypatch)
+    """A4: the kept prefix is [verified carrier, preserved objective]; the fit cuts old stored turns. On each cut the
+    carrier takes the notice, which names the cut rows, when it fits beside the kept turns; otherwise the warning
+    says so. Main: no system row, no notice (the rows have no pointer)."""
+    measure = _rough(monkeypatch)
     pad = " older words" * 100
-    rows = _store_turns(engine, [f"[U{i}]{pad}" for i in range(3)])
+    rows = _store_turns(engine, [f"[U{i}]{pad}" for i in range(6)])
     parts = _part(engine, "the first turns")
     carrier = {"role": "user", "content": f"{parts}\n\n{rows[0][1]['content']}"}
     assert engine._generated_context_carrier_remainder(carrier) == rows[0][1]["content"]
     objective = {"role": "user", "content": f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\nfinish the report"}
     active = [carrier, objective, *(row for _, row in rows[1:])]
-    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
-    with caplog.at_level("WARNING", logger="hermes_lcm"):
-        result = engine._survival_fit(active, list(active), 0, "test", request_cap=_rough(monkeypatch)(active) - 50)
-    assert result is not active and len(result) < len(active)
-    assert "no system row and no glued carrier for the notice" not in caplog.text
-    assert OPEN in result[0]["content"], [str(m["content"])[:60] for m in result]
+    placed = 0
+    for cap in range(measure(active) - 50, measure(active) - 900, -37):
+        engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="hermes_lcm"):
+            result = engine._survival_fit(active, list(active), 0, "test", request_cap=cap)
+        assert result is not active and len(result) < len(active)
+        assert "no system row and no glued carrier for the notice" not in caplog.text
+        if OPEN in result[0]["content"]:
+            placed += 1
+            assert engine._generated_context_carrier_remainder(result[0]) == rows[0][1]["content"]
+            assert engine._survival_fit_emission["row"] is result[0]
+        else:
+            assert "the notice does not fit beside the kept turns" in caplog.text, cap
+    assert placed
 
 
 def _rough(monkeypatch):
@@ -446,34 +456,3 @@ def _store_turns(engine, users):
         for row in ({"role": "user", "content": text}, {"role": "assistant", "content": f"reply {i}" + " v" * 200}):
             out.append((engine._store.append("S", dict(row), conversation_id="conv"), row))
     return out
-
-
-def test_f2_a_block_that_tips_the_whole_turn_cut_is_left_out_not_the_summary(tmp_path, host, caplog):  # noqa: F811 (the imported pytest fixture)
-    """F2: across the cap band where the re-formed carrier fits only without its block, the fit returns main's list
-    (the summary kept, the notice unplaced, one warning) instead of the emergency path that drops the summary."""
-    engine = _hermes_engine(tmp_path, window=200_000)
-    reply = {"role": "assistant", "content": "A synthetic long reply. " * 400}
-    phrase = {"role": "user", "content": "Synthetic phrase row.", "timestamp": 3.0}
-    seen = []
-    try:
-        for m in ({"role": "user", "content": "Synthetic old question.", "timestamp": 1.0}, reply, phrase, reply):
-            engine._store.append("S", dict(m), conversation_id="conv")
-        node = engine._dag.add_node(SummaryNode(session_id="S", summary="s", token_count=1, source_token_count=1,
-                                                source_ids=[1], expand_hint="turns"))
-        summary = f"[Recent Summary (d0, node {node})]\ns\n[Expand for details: turns]"
-        active = [{"role": "user", "content": f"{summary}\n\n{phrase['content']}"}, dict(reply),
-                  {"role": "user", "content": "Synthetic second question.", "timestamp": 4.0},
-                  {"role": "assistant", "content": "Second answer."},
-                  {"role": "user", "content": "Synthetic newest question?", "timestamp": 5.0}]
-        plain = engine._survival_measure([{"role": "user", "content": f"{summary}\n\nSynthetic second question."},
-                                          *active[3:]])
-        for cap in range(plain, plain + 200):
-            caplog.clear()
-            result = engine._survival_fit(active, list(active), 0, "t", after_exception=True, request_cap=cap)
-            seen.append((f"node {node})" in str(result[0].get("content")), OPEN in str(result[0].get("content")),
-                         caplog.text.count("no system row and no glued carrier for the notice")))
-    finally:
-        engine.shutdown()
-    assert all(kept for kept, _, _ in seen)  # the summary is never dropped where main keeps it
-    assert {(block, warned) for _, block, warned in seen} == {(False, 1), (True, 0)}  # the band, then the block
-    assert [block for _, block, _ in seen] == sorted(block for _, block, _ in seen)

@@ -374,7 +374,7 @@ class SurvivalFitMixin:
         if not self._session_id or self._bypasses_lcm_context_management():
             return result
         self._survival_view_read = None  # #2877: one read of the session per fit (a re-planned fit reads again)
-        self._survival_notice_unplaced = False
+        self._survival_notice_unplaced = None
         exit_fit = reason.startswith("exit_fit:")
         # #668: an exit fit's budget without the exit cap; a list over it is a session at risk, not headroom
         window_budget = self._survival_fit_budget(messages, observed_tokens) if exit_fit else None
@@ -438,16 +438,18 @@ class SurvivalFitMixin:
                      and self._ingest_cursor == len(result))
         # one map of the whole conversation part: its occurrence and order evidence needs every row (#650)
         store_ids = self._get_store_id_map_for_messages(result[system:])
-
-        def whole_turn_cut(**kwargs):  # #2896 F2: a cut the block tips over budget is retried without it (main's list)
-            return (self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True, **kwargs)
-                    or (None if system else self._survival_cut(result, prefix, budget, persisted, reason, store_ids,
-                                                               True, notice_block=False, **kwargs)))
-
+        # #2896: an earlier fit's block leaves every head carrier (each keeps its store id), so the search below is
+        # main's on main's list
+        unmarked = [self._survival_unmarked(row) if system <= i < prefix else row for i, row in enumerate(result)]
+        if any(new is not old for new, old in zip(unmarked, result)):
+            store_ids = {**store_ids, **{id(new): store_ids[id(old)] for new, old in zip(unmarked, result)
+                                         if new is not old and id(old) in store_ids}}
+            result = unmarked
         if exit_fit:
             # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
             # prefix, a protected fresh-tail row or a projection. The window budget still holds the list.
-            cut = whole_turn_cut(keep_from=self._fresh_tail_start(result))
+            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True,
+                                     keep_from=self._fresh_tail_start(result))
             if cut is None:
                 if log_skip:
                     logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
@@ -455,7 +457,7 @@ class SurvivalFitMixin:
                 return None, persisted
             emergency = False
         else:
-            cut = whole_turn_cut() if prefix > system else None
+            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
             emergency = prefix > system and cut is None
             # #1281: preserve user text when marks cannot fit and the list already fits the window.
             # Recovery caps keep the existing last-resort marks unconditionally (#608).
@@ -482,27 +484,57 @@ class SurvivalFitMixin:
                 record_absorbed_message(row, absorbed_from)
         return row
 
+    def _survival_unmarked(self, row):
+        """#2896: a head row without the admitted notice block an earlier fit placed in it."""
+        content = row.get("content") if isinstance(row, dict) else None
+        if not isinstance(content, str) or "\n\n<lcm-survival-notice digest=" not in content:
+            return row
+        end = self._verified_lcm_summary_prefix_end(content)
+        start = survival_notice_block_start(content, end) if end is not None else None
+        return row if start is None else {**row, "content": content[:start] + content[end:]}
+
+    def _survival_place_block(self, fitted, head_len: int, store_ids, notice: str, budget: int):
+        """#2896: with no system row, the notice as one marked block in this cut's last glued carrier that is a mapped
+        stored row (the re-formed one, else the last head carrier), which becomes the fit's emission. Only when the
+        list then fits: a deeper cut is never taken for the block; else the list as it is, the reason kept."""
+        formed = self._survival_cut_carrier
+        if formed is not None and head_len < len(fitted) and fitted[head_len] is formed[0]:
+            i, store_id = head_len, formed[2]
+        else:
+            i = next((i for i in reversed(range(min(head_len, len(fitted)))) if id(fitted[i]) in store_ids
+                      and self._generated_context_carrier_remainder(fitted[i]) is not None), None)
+            store_id = None if i is None else store_ids[id(fitted[i])]
+        self._survival_notice_unplaced = "no system row and no glued carrier for the notice"
+        content = fitted[i]["content"] if i is not None else ""
+        end = self._verified_lcm_summary_prefix_end(content) if i is not None else None
+        nodes = self._verified_lcm_summary_prefix(content[:end])[1] if end is not None else []
+        if not nodes:  # the block's digest binds to the verified parts' node ids
+            return fitted
+        parts, rest = content[:end], content[end:]
+        block = _survival_block(parts, nodes, notice)
+        placed = [*fitted[:i], {**fitted[i], "content": parts + block + rest}, *fitted[i + 1:]]
+        if self._survival_measure(placed) > budget:
+            self._survival_notice_unplaced = "the notice does not fit beside the kept turns"
+            return fitted
+        separator = "\n\n---\n\n" if rest.startswith("\n\n---\n\n") else "\n\n"
+        self._survival_notice_unplaced, self._survival_cut_carrier = None, (placed[i], parts + block + separator, store_id)
+        return placed
+
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
-                      whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None,
-                      notice_block: bool = True):
+                      whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
         oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
         projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
         summary is re-formed around the first kept user row as assembly forms it. ``keep_from``: no cut drops
         ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail). ``_survival_cut_carrier``: the
-        returned list's re-formed carrier, its summary span and its user row's store id, else None (#1000).
-        ``notice_block`` False: no #2896 notice block (the list main forms)."""
+        returned list's re-formed carrier, its summary span and its user row's store id, else None (#1000)."""
         self._survival_cut_carrier = None
         head, body = list(result[:lead]), list(result[lead:])
-        summary = summary_uid = formed = head_carrier = summary_nodes = None
-        unplaced = False
+        summary = summary_uid = formed = None
         remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
         if remainder is not None:
             carrier = head.pop()
-            end = self._verified_lcm_summary_prefix_end(carrier["content"])
-            start = survival_notice_block_start(carrier["content"], end)  # #2896: an earlier fit's block is replaced
-            summary = carrier["content"][:end if start is None else start]
-            summary_nodes = self._verified_lcm_summary_prefix(summary)[1]  # #2896: the block's digest binds to them
+            summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
             if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid; the user-only
                 # remainder copies no identity or address, and gets back a single proven host uid
@@ -544,9 +576,8 @@ class SurvivalFitMixin:
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
         def build(cut: int, kept, reply=None):
-            nonlocal formed, unplaced, head_carrier
-            formed = head_carrier = None
-            unplaced = False
+            nonlocal formed
+            formed = None
             kept_ids = {id(row) for row in kept}  # live rows: identity, one pass (not kept x dropped)
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
@@ -566,51 +597,28 @@ class SurvivalFitMixin:
             notice = notice or _NOTICE.format(n=count, first=mapped[0] if mapped else "-",
                                               last=mapped[-1] if mapped else "-")
             out = list(head)
-            block = ""
             if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
                 out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
-            elif not notice_block:  # #2896 F2: main's list, the notice unplaced
-                unplaced = True
-            elif summary is not None and summary_nodes:  # #2896: no system row: one marked block in the summary head
-                block = _survival_block(summary, summary_nodes, notice)
-            elif summary is None:  # the head's last verified glued carrier takes the block (never a standalone row)
-                unplaced = True
-                for i in reversed(range(len(out))):
-                    row = out[i]
-                    if id(row) not in store_ids or self._generated_context_carrier_remainder(row) is None:
-                        continue
-                    end = self._verified_lcm_summary_prefix_end(row["content"])
-                    start = survival_notice_block_start(row["content"], end)
-                    parts, rest = row["content"][:end if start is None else start], row["content"][end:]
-                    block = _survival_block(parts, self._verified_lcm_summary_prefix(parts)[1], notice)
-                    out[i] = {**row, "content": parts + block + rest}
-                    separator = "\n\n---\n\n" if rest.startswith("\n\n---\n\n") else "\n\n"
-                    head_carrier, unplaced = (out[i], parts + block + separator, store_ids[id(row)]), False
-                    break
-            else:
-                unplaced = True
             if summary is not None:
-                merged = {"role": "user", "content": f"{summary}{block}\n\n{kept[0].get('content')}"} if kept else None
+                merged = {"role": "user", "content": f"{summary}\n\n{kept[0].get('content')}"} if kept else None
                 if (merged and kept[0].get("role") == "user" and isinstance(kept[0].get("content"), str)
                         and any(message.get("role") == "user" for message in kept[1:])
                         and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
                     self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0],
                                                     taken=out + kept[1:])  # site 19
-                    formed = (merged, kept[0], block)
+                    formed = (merged, kept[0])
                     kept = [merged, *kept[1:]]
-                else:  # a standalone summary row takes no block (#2896: main's shape)
+                else:
                     out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
                                                                summary_uid, "survival_summary", taken=out + kept))
-                    unplaced = unplaced or bool(block)
             return out + kept or result[-1:], count, ids, notice
 
         def accepted(fitted, count, ids, kept, notice):
             """The returned cut: its carrier is recorded only when its user row is a mapped stored row."""
-            self._survival_notice_unplaced = unplaced  # #2896: warned only when the fit is applied
             if formed is not None and id(formed[1]) in store_ids:
-                self._survival_cut_carrier = (formed[0], f"{summary}{formed[2]}\n\n", store_ids[id(formed[1])])
-            elif head_carrier is not None:  # #2896: the head carrier holding the block is the fit's emission
-                self._survival_cut_carrier = head_carrier
+                self._survival_cut_carrier = (formed[0], f"{summary}\n\n", store_ids[id(formed[1])])
+            if not (fitted and fitted[0].get("role") == "system"):  # #2896: the block on this same cut, if it fits
+                fitted = self._survival_place_block(fitted, len(fitted) - len(kept), store_ids, notice, budget)
             return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
 
         def keep_reply(cut: int, kept):
@@ -840,8 +848,8 @@ class SurvivalFitMixin:
                 reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
                 "unknown" if uncovered is None else uncovered, projected, before, after, budget,
             )
-            if getattr(self, "_survival_notice_unplaced", False):  # #2896 (c): those rows stay with no pointer
-                logger.warning("LCM survival fit: no system row and no glued carrier for the notice; it is not placed")
+            if getattr(self, "_survival_notice_unplaced", None):  # #2896: why those rows have no pointer
+                logger.warning("LCM survival fit: %s; it is not placed", self._survival_notice_unplaced)
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    **({"cause": cause} if cause else {}),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
