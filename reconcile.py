@@ -2746,10 +2746,18 @@ class ReconcileMixin:
                 and not matches_durable_persisted_output_full_replay
                 and not has_durable_compacted_snapshot_replay
             ):
-                if (cursor == raw_session_count == len(stored_tail) == len(stored_tail_rows or ()) == len(candidate_prefix)
-                        and not candidate_has_unrecoverable_persisted_marker
-                        and self._matches_session_with_missing_tool_names(
-                            candidate_messages, candidate_prefix, stored_tail_rows, stored_tail)):
+                width = len(candidate_prefix)
+                # Use the raw tail alignment and limit owner lookup to that suffix.
+                if (
+                    cursor == len(candidate_identity_messages) == width <= len(stored_tail)
+                    and stored_tail_rows is not None
+                    and len(stored_tail_rows) == len(stored_tail)
+                    and not candidate_has_unrecoverable_persisted_marker
+                    and self._matches_session_with_missing_tool_names(
+                        candidate_identity_messages, candidate_prefix,
+                        stored_tail_rows[-width:], stored_tail[-width:],
+                    )
+                ):
                     return cursor
                 continue
 
