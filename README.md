@@ -78,13 +78,6 @@ Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM
 | PersonaMem v2 | 33.96 | [8th of 13](https://github.com/MemTensor/OmniMemEval/blob/8d1ff33904abccbcdef9363cf8ae82fc97574b26/docs/user_memory/results.md#result-summary) |
 
 Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
-
-<a id="aml-cycle-2"></a>
-**AML Cycle 2.** Both entries ran the LCM-X v0.28.0 engine ([`v0.28.0`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0), `709099b3`) behind our AML gateway, `bench/aml/aml_server.py`. They used the OmniMemEval client adapter in [our OmniMemEval fork](https://github.com/electricsheephq/OmniMemEval/tree/162640314863db64b5af62138b5b81776516d1ff) (`scripts/client_factory/lcmx_client.py`, commit `16264031`).
-- Coding: tag [`v0.28.0-coding-r3`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-coding-r3) at `9917c35b`. The gateway file is byte-identical to the one that ran.
-- Textual: tag [`v0.28.0-aml-textual`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-aml-textual) at `533c5956`. The gateway file is content-equivalent: the deployed copy differed only in how it found the OmniMemEval checkout.
-- Embedder: a local BAAI/bge-small-en-v1.5 through FastEmbed, with no generative LLM in the memory path. We disclosed this deviation to AML, which acknowledged it in writing on 6 November 2026.
-- Prior work: the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman; [lossless-claw](https://github.com/martian-engineering/lossless-claw); and [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm), the repository LCM-X continues (its root commit is `d6c32609`).
 <!-- results-highlights:end -->
 
 LCM-X replaces one-shot active-context compression with a SQLite-backed,
@@ -245,6 +238,14 @@ See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
 [Current project state](docs/project-status.md) and
 [Benchmark methodology](benchmarks/METHODOLOGY.md) for current identities,
 gaps, and proof boundaries.
+
+### AML Cycle 2
+
+Both entries ran the LCM-X v0.28.0 engine ([`v0.28.0`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0), `709099b3`) behind our AML gateway, `bench/aml/aml_server.py`. They used the OmniMemEval client adapter in [our OmniMemEval fork](https://github.com/electricsheephq/OmniMemEval/tree/162640314863db64b5af62138b5b81776516d1ff) (`scripts/client_factory/lcmx_client.py`, commit `16264031`).
+- Coding: tag [`v0.28.0-coding-r3`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-coding-r3) at `9917c35b`. The gateway file is byte-identical to the one that ran.
+- Textual: tag [`v0.28.0-aml-textual`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-aml-textual) at `533c5956`. The gateway file is content-equivalent: the deployed copy differed only in how it found the OmniMemEval checkout.
+- Embedder: a local BAAI/bge-small-en-v1.5 through FastEmbed, with no generative LLM in the memory path. We disclosed this deviation to AML, which acknowledged it in writing on 6 November 2026.
+- Prior work: the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman; [lossless-claw](https://github.com/martian-engineering/lossless-claw); and [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm), the repository LCM-X continues (its root commit is `d6c32609`).
 
 ### Results
 
