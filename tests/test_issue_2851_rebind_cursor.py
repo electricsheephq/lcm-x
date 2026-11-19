@@ -406,10 +406,10 @@ def test_rebind_after_condensation_check(tmp_path, monkeypatch):
 
 
 @pytest.mark.issue(2865)
-@pytest.mark.xfail(strict=True, raises=_LeakedBindingState, reason=(
-    "issue 2865, item 1: a switch between condensation's binding check and its node insert; same on main"
-))
 def test_condensed_node_keeps_its_source_session(tmp_path, monkeypatch):
+    # Issue 2865, item 1: a session switch between condensation's binding check and its node insert. This was an
+    # expected failure on main; the condensation publication fence (#2938) rejects a source that moved to another
+    # session, so no node in the new session claims the old session's leaves.
     raced = _exercise(tmp_path / "rebound", monkeypatch, "condensation-gap", "user-unstamped", grow=True)
     old_leaves = set(raced["a_leaf_ids"])
     foreign_nodes = [

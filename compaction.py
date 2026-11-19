@@ -81,6 +81,9 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "condensation_error",
     "condensation_no_progress",
     "no_same_depth_condensation_group",
+    "source_missing",
+    "source_wrong_depth",
+    "source_already_claimed",
 })
 
 
