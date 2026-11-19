@@ -749,7 +749,8 @@ def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
     """A6 restated (the RM's ruling on review round 1): per pass the candidate stores at least the base's leaves (a pass
     where its own prompt is under its trigger is excused), a pass that condenses still stores a leaf, no pass passes
     250 s; and over the walk its summary area per stored leaf (peak area / leaves stored, with a 1-token rounding
-    allowance), its end prompt, and its A0 and A0b rows are each at most the base's. The 60,000 / 36,000 figure (1.2 x
+    allowance), its end prompt (against the base's last non-fit prompt), its mean prompt, and its A0 and A0b rows are
+    each at most the base's. The 60,000 / 36,000 figure (1.2 x
     the base's sweep target) is reported as a target only. Boundedness is test_a6_bounded_summary_area."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
     fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"] and c["prompt_before"] >= c["trigger"]]
@@ -760,8 +761,14 @@ def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
     per_leaf = {tree: max(r["summary_area"] for r in records) / max(1, records[-1]["leaves_cum"])
                 for tree, records in (("base", base), ("cand", cand))}
     assert per_leaf["cand"] <= per_leaf["base"] + 1, f"{cell}: summary area per stored leaf {per_leaf}"
-    assert cand[-1]["prompt_after"] <= base[-1]["prompt_after"], (
-        f"{cell}: end prompt {cand[-1]['prompt_after']} > base {base[-1]['prompt_after']}")
+    # T1-327: the end prompt is compared with the base's LAST NON-FIT prompt (a lossy fit cut is not the base doing
+    # better), and the mean prompt over the walk must also be at most the base's
+    non_fit = [r for r, n in zip(base, a0b_rows(base)) if not n and not (r["loss"] or {}).get("survival_fit_notice")]
+    base_end = (non_fit or base)[-1]["prompt_after"]
+    assert cand[-1]["prompt_after"] <= base_end, f"{cell}: end prompt {cand[-1]['prompt_after']} > base {base_end}"
+    mean = {tree: sum(r["prompt_after"] for r in records) / len(records) for tree, records in (("base", base),
+                                                                                                ("cand", cand))}
+    assert mean["cand"] <= mean["base"], f"{cell}: mean prompt over the walk {mean}"
     lost = {tree: sum(r["loss"]["missing_count"] for r in records if r["loss"]) for tree, records in (("base", base),
                                                                                                     ("cand", cand))}
     assert lost["cand"] <= lost["base"], f"{cell}: A0 rows {lost}"
