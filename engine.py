@@ -34,7 +34,10 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import (
+    LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled,
+    ingest_ledger_mode, lcm_env_get, profile_bound, uid_recognition_enabled,
+)
 from .dag import CondensationPublicationRejected, SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
@@ -157,7 +160,7 @@ from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
-from .host_uid import HostUidShadowMixin, _valid_uid
+from .host_uid import HostUidShadowMixin, _uid_recognition_pass, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
 from .host_uid_emit import (
@@ -7873,6 +7876,7 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
 
+    @_uid_recognition_pass
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -9162,6 +9166,8 @@ class LCMEngine(
                 rows_classified=n - scan_start))
         reconcile_messages = replay_messages
         bind_session_counts: list = []
+        uid_recognition = uid_recognition_enabled(self)
+        uid_fetched = {} if uid_recognition else None
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
@@ -9169,6 +9175,7 @@ class LCMEngine(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts,
+                **({"uid_fetched": uid_fetched} if uid_recognition else {}),
             )
             today = self._ingest_cursor
             ledger_run = self._ledger_cold_cursor(
@@ -9296,6 +9303,16 @@ class LCMEngine(
                     accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
+                if uid_recognition and anchor_plan["cursor"] < n:
+                    matched = anchor_plan.setdefault("matched", {})
+                    other_claims = {int(row["store_id"]) for rows in matched.values() for row in rows}
+                    for idx, row in self._host_uid_resolve(messages, reconcile_messages, fetched=uid_fetched).items():
+                        if (idx >= anchor_plan["cursor"] and idx not in matched and idx not in anchor_plan["remainders"]
+                                and (row is None or row["store_id"] not in other_claims)):
+                            if row is not None:
+                                matched[idx] = [row]
+                            anchor_plan["replayed"].add(idx)
+                            anchor_plan.setdefault("explained", set()).add(idx)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
@@ -9412,6 +9429,8 @@ class LCMEngine(
         host_uids = self._host_uid_capture(messages, reconcile_messages, 0 if reconciled_existing_session
                                            else min(scan_start, cursor), cursor, anchor_plan,
                                            replayed_tool_segment_indexes)
+        if host_uids and uid_recognition:
+            host_uids["fetched"] = uid_fetched
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
@@ -11869,7 +11888,8 @@ class LCMEngine(
                 tail_selected
                 and tail_selected[0].get("role") == summary_role
             ):
-                source_ids = self._get_store_id_map_for_messages(tail_selected)
+                source_ids = self._get_store_id_map_for_messages(
+                    tail_selected, **({"uid_first": False} if uid_recognition_enabled(self) else {}))
                 folded_source_store_id = int(
                     source_ids.get(id(tail_selected[0])) or 0
                 )
@@ -12058,7 +12078,8 @@ class LCMEngine(
         text = next((t for m in reversed(tail_messages) if (t := _visible_reply_text(m))), "")
         if a is None or not kept or a >= start or _visible_reply_text(selection[a]) != text:
             return kept, room, None
-        ids = self._get_store_id_map_for_messages(selection)
+        ids = self._get_store_id_map_for_messages(
+            selection, **({"uid_first": False} if uid_recognition_enabled(self) else {}))
         reply_id = int(ids.get(id(selection[a])) or 0)
         if reply_id <= int(self._last_compacted_store_id or 0):
             return kept, room, None
@@ -12098,7 +12119,8 @@ class LCMEngine(
         host_result, host_before = _host_estimate(result), _host_estimate(host_input)
         if host_result is not None and host_before is not None and host_result > host_before:
             return "growth"
-        ids = self._get_store_id_map_for_messages(result)
+        ids = self._get_store_id_map_for_messages(
+            result, **({"uid_first": False} if uid_recognition_enabled(self) else {}))
         if twin is None or any(int(ids.get(id(m)) or 0) > reply["store_id"] for m in result[:twin]):
             return "postcondition"
         return ""

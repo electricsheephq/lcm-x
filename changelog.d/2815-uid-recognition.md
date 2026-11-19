@@ -1,0 +1,1 @@
+- Add opt-in Hermes host UID replay recognition and compaction attribution with `LCM_HOST_MESSAGE_UID=on` (#2815).
