@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,20 +44,19 @@ CELL = {"group": "S", "id": "s-600k-l40-prefix", "passes": 60, "raw_tokens": 150
         "window": 600_000, "pre": 37, "estimate": 44, "call": 40, "delta": 0, "prefix": "1-2x"}
 TODAY = "survival_fit.survival_fit_notice = lambda *args, **kwargs: None  # today's single-range notice\n"
 NOTICE = re.compile(r"^\[LCM survival fit: (\d+) earlier messages \(store ids (\d+)\.\.(\d+)\) are stored verbatim but not "
-                    r"in live context; read each range with lcm_load_session limit=(\d+) and next_cursor, a "
-                    r"content_truncated row with lcm_expand\(store_id\): (.*)\.\]$", re.S)
-GROUP = re.compile(r"session_id=([^;\s]+) ((?:after_store_id=\d+ for store ids \d+\.\.\d+ stop after \d+(?:, )?)+)")
-ITEM = re.compile(r"after_store_id=(\d+) for store ids (\d+)\.\.(\d+) stop after (\d+)")
+                    r"in live context; read with lcm_load_session limit=(\d+), next_cursor, and lcm_expand\(store_id\) "
+                    r"if truncated: (.*)\.\]$", re.S)
+GROUP = re.compile(r"session_id=([^;\s]+) ((?:after_store_id=\d+ to \d+(?:, )?)+)")
+ITEM = re.compile(r"after_store_id=(\d+) to (\d+)")
 
 
 def _calls(notice: str) -> list[tuple[int, int, dict]]:
     """(first, last, arguments) of every range the notice names, its arguments parsed from the text."""
     head = NOTICE.match(notice)
     assert head, notice
-    calls = [(int(first), int(stop), {"session_id": session, "after_store_id": int(after), "limit": int(head.group(4))})
-             for session, items in GROUP.findall(head.group(5)) for after, first, last, stop in ITEM.findall(items)
-             if last == stop]
-    assert len(calls) == len(ITEM.findall(head.group(5))), notice  # every range says where to stop
+    calls = [(int(after) + 1, int(stop), {"session_id": session, "after_store_id": int(after), "limit": int(head.group(4))})
+             for session, items in GROUP.findall(head.group(5)) for after, stop in ITEM.findall(items)]
+    assert len(calls) == len(ITEM.findall(head.group(5))), notice  # every range says where it starts and stops
     return calls
 
 
@@ -80,6 +80,9 @@ def _walk(tmp_path: Path, name: str, patch: str = "") -> list[dict]:
                "--workdir", str(tmp_path / f"{name}-work")]
     for entry in _syspaths():
         command += ["--syspath", entry]
+    if (TREE / "agent" / "context_engine.py").is_file():  # CI writes its host stub into the repo root, which is skipped
+        shutil.copytree(TREE / "agent", tmp_path / f"{name}-stub" / "agent")
+        command += ["--syspath", str(tmp_path / f"{name}-stub")]
     if patch:
         (tmp_path / f"{name}-patch.py").write_text(patch)
         command += ["--patch", str(tmp_path / f"{name}-patch.py")]
@@ -139,15 +142,14 @@ def test_builder_text_one_range_and_several_ranges_are_pinned_by_literals(engine
     rows = _store(engine, [f"row {i}" for i in range(1, 11)])
     messages, ids = _listed(rows, {4, 5, 6, 7, 8, 9, 10})
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) == (
-        "[LCM survival fit: 3 earlier messages (store ids 1..3) are stored verbatim but not in live context; read each "
-        "range with lcm_load_session limit=200 and next_cursor, a content_truncated row with lcm_expand(store_id): "
-        "session_id=S after_store_id=0 for store ids 1..3 stop after 3.]")
+        "[LCM survival fit: 3 earlier messages (store ids 1..3) are stored verbatim but not in live context; read with "
+        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 "
+        "to 3.]")
     messages, ids = _listed(rows, {3, 4, 7})
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) == (
-        "[LCM survival fit: 7 earlier messages (store ids 1..10) are stored verbatim but not in live context; read each "
-        "range with lcm_load_session limit=200 and next_cursor, a content_truncated row with lcm_expand(store_id): "
-        "session_id=S after_store_id=0 for store ids 1..2 stop after 2, "
-        "after_store_id=4 for store ids 5..6 stop after 6, after_store_id=7 for store ids 8..10 stop after 10.]")
+        "[LCM survival fit: 7 earlier messages (store ids 1..10) are stored verbatim but not in live context; read with "
+        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=0 "
+        "to 2, after_store_id=4 to 6, after_store_id=7 to 10.]")
     messages, ids = _listed(rows, set(range(1, 11)))
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) is None  # nothing out of view
 
@@ -194,9 +196,8 @@ def test_builder_text_on_the_emergency_path_is_pinned_by_a_literal(engine, monke
     assert "dropped the summary prefix" in caplog.text
     notice = engine._last_survival_fit["notice"]
     assert notice == ("[LCM survival fit: 10 earlier messages (store ids 1..10) are stored verbatim but not in live "
-                      "context; read each range with lcm_load_session limit=200 and next_cursor, a content_truncated row "
-                      "with lcm_expand(store_id): session_id=S after_store_id=0 "
-                      "for store ids 1..10 stop after 10.]")
+                      "context; read with lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: "
+                      "session_id=S after_store_id=0 to 10.]")
     assert result[0]["content"] == f"system prompt\n\n{notice}"
     # the same text from a direct call on the returned list, outside the fit (no node is shown: the prefix left)
     assert survival_fit_notice(engine, result, set()) == notice
@@ -261,6 +262,8 @@ def test_b_the_notice_bound_holds_for_long_ids(ids):
     assert count_tokens(notice) <= _NOTICE_MAX_TOKENS, count_tokens(notice)
     today = survival_fit._NOTICE.format(n=3, first=1, last=3)
     single = survival_fit.survival_notice_text(3, [("20261119_120000_abcdef12", 1, 3)])
+    # no longer than the single-range notice of the reviewed head b488389d (228 characters): budget-edge tests depend on it
+    assert len(survival_fit.survival_notice_text(3, [("S", 1, 3)])) <= 228
     assert count_tokens(single) <= count_tokens(today) + 40, (count_tokens(single), count_tokens(today))
     assert json.dumps(notice)[1:-1] == notice and json.dumps(single)[1:-1] == single  # nothing JSON escapes
 
@@ -376,9 +379,9 @@ def test_rows_that_left_are_named_in_any_case(engine):
     messages, ids = _listed(rows, {1, 2, 3, 4, 6})
     assert survival_fit_notice(engine, messages, set(), store_ids=ids) is None  # row 5's copy (1) is in the list
     assert survival_fit_notice(engine, messages, set(), left=[5], store_ids=ids) == (
-        "[LCM survival fit: 1 earlier messages (store ids 5..5) are stored verbatim but not in live context; read each "
-        "range with lcm_load_session limit=200 and next_cursor, a content_truncated row with lcm_expand(store_id): "
-        "session_id=S after_store_id=4 for store ids 5..5 stop after 5.]")
+        "[LCM survival fit: 1 earlier messages (store ids 5..5) are stored verbatim but not in live context; read with "
+        "lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if truncated: session_id=S after_store_id=4 "
+        "to 5.]")
 
 
 def test_after_a_rotation_a_dropped_parent_row_is_named_with_its_session(engine, monkeypatch):

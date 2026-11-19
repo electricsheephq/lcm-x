@@ -61,15 +61,15 @@ _WARNING_FITTED = ("To keep this conversation within the model's context window,
                    "during LCM context fitting; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
                    "/lcm doctor reports why.")
 _NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in "
-                  "live context; read each range with lcm_load_session limit=200 and next_cursor, a content_truncated "
-                  "row with lcm_expand(store_id): {calls}.]")
+                  "live context; read with lcm_load_session limit=200, next_cursor, and lcm_expand(store_id) if "
+                  "truncated: {calls}.]")
 _NOTICE_REST = "; and {count} earlier ranges (store ids {first}..{last}); lcm_grep reaches them"
 _NOTICE_MAX_RANGES = 8  # #2877: the newest ranges out of view are named with their calls; older ones are counted
 _NOTICE_MAX_TOKENS = 300  # the bound for 12-digit store ids and two sessions with ids up to 128 characters
 # the notice ends at its own closing '.]' (then a blank line or the end), so a ']' in a session id cannot split it
 _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
-                        r"but not in live context(?:; lcm_grep / lcm_load_session reach them\.\]|; read each range with "
-                        r"lcm_load_session limit=200 [^\n]*?\.\](?=\n\n|$))")
+                        r"but not in live context(?:; lcm_grep / lcm_load_session reach them\.\]|; read with "
+                        r"lcm_load_session limit=200, [^\n]*?\.\](?=\n\n|$))")
 _OUT_OF_VIEW_SQL = (
     "WITH RECURSIVE walk(root, node_id) AS (SELECT CAST(value AS INTEGER), CAST(value AS INTEGER) FROM json_each(?) "
     "UNION SELECT walk.root, CAST(source.value AS INTEGER) FROM walk JOIN summary_nodes AS node ON node.node_id = "
@@ -138,7 +138,7 @@ def survival_notice_text(count: int, ranges, rest=None) -> str:
     for session, first, last in ranges:
         if not groups or groups[-1][0] != session:
             groups.append((session, []))
-        groups[-1][1].append(f"after_store_id={first - 1} for store ids {first}..{last} stop after {last}")
+        groups[-1][1].append(f"after_store_id={first - 1} to {last}")  # where each range starts and stops
     # a session id ends at a space and groups at ';', characters ids never hold (their ':' are common)
     calls = "; ".join(f"session_id={session} " + ", ".join(items) for session, items in groups)
     calls += _NOTICE_REST.format(count=rest[0], first=rest[1], last=rest[2]) if rest else ""
