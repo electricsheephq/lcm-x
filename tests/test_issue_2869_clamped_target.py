@@ -54,7 +54,7 @@ def open_engine(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-def _target(engine, monkeypatch, force=False, current=None):
+def _target(engine, monkeypatch, force=False, current=None, **kwargs):
     """(sweep target, sweep active, overflow) of the first compress pass."""
     seen, prepare = [], engine._prepare_compression_sweep
 
@@ -64,7 +64,7 @@ def _target(engine, monkeypatch, force=False, current=None):
         return out
 
     monkeypatch.setattr(engine, "_prepare_compression_sweep", wrapped)
-    engine.compress(MESSAGES, current_tokens=current or engine.threshold_tokens, force=force)
+    engine.compress(MESSAGES, current_tokens=current or engine.threshold_tokens, force=force, **kwargs)
     return seen[0]
 
 
@@ -121,6 +121,13 @@ def test_unchanged_overflow(open_engine, monkeypatch):
 def test_unchanged_explicit_settings(open_engine, monkeypatch, config, expected):
     engine = open_engine(1_000_000, nodes=10, mean=1_590, **config)
     assert _target(engine, monkeypatch)[0] == expected
+
+
+def test_unchanged_on_a_recovery_pass(open_engine, monkeypatch):
+    """A host recovery attempt (bypass_cooldown) keeps today's target, as it keeps no depth target."""
+    engine = open_engine(1_000_000, nodes=10, mean=1_590)
+    target, active, overflow = _target(engine, monkeypatch, bypass_cooldown=True)
+    assert active and not overflow and target == _today(engine)
 
 
 def test_unchanged_with_background_leaf_prep_on(open_engine, monkeypatch):
