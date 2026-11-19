@@ -91,6 +91,34 @@ def test_slow_ingest_still_fits_forced_and_recovery_passes(engine, view, monkeyp
     assert _digests(stored_rows(engine)) == _digests(view)
 
 
+@pytest.mark.parametrize("held", [True, False], ids=["hold-fit-only", "default-caps-at-ceiling"])
+def test_slow_ingest_still_fits_automatic_passes(engine, monkeypatch, held):
+    engine.context_length = 6_000
+    ceiling = engine._survival_ceiling()
+    assert ceiling == 5_100
+    view = [row for i in range(40 if held else 16) for row in _turn(f"T{i}", 100.0 + i)]
+    measured = engine._survival_measure(view)
+    assert measured > ceiling
+    if held:
+        engine._config.max_assembly_tokens = 100_000
+        engine._start_sweep_budget_hold()
+    else:
+        assert engine._config.max_assembly_tokens == engine._config.reserve_tokens_floor == 0
+    observed = measured if held else ceiling
+    assert engine._hold_fit_only_applies(observed) is held
+    assert not engine._should_force_overflow_recovery(observed, view)
+    _late_ingest(engine, monkeypatch)
+
+    result = engine.compress(view, current_tokens=observed)
+
+    assert result and engine._survival_measure(result) <= ceiling
+    assert engine.last_compression_status != "deadline_yield"
+    assert engine._last_survival_fit is not None
+    if held:
+        assert engine.last_compression_noop_reason == "held"
+    assert _digests(stored_rows(engine)) == _digests(view)
+
+
 def _digests(rows):
     return [(row["role"], hashlib.sha256((row["content"] or "").encode()).hexdigest()) for row in rows]
 
@@ -153,6 +181,7 @@ def test_t5_host_uses_three_attempts_without_rearming(engine, monkeypatch):
     ("20", None, None, 300, 120, "config_yaml:compression.context_timeout_seconds"),
     ("400", None, 500, 400, 360, "config_yaml:compression.context_timeout_seconds"),
     ("100", 600, 700, 600, 540, "config_yaml:compression.context_timeout_seconds"),
+    pytest.param("60", '"NaN"', None, 60, 30, "config_yaml:compression.context_timeout_seconds", id="nan-aux"),
     ("0", 600, 700, 0, 700, "config_yaml:compression.context_timeout_seconds"),
     ("-1", None, 500, -1, 500, "config_yaml:compression.context_timeout_seconds"),
     ("bad", None, 500, 0, 500, "default"),
@@ -172,7 +201,7 @@ def test_t6_host_idle_margin(engine, tmp_path, monkeypatch, value, auxiliary, co
         engine._config.foreground_soft_seconds = configured_hard
     budget = engine._new_foreground_budget()
     assert budget.hard == hard
-    assert budget.soft == (60 if configured_hard is None else hard)
+    assert budget.soft == min(60 if configured_hard is None else configured_hard, hard)
     assert budget.configured_timeout == 900
     assert engine._config.hermes_context_timeout_seconds == idle
     assert engine._config.config_sources["hermes_context_timeout_seconds"] == source

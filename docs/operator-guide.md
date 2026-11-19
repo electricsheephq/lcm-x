@@ -1142,12 +1142,14 @@ What the main knobs do:
   forced overflow recovery and a host recovery attempt, and their condensation
   passes; a manual `/compress` and a forced overflow recovery use the hard bound
   only. A positive Hermes `compression.context_timeout_seconds` caps the budget at the effective host idle limit
-  minus the greater of 30 seconds and 10% of the limit. The effective limit is the largest of the configured idle
-  limit, Hermes `auxiliary.compression.timeout`, and 300 seconds. LCM-X uses its own hard bound if the host limit is
-  disabled or unreadable. If the host enforces an unreadable limit, keep the hard bound below it by the
+  minus the greater of 30 seconds and 10% of the limit. A finite positive Hermes `auxiliary.compression.timeout`
+  raises the idle limit to at least that value and 300 seconds. An unset auxiliary timeout uses the 300-second floor.
+  Other literal auxiliary timeout values leave the idle limit at its configured value. LCM-X uses its own hard bound
+  if the host limit is disabled or unreadable. If the host enforces an unreadable limit, keep the hard bound below it by the
   same margin. When ingest reaches the deadline on an automatic pass, the pass reports `deadline_yield`, returns the
-  original host list, and keeps the committed ingest. Manual compression, forced overflow recovery, and host recovery
-  attempts continue through their normal fit paths.
+  original host list, and keeps the committed ingest. Manual compression, forced overflow recovery, host recovery
+  attempts, and automatic passes that are held for a fit or reach an enabled survival fit ceiling continue through their
+  normal paths.
   When no call fits, a forced overflow recovery assembles to its cap with
   no call, and a recovery attempt is fitted under the threshold; time never makes
   a level 3 cut.

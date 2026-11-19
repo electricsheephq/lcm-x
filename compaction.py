@@ -2355,6 +2355,13 @@ class CompactionMixin:
         now = time.monotonic()
         if now < state.sweep_deadline:
             return False
+        # Let the ordinary exit fit trim a held or over-window request.
+        if state.hold_fit_only_requested or (
+            self._config.survival_fit
+            and (ceiling := self._survival_ceiling()) is not None
+            and state.observed_prompt_tokens >= ceiling
+        ):
+            return False
         self._last_compression_status = "deadline_yield"
         self._pressure_yield_invocation_verdict = "neutral"
         logger.info("LCM compaction deadline yield: check=after_ingest elapsed=%.1fs", now - state.budget.t0)

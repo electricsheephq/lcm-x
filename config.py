@@ -720,6 +720,12 @@ def _lcm_absolute_threshold_tokens_with_source(
     return value, source, warning
 
 
+def _hermes_auxiliary_compression_timeout_value(cfg: dict[str, Any]) -> Any:
+    auxiliary = cfg.get("auxiliary")
+    compression = auxiliary.get("compression") if isinstance(auxiliary, dict) else None
+    return compression.get("timeout") if isinstance(compression, dict) else None
+
+
 def _hermes_auxiliary_compression_timeout_ms_with_source(
     default: int, *, env: Mapping[str, str] | None = None
 ) -> tuple[int, str]:
@@ -733,13 +739,7 @@ def _hermes_auxiliary_compression_timeout_ms_with_source(
     """
     cfg = _load_hermes_config_yaml_for_env(env)
     try:
-        auxiliary = cfg.get("auxiliary") or {}
-        if not isinstance(auxiliary, dict):
-            return default, "default"
-        compression = auxiliary.get("compression") or {}
-        if not isinstance(compression, dict):
-            return default, "default"
-        value = compression.get("timeout")
+        value = _hermes_auxiliary_compression_timeout_value(cfg)
         if value is None:
             return default, "default"
         return int(float(value) * 1000), "config_yaml:auxiliary.compression.timeout"
@@ -751,15 +751,25 @@ def _hermes_context_timeout_seconds_with_source(
     auxiliary_timeout_ms: int, *, env: Mapping[str, str] | None = None
 ) -> tuple[float, str]:
     """Read the profile's effective host idle limit. Zero means no readable limit."""
-    compression = _load_hermes_config_yaml_for_env(env).get("compression")
+    cfg = _load_hermes_config_yaml_for_env(env)
+    compression = cfg.get("compression")
     value = compression.get("context_timeout_seconds") if isinstance(compression, dict) else None
     if value is not None and not isinstance(value, bool):
         try:
             seconds = float(value)
             if math.isfinite(seconds):
                 if seconds > 0:
-                    # Hermes raises a positive idle limit to its auxiliary compression timeout (floor 300 s).
-                    seconds = max(seconds, auxiliary_timeout_ms / 1000, 300.0)
+                    raw_aux = _hermes_auxiliary_compression_timeout_value(cfg)
+                    # An unresolved Hermes environment reference uses the default floor.
+                    if raw_aux is None or (isinstance(raw_aux, str) and "${" in raw_aux):
+                        seconds = max(seconds, 300.0)
+                    else:
+                        try:
+                            aux_seconds = float(raw_aux)
+                        except (TypeError, ValueError, OverflowError):
+                            aux_seconds = 0.0
+                        if math.isfinite(aux_seconds) and aux_seconds > 0:
+                            seconds = max(seconds, auxiliary_timeout_ms / 1000, 300.0)
                 return seconds, "config_yaml:compression.context_timeout_seconds"
         except (TypeError, ValueError, OverflowError):
             pass
