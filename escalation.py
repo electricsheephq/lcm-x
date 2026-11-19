@@ -1176,7 +1176,7 @@ def _invoke_summary_llm_routes(
         )
         result, route, error = attempt.text, attempt.route, attempt.error
         started, ended = attempt.timing.started, attempt.timing.ended
-        if error is not None:
+        if error is not None and not extended:
             note_error(error)
         if budget is not None:
             budget.record_call(route_key, started, ended)
@@ -1207,6 +1207,8 @@ def _invoke_summary_llm_routes(
         ))
         if extended and outcome.hang:  # design B: an extension-only call is never classed a hang
             outcome = replace(outcome, hang=False, record_hang=False)
+        if extended and error is not None and outcome.kind is not SummaryOutcomeKind.FAILURE:
+            note_error(error)  # design B: an extension-only failure leaves summary_failure as the base leaves it
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)
@@ -1252,8 +1254,10 @@ def _invoke_summary_llm_routes(
             note_error(None)
             if provenance is not None:  # #751: the chunk is too large for this route; the caller shrinks it
                 provenance["context_length_error"] = True
-        elif extended and outcome.kind is SummaryOutcomeKind.FAILURE:  # design B: no strike; the catch-up ends
-            budget.catchup, budget.catchup_ended = False, True
+        elif extended and outcome.kind is SummaryOutcomeKind.FAILURE:  # design B: no strike, no fallback call
+            budget.catchup, budget.catchup_ended, budget.extended = False, True, False
+            budget._admit_base(route_key)  # the base refuses the chain's next call, with its own stop reason
+            raise budget.stop()
         elif circuit_breaker is not None:
             if outcome.kind is SummaryOutcomeKind.FAILURE:
                 circuit_breaker.record_failure(route_key)

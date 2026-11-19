@@ -833,15 +833,17 @@ def test_recovery_cells_bounded_lag(grid, cell):
         assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
 
     def rate(records):
-        """Round 2 (4), T1-324: publications per pass over whole firing cycles, each from one firing to the next and
-        credited with that firing's count; the open cycle after the last firing is left out, unless it has run past one
-        hold period (the tree stopped firing), when it counts whole, to the end of the walk."""
+        """Round 2 (4) and round 3 (3), T1-324: publications per pass over whole firing cycles, from the first firing
+        to the last, with half of the first and half of the last firing's count inside that span (each borders a cycle
+        outside it). The open cycle after the last firing is left out, unless it has run past one hold period (the
+        tree stopped firing), when it counts whole, to the end of the walk."""
         fired = [(r["pass"], r["leaves"] + r["condensations"]) for r in records if r["leaves"] + r["condensations"]]
         if not fired:
             return 0.0
         if len(fired) == 1 or len(records) - fired[-1][0] > hold_passes:
             return sum(n for _, n in fired) / (len(records) - fired[0][0])
-        return sum(n for _, n in fired[:-1]) / (fired[-1][0] - fired[0][0])
+        inside = fired[0][1] / 2 + sum(n for _, n in fired[1:-1]) + fired[-1][1] / 2
+        return inside / (fired[-1][0] - fired[0][0])
     assert rate(cand) >= rate(base), f"{cell}: rate {rate(cand):.3f} < base {rate(base):.3f}"
 
 
@@ -919,66 +921,151 @@ def test_no_candidate_only_frontier_scan_before_the_leaf(grid_dir):
         assert c["leaves_cum"] >= b["leaves_cum"], f"pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}"
 
 
-# Round 2 (9): a summariser that fails ``FAIL_IF`` calls with a genuine provider error, alike on both trees. The admit
-# is wrapped to mark the failures of extension-only calls ("ext_fail") apart from the base-admitted ones ("fail").
+# Round 2 (9) and round 3: a summariser that fails the calls ``FAIL_IF`` selects with a genuine provider error, alike
+# on both trees. FAIL_IF sees ``n`` (the call's number in the walk), ``p`` (the pass), ``idx`` (the call's index in the
+# pass), ``ext`` (an extension-only call), ``fb`` (a call on the fallback route) and ``kind`` (a condensation while
+# _condense_summary_nodes runs, else a leaf); a failure ends at
+# ``END``. Per call the patch tags ``call_cut_flags``: a failure is "ext_fail" or "fail" (base-admitted), prefixed
+# "fb_" on the fallback route, and a fallback call that succeeds is "fb_call". At the end of each pass it adds
+# "pass:summary_failure" when the budget's sticky summary failure is set, and "pass:fb_open" while the fallback's
+# circuit is not closed. ``SETUP`` runs first.
 _FAILING = (
     "import sys as _sys\n"
+    "SETUP\n"
     "_P = _sys.modules['__main__'].Provider\n"
-    "_orig, _admit, _st = _P.__call__, escalation.ForegroundBudget.admit, {'end': -1e9, 'n': 0, 'ext': False}\n"
+    "_orig, _reset, _admit = _P.__call__, _P.reset_pass, escalation.ForegroundBudget.admit\n"
+    "_st = {'end': -1e9, 'n': 0, 'p': -1, 'ext': False, 'b': None, 'prov': None, 'cond': False}\n"
+    "_cs = engine.LCMEngine._condense_summary_nodes\n"
+    "def _cs_seen(self, *args, _cs=_cs, **kwargs):\n"
+    "    _st['cond'] = True\n"
+    "    try:\n"
+    "        return _cs(self, *args, **kwargs)\n"
+    "    finally:\n"
+    "        _st['cond'] = False\n"
+    "engine.LCMEngine._condense_summary_nodes = _cs_seen\n"
+    "def _reset_seen(self, _reset=_reset):\n"
+    "    _st['p'] += 1\n"
+    "    return _reset(self)\n"
+    "_P.reset_pass = _reset_seen\n"
     "def _admit_seen(self, route_key, _admit=_admit):\n"
     "    left = _admit(self, route_key)\n"
-    "    _st['ext'] = bool(getattr(self, 'extended', False))\n"
+    "    _st['ext'], _st['b'] = bool(getattr(self, 'extended', False)), self\n"
     "    return left\n"
     "escalation.ForegroundBudget.admit = _admit_seen\n"
     "def _failing(self, prompt, max_tokens, model='', timeout=None, reasoning_effort=''):\n"
     "    _st['n'] += 1\n"
+    "    _st['prov'] = self\n"
+    "    n, p, idx, ext, fb = _st['n'], _st['p'], self.started, _st['ext'], model == 'fb-model'\n"
+    "    kind = 'condensation' if _st['cond'] else 'leaf'\n"
     "    if FAIL_IF:\n"
     "        self.started += 1\n"
     "        self.timeouts.append(None if timeout is None else round(float(timeout), 3))\n"
-    "        self.kinds.append('leaf' if 'user turn' in prompt else 'condensation')\n"
-    "        self.cut_flags.append('ext_fail' if _st['ext'] else 'fail')\n"
-    "        self.clock.offset += SECONDS\n"
+    "        self.kinds.append(kind)\n"
+    "        self.cut_flags.append(('fb_' if fb else '') + ('ext_fail' if ext else 'fail'))\n"
+    "        self.clock.offset = END\n"
     "        _st['end'] = self.clock.offset\n"
     "        raise RuntimeError(ERROR)\n"
     "    try:\n"
     "        return _orig(self, prompt, max_tokens, model=model, timeout=timeout, reasoning_effort=reasoning_effort)\n"
     "    finally:\n"
     "        _st['end'] = self.clock.offset\n"
-    "_P.__call__ = _failing\n")
-_RATE_LIMIT = _FAILING.replace("SECONDS", "3.0").replace("ERROR", "'Error code: 429 - rate limit exceeded'")
-# a call that starts within 10 s of the previous call's end is rate-limited: always, or only among the first 3 calls
-PATCHES["burst"] = _RATE_LIMIT.replace("FAIL_IF", "self.clock.offset - _st['end'] < 10.0")
-PATCHES["burst_once"] = _RATE_LIMIT.replace("FAIL_IF", "_st['n'] <= 3 and self.clock.offset - _st['end'] < 10.0")
-# the control: every third call fails, whatever its index in the pass
-PATCHES["flaky"] = _FAILING.replace("FAIL_IF", "_st['n'] % 3 == 0").replace("SECONDS", "5.0").replace(
-    "ERROR", "'HTTP 500 upstream'")
+    "        if fb:\n"
+    "            self.cut_flags[-1] = 'fb_call'\n"
+    "_P.__call__ = _failing\n"
+    "_finish = engine.LCMEngine._finish_foreground_budget\n"
+    "def _finish_seen(self, budget, *args, _finish=_finish, **kwargs):\n"
+    "    if _st['prov'] is not None and budget.summary_failure:\n"
+    "        _st['prov'].cut_flags.append('pass:summary_failure')\n"
+    "    if _st['prov'] is not None and self._summary_circuit_breaker.route_status(['fb-model']).get('state') not in (\n"
+    "            None, 'closed'):\n"
+    "        _st['prov'].cut_flags.append('pass:fb_open')\n"
+    "    return _finish(self, budget, *args, **kwargs)\n"
+    "engine.LCMEngine._finish_foreground_budget = _finish_seen\n")
+
+
+def _failing(fail_if: str, error: str, end: str = "self.clock.offset + 3.0", setup: str = "") -> str:
+    return (_FAILING.replace("FAIL_IF", fail_if).replace("ERROR", repr(error)).replace("END", end)
+            .replace("SETUP", setup))
+
+
+_LIMIT = "self.clock.offset - _st['end'] < 10.0"  # a call that starts within 10 s of the previous call's end
+# (1)/(5): an enclosing host deadline 40 s into the pass closes any call still running then (the stream closed); the
+# fallback route has a 15 s estimate, so the base would admit it after the closed extension call
+_HOST40 = "_st['b'].t0 + 40.0"
+_FB15 = ("_fe = escalation.ForegroundEstimates.__init__\n"
+         "def _fe15(self, *a, _fe=_fe, **k):\n"
+         "    _fe(self, *a, **k)\n"
+         "    self.record_call('fb-model', 15.0)\n"
+         "escalation.ForegroundEstimates.__init__ = _fe15")
+# (7): twelve depth-0 nodes of 7,000 tokens, so one pre-leaf condensation leaves the frontier over the 50,000 target and
+# the post-leaf condensation runs under the catch-up
+_SEED12 = ("_runner = _sys.modules['__main__']\n"
+           "def _seed12(mods, engine, cell, target):\n"
+           "    for index in range(12):\n"
+           "        engine._dag.add_node(mods['dag'].SummaryNode(\n"
+           "            session_id=engine._session_id, depth=0, summary=_runner.sized_summary(7_000), token_count=7_000,\n"
+           "            source_token_count=14_000, source_ids=[], source_type='messages', created_at=float(index + 1)))\n"
+           "_runner._seed_prefix = _seed12")
+PATCHES["burst"] = _failing(_LIMIT, "Error code: 429 - rate limit exceeded")
+PATCHES["burst_once"] = _failing(f"n <= 3 and {_LIMIT}", "Error code: 429 - rate limit exceeded")
+# the control: every third call fails, whatever its index in the pass. Its circuit stays closed on both trees; the
+# candidate's per-pass counts move, because the catch-up ends at its first failed extension call
+PATCHES["flaky"] = _failing("n % 3 == 0", "HTTP 500 upstream", end="self.clock.offset + 5.0")
+PATCHES["host40"] = _failing(f"self.clock.offset + self.seconds(idx) > {_HOST40}", "stream closed",
+                             end=f"max(self.clock.offset, {_HOST40})", setup=_FB15)
+PATCHES["fb_after1"] = _failing("idx >= 1", "HTTP 500 upstream", end="self.clock.offset + 2.0")
+PATCHES["fb_down"] = _failing("(p < 3 and idx >= 1) or (p >= 3 and not fb)", "HTTP 500 upstream",
+                              end="self.clock.offset + 2.0")
+PATCHES["ext_condensation"] = _failing("ext and kind == 'condensation'", "HTTP 500 upstream",
+                                       end="self.clock.offset + 2.0", setup=_SEED12)
+_FB = {"settings": {"summary_fallback_models": ["fb-model"]}}
 _FAILING_CELLS = {
     "burst": {**_R1M, "id": "f-burst", "passes": 14, "pre": 37, "estimate": 44, "call": 40, "prefix": "under"},
     "burst_once": {**_R1M, "id": "f-burst-once", "passes": 20, "pre": 37, "estimate": 44, "call": 40, "prefix": "under"},
     "flaky": {"group": "S", "id": "f-flaky", "passes": 12, "raw_tokens": 150_000, "over_tokens": 20_000,
               "growth_tokens": 26_000, "turn_gap": 60, "finalize": 32, "chunk": 24_000, "summary_tokens": 1_500,
               "window": 1_000_000, "pre": 37, "estimate": 44, "call": 40, "delta": 0, "prefix": "none"},
+    "host40": {**_R1M, **_FB, "id": "f-host40", "passes": 3, "pre": 5, "estimate": 44, "call": [25, 40],
+               "prefix": "under"},
+    "fb_after1": {**_R1M, **_FB, "id": "f-fb-after1", "passes": 8, "pre": 5, "estimate": 50, "call": 10,
+                  "prefix": "under"},
+    "fb_down": {**_R1M, **_FB, "id": "f-fb-down", "passes": 10, "pre": 5, "estimate": 50, "call": 10,
+                "prefix": "under"},
+    "ext_condensation": {**_R1M, "id": "f-ext-condensation", "passes": 3, "pre": 5, "estimate": 40, "call": 40,
+                         "raw_tokens": 24_000, "prefix": "none"},
 }
 
 
 @pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
 @pytest.mark.parametrize("variant", list(_FAILING_CELLS))
 def test_extension_call_failure_counts_nothing(grid_dir, variant):
-    """(9): a genuine provider failure of an extension-only call charges the route nothing and ends the catch-up for
-    the rest of the pass (at most one such failure a pass); base-admitted calls are charged as before. Per pass: the
-    candidate's cumulative leaves at least the base's (A1's excuse: its prompt under its trigger and at or below the
-    base's), and no open circuit the base does not have."""
+    """(9), round 3 (1, 5, 6, 7): a genuine provider failure of an extension-only call charges no route, ends the
+    route chain (no fallback call follows it in the pass) and leaves the budget's sticky summary failure as the base
+    leaves it; base-admitted calls are charged as before. Per pass: the candidate's cumulative leaves at least the
+    base's (A1's excuse: its prompt under its trigger and at or below the base's), at most one failed extension call,
+    no fallback call after one, no open circuit (primary or fallback) the base does not have, and a summary failure
+    only with a base-admitted failure. With the primary route down (fb_down) the prompt is also never above the base's
+    (with the same excuse)."""
     cell = _FAILING_CELLS[variant]
     base, cand = (_run(tree, [cell], grid_dir, f"{variant}-{name}", patch=variant)["by_cell"][cell["id"]]
                   for name, tree in (("base", BASE_TREE), ("cand", CAND_TREE)))
-    assert any({"fail", "ext_fail"} & set(r["call_cut_flags"]) for r in base + cand), f"premise: no call failed"
+    assert any("ext_fail" in r["call_cut_flags"] for r in cand), f"premise: no extension-only call failed: {cand}"
     for b, c in zip(base, cand):
+        where, flags = f"{variant} pass {b['pass']}", c["call_cut_flags"]
         excused = c["prompt_before"] < c["trigger"] and c["prompt_before"] <= b["prompt_before"]
-        assert excused or c["leaves_cum"] >= b["leaves_cum"], (
-            f"{variant} pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}")
+        assert excused or c["leaves_cum"] >= b["leaves_cum"], f"{where}: leaves {c['leaves_cum']} < {b['leaves_cum']}"
         assert c["circuit"]["state"] == "closed" or b["circuit"]["state"] != "closed", (
-            f"{variant} pass {b['pass']}: circuit {c['circuit']}, base {b['circuit']}")
-        assert c["call_cut_flags"].count("ext_fail") <= 1, f"{variant} pass {b['pass']}: {c['call_cut_flags']}"
+            f"{where}: circuit {c['circuit']}, base {b['circuit']}")
+        assert flags.count("ext_fail") + flags.count("fb_ext_fail") <= 1, f"{where}: {flags}"
+        failed = [i for i, flag in enumerate(flags) if flag in ("ext_fail", "fb_ext_fail")]
+        after = [flag for flag in flags[failed[0] + 1:] if str(flag).startswith("fb_")] if failed else []
+        assert not after, f"{where}: a fallback call after the extension-only failure: {flags}"
+        assert "pass:fb_open" not in flags or "pass:fb_open" in b["call_cut_flags"], f"{where}: fallback circuit"
+        assert "pass:summary_failure" not in flags or {"fail", "fb_fail"} & set(flags), (
+            f"{where}: the sticky summary failure names an extension-only failure: {flags}")
+        if variant == "fb_down":
+            assert excused or c["prompt_after"] <= b["prompt_after"], (
+                f"{where}: prompt {c['prompt_after']} > base {b['prompt_after']}")
 
 
 # A6 boundedness, pinned BY CELL NAME on both trees (the RM's ruling): the summary area grows without bound in every
