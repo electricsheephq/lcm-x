@@ -589,8 +589,8 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "repeated-tool-id": {
-      "outcome_sha": "a3013ea19ff05032c08b19fe5b4f1324e73f7752f463abaf193833446197e2d9",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "d5a83b4ea7fe4fa2144f2e82e2588d78e00adf1f3c61f37f7daa000cdeab714b",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
     },
     "replay-build-mapped-ignore": {
       "outcome_sha": "e68b25e313cf9e67ada9053b55b5ca61da06366d2951fee38655d4bf3efd9f0e",
@@ -705,12 +705,12 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
     },
     "tools-delta": {
-      "outcome_sha": "a185f47b9cc4a6b03f399b818fe3cfa4fbe519c8fbdc7ba9b45ee5a5d406d169",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "2ac1bc2b502d26a8ca78e94298ccc445db7c70d3f36a38144b1da71d903092d2",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
     },
     "tools-full": {
-      "outcome_sha": "dd401ed1bd7093cbf05b3d9464554f49dbd0c79085a436669111695ffa51382f",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "0df1649081eab83240d962efac42570130584714ef03a11b34c5d9a3ebe80880",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
     },
     "tools-new": {
       "outcome_sha": "ede3a3dc1f53f8b06b71d1d752abc40291eac6f3baebf2d0cd356436655d7592",
@@ -721,16 +721,16 @@
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
     "tools-rewrite": {
-      "outcome_sha": "39f8866bcfba425aa80204bde3d00f35ac2f102352aa8dc232aa73553b3b1c27",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "9394c67e62a7062aa8615c4b4d5a92d0b13d3319dfe31b39f2ac26325d8cf7f5",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
     },
     "tools-suffix": {
       "outcome_sha": "9fe6ae3874862cc83057fa0f9aa336cd05e1f0c9c1508d81049c4d3b8fc3bda2",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links)"
     },
     "tools-warm": {
-      "outcome_sha": "1adac9f41456db1d3542ce6b8de56b35d99cf6d89aa608b995352fa02b78d08f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "0c372417abf74cf4d5d473a7fc5cdc0d9ea1a3cd2e4589a15a739980a07ee489",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2886: the cold bind takes the durable-tail route (cursor 4, 'replayed durable tail') instead of the ledger cursor (also 4); stored rows and tables unchanged"
     },
     "turns-changed": {
       "outcome_sha": "5f4bc585c603698139c8384290d82c007fa8adc2add15a1f3d696fc97866630c",
@@ -825,6 +825,16 @@
     "transcript-gc-locked": {
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    }
+  },
+  "reconcile": {
+    "tools-delta": {
+      "outcome_sha": "bb7e4b6b939af4d241f02c7fb20e94b5e3bd0c5689fc039f79227f8314bf863a",
+      "reason": "#2886: binds the durable tail; main stored it again (returns cursor 4, reason 'replayed durable tail', where main returned cursor 0)"
+    },
+    "tools-full": {
+      "outcome_sha": "cd50fafa647f27c8f5dd6f867d5e7aea1db330980ffed21fb052dbb9d5533007",
+      "reason": "#2886: binds the durable tail; main stored it again (returns cursor 4, reason 'replayed durable tail', where main returned cursor 0)"
     }
   }
 }

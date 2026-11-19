@@ -24,6 +24,7 @@ from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial, wraps
+from threading import get_ident
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -83,28 +84,48 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 })
 
 
-def _counted_compaction(operation):
-    """Keep connections live through the entire pass, including its finalizers."""
+_PROGRESS_FIELDS = ("role", "content", "tool_call_id", "tool_calls")
+
+
+def _progress_view(messages):
+    """The fields a progress report compares; count_message_tokens reads only content and tool_calls from them."""
+    try:
+        return [{field: message.get(field) for field in _PROGRESS_FIELDS} for message in messages]
+    except Exception:
+        return None
+
+
+def _made_progress(before, returned) -> bool:
+    """#2863: true only when the returned list differs from the input by content and is smaller by the counter."""
+    after = _progress_view(returned) if isinstance(returned, list) else None
+    if before is None or after is None or after == before:
+        return False
+    try:
+        return count_messages_tokens(after) < count_messages_tokens(before)
+    except Exception:
+        return False
+
+
+def _reports_progress(operation):
+    """#2863: the host arms its compaction-cleared re-check only when the engine reports progress
+    (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False. A call the
+    one-owner guard refuses returns its own list and does not report on exit. Known limit: the flag is one per engine,
+    so with overlapping calls on one engine it can be wrong once per overlap (one extra or one missing re-check, no data)."""
     @wraps(operation)
-    def counted(self, messages, *args, **kwargs):
-        with self._compaction_gate:
-            if self._compaction_closing:
-                return messages
-            self._compaction_inflight += 1
+    def reporting(self, messages, *args, **kwargs):
+        refusals = self._compress_reentry_refusals
+        if self._compress_owner in (None, get_ident()):  # another owner means this call is likely refused
+            self._last_compression_made_progress = False
+        before = _progress_view(messages)
         try:
-            canonical, host_view = self._canonical_host_view(messages)
-        except Exception as exc:
-            self._last_compression_status = "error"
-            self._record_ingest_failure("compress", exc)
-            return messages
-        else:
-            # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
-            return operation(self, canonical, *args, **{**kwargs, **host_view, "caller_messages": messages})
-        finally:
-            with self._compaction_gate:
-                self._compaction_inflight -= 1
-                self._compaction_gate.notify_all()
-    return counted
+            returned = operation(self, messages, *args, **kwargs)
+        except BaseException:
+            self._last_compression_made_progress = False
+            raise
+        if returned is not messages or self._compress_reentry_refusals == refusals:  # else refused
+            self._last_compression_made_progress = _made_progress(before, returned)
+        return returned
+    return reporting
 
 
 @dataclass
@@ -214,11 +235,14 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
+    carrier_remainder: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
     for msg in candidate_raw:
-        msg_tokens = count_message_tokens(msg)
+        # #2901: a generated summary carrier is charged at the row the summariser reads (_leaf_summary_input)
+        remainder = carrier_remainder(msg) if carrier_remainder is not None else None
+        msg_tokens = count_message_tokens(msg if remainder is None else {**msg, "content": remainder})
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
             break
         selected.append(msg)
@@ -738,7 +762,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, self._generated_context_carrier_remainder)
 
     def _stop_pass_for_shutdown(self) -> None:
         """#2101: a pass that stops for shutdown leaves the state of an identity no-op."""
@@ -751,7 +775,23 @@ class CompactionMixin:
         engine, changed = _compaction_binding_check.get()
         return engine is self and changed()
 
-    @_counted_compaction
+    def _claim_compress_owner(self, caller: int) -> bool:
+        """Claim under the compaction gate, preserving same-thread nesting."""
+        if self._compress_owner not in (None, caller):
+            self._compress_reentry_refusals += 1
+            logger.info("LCM compression skipped: another pass owns this engine")
+            return False
+        self._compress_owner = caller
+        self._compress_owner_depth += 1
+        return True
+
+    def _release_compress_owner(self) -> None:
+        """Release one claim under the compaction gate."""
+        self._compress_owner_depth -= 1
+        if not self._compress_owner_depth:
+            self._compress_owner = None
+
+    @_reports_progress
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
@@ -759,17 +799,57 @@ class CompactionMixin:
                  bypass_cooldown: bool = False, *, host_pairs=(), caller_messages=None) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
-        if self._compaction_is_closing():
-            return messages
-        self._maybe_reclassify_late_auxiliary_before_compaction_write()
-        with self._bypass_compression_binding() as bypassed:
-            sid = self._bypass_lcm_session_id() if bypassed else self._session_id
-            if self._emission_handle is not None and self._emission_handle.session_id == sid:
-                self._emission_handle = None
-            if bypassed:
-                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
-                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
-        caller_messages = messages if caller_messages is None else caller_messages
+        caller = get_ident()
+        # Bypass detection can inspect the auxiliary registry. Keep it outside the compaction gate.
+        owned = not self._bypasses_lcm_context_management()
+        with self._compaction_gate:
+            if self._compaction_closing or (owned and not self._claim_compress_owner(caller)):
+                return messages
+            self._compaction_inflight += 1
+        try:
+            caller_messages = messages
+            try:
+                messages, host_view = self._canonical_host_view(caller_messages)
+            except Exception as exc:
+                self._last_compression_status = "error"
+                self._record_ingest_failure("compress", exc)
+                return caller_messages
+            # Generated pairs match the copy made here and take precedence.
+            host_pairs = host_view.get("host_pairs", host_pairs)
+            if self._compaction_is_closing():
+                return messages
+            self._maybe_reclassify_late_auxiliary_before_compaction_write()
+            with self._bypass_compression_binding() as bypassed:
+                if bypassed:
+                    if owned:  # First-ingest reclassification found a late auxiliary caller.
+                        with self._compaction_gate:
+                            self._release_compress_owner()
+                            owned = False
+                    handle = self._emission_handle
+                    if handle is not None and handle.session_id == self._bypass_lcm_session_id():
+                        self._emission_handle = None
+                    # #1931: store a delegated child's rows before the host rewrites its view.
+                    return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+            if not owned:  # A bypass may have ended while the call was preparing.
+                with self._compaction_gate:
+                    owned = self._claim_compress_owner(caller)
+                    if not owned:
+                        return caller_messages
+            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
+                                        host_pairs=host_pairs, caller_messages=caller_messages)
+        finally:
+            # Keep the store open and the owner held through the pass's finalizers.
+            with self._compaction_gate:
+                if owned:
+                    self._release_compress_owner()
+                self._compaction_inflight -= 1
+                self._compaction_gate.notify_all()
+
+    def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *,
+                        host_pairs, caller_messages):
+        handle = self._emission_handle
+        if handle is not None and handle.session_id == self._session_id:
+            self._emission_handle = None
         # The session reset epoch also detects a reset or a rebind back to the same IDs.
         binding = (self._session_id, self._conversation_id, self._pressure_yield_reset_epoch)
 
@@ -809,10 +889,15 @@ class CompactionMixin:
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif (not force and (self._retained_stop_hold_active() or (self._no_progress_hold is not None
-                  and (self._no_progress_hold[1] != "no_progress"
-                       or not getattr(self, "_no_progress_hold_persisted", False))))) and self._no_progress_hold_blocks(
-                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+            elif (
+                not force
+                and (self._retained_stop_hold_active() or (
+                    (hold := self._no_progress_hold) is not None
+                    and (hold[1] != "no_progress" or not getattr(self, "_no_progress_hold_persisted", False))
+                ))
+                and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages))
+            ):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._compaction_request.below_threshold_cleanup_only = True
@@ -2287,7 +2372,7 @@ class CompactionMixin:
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
                 and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-                and (retained_hold or (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"))):
+                and (retained_hold or ((hold := self._no_progress_hold) is not None and hold[1] == "no_progress"))):
             # A cold direct caller now has current replay proof. Ingest cleanup
             # is adopted, but no attribution/leaf/condensation work is repeated.
             self._ingest_cursor = len(state.working_messages)
@@ -2856,8 +2941,8 @@ class CompactionMixin:
                 self._start_sweep_budget_hold(seconds_left, turn_paced=(
                     self._sweep_budget_hold_turn_paced
                     and self._sweep_budget_hold_active()
-                    and self._hung_summary_strike is not None
-                    and self._hung_summary_strike[0] == self._hold_conversation_key()
+                    and (strike := self._hung_summary_strike) is not None
+                    and strike[0] == self._hold_conversation_key()
                 ))
         elif state.sweep_stop_reason == "summary_result_rejected":
             warn_rejected()
@@ -2866,8 +2951,8 @@ class CompactionMixin:
 
         if state.budget.hung_route is not None:
             first_hang = (
-                self._hung_summary_strike is None
-                or self._hung_summary_strike[0] != self._hold_conversation_key())
+                (strike := self._hung_summary_strike) is None
+                or strike[0] != self._hold_conversation_key())
             if not first_hang:
                 # #1369: even an exempt forced retry consumes the pending turn-end release.
                 self._sweep_budget_hold_turn_paced = False

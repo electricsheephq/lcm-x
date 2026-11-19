@@ -15,7 +15,6 @@ Imports no memo symbol.
 import base64
 import hashlib
 import importlib
-import sys
 import json
 import os
 import random
@@ -48,6 +47,9 @@ KIND_MARKERS = (("projection", "[LCM survival fit: this "), ("pruned", PRUNED), 
                 ("persisted", "<persisted-output>"), ("externalized", "[Externalized tool output"),
                 ("ingest_placeholder", "[Externalized LCM ingest payload:"), ("summary", "[Expand for details:"),
                 ("near_miss", "lcm_survival_fi"))
+SUMMARY_EXPAND = "[Expand for details:"
+PROJECTION_NAMES = re.compile(
+    r"\[LCM survival fit: this [a-z_]+ message \(\d+ tokens\) is stored verbatim as store id (\d+);")
 SUMMARY_PART = re.compile(r"\[[A-Za-z0-9 -]+ Summary \(d(\d+), node (\d+)\)\]")
 
 pytestmark = pytest.mark.skipif(not BASE, reason="LCMX_FIXEDWORK_BASE_TREE is not set")
@@ -104,7 +106,9 @@ class Host:
             out = f"r{n}_{k}" + WORD * rng.choice([5, 40, 400])
             if kind == 1:
                 out = _persisted(self.home, cid, "full spill " + out)
-            self.add({"role": "tool", "tool_call_id": cid, "name": "read_file", "content": out})
+            # tests/harness/messages.py tool(): the gateway sends both name and tool_name on a tool row
+            self.add({"role": "tool", "tool_call_id": cid, "name": "read_file", "tool_name": "read_file",
+                      "content": out})
         self.add({"role": "assistant", "content": f"answer {n}" + WORD * rng.choice([1, 3, 6, 150])})
 
     def impure(self, engine):
@@ -206,7 +210,8 @@ def _digest(row):
 def _classify(engine, returned, session, externalize):
     """One pass's stored rows of the session that are not COVERED. A row is covered when a byte-equal stored copy
     (same digest) is under a node whose summary is in ``returned``, or when its content (or, for an externalized
-    row, the payload content it names) is in ``returned``, carried text behind a summary head included. An
+    row, the payload content it names) is in ``returned``: a plain row, or the text carried behind a summary head
+    (never a summary body). An
     uncovered row whose digest repeats an earlier stored row is that row's copy and is judged once, on the earlier
     row. The rest is either behind a pointer (shown only as the host's persisted-output marker, the pruned
     placeholder or a survival projection of it) or a loss (class d). Entries carry role, digest and form only."""
@@ -214,6 +219,10 @@ def _classify(engine, returned, session, externalize):
              ensure_ascii=False) for r in returned]
     joined = "\n".join(t or "" for t in texts)
     shown = {int(m.group(2)) for text in texts for m in SUMMARY_PART.finditer(text or "")}
+    # Where a stored row's text may appear: a plain returned row whole, but a summary row only in the text carried
+    # behind its summary parts. Text inside a summary body (a fallback summary can quote rows verbatim) is the
+    # node's summary, not the row: the row counts as summarised only when it is under that node.
+    carried = [t.rsplit(SUMMARY_EXPAND, 1)[-1].split("]", 1)[-1] if SUMMARY_PART.match(t or "") else t for t in texts]
     under, stack = set(), [n for n in map(engine._dag.get_node, sorted(shown)) if n is not None and n.summary in joined]
     while stack:
         node = stack.pop()
@@ -223,7 +232,10 @@ def _classify(engine, returned, session, externalize):
             stack.extend(n for n in map(engine._dag.get_node, node.source_ids) if n is not None)
     rows = engine._store.get_session_messages(session, limit=10 ** 7)
     covered = {_digest(r) for r in rows if r["store_id"] in under}
-    projections = [t.split("\n...\n", 1)[0] for t in texts if t and "[LCM survival fit: this " in t]
+    # A survival projection points at the store row its mark names; under the copies rule it points at every
+    # byte-equal stored copy of that row too.
+    named = {int(m.group(1)) for t in texts for m in PROJECTION_NAMES.finditer(t or "")}
+    projected = {_digest(r) for r in rows if r["store_id"] in named}
     seen, pointer, lost = set(), [], []
     for row in rows:
         digest, content = _digest(row), row.get("content") or ""
@@ -237,7 +249,7 @@ def _classify(engine, returned, session, externalize):
             if ref else None
         if payload is not None and isinstance(payload.get("content"), str):
             forms.append(payload["content"])
-        if any(form == t or (form and t and form in t) for form in forms for t in texts):
+        if any(form == t or (form and t and form in t) for form in forms for t in carried):
             covered.add(digest)
             continue
         if not first:
@@ -245,8 +257,7 @@ def _classify(engine, returned, session, externalize):
         shown_as = sorted({"pruned" if r.get("content") == PRUNED else "persisted_marker"
                            for r in returned if row.get("tool_call_id") and r.get("tool_call_id") == row["tool_call_id"]
                            and (r.get("content") == PRUNED or str(r.get("content")).lstrip().startswith("<persisted-output>"))})
-        if any(head and not head.startswith("[LCM survival fit: this ") and form.startswith(head)
-               for head in projections for form in forms):
+        if digest in projected:
             shown_as.append("projection")
         entry = (row["role"], digest[:16], "externalized" if ref else "inline", content[:60])
         (pointer if shown_as else lost).append(entry + (shown_as,) if shown_as else entry)
@@ -410,8 +421,8 @@ def test_a6_harness_is_deterministic(tmp_path, monkeypatch):
 
 
 _RUNS = {}
-# Seeds whose BASE run has rows neither summarised nor shown (class d); found on the branch point, 30 seeds.
-BASE_LOSS_SEEDS = frozenset({0, 1, 2, 4, 5, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 28, 29})
+# Seeds whose BASE run has rows neither summarised nor shown (class d; #2890 on main), 30 seeds.
+BASE_LOSS_SEEDS = frozenset({1, 3, 5, 7, 12, 16, 18, 20, 21, 22, 25, 26, 29})
 LOSS_REASON = "rows neither summarised nor shown on the base: under investigation (#2856 differential)"
 
 
@@ -428,8 +439,8 @@ def _pair(seed, tmp_path_factory, monkeypatch):
         (base, base_rows, kinds), (candidate, candidate_rows, _) = _RUNS[seed]
         out = os.environ.get("LCMX_FIXEDWORK_EVIDENCE")
         if out:
-            Path(out, "a6-copies").mkdir(exist_ok=True)
-            Path(out, "a6-copies", f"seed-{seed}.json").write_text(json.dumps(dict(
+            Path(out, "a6-hostfaithful").mkdir(exist_ok=True)
+            Path(out, "a6-hostfaithful", f"seed-{seed}.json").write_text(json.dumps(dict(
                 seed=seed, steps=len(base), ops=[s["op"] for s in base], passes=sum(s["op"] == "pass" for s in base),
                 stored_rows=len(base[-1]["db"].get("messages", [])),
                 summary_nodes=len(base[-1]["db"].get("summary_nodes", [])), ingested_kinds=dict(kinds),
@@ -475,10 +486,10 @@ def test_a6_sessions_exercise_every_kind(tmp_path_factory, monkeypatch):
                      f"{len(candidate_rows['lost'])}")
     out = os.environ.get("LCMX_FIXEDWORK_EVIDENCE")
     if out:
-        Path(out, "a6-copies").mkdir(exist_ok=True)
-        Path(out, "a6-copies", "kinds.json").write_text(json.dumps(dict(kinds=dict(kinds), summary_nodes=nodes),
+        Path(out, "a6-hostfaithful").mkdir(exist_ok=True)
+        Path(out, "a6-hostfaithful", "kinds.json").write_text(json.dumps(dict(kinds=dict(kinds), summary_nodes=nodes),
                                                                    indent=1) + "\n")
-        Path(out, "a6-copies", "a6_copies_summary.txt").write_text("\n".join(lines + [
+        Path(out, "a6-hostfaithful", "a6_hostfaithful_summary.txt").write_text("\n".join(lines + [
             f"total {tree}: stored again {dict(t['again'])} (all {sum(t['again'].values())}); behind a pointer "
             f"{t['pointer']}; lost (d) {t['lost']}" for tree, t in totals.items()]) + "\n")
     assert nodes > 0

@@ -15,6 +15,7 @@ import random
 import sys
 import threading
 import tracemalloc
+import weakref
 
 import pytest
 
@@ -60,16 +61,19 @@ def _memo(engine):
     return {} if memo is None else memo.entries
 
 
+def _fields(msg):
+    return tuple(msg.get(name) for name in reconcile._REPLAY_IDENTITY_FIELDS)
+
+
 def _admitted(msg):
-    """The wrapper's own fill condition, restated: a plain dict whose key builds and whose gate is empty."""
+    """The wrapper's own fill condition: a plain dict whose key builds and whose gate is empty."""
     if type(msg) is not dict:
         return False
     try:
-        frozen = _freeze_replay_identity_value(msg.get("tool_calls"))
+        key, frozen = reconcile._replay_identity_memo_key(_fields(msg), True, True)
     except (TypeError, RecursionError):
         return False
-    content = reconcile.normalize_content_value(msg.get("content")) or ""
-    return not _replay_identity_memo_gate(str(msg.get("role") or "unknown"), content, frozen)
+    return not _replay_identity_memo_gate(key[3], key[4], frozen)
 
 
 def _freezes(row):
@@ -220,25 +224,29 @@ def test_a1_memoised_identity_equals_the_uncached_one(tmp_path, monkeypatch):
     with _engine(tmp_path) as engine:
         sid = engine._store.append("S", {"role": "user", "content": "projected source" + WORD * 600},
                                    conversation_id="conv")
-        configs, cases, rows_checked, hits, admitted_seen = [engine._config], 2000, 0, 0, 0
+        configs, cases, rows_checked, hits, admitted_seen, transitions = [engine._config], 2000, 0, 0, 0, 0
         for step in range(cases):
             rows = _case(rng, sid)
             for row in rows:
                 for flags in FLAGS:
-                    expected = counter.original(engine, copy.deepcopy(row), **flags)
+                    # The oracle sees the very object the memo sees: a copy-induced difference shows.
+                    expected = counter.original(engine, row, **flags)
                     first = engine._message_replay_identity(row, **flags)
                     assert first == expected, (step, row, flags)
                     if rng.random() < 0.05:
                         _mutate(rng, engine, tmp_path, step, rows)
+                        transitions += 1
                     configs.append(engine._config)  # keep every config alive: id() is never recycled here
-                    expected = counter.original(engine, copy.deepcopy(row), **flags)
+                    expected = counter.original(engine, row, **flags)
                     before = counter.calls
                     second = engine._message_replay_identity(row, **flags)
                     assert second == expected, (step, row, flags)
-                    if _admitted(row) and counter.calls == before:
-                        hits += 1
                     if _admitted(row):
-                        admitted_seen += 1
+                        # After any state transition, the next call fills the memo and the one after it hits.
+                        admitted_seen, before = admitted_seen + 1, counter.calls
+                        assert engine._message_replay_identity(row, **flags) == expected, (step, row, flags)
+                        assert counter.calls == before, ("admitted row missed twice", step, row, flags)
+                        hits += 1
                     elif type(row) is dict and _freezes(row):
                         found = (str(row.get("role") or "unknown"),
                                  reconcile.normalize_content_value(row.get("content")) or "",
@@ -248,10 +256,11 @@ def test_a1_memoised_identity_equals_the_uncached_one(tmp_path, monkeypatch):
             if rng.random() < 0.5:
                 _mutate(rng, engine, tmp_path, step, rows)
                 configs.append(engine._config)
+                transitions += 1
     assert rows_checked >= 2000 * 4
-    # Every admitted second call with no epoch change between it and its first call is a hit.
-    assert hits >= admitted_seen * 0.8, (hits, admitted_seen)
-    _evidence("a1_oracle.json", dict(cases=cases, row_flag_checks=rows_checked, admitted=admitted_seen, hits=hits))
+    assert hits == admitted_seen and transitions > 0
+    _evidence("a1_oracle.json", dict(cases=cases, row_flag_checks=rows_checked, admitted=admitted_seen, hits=hits,
+                                     state_transitions=transitions))
 
 
 class _Touched(BaseException):
@@ -326,7 +335,10 @@ def test_a2_admitted_rows_read_no_state(tmp_path, monkeypatch):
     with _engine(tmp_path) as engine:
         sid = engine._store.append("S", {"role": "user", "content": "projected source" + WORD * 600},
                                    conversation_id="conv")
-        admitted = [row for _ in range(2000) for row in _case(rng, sid) if _admitted(row)]
+        # A3's real artifacts too: a weakened gate that admits one of them must be caught here.
+        candidates = [row for _ in range(2000) for row in _case(rng, sid)]
+        candidates += [row for _kind, row in real_artifacts(tmp_path / "artifacts")]
+        admitted = [row for row in candidates if _admitted(row)]
         normal = [[ReconcileMixin._message_replay_identity_uncached(engine, row, **flags) for flags in FLAGS]
                   for row in admitted]
         store, dag, config, log = engine._store, engine._dag, engine._config, []
@@ -449,3 +461,200 @@ def _evidence(name, payload):
     directory = os.environ.get("LCMX_FIXEDWORK_EVIDENCE")
     if directory:
         pathlib.Path(directory, name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def test_f1_a_row_changed_between_key_and_computation_never_poisons_the_memo(tmp_path, monkeypatch):
+    """Another thread changing the dict after the key is read: the miss computes on a private copy."""
+    first, second = {"role": "user", "content": "version one"}, {"role": "user", "content": "version two"}
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        key_of, mutated = reconcile._replay_identity_memo_key, []
+
+        def key_then_mutate(fields, *args):  # the first key read of the row, then the other thread's write
+            result = key_of(fields, *args)
+            if fields[1] == first["content"] and not mutated and row.get("content") == first["content"]:
+                mutated.append(True)
+                row["content"] = second["content"]
+            return result
+        uncached = ReconcileMixin._message_replay_identity_uncached
+
+        def mutate_while_computing(engine_, msg, **kwargs):  # the write lands during the computation instead
+            if not kwargs.get("stored_row") and late and late[0].get("content") == first["content"]:
+                late[0]["content"] = second["content"]
+            return uncached(engine_, msg, **kwargs)
+        for patch_name, late in (("key", []), ("compute", None)):
+            engine.__dict__.pop("_replay_identity_memo", None)
+            engine._message_replay_identity({"role": "user", "content": "warm"})
+            row = dict(first)
+            with monkeypatch.context() as patch:
+                if patch_name == "key":
+                    patch.setattr(reconcile, "_replay_identity_memo_key", key_then_mutate)
+                else:
+                    late = [row]
+                    patch.setattr(ReconcileMixin, "_message_replay_identity_uncached", mutate_while_computing)
+                engine._message_replay_identity(row)
+            for untouched in (dict(first), dict(second)):
+                assert engine._message_replay_identity(untouched) == uncached(engine, untouched), patch_name
+        assert mutated
+
+
+def test_f2_a_str_subclass_is_never_remembered(tmp_path):
+    class Text(str):
+        pass
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        for row in ({"role": "user", "content": Text("sub content")}, {"role": Text("user"), "content": "sub role"},
+                    {"role": "tool", "tool_call_id": Text("c1"), "content": "sub id"},
+                    {"role": "tool", "tool_name": Text("t"), "content": "sub tool"},
+                    {"role": "user", "name": Text("n"), "content": "sub name"}, {"role": "user", "content": 7}):
+            assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+            assert not any(key[4] in ("sub content", "sub role", "sub id", "sub tool", "sub name", "7")
+                           for key in _memo(engine)), row
+
+
+def test_f3_changing_the_integer_digit_limit_drops_the_memo(tmp_path):
+    limit = sys.get_int_max_str_digits()
+    with _engine(tmp_path) as engine:
+        row = {"role": "assistant", "content": "x", "tool_calls": [{"function": {"arguments": '{"n": 1}'}}]}
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        engine._message_replay_identity(row)
+        before = engine.__dict__["_replay_identity_memo"]
+        try:
+            sys.set_int_max_str_digits(limit + 1000 if limit else 5000)
+            assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+            assert engine.__dict__["_replay_identity_memo"] is not before
+        finally:
+            sys.set_int_max_str_digits(limit)
+
+
+def test_f4_concurrent_inserts_at_the_cap_stay_inside_the_bound(monkeypatch):
+    cap = 64 * 1024
+    monkeypatch.setattr(reconcile, "_REPLAY_IDENTITY_MEMO_MAX_BYTES", cap)
+    memo, peaks, barrier = reconcile._ReplayIdentityMemo(("epoch",)), [], threading.Barrier(2)
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    def insert(worker):
+        barrier.wait()
+        for i in range(4000):
+            key, frozen = reconcile._replay_identity_memo_key(_fields(
+                {"role": "user", "content": f"{worker}-{i}" + "y" * 400}), True, True)
+            memo.remember(key, ("user", key[4], "", "", ""), frozen)
+            peaks.append(memo.size)
+    try:
+        threads = [threading.Thread(target=insert, args=(worker,)) for worker in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert max(peaks) <= cap and memo.size <= cap
+    with memo.lock:
+        assert sum(1 for _ in memo.entries) <= reconcile._REPLAY_IDENTITY_MEMO_MAX_ENTRIES
+    copied = copy.deepcopy(memo)
+    assert copied.lock is not memo.lock and copied.entries == {}
+
+
+class _Opaque:
+    """Not JSON: its identity may fall back to str(), which names the object's address."""
+
+
+def _not_memoised(engine, row, needle):
+    return not any(needle in key[4] for key in _memo(engine))
+
+
+def test_r1_nested_non_json_content_is_computed_on_the_original(tmp_path):
+    """A weakref (or any object) nested in content or calls: uncached on the original msg, equal to the base."""
+    target = _Opaque()
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        for row in ({"role": "user", "content": [{"type": "text", "text": "weak"}, weakref.ref(target)]},
+                    {"role": "assistant", "content": "weak calls", "tool_calls": [{"f": weakref.ref(target)}]},
+                    {"role": "user", "content": {"opaque": _Opaque()}}):
+            assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+            assert not any(key[4] == (reconcile.normalize_content_value(row["content"]) or "") for key in _memo(engine))
+
+
+def test_r2_a_value_swapped_after_the_read_is_never_reread(tmp_path, monkeypatch):
+    """The fields are read once: a str subclass swapped in mid-call never reaches the key, the copy or the memo."""
+    class Text(str):
+        pass
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        row, key_of = {"role": "user", "content": "swapped later"}, reconcile._replay_identity_memo_key
+
+        def swap(fields, *args):
+            result = key_of(fields, *args)
+            row["content"] = Text("swapped later")  # another thread's write, after the one read
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(reconcile, "_replay_identity_memo_key", swap)
+            result = engine._message_replay_identity(row)
+        plain = {"role": "user", "content": "swapped later"}
+        assert result == ReconcileMixin._message_replay_identity_uncached(engine, plain)
+        remembered = [value for key, value in _memo(engine).items() if key[4] == "swapped later"]
+        assert remembered and all(type(value[1]) is str for value in remembered)
+        assert engine._message_replay_identity(plain) == ReconcileMixin._message_replay_identity_uncached(engine, plain)
+
+
+def test_r3_a_digit_limit_change_during_a_miss_is_not_remembered(tmp_path, monkeypatch):
+    limit = sys.get_int_max_str_digits()
+    uncached = ReconcileMixin._message_replay_identity_uncached
+
+    def change_limit(engine_, msg, **kwargs):
+        if msg.get("content") == "digit row":
+            sys.set_int_max_str_digits(limit + 1000 if limit else 5000)
+        return uncached(engine_, msg, **kwargs)
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(ReconcileMixin, "_message_replay_identity_uncached", change_limit)
+                engine._message_replay_identity({"role": "user", "content": "digit row"})
+            assert _not_memoised(engine, None, "digit row")
+        finally:
+            sys.set_int_max_str_digits(limit)
+
+
+@pytest.mark.parametrize("content", [[_Opaque()], {1, 2}, (1, 2), [{1: "int key"}]], ids=["object", "set", "tuple",
+                                                                                          "int-key"])
+def test_r4_non_json_content_equals_the_base_and_is_not_memoised(tmp_path, content):
+    """A str() fallback names an address: computing on a copy would change it, so these compute on the original."""
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        row = {"role": "user", "content": content}
+        expected = ReconcileMixin._message_replay_identity_uncached(engine, row)
+        assert engine._message_replay_identity(row) == expected
+        assert engine._message_replay_identity(row) == expected
+        assert len(_memo(engine)) == 1  # only the warm row
+
+
+@pytest.mark.parametrize("kind", ["projection", "persisted"])
+def test_g1_an_impure_row_on_the_miss_path_computes_on_its_original_row(tmp_path, kind):
+    """A row the gate rejects reads keys the memo key does not hold: a projection's timestamp (its stamp check), a
+    persisted marker's session_id (its durable lookup). It must compute on the original row, never on a copy of the
+    key fields, or a stamped projection aliases its source and the marker loses its session."""
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        if kind == "persisted":
+            return _persisted_marker_keeps_its_session(engine, tmp_path)
+        source = {"role": "user", "content": "x" * 6000, "timestamp": 1000.0}
+        store_id = engine._store.append("S", source, conversation_id="conv")
+        projected = engine._survival_projection([source], {id(source): store_id}, 0)[0]
+        assert "[LCM survival fit: this " in projected["content"]
+        other_stamp = {**projected, "timestamp": 2000.0}  # a new occurrence: another stamp than the source's
+        identity = engine._message_replay_identity(other_stamp)
+        assert identity == ReconcileMixin._message_replay_identity_uncached(engine, other_stamp)
+        assert identity[1] != source["content"], "a differently stamped projection aliased its source"
+
+
+def _persisted_marker_keeps_its_session(engine, tmp_path):
+    marker = _write_output(tmp_path / "home" / "cache" / "spillover" / "call_spill.txt")
+    engine.ingest([{"role": "assistant", "content": "", "tool_calls": [
+                       {"id": "call_spill", "type": "function", "function": {"name": "dump", "arguments": "{}"}}]},
+                   {"role": "tool", "tool_call_id": "call_spill", "tool_name": "dump", "content": marker}])
+    engine.on_session_start("S9", platform="cli", context_length=200_000, conversation_id="conv")
+    row = {"role": "tool", "tool_call_id": "call_spill", "tool_name": "dump", "content": marker, "session_id": "S"}
+    assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+    assert all(key[4] != marker for key in _memo(engine))
