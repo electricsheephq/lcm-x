@@ -2643,6 +2643,25 @@ class ReconcileMixin:
         run.literal_pruned_identities[id(msg)] = (inputs, identity)
         return identity
 
+    def _replay_uid_evidence(self, messages, rows) -> tuple[bool, bool]:
+        """Return (any UID contradiction, every row UID-matched) for aligned replay rows."""
+        pairs = [(self._host_occurrence_metadata(message)["message_uid"], row.get("store_id"))
+                 for message, row in zip(messages, rows)]
+        ids = [store_id for uid, store_id in pairs if uid is not None and store_id is not None]
+        if not ids or not self._store._host_uid_table_exists():
+            return False, False
+        lineage, _ = self._host_uid_lineage_key()
+        if lineage is None:
+            return False, False
+        bindings = self._store.host_uid_uids_of_stores(lineage, ids)
+        witnessed = len(pairs) == len(messages)
+        for uid, store_id in pairs:
+            bound = bindings.get(store_id, ())
+            if uid is not None and bound and uid not in bound:
+                return True, False
+            witnessed = witnessed and uid in bound
+        return False, witnessed
+
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
@@ -2669,6 +2688,7 @@ class ReconcileMixin:
         native_recovery_snapshot_digests = run.native_recovery_snapshot_digests
         native_prefix_digests = run.native_prefix_digests
         empty_prefix_cursor: int | None = None
+        rejected_full_replay = False
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
             native_recovery_snapshot_digest = native_prefix_digests.get(cursor, "")
@@ -2765,6 +2785,25 @@ class ReconcileMixin:
             has_tool_id_anchored_replay = candidate.has_tool_id_anchored_replay
             has_effective_full_replay = candidate.has_effective_full_replay
             has_raw_full_replay = candidate.has_raw_full_replay
+            if stored_tail_rows and (has_effective_full_replay or has_raw_full_replay
+                                     or (rejected_full_replay and matches_raw_tail)):
+                size = len(candidate_prefix)
+                raw_conflict, witnessed = self._replay_uid_evidence(
+                    candidate_identity_messages, stored_tail_rows[-size:])
+                effective_conflict = raw_conflict
+                if has_effective_full_replay and run.sanitized_tail_collapsed:
+                    effective_rows = [row for row, identity in zip(stored_tail_rows, stored_tail)
+                                      if self._active_cleanup_replay_identity(identity) is not None]
+                    effective_conflict, _ = self._replay_uid_evidence(
+                        candidate_identity_messages, effective_rows[-size:])
+                # A shorter exact suffix can prove the overlap of a contradicted full replay.
+                if (rejected_full_replay and witnessed and literal_prefix == stored_tail[-size:]
+                        and not any(map(_has_lossy_redacted_identity, literal_prefix))):
+                    return cursor
+                rejected_full_replay |= ((has_effective_full_replay and effective_conflict)
+                                         or (has_raw_full_replay and raw_conflict))
+                has_effective_full_replay &= not effective_conflict
+                has_raw_full_replay &= not raw_conflict
             has_scaffold_suffix_replay = candidate.has_scaffold_suffix_replay
             has_raw_cleanup_replay = candidate.has_raw_cleanup_replay
             if (

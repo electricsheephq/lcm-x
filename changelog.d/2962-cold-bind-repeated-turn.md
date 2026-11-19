@@ -1,0 +1,1 @@
+- Fix: Cold bind preserves fresh turns that repeat stored text when host UIDs identify different occurrences (#2962). Unkeyed replay retains its existing behavior (#1566).
