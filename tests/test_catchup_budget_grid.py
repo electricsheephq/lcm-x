@@ -169,7 +169,9 @@ N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
 KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
-KNOWN_2896_A0 = list(N)  # twins with A0 rows on main, so the candidate A0 test fails too while CAND = main
+# Issue 2901: leaf selection charges a glued carrier at its remainder, so these twins no longer stall into the fit.
+FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
+KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
