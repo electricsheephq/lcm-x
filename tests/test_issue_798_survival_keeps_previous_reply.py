@@ -62,7 +62,7 @@ def _fit(engine, view, budget):
 
 def _base_without_reply(view, ids):
     """Exact base shape when only the newest whole turn fits (including notice bytes)."""
-    notice = survival_fit._NOTICE.format(n=2, first=ids[0], last=ids[1])
+    notice = survival_fit.survival_notice_text(2, [("S", ids[0], ids[1])])
     return [{**view[0], "content": survival_fit.SurvivalFitMixin._survival_with_notice(
         view[0]["content"], notice)}, view[-1]]
 
@@ -73,7 +73,7 @@ def test_1_verbatim_reply_object_and_notice_excludes_reply(engine, rough_counts)
     assert fitted[1] is view[2] and fitted[2] is view[3]
     ids = [row["store_id"] for row in _rows(engine)]
     assert engine._last_survival_fit["dropped_rows"] == 1
-    assert engine._last_survival_fit["notice"] == survival_fit._NOTICE.format(n=1, first=ids[0], last=ids[0])
+    assert engine._last_survival_fit["notice"] == survival_fit.survival_notice_text(1, [("S", ids[0], ids[0])])
     assert rough_counts(fitted) <= 100
 
 

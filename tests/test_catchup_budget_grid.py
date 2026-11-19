@@ -33,7 +33,7 @@ RUNNER = HERE / "behaviour" / "catchup_grid_runner.py"
 BASE_TREE = Path(os.environ["LCMX_GRID_BASE"]).resolve() if os.environ.get("LCMX_GRID_BASE") else None
 NO_BASE = "two-tree grid: set LCMX_GRID_BASE to a copy of the base commit's tree (CI has none)"
 CAND_TREE = Path(os.environ.get("LCMX_GRID_CAND", str(HERE.parent))).resolve()
-RUN_TIMEOUT = 900  # seconds per runner process
+RUN_TIMEOUT = int(os.environ.get("LCMX_GRID_RUN_TIMEOUT", "900"))
 WALL_PLUGIN, WALL_HOST, HOST_COMMIT = 250.0, 270.0, 17.0
 CATCHUP_HARD, BASE_HARD = 210.0, 120.0
 STRICT = "needs the catch-up change"
@@ -168,16 +168,14 @@ S = [cell["id"] for cell in CELLS if cell["group"] == "S"]
 N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
-KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
 # Issue 2901: leaf selection charges a glued carrier at its remainder, so these twins no longer stall into the fit.
 FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
+# twins main fails on the base test (A0 or A0b); main 2c75f52b carries the 2901 fix, so FIXED_2901 pass on the base
+KNOWN_2896 = [cell for cell in N if cell not in FIXED_2901]
 KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
-# Issue 2901 moves these twins' trajectories: on some passes the candidate shows rows out of the list where the base did
-# not, while its totals stay at most the base's. Only the per-pass clause is pinned; the totals test is not.
+# Issue 2901 moved these twins' trajectories against a base without it. With the fix on main 2c75f52b (the base) the
+# per-pass clause holds and is no longer pinned; the totals test stays.
 PER_PASS_2901 = ["s-600k-l40-prefix-nosys", "d-depth0-past-100-nosys"]
-PER_PASS_2901_REASON = ("issues 2896, 904, 2883: the candidate's own later survival fit (notice not delivered without a "
-                        "system row), a kept leaf not rendered under the hidden-only rule, and depth-0 nodes beyond "
-                        "the per-level limit")
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
@@ -187,7 +185,7 @@ ISSUE_2877 = "issue 2877"
 # s-600k-l40-prefix a later fit's notice no longer names 37 of the first fit's rows, which no leaf covers yet (A0).
 KNOWN_2877_BASE = ["g1-03", "g1-04", "g1-12", "g1-13", "g1-20", "g1-21", "g1-22", "g1-30", "g1-31", "g1-33", "g1-34",
                    "g1-40", "g1-41", "g1-42", "g1-43", "g1-44", "s-600k-l40-prefix"]
-KNOWN_2877_A0 = ["s-600k-l40-prefix"]
+KNOWN_2877_A0: list[str] = []  # #2877 (N1): the notice names every range still out of view; the candidate pin is off
 ARM_CELLS = S + [cell for cell in KNOWN_2877_BASE if cell.startswith("g1-")]  # steady cells, G1 cells with A0b
 ARM_PRE_SECONDS = 5
 
@@ -450,8 +448,10 @@ def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
                          f"trigger {c['trigger']}, base {b['calls_started']}")
         if c["leaves_cum"] < b["leaves_cum"]:
             found.append(f"pass {b['pass']}: cumulative leaves {c['leaves_cum']} < base {b['leaves_cum']}")
-        if c["drained_cum"] < b["drained_cum"]:
-            found.append(f"pass {b['pass']}: cumulative drained {c['drained_cum']} < base {b['drained_cum']}")
+        # T1-285 / T1-293: drained = tokens removed by stored leaves and condensations, never a survival-fit cut or notice
+        if c["summary_drained_cum"] < b["summary_drained_cum"]:
+            found.append(f"pass {b['pass']}: cumulative drained {c['summary_drained_cum']} < base "
+                         f"{b['summary_drained_cum']}")
         if c["hold_armed"] and not b["hold_armed"]:
             found.append(f"pass {b['pass']}: the candidate armed a hold the base did not")
     return found
@@ -479,7 +479,7 @@ def test_a0_loss(grid, cell, tree, request):
     records = grid[tree]["by_cell"][cell]
     if tree == "base" and cell in KNOWN_2877_BASE or tree == "cand" and cell in KNOWN_2877_A0:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
-    if cell in D:
+    if cell in D and not (tree == "cand" and cell == "d-depth0-past-100"):  # T1-293: N1 names the rows the limit hides
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
     if cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2896))
@@ -520,15 +520,16 @@ def test_no_duplicate_content_rows(grid, cell, tree):
 
 
 @pytest.mark.parametrize("cell", ALL)
-def test_a0_candidate_no_worse_than_the_base(grid, cell, request):
-    """Per pass: the candidate's A0b rows, and (in the pinned A0 cells) its A0 rows, are at most the base's."""
-    if cell in PER_PASS_2901:
-        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=PER_PASS_2901_REASON))
+def test_a0_candidate_no_worse_than_the_base(grid, cell):
+    """Per pass (#2877, ruling T1-275): the candidate's A0 rows are at most the base's, and its A0 + A0b rows are at most
+    the base's (N1 moves rows with no pointer behind its notice). The PER_PASS_2901 cells are not pinned: the base
+    (main 2c75f52b) carries the 2901 fix, so both trees share that trajectory."""
     base, cand = grid["base"]["by_cell"][cell], grid["cand"]["by_cell"][cell]
     for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
-        assert nc <= nb, f"A0b in cell {cell} pass {b['pass']}: candidate {nc} rows behind a notice, base {nb}"
         lost = [r["loss"]["missing_count"] if r["loss"] else 0 for r in (b, c)]
         assert lost[1] <= lost[0], f"A0 in cell {cell} pass {b['pass']}: candidate {lost[1]} rows, base {lost[0]}"
+        assert lost[1] + nc <= lost[0] + nb, (f"A0 + A0b in cell {cell} pass {b['pass']}: candidate {lost[1]} + {nc}, "
+                                              f"base {lost[0]} + {nb}")
 
 
 @pytest.mark.parametrize("cell", PER_PASS_2901)
