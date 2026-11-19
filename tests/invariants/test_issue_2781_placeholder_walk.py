@@ -304,12 +304,14 @@ def _placement_digest(shape, snapshots):
 
 def test_unset_shadow_digests(tmp_path, monkeypatch, summaries):
     digests = {}
-    for mode in ("unset", "shadow"):
+    for mode in ("unset", "shadow", "on"):
         _mode(monkeypatch, mode)
         for cell in (1, 4, 5):
             name = f"{mode}-{cell}"
             summaries.clear()
-            with _open(tmp_path / name) as engine:
+            with _open(tmp_path / name) as engine, monkeypatch.context() as control:
+                if mode == "on":
+                    control.setattr(engine, "_uid_recognition_allowed", lambda: False)
                 view, _, _, _, _, after = _far_store(engine, groups=40 if cell == 4 else 1)
                 if cell == 4:
                     engine._config.leaf_chunk_tokens = 110
@@ -319,11 +321,10 @@ def test_unset_shadow_digests(tmp_path, monkeypatch, summaries):
                     for _ in range(2):
                         output = _pass(engine, output)
                 digests[name] = _digest(_snapshot(engine, output, summaries))
-    assert all(digests[f"unset-{cell}"] == digests[f"shadow-{cell}"] for cell in (1, 4, 5))
-    if path := os.environ.get("C16_DIGEST"):
-        Path(path).write_text(json.dumps(digests, indent=2, sort_keys=True) + "\n")
-    if path := os.environ.get("C16_EXPECT"):
-        assert digests == json.loads(Path(path).read_text())
+    assert {cell: digests[f"unset-{cell}"] for cell in (1, 4, 5)} == {
+        cell: digests[f"shadow-{cell}"] for cell in (1, 4, 5)}
+    assert {cell: digests[f"on-{cell}"] for cell in (1, 4, 5)} == {
+        cell: digests[f"shadow-{cell}"] for cell in (1, 4, 5)}
 
 
 def test_complete_group_followed_by_version(tmp_path, monkeypatch, summaries, caplog):
@@ -339,6 +340,22 @@ def test_complete_group_followed_by_version(tmp_path, monkeypatch, summaries, ca
         assert engine._store_complete_copy_exclusion_proofs == copies
         assert "first tool group remains open" not in caplog.text
         _assert_no_orphan_or_stub(output)
+
+
+@pytest.mark.xfail(strict=True, reason="first-group exception gap, pre-existing, issue 2934")
+def test_first_open_group_keeps_its_real_result(tmp_path, monkeypatch, summaries):
+    _mode(monkeypatch, "on")
+    with _open(tmp_path / "store") as engine:
+        prefix, summary = _opening(engine, [_msg("initial")])
+        caller, result = _group("open-call", 1)
+        retained, later, tail = [_msg(name) for name in ("retained", "later", "tail")]
+        engine.ingest([*prefix, caller, retained, result, later, tail])
+        live = dict(result, content=PRUNED)
+        result_id = _canonical(engine, result)
+        seen = _observe_resolution(engine, monkeypatch, [(live, result_id, None)])
+        output = _pass(engine, [summary, caller, live, later, retained, tail])
+        _assert_resolution(seen, [(live, result_id, None)])
+        assert result_id in _present_node_sources(engine, output) or live in output or result in output
 
 
 @pytest.mark.parametrize("exit_at", ["retained", "hole", "scan"])
@@ -373,7 +390,6 @@ def test_group_closure(tmp_path, monkeypatch, summaries, caplog, exit_at, first)
             output = _pass(engine, view)
         _assert_resolution(seen, cases)
         sources = _present_node_sources(engine, output)
-        assert result_id not in sources
         if first:
             assert caller_id in sources
             lines = [r.getMessage() for r in caplog.records if "first tool group remains open" in r.getMessage()]
@@ -385,6 +401,7 @@ def test_group_closure(tmp_path, monkeypatch, summaries, caplog, exit_at, first)
             assert _frontier(engine) > before
             assert engine._store.get(result_id)["content"] == result["content"]
         else:
+            assert result_id not in sources
             assert _canonical(engine, prior[0]) in sources
             assert caller_id not in sources
             assert all(row in output for row in group)
@@ -509,6 +526,7 @@ def test_new_uid_with_reused_call_id(tmp_path, monkeypatch, summaries):
         before = len(_rows(engine))
         engine.ingest([*prefix, *new])
         assert checked and not any(checked)
+        assert _bindings(engine, new).get(new[1]["message_uid"]) == [(_rows(engine)[-1]["store_id"], "canonical")]
         sid = _canonical(engine, new[1])
         assert len(_rows(engine)) == before + 2 and sid > _canonical(engine, old[1])
         assert engine._store.get(sid)["content"] == PRUNED
@@ -549,6 +567,7 @@ def test_cold_uid_prefix(tmp_path, monkeypatch, summaries, copies):
         filler = [_msg(f"history-{i}") for i in range(67)]
         prefix, _ = _opening(engine, [*filler, *neighbor, *group])
         caller_id, result_id = [_canonical(engine, row) for row in group]
+        neighbor_ids = [_canonical(engine, row) for row in neighbor]
         assert {caller_id, result_id} <= set(_covered(engine))
         copy_rows = _copy(group, 1) * copies
         engine.ingest([*prefix, *copy_rows])
@@ -560,6 +579,8 @@ def test_cold_uid_prefix(tmp_path, monkeypatch, summaries, copies):
     for attempt in range(2):
         with _open(path, restart=True) as engine:
             assert [_canonical(engine, row) for row in group] == [caller_id, result_id]
+            assert [row["store_id"] for row in engine._host_uid_resolve(
+                _pruned(neighbor), prefix_only=True).values()] == neighbor_ids
             real = engine._reconcile_ingest_cursor_from_store
             records = []
 

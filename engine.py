@@ -8801,7 +8801,8 @@ class LCMEngine(
                 if uid_recognition and anchor_plan["cursor"] < n:
                     matched = anchor_plan.setdefault("matched", {})
                     other_claims = {int(row["store_id"]) for rows in matched.values() for row in rows}
-                    for idx, row in self._host_uid_resolve(messages, reconcile_messages, fetched=uid_fetched).items():
+                    for idx, row in self._host_uid_resolve(
+                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims).items():
                         if (idx >= anchor_plan["cursor"] and idx not in matched and idx not in anchor_plan["remainders"]
                                 and (row is None or row["store_id"] not in other_claims)):
                             if row is not None:

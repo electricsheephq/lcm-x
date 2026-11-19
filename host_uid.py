@@ -322,7 +322,7 @@ class HostUidShadowMixin:
             return source
 
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
-                          bound_uids=None, held=None):
+                          bound_uids=None, held=None, avoid=()):
         """Resolve durable occurrences and optionally report placeholder versions superseded by their source."""
         if not self._uid_recognition_enabled():
             return {}
@@ -355,7 +355,8 @@ class HostUidShadowMixin:
                         continue
                     candidates = [(sid, kind) for sid, kind in bindings.get(uid, ()) if sid in owned and sid not in claimed]
                     hit = next((sid for sid, kind in candidates
-                                if kind == "canonical" and self._uid_placeholder_source(message, owned[sid])), None)
+                                if kind == "canonical" and sid not in avoid
+                                and self._uid_placeholder_source(message, owned[sid])), None)
                     if hit is not None and held is not None:
                         placeholder_versions[idx] = {sid: hit for sid, _ in candidates
                                                      if owned[sid].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER}

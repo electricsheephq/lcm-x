@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+from bisect import bisect_right
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -234,6 +235,13 @@ class StoreCompleteMixin:
         return self._redact_active_replay_messages(messages)
 
     def _store_complete_placeholder_twins(self, conn, rows):
+        try:
+            return self._store_complete_placeholder_twins_query(conn, rows)
+        except Exception:
+            logger.debug("LCM UID twin lookup unavailable", exc_info=True)
+            return {}
+
+    def _store_complete_placeholder_twins_query(self, conn, rows):
         if not uid_recognition_enabled(self):
             return {}
         conversation = {"", str(self._conversation_id or "")}
@@ -676,15 +684,32 @@ class StoreCompleteMixin:
         # before the first one that is not (a chunk row the budget cut, a claim left behind).
         def pending_caller():
             skipped = set(excluded) | covered | passive | ignored
-            skipped_answers, last_result = set(), {}
+            caller_positions, skipped_answers, stored_answers = {}, {}, {}
+            # A mapped caller in the live view can bound a result beyond the scan.
+            for message, sid in ([(row, int(row["store_id"])) for row in rows]
+                                 + [(m, position(m)) for m in view]):
+                if sid:
+                    for call_id in caller_ids(message):
+                        caller_positions.setdefault(call_id, set()).add(sid)
+            caller_positions = {call_id: sorted(positions) for call_id, positions in caller_positions.items()}
             for row in rows:
                 if call_id := tool_id(row):
                     sid = int(row["store_id"])
                     if sid in skipped:
-                        skipped_answers.add(call_id)
-                    last_result[call_id] = sid
+                        skipped_answers.setdefault(call_id, []).append(sid)
+                    stored_answers.setdefault(call_id, []).append(sid)
             emitted = {id(message) for message, _ids in out}
-            waiting = results(message for message in chunk if id(message) not in emitted)
+            waiting, live_callers = {}, {}
+            for message in chunk:
+                for call_id in caller_ids(message):
+                    live_callers[call_id] = position(message)
+                if id(message) not in emitted and (call_id := tool_id(message)):
+                    waiting.setdefault(call_id, []).append((position(message), live_callers.get(call_id)))
+
+            def has_answer(positions, at, end):
+                index = bisect_right(positions, at)
+                return index < len(positions) and positions[index] < end
+
             answered, pending = set(), None
             for i in range(len(out) - 1, -1, -1):
                 message, ids = out[i]
@@ -692,30 +717,55 @@ class StoreCompleteMixin:
                     answered.add(call_id)
                 elif opens := caller_ids(message):
                     at = position(message, ids)
-                    unanswered = opens - answered - skipped_answers
-                    count = sum(call_id in waiting or last_result.get(call_id, 0) > at for call_id in unanswered)
+                    count = 0
+                    for call_id in opens - answered:
+                        positions = caller_positions.get(call_id, ())
+                        index = bisect_right(positions, at)
+                        end = positions[index] if index < len(positions) else float("inf")
+                        if has_answer(skipped_answers.get(call_id, ()), at, end):
+                            continue
+                        only_caller = len(positions) <= 1 and index == len(positions)
+                        count += has_answer(stored_answers.get(call_id, ()), at, end) or any(
+                            only_caller or (at < sid < end if sid else owner in (None, at))
+                            for sid, owner in waiting.get(call_id, ()))
                     if count:
                         pending = i, at, count
                     answered.difference_update(opens)
             return pending
 
         hole_stop = None  # #1998: (hole, taken rows not emitted) of the cut that empties the leaf
+        before_pending = None
         while out:
             accounted = {s for m, ids in out for s in ids_of(m, ids)} | set(excluded) | ignored | passive
             last = max((s for m, ids in out for s in ids_of(m, ids)), default=0)
             hole = next((int(row["store_id"]) for row in rows
                          if int(row["store_id"]) < last and int(row["store_id"]) not in accounted), None)
-            if hole is None:
-                if recognize and (pending := pending_caller()) is not None:
+            restore = hole is not None and before_pending is not None
+            if hole is None or restore:
+                if restore:
+                    # The walk prefix lost a lower store ID carried by a later walk row.
+                    out, pending = before_pending
+                    complete = False
+                else:
+                    pending = pending_caller() if recognize else None
+                if pending is not None:
                     i, caller_id, count = pending
-                    if any(ids_of(m, ids) for m, ids in out[:i]):
+                    if restore:
+                        key = self._hold_conversation_key()
+                        logged = self.__dict__.setdefault("_open_tool_group_cut_logged", set())
+                        if key in logged:
+                            break
+                        logged.add(key)
+                    elif any(ids_of(m, ids) for m, ids in out[:i]):
+                        if before_pending is None:
+                            before_pending = out[:], pending
                         del out[i:]
                         complete = False
                         continue
                     scope = _UID_DROP_INPUT.get()
-                    if scope is None or not scope.open_tool_group_logged:
-                        logger.info("LCM store-complete leaf: first tool group remains open caller_store_id=%d pending=%d",
-                                    caller_id, count)
+                    if restore or scope is None or not scope.open_tool_group_logged:
+                        logger.info("LCM store-complete leaf: first tool group remains open caller_store_id=%d pending=%d%s",
+                                    caller_id, count, " reason=contiguity" if restore else "")
                         if scope is not None and scope.owner is self:
                             scope.open_tool_group_logged = True
                 break
