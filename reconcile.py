@@ -18,10 +18,12 @@ avoid an import cycle (staticmethod resolution is identical).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
 import sys
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -486,14 +488,28 @@ def _replay_identity_memo_gate(role: str, content: str, frozen_calls: tuple) -> 
                      if any(marker in text for text in texts for marker in markers))
 
 
+def _replay_identity_memo_key(msg: Dict[str, Any], strip_carrier: bool, allow_pruned_tool_alias: bool) -> tuple:
+    """(key, frozen calls) of a live row, or TypeError when a raw value the key reads is not an exact str/None
+    (role, tool_call_id, tool_name, name) or an exact str/list/dict/None (content): a subclass could make two
+    different values compare equal."""
+    if type(msg.get("content")) not in (str, list, dict, type(None)) or any(
+            type(msg.get(name)) not in (str, type(None)) for name in ("role", "tool_call_id", "tool_name", "name")):
+        raise TypeError("not a replay identity memo input")
+    frozen_calls = _freeze_replay_identity_value(msg.get("tool_calls"))
+    role = str(msg.get("role") or "unknown")
+    return (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role,
+            normalize_content_value(msg.get("content")) or "", str(msg.get("tool_call_id") or ""),
+            frozen_calls, str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else ""), frozen_calls
+
+
 class _ReplayIdentityMemo:
     """One epoch's remembered live identities; replaced whole on an epoch change or overflow."""
-    __slots__ = ("epoch", "entries", "size")
+    __slots__ = ("epoch", "entries", "size", "lock")
 
     def __init__(self, epoch):
-        self.epoch, self.entries, self.size = epoch, {}, 0
+        self.epoch, self.entries, self.size, self.lock = epoch, {}, 0, threading.Lock()
 
-    def __deepcopy__(self, memo):  # a copied engine starts with an empty memo
+    def __deepcopy__(self, memo):  # a copied engine starts with an empty memo and its own lock
         return _ReplayIdentityMemo(self.epoch)
 
     def remember(self, key: tuple, result: tuple, frozen_calls: tuple) -> None:
@@ -505,11 +521,12 @@ class _ReplayIdentityMemo:
                 + _frozen_replay_identity_walk(frozen_calls)[1])
         if size > _REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES:
             return
-        if (len(self.entries) >= _REPLAY_IDENTITY_MEMO_MAX_ENTRIES
-                or self.size + size > _REPLAY_IDENTITY_MEMO_MAX_BYTES):
-            self.entries, self.size = {}, 0
-        self.entries[key] = result
-        self.size += size
+        with self.lock:  # the bound check and the insert are one step: concurrent inserts never pass the caps
+            if (len(self.entries) >= _REPLAY_IDENTITY_MEMO_MAX_ENTRIES
+                    or self.size + size > _REPLAY_IDENTITY_MEMO_MAX_BYTES):
+                self.entries, self.size = {}, 0
+            self.entries[key] = result
+            self.size += size
 
 
 class ReconcileMixin:
@@ -1082,7 +1099,7 @@ class ReconcileMixin:
         one: it always computes) on a bound engine (no detached-store arguments), a live row (stored rows are
         not remembered yet), no host-rewrite overlay, a plain dict, storage already open (a miss opens it as
         before), a key that builds and an empty gate. The memo is dropped when the config object, the session,
-        the conversation or the Hermes home changes, and on overflow."""
+        the conversation, the Hermes home or the interpreter's integer-digit limit changes, and on overflow."""
         uncached = ReconcileMixin._message_replay_identity_uncached
         state = getattr(self, "__dict__", None)
         if (stored_row or with_host_rewrite or store is not None or hermes_home is not None
@@ -1092,7 +1109,8 @@ class ReconcileMixin:
                             strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias, store=store,
                             hermes_home=hermes_home, session_id=session_id, conversation_id=conversation_id)
         epoch = (id(getattr(self, "_config", None)), getattr(self, "_session_id", None),
-                 getattr(self, "_conversation_id", None), getattr(self, "_hermes_home", None))
+                 getattr(self, "_conversation_id", None), getattr(self, "_hermes_home", None),
+                 sys.get_int_max_str_digits())  # the digit limit decides which tool-call JSON strings parse
         # The key holds, by value, everything the body reads for an admitted row: the flags, the role string,
         # the normalised content (the body reads raw content only through normalize_content_value), the call id,
         # the tool calls (read by _survival_projection_source's mark scan and _stable_tool_calls_identity) and
@@ -1100,11 +1118,7 @@ class ReconcileMixin:
         # stamp check runs only on a projection mark), session_id and store_id (stored rows and persisted-output
         # proofs only), and ``name`` on other roles (a participant label, never part of the identity).
         try:
-            frozen_calls = _freeze_replay_identity_value(msg.get("tool_calls"))
-            role = str(msg.get("role") or "unknown")
-            key = (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role,
-                   normalize_content_value(msg.get("content")) or "", str(msg.get("tool_call_id") or ""),
-                   frozen_calls, str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else "")
+            key, _frozen = _replay_identity_memo_key(msg, strip_carrier, allow_pruned_tool_alias)
             memo = state.get("_replay_identity_memo")
             if memo is None or memo.epoch != epoch:
                 memo = state["_replay_identity_memo"] = _ReplayIdentityMemo(epoch)
@@ -1113,7 +1127,15 @@ class ReconcileMixin:
             return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
         if hit is not None:
             return hit
-        result = uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+        # A miss computes on a private copy and remembers it under the copy's own key, so a row another thread
+        # changes between the key and the computation can never store one version's identity under the other's
+        # key. Nothing on the admitted path reads the row's object identity.
+        try:
+            snap = copy.deepcopy(msg)
+            key, frozen_calls = _replay_identity_memo_key(snap, strip_carrier, allow_pruned_tool_alias)
+        except Exception:
+            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+        result = uncached(self, snap, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
         if not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
             memo.remember(key, result, frozen_calls)
         return result

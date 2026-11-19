@@ -61,15 +61,14 @@ def _memo(engine):
 
 
 def _admitted(msg):
-    """The wrapper's own fill condition, restated: a plain dict whose key builds and whose gate is empty."""
+    """The wrapper's own fill condition: a plain dict whose key builds and whose gate is empty."""
     if type(msg) is not dict:
         return False
     try:
-        frozen = _freeze_replay_identity_value(msg.get("tool_calls"))
+        key, frozen = reconcile._replay_identity_memo_key(msg, True, True)
     except (TypeError, RecursionError):
         return False
-    content = reconcile.normalize_content_value(msg.get("content")) or ""
-    return not _replay_identity_memo_gate(str(msg.get("role") or "unknown"), content, frozen)
+    return not _replay_identity_memo_gate(key[3], key[4], frozen)
 
 
 def _freezes(row):
@@ -220,7 +219,7 @@ def test_a1_memoised_identity_equals_the_uncached_one(tmp_path, monkeypatch):
     with _engine(tmp_path) as engine:
         sid = engine._store.append("S", {"role": "user", "content": "projected source" + WORD * 600},
                                    conversation_id="conv")
-        configs, cases, rows_checked, hits, admitted_seen = [engine._config], 2000, 0, 0, 0
+        configs, cases, rows_checked, hits, admitted_seen, transitions = [engine._config], 2000, 0, 0, 0, 0
         for step in range(cases):
             rows = _case(rng, sid)
             for row in rows:
@@ -230,15 +229,18 @@ def test_a1_memoised_identity_equals_the_uncached_one(tmp_path, monkeypatch):
                     assert first == expected, (step, row, flags)
                     if rng.random() < 0.05:
                         _mutate(rng, engine, tmp_path, step, rows)
+                        transitions += 1
                     configs.append(engine._config)  # keep every config alive: id() is never recycled here
                     expected = counter.original(engine, copy.deepcopy(row), **flags)
                     before = counter.calls
                     second = engine._message_replay_identity(row, **flags)
                     assert second == expected, (step, row, flags)
-                    if _admitted(row) and counter.calls == before:
-                        hits += 1
                     if _admitted(row):
-                        admitted_seen += 1
+                        # After any state transition, the next call fills the memo and the one after it hits.
+                        admitted_seen, before = admitted_seen + 1, counter.calls
+                        assert engine._message_replay_identity(row, **flags) == expected, (step, row, flags)
+                        assert counter.calls == before, ("admitted row missed twice", step, row, flags)
+                        hits += 1
                     elif type(row) is dict and _freezes(row):
                         found = (str(row.get("role") or "unknown"),
                                  reconcile.normalize_content_value(row.get("content")) or "",
@@ -248,10 +250,11 @@ def test_a1_memoised_identity_equals_the_uncached_one(tmp_path, monkeypatch):
             if rng.random() < 0.5:
                 _mutate(rng, engine, tmp_path, step, rows)
                 configs.append(engine._config)
+                transitions += 1
     assert rows_checked >= 2000 * 4
-    # Every admitted second call with no epoch change between it and its first call is a hit.
-    assert hits >= admitted_seen * 0.8, (hits, admitted_seen)
-    _evidence("a1_oracle.json", dict(cases=cases, row_flag_checks=rows_checked, admitted=admitted_seen, hits=hits))
+    assert hits == admitted_seen and transitions > 0
+    _evidence("a1_oracle.json", dict(cases=cases, row_flag_checks=rows_checked, admitted=admitted_seen, hits=hits,
+                                     state_transitions=transitions))
 
 
 class _Touched(BaseException):
@@ -326,7 +329,10 @@ def test_a2_admitted_rows_read_no_state(tmp_path, monkeypatch):
     with _engine(tmp_path) as engine:
         sid = engine._store.append("S", {"role": "user", "content": "projected source" + WORD * 600},
                                    conversation_id="conv")
-        admitted = [row for _ in range(2000) for row in _case(rng, sid) if _admitted(row)]
+        # A3's real artifacts too: a weakened gate that admits one of them must be caught here.
+        candidates = [row for _ in range(2000) for row in _case(rng, sid)]
+        candidates += [row for _kind, row in real_artifacts(tmp_path / "artifacts")]
+        admitted = [row for row in candidates if _admitted(row)]
         normal = [[ReconcileMixin._message_replay_identity_uncached(engine, row, **flags) for flags in FLAGS]
                   for row in admitted]
         store, dag, config, log = engine._store, engine._dag, engine._config, []
@@ -449,3 +455,96 @@ def _evidence(name, payload):
     directory = os.environ.get("LCMX_FIXEDWORK_EVIDENCE")
     if directory:
         pathlib.Path(directory, name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def test_f1_a_row_changed_between_key_and_computation_never_poisons_the_memo(tmp_path, monkeypatch):
+    """Another thread changing the dict after the key is read: the miss computes on a private copy."""
+    first, second = {"role": "user", "content": "version one"}, {"role": "user", "content": "version two"}
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        key_of, mutated = reconcile._replay_identity_memo_key, []
+
+        def key_then_mutate(msg, *args):  # the first key read of the row, then the other thread's write
+            result = key_of(msg, *args)
+            if msg is row and not mutated:
+                mutated.append(True)
+                row["content"] = second["content"]
+            return result
+        uncached = ReconcileMixin._message_replay_identity_uncached
+
+        def mutate_while_computing(engine_, msg, **kwargs):  # the write lands during the computation instead
+            if not kwargs.get("stored_row") and late and late[0].get("content") == first["content"]:
+                late[0]["content"] = second["content"]
+            return uncached(engine_, msg, **kwargs)
+        for patch_name, late in (("key", []), ("compute", None)):
+            engine.__dict__.pop("_replay_identity_memo", None)
+            engine._message_replay_identity({"role": "user", "content": "warm"})
+            row = dict(first)
+            with monkeypatch.context() as patch:
+                if patch_name == "key":
+                    patch.setattr(reconcile, "_replay_identity_memo_key", key_then_mutate)
+                else:
+                    late = [row]
+                    patch.setattr(ReconcileMixin, "_message_replay_identity_uncached", mutate_while_computing)
+                engine._message_replay_identity(row)
+            for untouched in (dict(first), dict(second)):
+                assert engine._message_replay_identity(untouched) == uncached(engine, untouched), patch_name
+        assert mutated
+
+
+def test_f2_a_str_subclass_is_never_remembered(tmp_path):
+    class Text(str):
+        pass
+    with _engine(tmp_path) as engine:
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        for row in ({"role": "user", "content": Text("sub content")}, {"role": Text("user"), "content": "sub role"},
+                    {"role": "tool", "tool_call_id": Text("c1"), "content": "sub id"},
+                    {"role": "tool", "tool_name": Text("t"), "content": "sub tool"},
+                    {"role": "user", "name": Text("n"), "content": "sub name"}, {"role": "user", "content": 7}):
+            assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+            assert not any(key[4] in ("sub content", "sub role", "sub id", "sub tool", "sub name", "7")
+                           for key in _memo(engine)), row
+
+
+def test_f3_changing_the_integer_digit_limit_drops_the_memo(tmp_path):
+    limit = sys.get_int_max_str_digits()
+    with _engine(tmp_path) as engine:
+        row = {"role": "assistant", "content": "x", "tool_calls": [{"function": {"arguments": '{"n": 1}'}}]}
+        engine._message_replay_identity({"role": "user", "content": "warm"})
+        engine._message_replay_identity(row)
+        before = engine.__dict__["_replay_identity_memo"]
+        try:
+            sys.set_int_max_str_digits(limit + 1000 if limit else 5000)
+            assert engine._message_replay_identity(row) == ReconcileMixin._message_replay_identity_uncached(engine, row)
+            assert engine.__dict__["_replay_identity_memo"] is not before
+        finally:
+            sys.set_int_max_str_digits(limit)
+
+
+def test_f4_concurrent_inserts_at_the_cap_stay_inside_the_bound(monkeypatch):
+    cap = 64 * 1024
+    monkeypatch.setattr(reconcile, "_REPLAY_IDENTITY_MEMO_MAX_BYTES", cap)
+    memo, peaks, barrier = reconcile._ReplayIdentityMemo(("epoch",)), [], threading.Barrier(2)
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    def insert(worker):
+        barrier.wait()
+        for i in range(4000):
+            key, frozen = reconcile._replay_identity_memo_key({"role": "user", "content": f"{worker}-{i}" + "y" * 400},
+                                                              True, True)
+            memo.remember(key, ("user", key[4], "", "", ""), frozen)
+            peaks.append(memo.size)
+    try:
+        threads = [threading.Thread(target=insert, args=(worker,)) for worker in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert max(peaks) <= cap and memo.size <= cap
+    with memo.lock:
+        assert sum(1 for _ in memo.entries) <= reconcile._REPLAY_IDENTITY_MEMO_MAX_ENTRIES
+    copied = copy.deepcopy(memo)
+    assert copied.lock is not memo.lock and copied.entries == {}
