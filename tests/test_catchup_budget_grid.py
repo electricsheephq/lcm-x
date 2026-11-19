@@ -194,9 +194,9 @@ def _regression_cells() -> list[dict]:
         {**_G120, "id": "v-ctl-pre37-c70-l20", "passes": 24, "pre": 37, **kind(70, 20)},
         {**_G120, "id": "v-ctl-pre37-c70-l45", "passes": 24, "pre": 37, **kind(70, 45)},
     ]
-    cells += [{**_G120, "id": f"v5-recover-at-{at}", "passes": 20, "from_pass": [{"pass": at, "pre": 5, "call": 5}]}
-              for at in (9, 10, 11, 12)]
-    return [{**cell, "group": "V"} for cell in cells]
+    cells = [{**cell, "group": "V"} for cell in cells]
+    return cells + [{**_G120, "group": "VR", "id": f"v5-recover-at-{at}", "passes": 30,
+                     "from_pass": [{"pass": at, "pre": 5, "call": 5}]} for at in (9, 10, 11, 12)]
 
 
 def _mark_cells() -> list[dict]:
@@ -228,6 +228,7 @@ ISSUE_2901 = "issue 2901"
 KNOWN_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-600k-l40-prefix-nosys", "s-1m-cond-then-leaf-nosys"]
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 V = [cell["id"] for cell in CELLS if cell["group"] == "V"]
+VR = [cell["id"] for cell in CELLS if cell["group"] == "VR"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
 GATE_SHARE_TARGET = 0.8  # G1 passes that reached the gate: triggered, or at or over the trigger and refused by a hold
@@ -728,20 +729,26 @@ def _base_sweep_target(window: int) -> int:
 
 @pytest.mark.parametrize("cell", S)
 def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
-    """T1-285 (a), T1-289: per pass the candidate stores at least the base's leaves (a pass where the candidate's own
-    prompt is under its trigger is excused), a pass that condenses still stores a leaf, no pass passes 250 s, at least
-    one condensation is stored, and the peak summary area is at most 1.2 x the base's sweep target and bounded (A6's
-    slope rule over passes 41-60)."""
+    """A6 restated (the RM's ruling on review round 1): per pass the candidate stores at least the base's leaves (a pass
+    where its own prompt is under its trigger is excused), a pass that condenses still stores a leaf, no pass passes
+    250 s; and over the walk its summary area per stored leaf (peak area / leaves stored, with a 1-token rounding
+    allowance), its end prompt, and its A0 and A0b rows are each at most the base's. The 60,000 / 36,000 figure (1.2 x
+    the base's sweep target) is reported as a target only. Boundedness is test_a6_bounded_summary_area."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
     fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"] and c["prompt_before"] >= c["trigger"]]
     assert not fewer, f"{cell}: fewer leaves than the base in passes {fewer}"
     no_leaf = [c["pass"] for c in cand if c["condensations"] and not c["leaves"]]
     assert not no_leaf, f"{cell}: a condensation without a leaf in passes {no_leaf}"
     assert not a2_violations(cand), a2_violations(cand)
-    assert sum(c["condensations"] for c in cand) >= 1, f"{cell}: no condensation stored"
-    peak, bar = max(c["summary_area"] for c in cand), 1.2 * _base_sweep_target(BY_ID[cell]["window"])
-    assert peak <= bar, f"{cell}: peak summary area {peak} > {bar:.0f} (1.2 x the base's sweep target)"
-    assert not _a6(cand)["grows"], f"{cell}: the summary area grows over passes 41-60: {_a6(cand)}"
+    per_leaf = {tree: max(r["summary_area"] for r in records) / max(1, records[-1]["leaves_cum"])
+                for tree, records in (("base", base), ("cand", cand))}
+    assert per_leaf["cand"] <= per_leaf["base"] + 1, f"{cell}: summary area per stored leaf {per_leaf}"
+    assert cand[-1]["prompt_after"] <= base[-1]["prompt_after"], (
+        f"{cell}: end prompt {cand[-1]['prompt_after']} > base {base[-1]['prompt_after']}")
+    lost = {tree: sum(r["loss"]["missing_count"] for r in records if r["loss"]) for tree, records in (("base", base),
+                                                                                                    ("cand", cand))}
+    assert lost["cand"] <= lost["base"], f"{cell}: A0 rows {lost}"
+    assert sum(a0b_rows(cand)) <= sum(a0b_rows(base)), f"{cell}: A0b rows {sum(a0b_rows(cand))} > {sum(a0b_rows(base))}"
 
 
 @pytest.mark.parametrize("cell", V)
@@ -761,6 +768,39 @@ def test_regression_cells_never_behind_the_base(grid, cell):
         assert excused or done["cand"] >= done["base"], f"{cell} pass {b['pass']}: leaves + condensations {done}"
         assert nc <= nb, f"{cell} pass {b['pass']}: A0b {nc} > base {nb}"
         assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
+
+
+@pytest.mark.parametrize("cell", VR)
+def test_recovery_cells_bounded_lag(grid, cell):
+    """Route recovery (the RM's restatement): never behind by more than one firing's publications (the base's largest
+    one-pass count of leaves + condensations), never behind for longer than one hold period (600 s of turn gaps,
+    counted in passes) except where A1's excuse holds (the candidate under its trigger and at or below the base's
+    prompt), the same or a better rate over the walk (publications up to each tree's last publishing pass, per pass),
+    rows behind a notice at most the base's, and no hung strike the base lacks."""
+    base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
+    assert len(base) == len(cand), f"{cell}: walks of {len(base)} and {len(cand)} passes"
+    firing = max(r["leaves"] + r["condensations"] for r in base)
+    hold_passes = -(-600 // int(BY_ID[cell]["turn_gap"]))
+    done, behind_for = {"base": 0, "cand": 0}, 0
+    for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
+        done["base"] += b["leaves"] + b["condensations"]
+        done["cand"] += c["leaves"] + c["condensations"]
+        deficit = done["base"] - done["cand"]
+        assert deficit <= firing, f"{cell} pass {b['pass']}: behind by {deficit} > one firing ({firing})"
+        excused = c["prompt_before"] < c["trigger"] and c["prompt_before"] <= b["prompt_before"]
+        behind_for = behind_for + 1 if deficit > 0 and not excused else 0
+        assert behind_for <= hold_passes, f"{cell} pass {b['pass']}: behind for {behind_for} passes > {hold_passes}"
+        assert nc <= nb, f"{cell} pass {b['pass']}: A0b {nc} > base {nb}"
+        assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
+
+    def rate(records):
+        cum, best = 0, 0.0
+        for r in records:
+            cum += r["leaves"] + r["condensations"]
+            if r["leaves"] + r["condensations"]:
+                best = cum / (r["pass"] + 1)
+        return best
+    assert rate(cand) >= rate(base), f"{cell}: rate {rate(cand):.3f} < base {rate(base):.3f}"
 
 
 def test_stale_estimate_no_extension_leaf_below_the_mark(grid):
@@ -810,11 +850,21 @@ def test_extension_call_classified_against_its_own_deadline(grid_dir, variant):
     assert not bad, f"{variant}: the extension call was charged to the route: {bad}"
 
 
+# A6 boundedness, pinned BY CELL NAME on both trees (the RM's ruling): the summary area grows without bound in every
+# steady cell on the base too, because the pre-leaf condensation's grant (about 19-23 s against a 44 s call) never lets
+# a condensation land. Pre-existing; the pin covers this boundedness clause only.
+ISSUE_2878 = "issue 2878: the starved pre-leaf condensation grant; the summary area grows on both trees"
+KNOWN_2878 = ["s-1m-l40", "s-1m-l45-d15", "s-600k-l40-prefix", "s-1m-cond-then-leaf"]
+
+
+@pytest.mark.parametrize("tree", ["base", "cand"])
 @pytest.mark.parametrize("cell", S)
-def test_a6_bounded_summary_area(grid, cell):
-    base, cand = (_a6(grid[tree]["by_cell"][cell]) for tree in ("base", "cand"))
-    assert base["passes"] == cand["passes"] == A6_TO, f"A6 in cell {cell}: walks of {base['passes']}, {cand['passes']}"
-    assert not (cand["grows"] and not base["grows"]), f"A6 in cell {cell}: candidate {cand}, base {base}"
+def test_a6_bounded_summary_area(grid, cell, tree, request):
+    a6 = _a6(grid[tree]["by_cell"][cell])
+    assert a6["passes"] == A6_TO, f"A6 in cell {cell}: a walk of {a6['passes']} passes"
+    if cell in KNOWN_2878:
+        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2878))
+    assert not a6["grows"], f"A6 on {tree} in cell {cell}: {a6}"
 
 
 @pytest.mark.parametrize("variant", list(NEGATIVE_EXPECT))
