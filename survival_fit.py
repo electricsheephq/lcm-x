@@ -173,11 +173,14 @@ class SurvivalFitMixin:
                 "window_cap": observed_tokens if _positive_int(observed_tokens) else self._survival_measure(messages),
                 "request_cap": int(threshold * _RECOVERY_THRESHOLD_SHARE) if threshold > 0 else None}
 
-    def _survival_generated(self, message) -> bool:
+    def _survival_generated(self, message, store_id=None) -> bool:
         """LCM's own regenerated context (summaries, carriers): derived from stored rows, never a row."""
-        return (self._is_replayed_context_scaffold_message(message)
-                or self._generated_context_carrier_remainder(message) is not None
-                or self._is_context_summary_content(message.get("content")))  # a host summary of stored rows
+        if self._generated_context_carrier_remainder(message) is not None:
+            return self._carried_user_text(message, store_id) is not None
+        return ((self._is_replayed_context_scaffold_message(message)
+                 or self._is_context_summary_content(message.get("content")))
+                and not (message.get("role") == "user" and store_id
+                         and self._bound_user_text(store_id) == message.get("content")))
 
     def _survival_completed_reply(self, message) -> bool:
         """#798: a completed textual reply needs a host stamp for replay on cold resume."""
@@ -245,10 +248,6 @@ class SurvivalFitMixin:
         # exists in this session at the same depth with equal bytes, a preserved objective/todo row, or a
         # verified carrier (#678). A genuine summary that fails verification falls back to the v0.24.6 rule.
         prefix = system
-        while prefix < len(result) and isinstance(result[prefix], dict) and (
-                self._is_verified_replay_scaffold_message(result[prefix])
-                or self._generated_context_carrier_remainder(result[prefix]) is not None):
-            prefix += 1
         # The ingest cursor indexes this list with nothing to reconcile: every row of it is persisted,
         # including rows the identity mapper cannot pin to one stored copy (duplicates, stubbed tools).
         # After an exception the cursor proves nothing (this call's writes may have failed or been rolled
@@ -257,6 +256,10 @@ class SurvivalFitMixin:
                      and self._ingest_cursor == len(result))
         # one map of the whole conversation part: its occurrence and order evidence needs every row (#650)
         store_ids = self._get_store_id_map_for_messages(result[system:])
+        while prefix < len(result) and isinstance(result[prefix], dict) and (
+                self._survival_scaffold(result[prefix], store_ids)
+                or self._carried_user_text(result[prefix], store_ids.get(id(result[prefix]))) is not None):
+            prefix += 1
         if exit_fit:
             # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
             # prefix, a protected fresh-tail row or a projection. The window budget still holds the list.
@@ -296,14 +299,31 @@ class SurvivalFitMixin:
                 record_absorbed_message(row, absorbed_from)
         return row
 
-    def _carried_user_text(self, message) -> Optional[str]:
-        """#2895: the real row's text behind a verified carrier, or None. Stop at a stored literal paste."""
+    def _bound_user_text(self, store_id) -> Optional[str]:
+        row = self._store.get(store_id) if store_id else None
+        return row["content"] if row and row.get("role") == "user" else None
+
+    def _is_literal_user_text(self, text, bound_content) -> bool:
+        if bound_content is not None:
+            return text == bound_content
+        return bool(self._store.find_session_rows_by_content(self._session_id, "user", text, (1 << 63) - 1, limit=1))
+
+    def _survival_scaffold(self, message, store_ids) -> bool:
+        return self._is_verified_replay_scaffold_message(message) and (
+            message.get("role") != "user"
+            or not self._is_literal_user_text(message.get("content"), self._bound_user_text(store_ids.get(id(message)))))
+
+    def _carried_user_text(self, message, store_id=None) -> Optional[str]:
+        """#2895: stop at this occurrence's stored text, or at a same-session literal if unbound."""
         remainder = self._generated_context_carrier_remainder(message)
+        if remainder is None:
+            return None
+        bound = self._bound_user_text(store_id)
+        if self._is_literal_user_text(message["content"], bound):
+            return None
         while remainder is not None:
             inner = self._generated_context_carrier_remainder({"role": "user", "content": remainder})
-            if inner is None or self._store.find_session_rows_by_content(
-                self._session_id, "user", remainder, (1 << 63) - 1, limit=1,
-            ):
+            if inner is None or self._is_literal_user_text(remainder, bound):
                 break
             remainder = inner
         return remainder
@@ -335,7 +355,8 @@ class SurvivalFitMixin:
         summary = summary_uid = formed = None
         naming_ids = store_ids
         # #2895: a nested carrier ("summary\n\nold summary\n\nrow") splits down to its real row, which is counted
-        remainder = self._carried_user_text(head[-1]) if whole_turns and head else None
+        remainder = (self._carried_user_text(head[-1], store_ids.get(id(head[-1])))
+                     if whole_turns and head else None)
         if remainder is not None:
             carrier = head.pop()
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
@@ -356,7 +377,7 @@ class SurvivalFitMixin:
         body_ids = {id(m) for m in body}
 
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
-            return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
+            return persisted or id(message) in store_ids or self._survival_scaffold(message, store_ids)
 
         def build(cut: int, kept, reply=None):
             nonlocal formed
@@ -365,9 +386,9 @@ class SurvivalFitMixin:
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(naming_ids[id(message)] for message in dropped if id(message) in naming_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
-            ids = sorted(naming_ids[id(message)] for message in dropped
-                         if id(message) in naming_ids and not self._survival_generated(message))
-            count = sum(1 for message in dropped if not self._survival_generated(message))
+            counted = [m for m in dropped if not self._survival_generated(m, naming_ids.get(id(m)))]
+            ids = sorted(naming_ids[id(message)] for message in counted if id(message) in naming_ids)
+            count = len(counted)
             # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
             notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
             out = list(head)
@@ -428,7 +449,7 @@ class SurvivalFitMixin:
             if index and not all(durable(message) for message in dropped):
                 break  # never omit a row that is not durably stored
             if index and covered is not None:  # #738: every dropped row is a covered stored row or verified scaffold
-                if not all(store_ids.get(id(m)) in covered or self._is_verified_replay_scaffold_message(m)
+                if not all(store_ids.get(id(m)) in covered or self._survival_scaffold(m, store_ids)
                            for m in dropped):
                     break  # an unmapped, merged, stubbed or uncovered row stays, and so does every longer region
                 if not any(id(m) in store_ids for m in dropped):

@@ -385,8 +385,8 @@ def test_unwrapped_row_keeps_its_uid_and_store_row(tmp_path, monkeypatch, stand_
     unwrap = getattr(LCMEngine, "_unwrap_incoming_carrier", None)
     emit = LCMEngine._emit_summary_carrier
 
-    def record_unwrap(self, row):
-        out = unwrap(self, row)
+    def record_unwrap(self, row, store_id=None):
+        out = unwrap(self, row, store_id)
         if out is not row:
             mapped = (self._get_store_ids_for_messages([row]), self._get_store_ids_for_messages([_host_keys(out)]))
             unwrapped.append((row, out, mapped))
@@ -476,9 +476,9 @@ def test_survival_cut_counts_row_behind_nested_carrier(tmp_path, monkeypatch, st
 
 def _neutralised(monkeypatch):
     """Main's assembly and fit: no unwrap of an incoming carrier, a split that peels one level."""
-    monkeypatch.setattr(LCMEngine, "_unwrap_incoming_carrier", lambda self, row: row, raising=False)
-    monkeypatch.setattr(LCMEngine, "_carried_user_text", LCMEngine._generated_context_carrier_remainder,
-                        raising=False)
+    monkeypatch.setattr(LCMEngine, "_unwrap_incoming_carrier", lambda self, row, store_id=None: row, raising=False)
+    monkeypatch.setattr(LCMEngine, "_carried_user_text",
+                        lambda self, row, store_id=None: self._generated_context_carrier_remainder(row), raising=False)
 
 
 def _five_passes(tmp_path, monkeypatch, plans, seed, system, tag):
@@ -681,8 +681,8 @@ def test_capped_walk_preserves_carrier_nodes_at_pass_29(tmp_path, monkeypatch, s
         # Replay the reviewed late unwrap through pass 28 so every candidate sees the same input at pass 29.
         emit = engine._emit_summary_carrier
 
-        def unwrap_at_pass_29(row):
-            return unwrap(row) if len(session.passes) >= 28 else row
+        def unwrap_at_pass_29(row, store_id=None):
+            return unwrap(row, store_id) if len(session.passes) >= 28 else row
 
         def late_unwrap(summary_message, leading_msg, result, tail_selected, *args):
             if len(session.passes) < 28 and summary_message is not None and tail_selected:
@@ -889,3 +889,114 @@ def test_carried_row_oracle_requires_exact_evidence(carrier_session):
     for row in (user, carrier, {"role": "user", "content": _summary([covering])}):
         assert _carried_row_fate(session, [carrier], [row], [], []) == (content, "kept")
     assert _carried_row_fate(session, [carrier], [], [(1, {store_id})], applied) == (content, "named")
+
+
+def test_round3_compress_keeps_literal_paste(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    old = [session.row(role="user" if i % 2 == 0 else "assistant",
+                       content=f"[old-{i:02d}] " + "cedar " * 60) for i in range(40)]
+    engine.ingest(old)
+    first = engine.compress(old, current_tokens=11000)
+    pasted = f"{_summary(engine._dag.get_session_nodes(engine._session_id)[-1:])}\n\nplease explain this"
+    middle = [session.row(role="user" if i % 2 == 0 else "assistant",
+                          content=f"[mid-{i:02d}] " + "birch " * 60) for i in range(12)]
+    tail = [session.row(role="user", content=pasted)] + [
+        session.row(role="assistant" if i % 2 == 0 else "user", content=f"[new-{i:02d}] " + "elm " * 60)
+        for i in range(23)
+    ]
+    incoming = first + middle + tail
+    engine.ingest(incoming)
+    before = engine._store.get_session_messages(engine._session_id, limit=1000)
+    paste_row, = (r for r in before if r["role"] == "user" and r["content"] == pasted)
+
+    result = engine.compress(incoming, current_tokens=11000)
+    assert any(row["role"] == "user" and row["content"].endswith(pasted) for row in result)
+    carrier, = (c for c in engine._last_emission_descriptors["emissions"] if c["kind"] == "carrier")
+    assert carrier["retained_source"] == {"store_id": paste_row["store_id"]}
+    engine._frontier_holder().invalidate()
+    engine.ingest(result)
+    assert engine._store.get_session_messages(engine._session_id, limit=1000) == before
+
+
+def test_round3_double_carrier_keeps_its_bound_row(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    outer, inner = [_leaf(engine, label) for label in ("outer leaf", "literal leaf")]
+    pasted = f"{_summary([inner])}\n\nOK"
+    span = f"{_summary([outer])}\n\n{_summary([inner])}\n\n"
+    rows = [session.row(role="user", content="OK"), *_tail(session)[1:]]
+    ok_id = engine._store.append(engine._session_id, rows[0], conversation_id=engine._conversation_id)
+    paste_id = engine._store.append(engine._session_id, session.row(role="user", content=pasted),
+                                    conversation_id=engine._conversation_id)
+    for row in rows[1:]:
+        engine._store.append(engine._session_id, row, conversation_id=engine._conversation_id)
+    carrier = {"role": "user", "content": span + "OK"}
+    incoming = [carrier, *rows[1:]]
+    binding = engine._emission_binding()
+    emissions = _finalize_emission_descriptors(incoming, [{
+        "row": carrier, "kind": "carrier", "span": span,
+        "retained_source": {"store_id": ok_id}, "full_identity": _emission_identity(carrier),
+    }], binding)
+    engine._last_emission_descriptors = {"version": 4, **binding, "emissions": emissions}
+    assert engine._get_store_id_map_for_messages(incoming)[id(carrier)] == ok_id
+    _leaf(engine, "new hidden leaf")
+
+    result = engine._assemble_context(None, incoming)
+    candidate, = engine._pending_emission_candidates
+    assert paste_id != ok_id
+    assert candidate["retained_source"] == {"store_id": ok_id}
+    assert engine._generated_context_carrier_remainder(result[0]) == "OK"
+
+
+def test_round3_whole_turn_fit_names_literal_paste(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    outer, inner = [_leaf(engine, label) for label in ("outer leaf", "literal leaf")]
+    pasted = f"{_summary([inner])}\n\nOK"
+    rows = [{"role": "user", "content": "OK"}, {"role": "user", "content": pasted}, *_tail(session)[1:]]
+    ids = [engine._store.append(engine._session_id, row, conversation_id=engine._conversation_id) for row in rows]
+    _, paste_id, reply_id, *_ = ids
+    assert paste_id == 2
+    system = {"role": "system", "content": "system"}
+    summary = {"role": "user", "content": _summary([outer])}
+    carrier = {"role": "user", "content": f"{summary['content']}\n\n{pasted}"}
+    result = [system, carrier, *rows[2:]]
+    assert engine._get_store_id_map_for_messages(result[1:])[id(carrier)] == paste_id
+
+    # Fit both later rows plus the notice, with too little room for the previous reply.
+    notice = survival_fit._NOTICE.format(n=2, first=paste_id, last=reply_id)
+    noticed = {**system, "content": engine._survival_with_notice(system["content"], notice)}
+    budget = engine._survival_measure([noticed, summary, *rows[3:]])
+    before = engine._survival_measure(result)
+    plan, _ = engine._plan_survival_fit(result, result, before, before, budget, "test", exit_fit=False)
+    assert plan is not None
+    assert plan.ids == [paste_id, reply_id]
+    assert plan.count == 2
+    assert plan.notice == notice
+    assert notice in plan.fitted[0]["content"]
+
+
+@pytest.mark.parametrize("invalid", ["span", "already-named"])
+def test_round3_pending_carrier_rejects_invalid_source(carrier_session, invalid):
+    engine = carrier_session.engine
+    rows = _tail(carrier_session)
+    engine.ingest(rows)
+    carried_id, reply_id, *newer_ids = engine._get_store_ids_for_messages(rows)
+    _leaf(engine, "new hidden leaf")
+    result = engine._assemble_context(None, rows)
+    emission, = engine._pending_emission_candidates
+    assert emission["row"] is result[0] and emission["retained_source"] == {"store_id": carried_id}
+    if invalid == "span":
+        decoy = {**emission, "span": "different summary\n\n", "retained_source": {"store_id": 999}}
+        engine._pending_emission_candidates = [decoy, emission]
+        expected = [carried_id, reply_id]
+    else:
+        engine._pending_emission_candidates = [{**emission, "retained_source": {"store_id": reply_id}}]
+        expected = [reply_id]
+    mapped = {id(row): sid for row, sid in zip(result[1:], [reply_id, *newer_ids], strict=True)}
+    summary = {"role": "user", "content": emission["span"][:-2]}
+    budget = engine._survival_measure([summary, *result[2:]])
+    _, count, ids, _, _ = engine._survival_cut(result, 1, budget, True, "test", mapped, True)
+    assert count == 2
+    assert ids == expected

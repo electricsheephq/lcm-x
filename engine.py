@@ -11518,9 +11518,11 @@ class LCMEngine(
             )
         # Charge only the carried user row to the tail. The new summary has its own budget (#2895).
         unwrapped = None
+        source_id = None
         if _prepared_tail is None and retained_user_msg is None and tail_for_selection:
             incoming_carrier = tail_for_selection[0]
-            first = self._unwrap_incoming_carrier(incoming_carrier)
+            source_id = self._incoming_carrier_source_id(incoming_carrier, tail_for_selection)
+            first = self._unwrap_incoming_carrier(incoming_carrier, source_id)
             if first is not incoming_carrier:
                 unwrapped = first
                 tail_for_selection = [first, *tail_for_selection[1:]]
@@ -11658,6 +11660,7 @@ class LCMEngine(
 
         carried_tail, tail_selected = self._emit_summary_carrier(
             summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+            source_id if tail_selected and tail_selected[0] is unwrapped else None,
         )
         self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
                                          proactive_msg, generated_context_row, tail_selected)
@@ -11878,7 +11881,7 @@ class LCMEngine(
                 folded_result_index, folded_original_tail, tail_selected)
 
     def _emit_summary_carrier(
-        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail, source_id=None,
     ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
         # Fresh tail. A user-role summary directly ahead of a historical user
         # row is emitted as the carrier a host's alternation repair would build
@@ -11903,7 +11906,8 @@ class LCMEngine(
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
             if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
-                source_ids = self._get_store_ids_for_messages([tail_selected[0]])
+                source_ids = ([source_id] if source_id and self._bound_user_text(source_id) == tail_selected[0]["content"]
+                              else self._get_store_ids_for_messages([tail_selected[0]]))
                 result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:
                     summary_candidate.update({
@@ -11916,11 +11920,17 @@ class LCMEngine(
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
 
-    def _unwrap_incoming_carrier(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def _incoming_carrier_source_id(self, row, tail):
+        if self._generated_context_carrier_remainder(row) is None:
+            return None
+        return (self._compress_run.store_ids_by_message_id.get(id(row))
+                or self._get_store_id_map_for_messages(tail).get(id(row)))
+
+    def _unwrap_incoming_carrier(self, row: Dict[str, Any], store_id=None) -> Dict[str, Any]:
         """``row``, or the real row behind it when it is a verified carrier at any nesting depth. As the
         survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
         single proven host uid; the carrier's API-side content is not the row's either."""
-        remainder = self._carried_user_text(row)
+        remainder = self._carried_user_text(row, store_id)
         if remainder is None:
             return row
         unwrapped = {key: value for key, value in row.items() if key != "api_content"}
