@@ -60,19 +60,14 @@ _WARNING = _WARNING_SUMMARY_FAILED
 _WARNING_FITTED = ("To keep this conversation within the model's context window, {n} older messages left live context "
                    "during LCM context fitting; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
                    "/lcm doctor reports why.")
-_NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages of this session are stored verbatim but not in live context. "
-                  "Each range loads with the call as written, paging with next_cursor: {calls}.]")
-_NOTICE_CALL = "store ids {first}..{last}: lcm_load_session(session_id={session}, after_store_id={after}, limit=200)"
+_NOTICE_RANGES = ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in "
+                  "live context; read each range with lcm_load_session and limit=200, paging with next_cursor: {calls}.]")
 _NOTICE_REST = "; and {count} earlier ranges (store ids {first}..{last}); lcm_grep reaches them"
 _NOTICE_MAX_RANGES = 8  # #2877: the newest ranges out of view are named with their calls; older ones are counted
-_NOTICE_MAX_TOKENS = 700  # the notice's bound for store ids up to 12 digits and session ids up to 128 characters
-_CALL_RE = r'store ids \d+\.\.\d+: lcm_load_session\(session_id="(?:[^"\\]|\\.)*", after_store_id=\d+, limit=200\)'
-_NOTICE_RE = re.compile(r"(?:\n\n)?(?:\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
-                        r"but not in live context; lcm_grep / lcm_load_session reach them\.\]"
-                        r"|\[LCM survival fit: \d+ earlier messages of this session are stored verbatim but not in live "
-                        r"context\. Each range loads with the call as written, paging with next_cursor: "
-                        + _CALL_RE + "(?:; " + _CALL_RE + r")*(?:; and \d+ earlier ranges \(store ids \d+\.\.\d+\); "
-                        r"lcm_grep reaches them)?\.\])")
+_NOTICE_MAX_TOKENS = 300  # the bound for store ids up to 12 digits and two sessions with ids up to 128 characters
+_NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
+                        r"but not in live context(?:; lcm_grep / lcm_load_session reach them|; read each range with "
+                        r"lcm_load_session and limit=200, paging with next_cursor: [^\]]*)\.\]")
 _OUT_OF_VIEW_SQL = (
     "WITH RECURSIVE walk(root, node_id) AS (SELECT CAST(value AS INTEGER), CAST(value AS INTEGER) FROM json_each(?) "
     "UNION SELECT walk.root, CAST(source.value AS INTEGER) FROM walk JOIN summary_nodes AS node ON node.node_id = "
@@ -124,12 +119,17 @@ def read_out_of_view(store: Any, session_id: str, node_ids, kept=None, also=()) 
 
 
 def survival_notice_text(count: int, ranges, rest=None) -> str:
-    """The notice for ``ranges`` [(session id, first, last), ...], each with the call that loads it, and ``rest``
-    (count, first, last), the older ranges counted in one clause."""
-    calls = "; ".join(_NOTICE_CALL.format(first=first, last=last, session=json.dumps(session, ensure_ascii=False),
-                                          after=first - 1) for session, first, last in ranges)
+    """The notice for ``ranges`` [(session id, first, last), ...] in store-id order, each with the after_store_id that
+    loads it, and ``rest`` (count, first, last), the older ranges counted in one clause. The head names their span."""
+    groups = []
+    for session, first, last in ranges:
+        if not groups or groups[-1][0] != session:
+            groups.append((session, []))
+        groups[-1][1].append(f"after_store_id={first - 1} for store ids {first}..{last}")
+    calls = "; ".join(f"session_id={session}: " + ", ".join(items) for session, items in groups)
     calls += _NOTICE_REST.format(count=rest[0], first=rest[1], last=rest[2]) if rest else ""
-    return _NOTICE_RANGES.format(n=count, calls=calls)
+    bounds = [x for _, first, last in ranges for x in (first, last)] + (list(rest[1:]) if rest else [])
+    return _NOTICE_RANGES.format(n=count, first=min(bounds), last=max(bounds), calls=calls)
 
 
 def survival_fit_notice(engine: Any, messages, shown_node_ids, *, left=(), store_ids=None,
