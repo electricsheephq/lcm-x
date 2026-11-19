@@ -148,7 +148,11 @@ def _reference_cells() -> list[dict]:
     """T1-285, issue 2878: shipped budgets with the reference agent's timing (37 s pre-call work, a 44 s condensation, a
     38 s leaf, the route estimate 44 s) and a prefix over target: the condensation and a leaf land in the same pass."""
     return [{**G1_FIXED, **_g1_load(1_000_000), "group": "R", "id": "r-shipped-cond-then-leaf", "window": 1_000_000,
-             "pre": 37, "estimate": 44, "call": [44, 38], "delta": 0, "prefix": "over2x"}]
+             "pre": 37, "estimate": 44, "call": [44, 38], "delta": 0, "prefix": "over2x"}] + [
+        # T1-289's boundary: the reserve is released only when pre + condensation + leaf estimates <= 210 - 20 s;
+        # route estimate 70 s: 49 + 140 = 189 s releases it, 52 + 140 = 192 s keeps the base's reserve
+        {**G1_FIXED, **_g1_load(1_000_000), "group": "R", "id": f"r-release-{side}", "window": 1_000_000, "pre": pre,
+         "estimate": 70, "call": [60, 60], "delta": 0, "prefix": "over2x"} for side, pre in (("inside", 49), ("outside", 52))]
 
 
 CELLS = _g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells() + _reference_cells()
@@ -412,7 +416,7 @@ def a0_violations(records: list[dict]) -> list[str]:
 
 def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
     """Per pass index: a base call needs a candidate call unless the candidate's own prompt is under its trigger, and a
-    hold the candidate arms needs one the base arms. T1-285: cumulative leaves and drained tokens (removed by stored
+    hold is compared cumulatively (T1-289, below). T1-285: cumulative leaves and drained tokens (removed by stored
     leaves and condensations only, never by a survival-fit cut) are compared with a one-pass lag (the candidate at pass
     k against the base at pass k - 1), and at the end of the walk the candidate has at least the base's totals."""
     found = []
@@ -424,8 +428,16 @@ def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
             if index and c[key] < base[index - 1][key]:
                 found.append(f"pass {b['pass']}: cumulative {label} {c[key]} < base {base[index - 1][key]} at pass "
                              f"{base[index - 1]['pass']}")
-        if c["hold_armed"] and not b["hold_armed"]:
-            found.append(f"pass {b['pass']}: the candidate armed a hold the base did not")
+        # T1-289: holds compared cumulatively, the candidate at pass k against the base at pass k + 1, excused where
+        # the candidate's own prompt is under its trigger
+        cand_holds = sum(r["hold_armed"] for r in cand[:index + 1])
+        base_holds = sum(r["hold_armed"] for r in base[:index + 2])
+        if cand_holds > base_holds and c["prompt_before"] >= c["trigger"]:
+            found.append(f"pass {b['pass']}: the candidate armed {cand_holds} holds, the base {base_holds} by pass "
+                         f"{min(index + 1, len(base) - 1)}")
+    if sum(r["hold_armed"] for r in cand) > sum(r["hold_armed"] for r in base):
+        found.append(f"end of walk: the candidate armed {sum(r['hold_armed'] for r in cand)} holds, the base "
+                     f"{sum(r['hold_armed'] for r in base)}")
     for key, label in (("leaves_cum", "leaves"), ("summary_drained_cum", "drained")):
         if base and cand and cand[-1][key] < base[-1][key]:
             found.append(f"end of walk: cumulative {label} {cand[-1][key]} < base {base[-1][key]}")
@@ -618,23 +630,29 @@ def test_extension_call_on_a_no_progress_window_host_is_never_a_hang(grid_dir):
     assert not a2_violations(records)
 
 
-C_STAND_IN_PEAK = 27_524  # round 5: the (c) stand-in's peak summary area over the steady cells
+def _base_sweep_target(window: int) -> int:
+    """The base's default summary-prefix target at context_threshold 0.5 (PR 2876: 5% of the window above 480,000,
+    capped at a quarter of the trigger): 50,000 on 1M, 30,000 on 600k."""
+    trigger = window // 2
+    return max(min(24_000, trigger // 4), min(int(0.05 * window), trigger // 4))
 
 
 @pytest.mark.parametrize("cell", S)
 def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
-    """T1-285 (a): per pass the candidate stores at least the base's leaves, a pass that condenses still stores a
-    leaf, no pass passes 250 s, at least one condensation is stored, and the peak summary area is at most 1.2 x the
-    (c) stand-in's."""
+    """T1-285 (a), T1-289: per pass the candidate stores at least the base's leaves (a pass where the candidate's own
+    prompt is under its trigger is excused), a pass that condenses still stores a leaf, no pass passes 250 s, at least
+    one condensation is stored, and the peak summary area is at most 1.2 x the base's sweep target and bounded (A6's
+    slope rule over passes 41-60)."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
-    fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"]]
+    fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"] and c["prompt_before"] >= c["trigger"]]
     assert not fewer, f"{cell}: fewer leaves than the base in passes {fewer}"
     no_leaf = [c["pass"] for c in cand if c["condensations"] and not c["leaves"]]
     assert not no_leaf, f"{cell}: a condensation without a leaf in passes {no_leaf}"
     assert not a2_violations(cand), a2_violations(cand)
     assert sum(c["condensations"] for c in cand) >= 1, f"{cell}: no condensation stored"
-    peak = max(c["summary_area"] for c in cand)
-    assert peak <= 1.2 * C_STAND_IN_PEAK, f"{cell}: peak summary area {peak} > 1.2 x {C_STAND_IN_PEAK}"
+    peak, bar = max(c["summary_area"] for c in cand), 1.2 * _base_sweep_target(BY_ID[cell]["window"])
+    assert peak <= bar, f"{cell}: peak summary area {peak} > {bar:.0f} (1.2 x the base's sweep target)"
+    assert not _a6(cand)["grows"], f"{cell}: the summary area grows over passes 41-60: {_a6(cand)}"
 
 
 def test_shipped_budget_condensation_then_leaf(grid):
@@ -644,6 +662,18 @@ def test_shipped_budget_condensation_then_leaf(grid):
         f"candidate pass 0: {cand['condensations']} condensations, {cand['leaves']} leaves (base: "
         f"{base['condensations']}, {base['leaves']}; call timeouts {cand['call_timeouts']})")
     assert not a2_violations([cand])
+
+
+def test_leaf_reserve_release_boundary(grid):
+    """T1-289: inside the boundary the condensation gets the grant without the leaf reserve and a leaf follows in the
+    same pass; outside it the first call is the base's (same kind, same timeout)."""
+    by = {tree: {side: grid[tree]["by_cell"][f"r-release-{side}"][0] for side in ("inside", "outside")}
+          for tree in ("base", "cand")}
+    inside, outside = by["cand"]["inside"], by["cand"]["outside"]
+    assert inside["call_kinds"][:1] == ["condensation"] and inside["condensations"] >= 1 and inside["leaves"] >= 1, inside
+    assert (outside["call_kinds"][:1], outside["call_timeouts"][:1], outside["condensations"]) == (
+        by["base"]["outside"]["call_kinds"][:1], by["base"]["outside"]["call_timeouts"][:1],
+        by["base"]["outside"]["condensations"]), (outside, by["base"]["outside"])
 
 
 @pytest.mark.parametrize("cell", S)

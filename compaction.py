@@ -2569,8 +2569,10 @@ class CompactionMixin:
             and state.sweep_summary_prefix_before > state.sweep_target_tokens
             and self._summary_route_available()
         ):
-            # Design B (T1-285): with the catch-up engaged the leaf gets its own bound, so the condensation keeps its grant.
-            state.budget.leaf_reserve = 0.0 if state.catchup_mark else state.budget.estimate(self._primary_summary_route())
+            # Design B (T1-285, T1-289): the leaf takes the catch-up bound when both calls fit by it.
+            estimate = state.budget.estimate(self._primary_summary_route())
+            state.budget.leaf_reserve = 0.0 if state.catchup_mark and (
+                time.monotonic() + 2 * estimate <= state.budget.catchup_deadline()) else estimate
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (

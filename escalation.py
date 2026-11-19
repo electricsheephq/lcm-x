@@ -177,8 +177,7 @@ class ForegroundBudget:
 
     def catchup_timeout(self) -> float:
         """Design B: an extension-only call's timeout cap, below the hang share of the window the outcome reads."""
-        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout,
-                                            self.call_hard - self.call_reserve - self.leaf_reserve)
+        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, self.call_hard - self.call_reserve - self.leaf_reserve)
 
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
