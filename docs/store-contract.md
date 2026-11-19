@@ -4,7 +4,7 @@ Contract version: 2
 Digest: sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0
 
 Version 2 adds the partial `idx_msg_session_tool_call` index for tool-row lookups by call ID (#2975).
-A writable store open adds the index to existing stores. The SQLite schema stamp stays at 5.
+Version 2 code can use a store before the index exists, and the first writable open that can take the write lock creates it. The SQLite schema stamp stays at 5.
 Version 2 readers accept version 1 stores and replicas. A version 1 cloud reader refuses a version 2 replica with `replica_newer_contract`.
 
 ## What a consumer may read

@@ -24,6 +24,11 @@ from .session_end_expected import FAULTS, INTENDED_DIFFERENCES, ROUTES, SHRINKIN
 
 # Local copies keep this gate independent of the historical pin modules.
 FULL_OUTPUT = "SPILLOVER_RECOVERY_NEEDLE:\n" + ("é文abcdef\n" * 600)
+TOOL_CALL_INDEX = (
+    'index', 'idx_msg_session_tool_call', 'messages',
+    'CREATE INDEX idx_msg_session_tool_call\n'
+    '                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL',
+)
 
 
 def _b64(n):
@@ -265,8 +270,24 @@ def _stored_order(snapshot, key):
     return ordered
 
 
+def _schema_matches(main, candidate):
+    if main.keys() != candidate.keys():
+        return False
+    for path, baseline in main.items():
+        observed = candidate[path]
+        if TOOL_CALL_INDEX in observed and TOOL_CALL_INDEX not in baseline:
+            observed = list(observed)
+            observed.remove(TOOL_CALL_INDEX)
+        if observed != baseline:
+            return False
+    return True
+
+
 def judge(main, candidate, stage, *, case=None, mode=None, seen=None):
     for key in ('canonical', 'schema', 'tables', 'payload', 'pending', 'ledger', 'lifecycle'):
+        if key == 'schema':
+            assert _schema_matches(main[key], candidate[key]), f'{stage}: schema changed'
+            continue
         entries = [entry for entry in INTENDED_DIFFERENCES
                    if entry[0] == case and entry[1] in ('*', mode) and entry[2:4] == (stage, key)]
         if entries:

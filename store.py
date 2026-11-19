@@ -898,14 +898,22 @@ class MessageStore:
                 ON messages(session_id, store_id);
             CREATE INDEX IF NOT EXISTS idx_msg_session_ts
                 ON messages(session_id, timestamp);
-            CREATE INDEX IF NOT EXISTS idx_msg_session_tool_call
-                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
         """)
+        if not self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_msg_session_tool_call'"
+        ).fetchone():
+            # The session scan still works on read-only or busy stores. Retry on the next open.
+            with _temporary_sqlite_busy_timeout([self._conn], 250):
+                try:
+                    self._conn.execute("""CREATE INDEX IF NOT EXISTS idx_msg_session_tool_call
+                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL""")
+                except sqlite3.OperationalError:
+                    pass
         ensure_external_content_fts(
             self._conn,
             build_message_fts_spec(),
