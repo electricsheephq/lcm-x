@@ -439,11 +439,18 @@ def test_d6_system_row_records_unchanged(lineage, monkeypatch):
     assert all(not record[0] and record[3] == 1 for record in full[0])
 
 
-def test_d9_guard_restore_starts_hidden_only_hold(lineage, monkeypatch, summaries):
+@pytest.mark.parametrize("near_threshold", [False, True], ids=["equal", "shorter"])
+def test_d9_guard_restore_controls_hidden_only_hold(lineage, monkeypatch, summaries, near_threshold):
     with _closing(_arm_engine(lineage, "store")) as engine, monkeypatch.context() as fault:
         view = _adoptable_plain(engine, covered_replay=True)
         _bound_backlog(engine, view)
         engine._config.leaf_chunk_tokens = 1
+        if near_threshold:
+            call, tool = tool_pair("c20b-guard", "synthetic tool text " * 100)
+            view[-1:] = [call, tool, _missing(calls=48)]
+            engine._config.large_output_externalization_enabled = True
+            engine._config.large_output_active_replay_stubbing_enabled = True
+            engine._config.large_output_active_replay_stub_threshold_tokens = 250
         verdicts = _observe_guard(engine, fault, deny_coverage=True)
         _subject(engine, fault, mode="on")
         with patch.object(engine, "_start_no_progress_hold", wraps=engine._start_no_progress_hold) as hold:
@@ -451,7 +458,14 @@ def test_d9_guard_restore_starts_hidden_only_hold(lineage, monkeypatch, summarie
         assert engine._last_compress_leaves[1] == 1
         [(assembly, guarded)] = verdicts
         assert guarded is not assembly and CALL not in _pairs(guarded)[1]
-        assert len(guarded) >= len(view) and count_messages_tokens(guarded) >= count_messages_tokens(view)
-        assert output == [*view, engine._missing_tool_result_stub(CALL)]
-        assert any(call.args == ("hidden_only",) for call in hold.call_args_list)
+        stubs = [engine._missing_tool_result_stub(call["id"]) for call in view[-1]["tool_calls"]]
+        stubbed = guarded + stubs
+        host_tokens = count_messages_tokens(view)
+        assert len(guarded) == len(view) and count_messages_tokens(stubbed) >= host_tokens
+        if near_threshold:
+            assert count_messages_tokens(guarded) < host_tokens
+        else:
+            assert guarded == view
+        assert output == stubbed
+        assert any(call.args == ("hidden_only",) for call in hold.call_args_list) == (not near_threshold)
         assert engine._ingest_cursor == len(output)

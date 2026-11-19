@@ -155,16 +155,15 @@ def test_binding_change_returns_original(tmp_path, monkeypatch, summaries):
             assert scope.uid_trimmed and scope.legacy_replay is not None
             engine.on_session_start("B", platform="telegram", context_length=200_000, conversation_id="B-conv")
             result = finish(state, *args)
-            action, output = result
-            assert output is view
-            assert action == "return"
             exits.append(result)
             return result
 
         monkeypatch.setattr(engine, "_finish_without_leaf", rebind)
-        output = _subject(engine, monkeypatch, view)
-        assert exits == [("return", view)] and exits[0][1] is view
+        returned = _subject(engine, monkeypatch, view)
+        [(action, output)] = exits
         assert output is view
+        assert action == "return"
+        assert returned is view
 
 
 @pytest.mark.parametrize("fits", [True, False], ids=["fits", "over-cap"])
