@@ -415,7 +415,7 @@ def _strip_volatile_host_scaffolding(content: str) -> str:
     return content
 
 
-# Live replay identities of rows that read no state are remembered (#2856). The gate's kinds name
+# Replay identities of rows that read no state are remembered, live and stored (#2856). The gate's kinds name
 # every branch of the identity that reads the store, the DAG, disk, the config or engine state; a row carrying
 # none of their markers (in its content or in any string of its tool calls) has an identity that is a function
 # of its key alone. Markers with no importable constant are named once here: _EXTERNALIZED_REF_RE's two heads
@@ -481,29 +481,32 @@ def _frozen_replay_identity_walk(frozen: tuple) -> tuple[list, int]:
 
 
 def _replay_identity_memo_gate(role: str, content: str, frozen_calls: tuple) -> frozenset[str]:
-    """The impure kinds a live row carries; empty = its identity reads no state and may be remembered.
-    Unconditional on ``role`` and on the identity flags: over-approximation only costs a memo entry."""
+    """The impure kinds a row carries; empty = its identity reads no state and may be remembered. Unconditional
+    on ``role``, on ``stored_row`` and on the identity flags: over-approximation only costs a memo entry. Every
+    string of the calls is scanned, dict keys included (a stored row's payload restore rewrites keys too)."""
     texts = [content, *_frozen_replay_identity_walk(frozen_calls)[0]]
     return frozenset(kind for kind, markers in _REPLAY_IDENTITY_MEMO_GATE
                      if any(marker in text for text in texts for marker in markers))
 
 
-def _replay_identity_memo_key(msg: Dict[str, Any], strip_carrier: bool, allow_pruned_tool_alias: bool) -> tuple:
-    """(key, frozen calls) of a live row, or TypeError when a raw value the key reads is not an exact str/None
-    (role, tool_call_id, tool_name, name) or an exact str/list/dict/None (content): a subclass could make two
-    different values compare equal."""
+def _replay_identity_memo_key(msg: Dict[str, Any], strip_carrier: bool, allow_pruned_tool_alias: bool,
+                              stored_row: bool = False) -> tuple:
+    """(key, frozen calls) of a row, or TypeError when a raw value the key reads is not an exact str/None
+    (role, tool_call_id, tool_name, name, and a stored row's session_id) or an exact str/list/dict/None
+    (content): a subclass could make two different values compare equal."""
     if type(msg.get("content")) not in (str, list, dict, type(None)) or any(
-            type(msg.get(name)) not in (str, type(None)) for name in ("role", "tool_call_id", "tool_name", "name")):
+            type(msg.get(name)) not in (str, type(None))
+            for name in ("role", "tool_call_id", "tool_name", "name", *(("session_id",) if stored_row else ()))):
         raise TypeError("not a replay identity memo input")
     frozen_calls = _freeze_replay_identity_value(msg.get("tool_calls"))
     role = str(msg.get("role") or "unknown")
-    return (False, bool(strip_carrier), bool(allow_pruned_tool_alias), role,
+    return (bool(stored_row), bool(strip_carrier), bool(allow_pruned_tool_alias), role,
             normalize_content_value(msg.get("content")) or "", str(msg.get("tool_call_id") or ""),
             frozen_calls, str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else ""), frozen_calls
 
 
 class _ReplayIdentityMemo:
-    """One epoch's remembered live identities; replaced whole on an epoch change or overflow."""
+    """One epoch's remembered identities; replaced whole on an epoch change or overflow."""
     __slots__ = ("epoch", "entries", "size", "lock")
 
     def __init__(self, epoch):
@@ -1093,16 +1096,16 @@ class ReconcileMixin:
         strip_carrier: bool = True, allow_pruned_tool_alias: bool = True, store=None, hermes_home=None,
         session_id=None, conversation_id=None,
     ) -> tuple[str, str, str, str, str]:
-        """The replay identity; a live row whose identity reads no state is computed once per epoch (#2856).
+        """The replay identity; a row whose identity reads no state is computed once per epoch (#2856).
 
         Remembered only for a ReconcileMixin (ingest_classifier binds this function into an adapter that is not
-        one: it always computes) on a bound engine (no detached-store arguments), a live row (stored rows are
-        not remembered yet), no host-rewrite overlay, a plain dict, storage already open (a miss opens it as
-        before), a key that builds and an empty gate. The memo is dropped when the config object, the session,
+        one: it always computes) on a bound engine (no detached-store arguments), a live or stored row, no
+        host-rewrite overlay, a plain dict, storage already open (a miss opens it as before), a key that builds
+        and an empty gate. The memo is dropped when the config object, the session,
         the conversation, the Hermes home or the interpreter's integer-digit limit changes, and on overflow."""
         uncached = ReconcileMixin._message_replay_identity_uncached
         state = getattr(self, "__dict__", None)
-        if (stored_row or with_host_rewrite or store is not None or hermes_home is not None
+        if (with_host_rewrite or store is not None or hermes_home is not None
                 or session_id is not None or conversation_id is not None or type(msg) is not dict
                 or state is None or not isinstance(self, ReconcileMixin) or not getattr(self, "_storage_ready", True)):
             return uncached(self, msg, stored_row=stored_row, with_host_rewrite=with_host_rewrite,
@@ -1117,14 +1120,26 @@ class ReconcileMixin:
         # the tool name (tool rows only). Not read on an admitted row: timestamp and message_uid (the survival
         # stamp check runs only on a projection mark), session_id and store_id (stored rows and persisted-output
         # proofs only), and ``name`` on other roles (a participant label, never part of the identity).
+        # A stored row (``stored_row`` is in the key) reads, beyond these: its session_id and the bound one, the
+        # Hermes home and the config, all only to restore ingest payload placeholders in the content and in every
+        # string of the calls, dict keys included; the restore is the identity unless a string carries
+        # _EXTERNALIZED_PLACEHOLDER_PREFIX, which the gate rejects (and json.loads of the content, a function of
+        # the content and the digit limit). Its OOB strip and persisted-output branch run only on markers the
+        # gate rejects, its carrier strip and projection lookup never run, and timestamp, store_id and
+        # conversation_id are not read. So the key holds a stored row's identity inputs by value: any write that
+        # changes them (content updated in place, a delete and re-insert under the same store id, rewritten
+        # calls) changes the key. Writes to state an identity reads (payload files, DAG nodes, host-rewrite
+        # overrides, out-of-band proofs, a pruned row's source) cannot change an admitted row's identity, because
+        # the gate rejects every row that reads them; config, session, home and digit-limit changes drop the memo.
         try:
-            key, _frozen = _replay_identity_memo_key(msg, strip_carrier, allow_pruned_tool_alias)
+            key, _frozen = _replay_identity_memo_key(msg, strip_carrier, allow_pruned_tool_alias, stored_row)
             memo = state.get("_replay_identity_memo")
             if memo is None or memo.epoch != epoch:
                 memo = state["_replay_identity_memo"] = _ReplayIdentityMemo(epoch)
             hit = memo.entries.get(key)
         except Exception:
-            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+            return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
+                            allow_pruned_tool_alias=allow_pruned_tool_alias)
         if hit is not None:
             return hit
         # A miss computes on a private copy and remembers it under the copy's own key, so a row another thread
@@ -1132,10 +1147,12 @@ class ReconcileMixin:
         # key. Nothing on the admitted path reads the row's object identity.
         try:
             snap = copy.deepcopy(msg)
-            key, frozen_calls = _replay_identity_memo_key(snap, strip_carrier, allow_pruned_tool_alias)
+            key, frozen_calls = _replay_identity_memo_key(snap, strip_carrier, allow_pruned_tool_alias, stored_row)
         except Exception:
-            return uncached(self, msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
-        result = uncached(self, snap, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias)
+            return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
+                            allow_pruned_tool_alias=allow_pruned_tool_alias)
+        result = uncached(self, snap, stored_row=stored_row, strip_carrier=strip_carrier,
+                          allow_pruned_tool_alias=allow_pruned_tool_alias)
         if not _replay_identity_memo_gate(key[3], key[4], frozen_calls):
             memo.remember(key, result, frozen_calls)
         return result
