@@ -28,8 +28,8 @@ runtime evidence.
 - **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, with read compatibility for legacy transcript GC placeholders
 - **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
   keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
-  (off by default — the durable store is lossless), and automatic protection of the copies
-  sent to known cloud embedding providers
+  and a separate experimental opt-in filter for copies sent to known cloud embedding
+  providers. Both flags default to off
 - **Storage-boundary payload guard** - media-ish `data:*;base64` and long base64-looking strings are externalized before LCM writes them to SQLite
 - **Diagnostics** - `lcm_status`, `lcm_inspect`, `lcm_doctor`, and optional `/lcm` slash commands
 
@@ -69,7 +69,7 @@ required durable redaction to be on; current main resolves it independently):
 
 ```text
 durable summary or semantic query (unchanged)
-  -> embedding-privacy resolution (auto-ON for cloud; `privacy:off` opt-out)
+  -> embedding-privacy resolution (experimental cloud opt-in; default `privacy:off`)
   -> active named sensitive-pattern catalog
   -> provider-input-only placeholder transform
   -> residual scan / fail closed
@@ -78,10 +78,10 @@ durable summary or semantic query (unchanged)
 ```
 
 The transform never rewrites durable messages, summaries, FTS rows, or payloads.
-When embedding privacy is ON (the cloud default), empty, unknown, drifted, or
+When the experimental filter is explicitly enabled, empty, unknown, drifted, or
 residual-unsafe policies stop cloud warmup, document dispatch, and
-semantic-query dispatch before transport; the explicit `privacy:off` opt-out
-dispatches raw input under its own bound revision instead of blocking. Policy
+semantic-query dispatch before transport. The default `privacy:off` revision
+dispatches unfiltered input. Policy
 identity uses only the transform version and active pattern-name hash; it never
 contains secret-derived bytes.
 

@@ -896,6 +896,7 @@ def test_recall_cloud_summary_query_is_protected_with_durable_redaction_off(
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-4-large"
     recall_engine._config.sensitive_patterns_enabled = False
+    recall_engine._config.embedding_privacy_enabled = True
     secret = "abcdefghijklmnop"
     raw_query = f"summary privacy api_key={secret}"
     recall_engine._store.append(CURRENT, {"role": "user", "content": raw_query})
@@ -977,6 +978,7 @@ def test_recall_cloud_chunk_query_is_protected_with_durable_redaction_off(
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-4-large"
     recall_engine._config.sensitive_patterns_enabled = False
+    recall_engine._config.embedding_privacy_enabled = True
     secret = "abcdefghijklmnop"
     raw_query = f"chunk privacy api_key={secret}"
     recall_engine._store.append(CURRENT, {"role": "user", "content": raw_query})
@@ -1550,6 +1552,7 @@ def test_rerank_protects_cloud_payload_and_reorders_original_hits(
     recall_engine, monkeypatch
 ):
     recall_engine._config.rerank_enabled = True
+    recall_engine._config.embedding_privacy_enabled = True
     recall_engine._config.rerank_model = "rerank-2.5"
     query_secret = "query-secret-abcdefghijklmnop"
     alpha_secret = "alpha-secret-abcdefghijklmnop"

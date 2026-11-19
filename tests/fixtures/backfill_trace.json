@@ -11775,6 +11775,7 @@
 "connection open [\"connection-1\",[\"file://<sandbox>/lcm.db?mode=ro\"],null]",
 "sql connection-1 sha12/len=d42e33185e43/360",
 "connection close \"connection-1\"",
+"boundary revision null",
 "return type [\"str\",null]",
 "report fields sha12/len=a35fafb8ce31/565",
 "rendered sha12/len=a35fafb8ce31/565",

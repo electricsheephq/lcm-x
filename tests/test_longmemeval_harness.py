@@ -1664,6 +1664,20 @@ def _flatten_document_calls(provider):
     return [text for call in provider.captured_documents for text in call]
 
 
+@pytest.fixture
+def opt_into_embedding_privacy(monkeypatch):
+    from hermes_lcm.config import LCMConfig
+
+    configure = LCMConfig.__init__
+
+    def configure_with_privacy(config, *args, **kwargs):
+        kwargs["embedding_privacy_enabled"] = True
+        configure(config, *args, **kwargs)
+
+    monkeypatch.setattr(LCMConfig, "__init__", configure_with_privacy)
+
+
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_cloud_summary_document_is_protected_before_provider_dispatch(tmp_path):
     summary = _CapturingIdentityEmbedder("voyage-4-large")
     chunk = _IdentityEmbedder("voyage-context-4")
@@ -1683,6 +1697,7 @@ def test_cloud_summary_document_is_protected_before_provider_dispatch(tmp_path):
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_cloud_flat_chunk_document_is_protected_before_provider_dispatch(tmp_path):
     summary = _CapturingIdentityEmbedder("voyage-4-large")
     chunk = _CapturingIdentityEmbedder("voyage-context-4")
@@ -1702,6 +1717,7 @@ def test_cloud_flat_chunk_document_is_protected_before_provider_dispatch(tmp_pat
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_cloud_contextual_chunk_group_is_protected_before_provider_dispatch(tmp_path):
     summary = _CapturingIdentityEmbedder("voyage-4-large")
     chunk = _CapturingContextualIdentityEmbedder("voyage-context-4")
@@ -1750,6 +1766,7 @@ def test_cloud_embeddings_keep_lossless_raw_corpus_in_fts(tmp_path):
     assert _PRIVACY_PLACEHOLDER not in fts_text
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch):
     import benchmarking.longmemeval as lme
 
@@ -1823,6 +1840,7 @@ def test_stub_query_reaches_provider_byte_identical(tmp_path, monkeypatch):
     assert provider.captured_queries == [_PRIVACY_TEXT]
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_prewarm_cloud_documents_are_protected_before_dispatch(tmp_path):
     import benchmarking.longmemeval as lme
 
@@ -1839,6 +1857,7 @@ def test_prewarm_cloud_documents_are_protected_before_dispatch(tmp_path):
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_prewarm_reports_privacy_transform_counts(tmp_path, monkeypatch):
     import benchmarking.longmemeval as lme
 
@@ -1873,6 +1892,7 @@ def test_prewarm_reports_privacy_transform_counts(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_prewarm_changed_manifest_records_exact_transformed_unit(
     tmp_path, monkeypatch, dry_run
 ):
@@ -1940,6 +1960,7 @@ def test_prewarm_changed_manifest_stays_empty_without_transform(tmp_path):
     assert manifest.read_text(encoding="utf-8") == ""
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_prewarm_privacy_block_is_counted_and_reraised(tmp_path, monkeypatch):
     import benchmarking.longmemeval as lme
     from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
@@ -1974,6 +1995,7 @@ def test_prewarm_privacy_block_is_counted_and_reraised(tmp_path, monkeypatch):
     assert raw.captured_documents == []
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_path):
     import benchmarking.longmemeval as lme
 
@@ -2000,6 +2022,7 @@ def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_pat
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_determinism_probe_privacy_counts_are_sample_scoped(tmp_path):
     question = parse_question(
         _make_raw(
