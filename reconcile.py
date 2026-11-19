@@ -342,10 +342,12 @@ class _TailReplayRun:
     session_end_prefix_digests: dict[int, str] = field(init=False)
     # Pure identity transforms, scoped to this reconciliation invocation.
     # The prepared messages list retains every object used as an id key.
-    literal_pruned_identities: dict[int, tuple[str, str, str, str, str]] = field(default_factory=dict, init=False)
-    persisted_marker_texts: dict[int, str] = field(default_factory=dict, init=False)
+    literal_pruned_identities: dict[int, tuple[tuple, tuple[str, str, str, str, str]]] = field(
+        default_factory=dict, init=False
+    )
+    persisted_marker_texts: dict[int, tuple[tuple[str, str, int], str]] = field(default_factory=dict, init=False)
     cleanup_identities: dict[
-        tuple[str, str, str, str, str], tuple[str, str, str, str, str] | None
+        tuple[tuple[str, str, str, str, str], int], tuple[str, str, str, str, str] | None
     ] = field(default_factory=dict, init=False)
     generationless_identities: dict[
         tuple[str, str, str, str, str], tuple[str, str, str, str, str]
@@ -353,14 +355,21 @@ class _TailReplayRun:
     generationless_sanitized_tail: list[tuple[str, str, str, str, str]] | None = field(default=None, init=False)
 
     def persisted_marker_text(self, msg: Dict[str, Any]) -> str:
-        text = self.persisted_marker_texts.get(id(msg))
-        if text is None:
-            text = ""
-            if str(msg.get("role") or "") == "tool":
-                content = normalize_content_value(msg.get("content")) or ""
-                if _is_hermes_persisted_output_marker(content):
-                    text = content
-            self.persisted_marker_texts[id(msg)] = text
+        role = msg.get("role")
+        if str(role or "") != "tool":
+            return ""
+        content = msg.get("content")
+        limit = sys.get_int_max_str_digits()
+        inputs = (role, content, limit)
+        cacheable = type(role) is str and type(content) is str
+        entry = self.persisted_marker_texts.get(id(msg)) if cacheable else None
+        # Tuple equality checks each field by identity before comparing its value.
+        if entry is not None and entry[0] == inputs:
+            return entry[1]
+        content = normalize_content_value(content) or ""
+        text = content if _is_hermes_persisted_output_marker(content) else ""
+        if cacheable and sys.get_int_max_str_digits() == limit:
+            self.persisted_marker_texts[id(msg)] = (inputs, text)
         return text
 
 
@@ -2331,10 +2340,14 @@ class ReconcileMixin:
         raw_tail_suffix = stored_tail[-len(candidate_prefix) :] if matches_raw_tail else []
         raw_suffix_needs_cleanup_equivalence = False
         for identity in raw_tail_suffix:
-            if identity in run.cleanup_identities:
-                cleaned = run.cleanup_identities[identity]
+            limit = sys.get_int_max_str_digits()  # cleanup decodes identity JSON
+            key = (identity, limit)
+            if key in run.cleanup_identities:
+                cleaned = run.cleanup_identities[key]
             else:
-                cleaned = run.cleanup_identities[identity] = self._active_cleanup_replay_identity(identity)
+                cleaned = self._active_cleanup_replay_identity(identity)
+                if sys.get_int_max_str_digits() == limit:
+                    run.cleanup_identities[key] = cleaned
             if cleaned != identity:
                 raw_suffix_needs_cleanup_equivalence = True
                 break
@@ -2607,16 +2620,27 @@ class ReconcileMixin:
     def _literal_pruned_replay_identity(
         self, run: _TailReplayRun, msg: Dict[str, Any],
     ) -> tuple[str, str, str, str, str]:
-        # pruned_source_ids guarantees literal placeholder content and a tool role.
-        # With aliasing disabled, only a survival mark in tool calls could lead
-        # to a durable source and a subsequent payload read.
-        calls = msg.get("tool_calls")
-        if calls is not None and not (type(calls) is list and not calls):
+        if type(msg) is not dict:
             return self._message_replay_identity(msg, allow_pruned_tool_alias=False)
-        identity = run.literal_pruned_identities.get(id(msg))
-        if identity is None:
-            identity = self._message_replay_identity(msg, allow_pruned_tool_alias=False)
-            run.literal_pruned_identities[id(msg)] = identity
+        fields = tuple(map(msg.get, _REPLAY_IDENTITY_FIELDS))
+        role, content, calls, *labels = fields
+        # A message can change after pruned_source_ids was prepared. Admit only
+        # literal tool rows with immutable labels and no calls (hence no projection).
+        if (type(role) is not str or role != "tool"
+                or type(content) is not str or content != _HERMES_PRUNED_TOOL_PLACEHOLDER
+                or (calls is not None and not (type(calls) is list and not calls))
+                or any(label is not None and type(label) is not str for label in labels)):
+            return self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+        inputs = (role, content, None if calls is None else (), *labels)
+        entry = run.literal_pruned_identities.get(id(msg))
+        if entry is not None and entry[0] == inputs:
+            return entry[1]
+        snapshot = dict(zip(_REPLAY_IDENTITY_FIELDS, inputs))
+        if calls is not None:
+            snapshot["tool_calls"] = []
+        identity = self._message_replay_identity(
+            snapshot, allow_pruned_tool_alias=False)
+        run.literal_pruned_identities[id(msg)] = (inputs, identity)
         return identity
 
     def _find_reconciled_cursor_for_store_tail(

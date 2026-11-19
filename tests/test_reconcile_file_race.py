@@ -2,11 +2,12 @@
 
 from copy import deepcopy
 import subprocess
+import sys
 
 import pytest
 
 from tests.test_issue_10_persisted_output_spillover import (
-    FULL_OUTPUT, SESSION_ID, _engine, _messages, _write_output,
+    FULL_OUTPUT, SESSION_ID, _engine, _marker, _messages, _write_output,
 )
 from tests.test_issue_1090_replay_prefix_scaling import NOTE
 from tests.test_issue_772_replay_keeps_host_stubs import CLEARED
@@ -36,7 +37,7 @@ def _compare(tmp_path, monkeypatch, stored, incoming, project=None, reset=None, 
                 project_candidate = reader._project_replay_candidate
                 collect = reader._collect_persisted_replay_evidence
                 identity = reader._message_replay_identity
-                visits, recovery = [], []
+                visits, recovery, cleanup = [], [], []
                 literals = 0
 
                 def count_identity(msg, **kwargs):
@@ -54,26 +55,28 @@ def _compare(tmp_path, monkeypatch, stored, incoming, project=None, reset=None, 
                 def visit(run, candidate):
                     visits.append(candidate.cursor)
                     if project is not None:
-                        project(candidate, recovery)
+                        project(candidate, recovery, patch)
                     project_candidate(run, candidate)
 
                 def observe_recovery(run, candidate):
                     collect(run, candidate)
                     recovery.append((candidate.cursor, candidate.candidate_has_unrecoverable_persisted_marker))
+                    cleanup.append((candidate.cursor, candidate.raw_suffix_needs_cleanup_equivalence))
 
                 patch.setattr(reader, "_prepare_tail_replay_run", prepare_run)
                 patch.setattr(reader, "_project_replay_candidate", visit)
                 patch.setattr(reader, "_collect_persisted_replay_evidence", observe_recovery)
                 patch.setattr(reader, "_message_replay_identity", count_identity)
-                tail = [reader._message_replay_identity(row, stored_row=True) for row in rows]
+                tail = [reader._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)
+                        for row in rows]
                 cursor = reader._find_reconciled_cursor_for_store_tail(
                     incoming, tail, stored_tail_rows=rows, allow_empty_prefix=True,
                     session_count=len(rows), raw_session_count=len(rows))
-                observations.append((cursor, visits, recovery))
-                literal_counts.append(literals)
-                assert visits
-                assert incoming == before
-                assert reader._store.get_session_messages(SESSION_ID) == rows
+            observations.append((cursor, visits, recovery, cleanup))
+            literal_counts.append(literals)
+            assert visits
+            assert incoming == before
+            assert reader._store.get_session_messages(SESSION_ID) == rows
         finally:
             reader.shutdown()
     assert observations[0] == observations[1]
@@ -107,28 +110,60 @@ def test_cursor_oracle(tmp_path, monkeypatch, shape, cut):
         incoming.insert(0, {"role": "user", "content": "Different opening"})
     if cut != "top":
         incoming.append({"role": "user", "content": "Fresh turn"})
-    cursor, _, _ = _compare(tmp_path, monkeypatch, stored, incoming, pin_literals=shape == "pruned" and cut != "top")
+    cursor, *_ = _compare(tmp_path, monkeypatch, stored, incoming, pin_literals=shape == "pruned" and cut != "top")
     assert cursor == expected
 
 
-@pytest.mark.parametrize("move_spill", [False, True])
-def test_reconcile_file_moves_between_candidates(tmp_path, monkeypatch, move_spill):
+@pytest.mark.parametrize("change", ["none", "move", "rewrite", "digit-limit"])
+def test_reconcile_marker_between_candidates(tmp_path, monkeypatch, change):
     spill = tmp_path / "hermes" / "cache" / "spillover" / "call_spill.txt"
     moved = spill.with_suffix(".moved")
     stored = _messages(_write_output(spill))
-    incoming = stored + [{"role": "user", "content": "Fresh turn"}]
+    incoming = deepcopy(stored) + [{"role": "user", "content": "Fresh turn"}]
+    original_limit = sys.get_int_max_str_digits()
+    if change == "digit-limit":
+        incoming[1]["content"] = stored[1]["content"].replace("too large (", "too large (" + "0" * 640)
 
-    def project(candidate, recovery):
-        if candidate.cursor == 2 and move_spill:
+    def project(candidate, recovery, patch):
+        if candidate.cursor == 3 and change == "digit-limit":
+            sys.set_int_max_str_digits(640)
+        if candidate.cursor == 2 and change != "none":
             assert recovery == [(3, False)]
-            subprocess.run(["mv", str(spill), str(moved)], check=True)
+            if change == "rewrite":
+                patch.setitem(incoming[1], "content", _marker(spill.with_name("missing.txt")))
+            else:
+                sys.set_int_max_str_digits(0 if change == "digit-limit" else original_limit)
+                subprocess.run(["mv", str(spill), str(moved)], check=True)
 
-    # Restore at preparation so the memo-off and memo-on arms see the same
-    # file when they build the restart's occurrence identities.
-    def restore_after_move():
+    def reset():
+        sys.set_int_max_str_digits(0 if change == "digit-limit" else original_limit)
         if moved.exists():
             moved.rename(spill)
-    cursor, visits, recovery = _compare(tmp_path, monkeypatch, stored, incoming, project, restore_after_move)
+
+    try:
+        cursor, visits, recovery, _ = _compare(tmp_path, monkeypatch, stored, incoming, project, reset)
+    finally:
+        sys.set_int_max_str_digits(original_limit)
     assert visits[:2] == [3, 2]
-    assert recovery[:2] == [(3, False), (2, move_spill)]
-    assert cursor == (0 if move_spill else 2)
+    assert recovery[:2] == [(3, False), (2, change != "none")]
+    assert cursor == (2 if change == "none" else 0)
+
+
+@pytest.mark.parametrize("with_calls", [False, True], ids=["literal-call-id", "pruned-with-calls"])
+def test_literal_pruned_cursor_oracle(tmp_path, monkeypatch, with_calls):
+    older = _messages(FULL_OUTPUT, "a") + _messages(FULL_OUTPUT, "b")
+    suffix = _messages("durable anchor", "anchor") + _messages(CLEARED, "a") + _messages(CLEARED, "b")
+    if with_calls:
+        suffix[-1]["tool_calls"] = suffix[-2]["tool_calls"]
+    incoming = deepcopy(suffix) + _messages("fresh", "x") + _messages("fresh", "y")
+    cursor, *_ = _compare(tmp_path, monkeypatch, older + suffix, incoming)
+    assert cursor == len(suffix)
+
+
+def test_raw_cleanup_cursor_oracle(tmp_path, monkeypatch):
+    clean = [{"role": "assistant", "content": text} for text in ("First", "Second")]
+    stored = clean + [{"role": "assistant", "content": "<think>Private reasoning</think>"}] + clean
+    cursor, _, _, cleanup = _compare(tmp_path, monkeypatch, stored, [NOTE, *deepcopy(stored)])
+    assert cursor == 1
+    assert cleanup[0] == (6, True)
+    assert (3, False) in cleanup
