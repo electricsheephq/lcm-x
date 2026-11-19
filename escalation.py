@@ -17,7 +17,7 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from . import tokens as _token_module
@@ -159,12 +159,10 @@ class ForegroundBudget:
 
     @property
     def call_hard(self) -> float:
-        """The hard bound of the admitted call: the catch-up bound for an extension-only call, else ``hard``."""
         return _CATCHUP_HARD_SECONDS if self.extended else self.hard
 
     @property
     def call_reserve(self) -> float:
-        """The finalize reserve of the admitted call: at least the catch-up minimum for an extension-only call."""
         return max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS) if self.extended else self.reserve
 
     @property
@@ -172,7 +170,6 @@ class ForegroundBudget:
         return self.t0 + self.call_hard - self.call_reserve - self.leaf_reserve
 
     def catchup_deadline(self) -> float:
-        """Design B: the catch-up bound, t0 + 210 s less the extension-only reserve."""
         return self.t0 + _CATCHUP_HARD_SECONDS - max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS)
 
     def catchup_timeout(self) -> float:
@@ -1201,10 +1198,12 @@ def _invoke_summary_llm_routes(
             budget_bound=budget_bound,
             call_timeout=call_timeout,
             configured_timeout=budget.configured_timeout if budget is not None else 0.0,
-            hard=(budget.call_hard if extended else budget.hard) if budget is not None else 0.0,
-            reserve=(budget.call_reserve if extended else budget.reserve) if budget is not None else 0.0,
+            hard=budget.hard if budget is not None else 0.0,
+            reserve=budget.reserve if budget is not None else 0.0,
             leaf_reserve=budget.leaf_reserve if budget is not None else 0.0,
-            usable_deadline=budget.usable_deadline if budget is not None else 0.0,
+            # design B: an extension-only call is classified against its own stream deadline
+            usable_deadline=(min(budget.usable_deadline, started + call_timeout) if extended else budget.usable_deadline)
+            if budget is not None else 0.0,
             now=time.monotonic() if budget is not None and result is None and error is not None else 0.0,
             breaker_present=circuit_breaker is not None,
             accepts_result=accepted,
@@ -1214,6 +1213,8 @@ def _invoke_summary_llm_routes(
                            and source_tokens is not None else 0),
             context_length_rescue=context_length_rescue,
         ))
+        if extended and outcome.hang:  # design B: an extension-only call is never classed a hang
+            outcome = replace(outcome, hang=False, record_hang=False)
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)

@@ -96,8 +96,13 @@ class Provider:
         value = script[min(index, len(script) - 1)]
         return None if value == "hang" else float(value)
 
+    kind_script = None  # verify-2912: {"condensation": s, "leaf": s} overrides the index script per call kind
+
     def __call__(self, prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
         took = self.seconds(self.started)
+        if self.kind_script:
+            value = self.kind_script["leaf" if "user turn" in prompt else "condensation"]
+            took = None if value == "hang" else float(value)
         self.started += 1
         self.timeouts.append(None if timeout is None else round(float(timeout), 3))
         self.kinds.append("leaf" if "user turn" in prompt else "condensation")
@@ -284,11 +289,24 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
     if cell.get("estimate") is not None:
         estimates.record_call(route, float(cell["estimate"]))
     in_pass = {"active": False, "pre_done": False}
+    cur = {"pre": cell.get("pre", 0), "turn_gap": cell.get("turn_gap", 60)}  # verify-2912: per-pass overrides
+    provider.kind_script = cell.get("call_kind")
+
+    def apply_overrides(index):
+        for item in cell.get("from_pass", []):
+            if index >= int(item["pass"]):
+                for key in ("pre", "turn_gap"):
+                    if key in item:
+                        cur[key] = item[key]
+                if "call" in item:
+                    provider.script = item["call"]
+                if "call_kind" in item:
+                    provider.kind_script = item["call_kind"]
 
     def pre_work(*_args, **_kwargs):
         if in_pass["active"] and not in_pass["pre_done"]:
             in_pass["pre_done"] = True
-            clock.offset += float(cell.get("pre", 0))
+            clock.offset += float(cur["pre"])
 
     def finalize(budget, *_args, **_kwargs):
         in_pass["budget"] = budget
@@ -314,6 +332,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
     max_passes = int(cell.get("passes", 10))
     try:
         for index in range(max_passes):
+            apply_overrides(index)
             if index:
                 grown = make_turns(next_turn, int(cell.get("growth_turns", 0)), row_tokens, tool_every)
                 next_turn += int(cell.get("growth_turns", 0))
@@ -321,7 +340,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
                     grown += make_turns(next_turn, 1, row_tokens, tool_every)
                     next_turn += 1
                 view = list(result) + grown
-                clock.offset += float(cell.get("turn_gap", 60))
+                clock.offset += float(cur["turn_gap"])
             prompt = count(view) + fixed
             if kind == "overflow":
                 prompt = max(prompt, window + 1)

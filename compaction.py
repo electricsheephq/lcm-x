@@ -112,6 +112,7 @@ class _CompressionState:
     depth_target_tokens: int = 0
     depth_load_addend: int = 0
     catchup_mark: int = 0  # design B: the mark M while the catch-up budget engages, else 0
+    catchup_condensed: int = 0  # design B: tokens the pre-leaf condensations freed (its own prompt estimate only)
     step_deadline: float = 0.0  # design B: the sweep deadline, or the catch-up bound while the catch-up is open
     stub_first_fallback: Callable[[], Optional[List[Dict[str, Any]]]] | None = None
     critical_budget_pressure: bool = False
@@ -2446,7 +2447,7 @@ class CompactionMixin:
         """Design B: the mark M (never a stop), or 0 when the catch-up does not engage: it needs an automatic threshold
         sweep above 480,000 tokens and neither foreground setting configured (a non-default config_sources entry; with
         none recorded, as for every config today, soft 60.0 and hard 0 are unconfigured). M is the depth target, else
-        the prepared-leaf low-water mark (none where leaf_prep.levels gives none)."""
+        threshold - max(2 x chunk, 0.1 x window), at least 1 (the prompt is then always above it)."""
         config, sources = self._config, getattr(self._config, "config_sources", None) or {}
 
         def unset(name: str, default: float) -> bool:
@@ -2459,14 +2460,14 @@ class CompactionMixin:
             return 0
         if state.depth_target_tokens:
             return state.depth_target_tokens
-        bounds = leaf_prep.levels(self.threshold_tokens, self.context_length, int(config.leaf_chunk_tokens))
-        return max(0, int(bounds[1])) if bounds is not None else 0
+        return max(1, int(self.threshold_tokens - max(2 * int(config.leaf_chunk_tokens), 0.1 * self.context_length)))
 
     def _open_catchup(self, state: _CompressionState) -> float:
         """Design B: open the catch-up after progress while the prompt is above the mark; return the step deadline."""
         budget = state.budget
         catchup = bool(state.catchup_mark and budget.progress
-                       and state.estimated_active_tokens + state.depth_load_addend > state.catchup_mark)
+                       and state.estimated_active_tokens + state.depth_load_addend - state.catchup_condensed
+                       > state.catchup_mark)
         if catchup or budget.catchup:  # set only once engaged: the base's pass keeps the base's budget state
             budget.catchup = catchup
         state.step_deadline = budget.catchup_deadline() if budget.catchup else state.sweep_deadline
@@ -2606,10 +2607,7 @@ class CompactionMixin:
             and state.sweep_summary_prefix_before > state.sweep_target_tokens
             and self._summary_route_available()
         ):
-            # Design B (T1-285, T1-289): the leaf takes the catch-up bound when both calls fit by it.
-            estimate = state.budget.estimate(self._primary_summary_route())
-            state.budget.leaf_reserve = 0.0 if state.catchup_mark and (
-                time.monotonic() + 2 * estimate <= state.budget.catchup_deadline()) else estimate
+            state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (
@@ -2648,6 +2646,8 @@ class CompactionMixin:
                 state.budget.leaf_reserve = 0.0
                 self._pre_leaf_span("condensation", span_started)
             state.max_leaf_passes -= state.pre_leaf_condensation_passes
+            if state.catchup_mark and state.pre_leaf_condensation_passes:  # design B: what the condensations freed
+                state.catchup_condensed = max(0, state.sweep_summary_prefix_before - self._summary_frontier_tokens())
         if self._compress_binding_changed() or self._compaction_is_closing():
             return "return", state.host_messages
         if state.threshold_full_sweep_active:

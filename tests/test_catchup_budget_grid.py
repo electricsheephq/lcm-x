@@ -169,7 +169,48 @@ def _reference_cells() -> list[dict]:
          "estimate": 70, "call": [60, 60], "delta": 0, "prefix": "over2x"} for side, pre in (("inside", 49), ("outside", 52))]
 
 
-CELLS = _g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells() + _reference_cells()
+_G120 = {**G1_FIXED, **_g1_load(600_000), "window": 600_000, "pre": 59, "estimate": None, "call": 45, "delta": 0,
+         "prefix": "over2x"}
+_R1M = {**G1_FIXED, **_g1_load(1_000_000), "window": 1_000_000, "delta": 0, "prefix": "over2x"}
+
+
+def _regression_cells() -> list[dict]:
+    """Review fix round 1 (group V), each red on e529d499 (the released pre-leaf leaf reserve) and green after:
+    the reviewer's hardened cells, the verifier's starvation shape (1) at 60 passes, its route-recovery shapes (5) and
+    its seven controls. ``call_kind`` and ``from_pass`` are the runner's per-kind latency and per-pass overrides."""
+    kind = lambda cond, leaf: {"call_kind": {"condensation": cond, "leaf": leaf}}  # noqa: E731
+    cells = [
+        {**_G120, "id": "h-g120-params-call60-25", "call": [60, 25]},
+        {**_R1M, "id": "h-pre37-est44-hang-30", "pre": 37, "estimate": 44, "call": ["hang", 30]},
+        {**_R1M, "id": "h-pre37-est44-call80-38", "pre": 37, "estimate": 44, "call": [80, 38]},
+        {**_R1M, "id": "x-hangcond-fastleaf-pre10", "pre": 10, "estimate": 30, "call": ["hang", 10]},
+        {**_R1M, "id": "x-slowcond-fastleaf", "pre": 37, "estimate": 44, "call": [100, 30]},
+        {**_G120, "id": "v1-starve-c70-l20-60p", "passes": 60, **kind(70, 20)},
+        {**_G120, "id": "v-ctl-c70-l70", "passes": 24, **kind(70, 70)},
+        {**_G120, "id": "v-ctl-pre37-c45-l45", "passes": 24, "pre": 37},
+        {**_G120, "id": "v-ctl-c40-l20-gap700", "passes": 8, "turn_gap": 700, **kind(40, 20)},
+        {**_G120, "id": "v-ctl-c42-l20-gap700", "passes": 8, "turn_gap": 700, **kind(42, 20)},
+        {**_G120, "id": "v-ctl-c45-l35", "passes": 24, **kind(45, 35)},
+        {**_G120, "id": "v-ctl-pre37-c70-l20", "passes": 24, "pre": 37, **kind(70, 20)},
+        {**_G120, "id": "v-ctl-pre37-c70-l45", "passes": 24, "pre": 37, **kind(70, 45)},
+    ]
+    cells += [{**_G120, "id": f"v5-recover-at-{at}", "passes": 20, "from_pass": [{"pass": at, "pre": 5, "call": 5}]}
+              for at in (9, 10, 11, 12)]
+    return [{**cell, "group": "V"} for cell in cells]
+
+
+def _mark_cells() -> list[dict]:
+    """Group M. (4): a depth target of 0.49 (M 490k) a prompt 1k over the trigger, so the pre-leaf condensation alone
+    brings it under M: no extension leaf may follow. (3): a 400k trigger on a 1M window (M = 400k - 100k = 300k), where
+    leaf_prep.levels has no low-water mark: the catch-up must engage."""
+    return [{**_R1M, "group": "M", "id": "m4-depth-stale", "passes": 3, "pre": 37, "call": 40, "over_tokens": 1_000,
+             "depth_ratio": 0.49},
+            {**_R1M, "group": "M", "id": "m3-trigger-400k", "passes": 3, "pre": 37, "estimate": 40, "call": 40,
+             "prefix": "none", "settings": {"context_threshold": 0.4}}]
+
+
+CELLS = (_g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells() + _reference_cells()
+         + _regression_cells() + _mark_cells())
 CELLS += _no_system_twins(CELLS)
 BY_ID = {cell["id"]: cell for cell in CELLS}
 G1 = [cell["id"] for cell in CELLS if cell["group"] == "G1"]
@@ -186,6 +227,7 @@ ISSUE_2901 = "issue 2901"
 # from then the candidate's A0 there must be 0
 KNOWN_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-600k-l40-prefix-nosys", "s-1m-cond-then-leaf-nosys"]
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
+V = [cell["id"] for cell in CELLS if cell["group"] == "V"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
 GATE_SHARE_TARGET = 0.8  # G1 passes that reached the gate: triggered, or at or over the trigger and refused by a hold
@@ -568,21 +610,9 @@ def test_g1_gate_share(grid):
         assert share >= GATE_SHARE_TARGET, f"{tree}: {share:.2f} of G1 passes reached the gate"
 
 
-# The one pinned A1 shortfall: the call-start clause in cell g1-20 at pass 9, on the candidate. Every other A1 finding,
-# in this cell at any other pass or clause and in every other cell, still gates.
-A1_PIN = ("g1-20", "pass 9: calls started 0 ")
-A1_PIN_REASON = ("g1-20 pass 9 call start: no base-admitted call refused; cumulative leaves + condensations and "
-                 "cumulative calls started at least the base's at every pass; the shortfall is a base call that was "
-                 "cut (no leaf), offset by a later-armed wall-time hold")
-
-
 @pytest.mark.parametrize("cell", G1 + G2 + S)
-def test_a1_never_less_progress(grid, cell, request):
+def test_a1_never_less_progress(grid, cell):
     found = a1_violations(grid["base"]["by_cell"][cell], grid["cand"]["by_cell"][cell])
-    if cell == A1_PIN[0]:
-        others = [item for item in found if not item.startswith(A1_PIN[1])]
-        assert not others, f"A1 in cell {cell}: " + "; ".join(others)
-        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=A1_PIN_REASON))
     assert not found, f"A1 in cell {cell}: " + "; ".join(found)
 
 
@@ -714,25 +744,67 @@ def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
     assert not _a6(cand)["grows"], f"{cell}: the summary area grows over passes 41-60: {_a6(cand)}"
 
 
-def test_shipped_budget_condensation_then_leaf(grid):
-    """T1-285 (a), issue 2878: at shipped budgets the condensation completes and a leaf is stored in the same pass."""
-    base, cand = (grid[tree]["by_cell"]["r-shipped-cond-then-leaf"][0] for tree in ("base", "cand"))
-    assert cand["condensations"] >= 1 and cand["leaves"] >= 1, (
-        f"candidate pass 0: {cand['condensations']} condensations, {cand['leaves']} leaves (base: "
-        f"{base['condensations']}, {base['leaves']}; call timeouts {cand['call_timeouts']})")
-    assert not a2_violations([cand])
+@pytest.mark.parametrize("cell", V)
+def test_regression_cells_never_behind_the_base(grid, cell):
+    """On every pass, no lag: cumulative leaves and cumulative leaves + condensations at least the base's, rows behind a
+    notice (A0b) at most the base's, and no hung strike the base lacks."""
+    base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
+    assert len(base) == len(cand), f"{cell}: walks of {len(base)} and {len(cand)} passes"
+    done = {"base": 0, "cand": 0}
+    for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
+        done["base"] += b["leaves"] + b["condensations"]
+        done["cand"] += c["leaves"] + c["condensations"]
+        assert c["leaves_cum"] >= b["leaves_cum"], f"{cell} pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}"
+        assert done["cand"] >= done["base"], f"{cell} pass {b['pass']}: leaves + condensations {done}"
+        assert nc <= nb, f"{cell} pass {b['pass']}: A0b {nc} > base {nb}"
+        assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
 
 
-def test_leaf_reserve_release_boundary(grid):
-    """T1-289: inside the boundary the condensation gets the grant without the leaf reserve and a leaf follows in the
-    same pass; outside it the first call is the base's (same kind, same timeout)."""
-    by = {tree: {side: grid[tree]["by_cell"][f"r-release-{side}"][0] for side in ("inside", "outside")}
-          for tree in ("base", "cand")}
-    inside, outside = by["cand"]["inside"], by["cand"]["outside"]
-    assert inside["call_kinds"][:1] == ["condensation"] and inside["condensations"] >= 1 and inside["leaves"] >= 1, inside
-    assert (outside["call_kinds"][:1], outside["call_timeouts"][:1], outside["condensations"]) == (
-        by["base"]["outside"]["call_kinds"][:1], by["base"]["outside"]["call_timeouts"][:1],
-        by["base"]["outside"]["condensations"]), (outside, by["base"]["outside"])
+def test_stale_estimate_no_extension_leaf_below_the_mark(grid):
+    """(4): once the pre-leaf condensation brings the prompt under M, only the base admits (pass 0 matches the base)."""
+    base, cand = (grid[tree]["by_cell"]["m4-depth-stale"][0] for tree in ("base", "cand"))
+    assert base["condensations"] >= 1, f"premise: the base condenses first: {base}"
+    assert (cand["leaves"], cand["calls_started"]) == (base["leaves"], base["calls_started"]), (cand, base)
+
+
+def test_mark_per_rule_4_engages_at_a_400k_trigger(grid):
+    """(3): M = threshold - max(2 x chunk, 0.1 x window) engages the catch-up where leaf_prep.levels has no mark."""
+    base, cand = (grid[tree]["by_cell"]["m3-trigger-400k"][0] for tree in ("base", "cand"))
+    assert cand["leaves"] > base["leaves"], f"candidate {cand['leaves']} leaves, base {base['leaves']}"
+
+
+# (2): an extension-only call on a host with the stream-deadline seam. The pass's second call (the extension call) is
+# either masked at its own deadline as a non-timeout error (MASK), or returns late, 11 s past it (LATE).
+_EXT_HOST = (
+    "import sys as _sys\n"
+    "escalation._host_stream_deadline_seam = lambda: True\n"
+    "_P = _sys.modules['__main__'].Provider\n"
+    "_orig = _P.__call__\n"
+    "def _ext(self, prompt, max_tokens, model='', timeout=None, reasoning_effort=''):\n"
+    "    if self.started == 0:\n"
+    "        return _orig(self, prompt, max_tokens, model=model, timeout=timeout, reasoning_effort=reasoning_effort)\n"
+    "    deadline = escalation._summary_call.stream_deadline\n"
+    "    self.started += 1; self.cut += 1\n"
+    "    self.timeouts.append(None if timeout is None else round(float(timeout), 3))\n"
+    "    self.kinds.append('leaf' if 'user turn' in prompt else 'condensation'); self.cut_flags.append(True)\n"
+    "    self.clock.offset = deadline + LATE\n"
+    "    raise (TimeoutError('timed out') if LATE else RuntimeError('invalid argument: stream closed'))\n"
+    "_P.__call__ = _ext\n")
+PATCHES["ext_masked"] = _EXT_HOST.replace("LATE", "0")
+PATCHES["ext_late"] = _EXT_HOST.replace("LATE", "11")
+
+
+@pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
+@pytest.mark.parametrize("variant", ["ext_masked", "ext_late"])
+def test_extension_call_classified_against_its_own_deadline(grid_dir, variant):
+    """(2): (a) a timeout the host masks at the extension call's own deadline charges no route failure; (b) a return
+    past its own timeout opens no circuit and marks no hang."""
+    cell = {**BY_ID["g1-hang-every-pass"], "id": f"e-{variant}", "passes": 3}
+    records = _run(CAND_TREE, [cell], grid_dir, variant, patch=variant)["by_cell"][cell["id"]]
+    assert any(any(r["call_cut_flags"][1:]) for r in records), f"no extension call ran: {records}"
+    bad = [(r["pass"], r["circuit"]) for r in records if r["circuit"]["state"] != "closed"
+           or r["circuit"]["last_error_class"] in ("provider_failure", "hung") or r["holds"]["hung_strike"]]
+    assert not bad, f"{variant}: the extension call was charged to the route: {bad}"
 
 
 @pytest.mark.parametrize("cell", S)
