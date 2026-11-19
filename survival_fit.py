@@ -70,6 +70,21 @@ _NOTICE_MAX_TOKENS = 300  # the bound for 12-digit store ids and two sessions wi
 _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
                         r"but not in live context(?:; lcm_grep / lcm_load_session reach them\.\]|; read with "
                         r"lcm_load_session, [^\n]*?\.\](?=\n\n|$))")
+# #2896: on a list with no leading system row the notice is one marked block right after the last verified summary
+# part of the head (then a separator or the end of the text); the summary verifier admits it there and only there
+_NOTICE_BLOCK = "\n\n<lcm-survival-notice>\n{notice}\n</lcm-survival-notice>"
+_NOTICE_BLOCK_RE = re.compile(r"\n\n<lcm-survival-notice>\n\[LCM survival fit: \d+ earlier messages \(store ids [^()\n\]]*\) "
+                              r"are stored verbatim but not in live context[^\n]*?\.\]\n</lcm-survival-notice>(?=\n\n|\Z)")
+
+
+def survival_notice_block_start(content: str, prefix_end: int) -> Optional[int]:
+    """#2896: where the marked notice block that ends the verified summary prefix ``content[:prefix_end]`` starts, else
+    None (the prefix is its summary parts alone)."""
+    start = content.rfind("\n\n<lcm-survival-notice>\n", 0, prefix_end)
+    block = _NOTICE_BLOCK_RE.match(content, start) if start >= 0 else None
+    return start if block is not None and block.end() == prefix_end else None
+
+
 _WALK_SQL = (
     "WITH RECURSIVE walk(root, node_id) AS (SELECT CAST(value AS INTEGER), CAST(value AS INTEGER) FROM json_each(?) "
     "UNION SELECT walk.root, CAST(source.value AS INTEGER) FROM walk JOIN summary_nodes AS node ON node.node_id = "

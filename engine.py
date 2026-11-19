@@ -165,7 +165,8 @@ from .host_uid_emit import (
     sync_cached_host_metadata,
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
-from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
+from .survival_fit import (SurvivalFitMixin, _NOTICE_BLOCK_RE, _carries_survival_notice, _host_estimate,
+                           survival_reserve_fraction)
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -7124,6 +7125,12 @@ class LCMEngine(
                 pos += 7
                 continue
             break
+        # #2896: one marked survival notice block after the last verified part, then a separator or the end of the
+        # text, belongs to the prefix; anything else (malformed, misplaced, before a further part) stays content
+        block = _NOTICE_BLOCK_RE.match(content, pos) if node_ids else None
+        if block is not None and not self._LCM_SUMMARY_PART_HEADER_RE.match(
+                content, block.end() + (7 if content.startswith("\n\n---\n\n", block.end()) else 2)):
+            pos = block.end()
         return (pos, node_ids) if node_ids else (None, [])
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
