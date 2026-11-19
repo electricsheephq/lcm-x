@@ -2406,12 +2406,10 @@ class CompactionMixin:
         return target
 
     def _catchup_mark(self, state: _CompressionState, *, force: bool, recovery_attempt: bool) -> int:
-        """Design B: the mark M, or 0 when the catch-up budget does not engage. It engages only for an automatic
-        threshold sweep above 480,000 tokens with neither foreground setting configured. A setting counts as
-        configured when config_sources records a non-default source for it; with no source recorded (a manual
-        config, and every config today: these two fields are not source-tracked), soft 60.0 and hard 0 count as
-        unconfigured. M is the depth target when set, else the prepared-leaf low-water mark (no mark, no catch-up
-        where leaf_prep.levels has none). M is never a stop."""
+        """Design B: the mark M (never a stop), or 0 when the catch-up does not engage: it needs an automatic threshold
+        sweep above 480,000 tokens and neither foreground setting configured (a non-default config_sources entry; with
+        none recorded, as for every config today, soft 60.0 and hard 0 are unconfigured). M is the depth target, else
+        the prepared-leaf low-water mark (none where leaf_prep.levels gives none)."""
         config, sources = self._config, getattr(self._config, "config_sources", None) or {}
 
         def unset(name: str, default: float) -> bool:
@@ -2428,8 +2426,7 @@ class CompactionMixin:
         return max(0, int(bounds[1])) if bounds is not None else 0
 
     def _open_catchup(self, state: _CompressionState) -> float:
-        """Design B: open the catch-up admit after progress while the whole prompt is above the mark, and return the
-        step deadline: the catch-up bound while it is open, else the sweep deadline."""
+        """Design B: open the catch-up after progress while the prompt is above the mark; return the step deadline."""
         budget = state.budget
         catchup = bool(state.catchup_mark and budget.progress
                        and state.estimated_active_tokens + state.depth_load_addend > state.catchup_mark)
@@ -2572,7 +2569,8 @@ class CompactionMixin:
             and state.sweep_summary_prefix_before > state.sweep_target_tokens
             and self._summary_route_available()
         ):
-            state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
+            # Design B (T1-285): with the catch-up engaged the leaf gets its own bound, so the condensation keeps its grant.
+            state.budget.leaf_reserve = 0.0 if state.catchup_mark else state.budget.estimate(self._primary_summary_route())
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (

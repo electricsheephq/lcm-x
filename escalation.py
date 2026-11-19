@@ -66,8 +66,7 @@ _DEFAULT_ROUTE_KEY = "<task-default>"
 
 # #608: a threshold sweep does not start a summariser call with less time than this left.
 _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
-# Design B: after progress, while the whole prompt is above the mark, a call the base refuses may still start if it is
-# expected to end by t0 + this - reserve (soft target ignored), with its timeout under the hang share (0.9) of its window.
+# Design B: after progress, above the mark, a call the base refuses may start if it ends by t0 + this - reserve.
 _CATCHUP_HARD_SECONDS = 210.0  # provisional until bench numbers
 _CATCHUP_TIMEOUT_SHARE = 0.85
 _CATCHUP_MIN_RESERVE_SECONDS = 20.0  # an extension-only admit's finalize reserve (a cold pass has a 5 s reserve)

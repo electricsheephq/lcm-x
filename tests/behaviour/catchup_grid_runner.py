@@ -305,7 +305,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
     next_turn = len([row for row in view if row["role"] == "user"])
     fixed = max(0, engine.threshold_tokens + int(cell.get("over_tokens", 0)) - count(view))
     kind = cell.get("kind", "auto")
-    records, leaves_cum, drained_cum, result = [], 0, 0, None
+    records, leaves_cum, drained_cum, summary_drained_cum, result = [], 0, 0, 0, None
     count_text = mods["tokens"].count_tokens
     max_passes = int(cell.get("passes", 10))
     try:
@@ -335,7 +335,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
                 result = view
                 record.update(calls_started=0, calls_cut=0, call_timeouts=[], call_cut_flags=[], call_kinds=[], leaves=0,
                               condensations=0, stop_reason="not_triggered", status="", wall=0.0, pre_seen=None,
-                              prompt_after=prompt, returned_is_input=True, loss=None)
+                              prompt_after=prompt, returned_is_input=True, loss=None, summary_drained=0)
             else:
                 in_pass.update(active=True, pre_done=False, budget=None)
                 started = clock.offset
@@ -347,6 +347,10 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
                 nodes_after = {node.node_id: node.depth
                                for node in engine._dag.get_session_nodes("S", limit=10_000_000)}
                 new = [depth for node_id, depth in nodes_after.items() if node_id not in nodes_before]
+                # tokens removed by this pass's stored nodes only (source tokens less summary tokens), never by a fit cut
+                fresh_nodes = [engine._dag.get_node(int(node_id)) for node_id in nodes_after if node_id not in nodes_before]
+                record["summary_drained"] = sum(max(0, int(node.source_token_count) - int(node.token_count))
+                                                for node in fresh_nodes if node is not None)
                 status = engine._last_threshold_full_sweep
                 fresh = status is not status_before and isinstance(status, dict)
                 budget = in_pass.get("budget")
@@ -363,6 +367,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
                     loss=loss_check(engine, view, result, did_work=bool(provider.started or new)))
             leaves_cum += record["leaves"]
             drained_cum += record["prompt_before"] - record["prompt_after"]
+            summary_drained_cum += record["summary_drained"]
             breaker = engine._summary_circuit_breaker.route_status([route])
             hold_until = float(getattr(engine, "_sweep_budget_hold_until", 0) or 0)
             record["duplicate_rows"] = duplicate_rows(engine)
@@ -372,7 +377,7 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
             heads = [engine._verified_lcm_summary_prefix(row["content"])[0]
                      if row.get("role") == "user" and isinstance(row.get("content"), str) else None for row in result]
             record.update(
-                trigger=int(engine.threshold_tokens), drained_cum=drained_cum, leaf_summary_tokens=count_text(summary), leaves_cum=leaves_cum,
+                trigger=int(engine.threshold_tokens), drained_cum=drained_cum, summary_drained_cum=summary_drained_cum, leaf_summary_tokens=count_text(summary), leaves_cum=leaves_cum,
                 raw_rows_after=sum(1 for row, end in zip(result, heads) if row.get("role") != "system" and end is None),
                 summary_area=sum(count_text(row["content"][:end]) for row, end in zip(result, heads) if end),
                 frontier_tokens=int(engine._summary_frontier_tokens()),

@@ -144,7 +144,14 @@ def _depth_cells() -> list[dict]:
              "settings": {"dynamic_leaf_chunk_enabled": False, "summary_prefix_target_tokens": 50_000_000}}]
 
 
-CELLS = _g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells()
+def _reference_cells() -> list[dict]:
+    """T1-285, issue 2878: shipped budgets with the reference agent's timing (37 s pre-call work, a 44 s condensation, a
+    38 s leaf, the route estimate 44 s) and a prefix over target: the condensation and a leaf land in the same pass."""
+    return [{**G1_FIXED, **_g1_load(1_000_000), "group": "R", "id": "r-shipped-cond-then-leaf", "window": 1_000_000,
+             "pre": 37, "estimate": 44, "call": [44, 38], "delta": 0, "prefix": "over2x"}]
+
+
+CELLS = _g1_cells() + _g2_cells() + _l_cells() + _steady_cells() + _depth_cells() + _reference_cells()
 BY_ID = {cell["id"]: cell for cell in CELLS}
 G1 = [cell["id"] for cell in CELLS if cell["group"] == "G1"]
 G2 = [cell["id"] for cell in CELLS if cell["group"] == "G2"]
@@ -404,19 +411,24 @@ def a0_violations(records: list[dict]) -> list[str]:
 
 
 def a1_violations(base: list[dict], cand: list[dict]) -> list[str]:
-    """Per pass index: a base call needs a candidate call unless the candidate's own prompt is under its trigger; and
-    the candidate's cumulative leaves and cumulative tokens drained are each at least the base's."""
+    """Per pass index: a base call needs a candidate call unless the candidate's own prompt is under its trigger, and a
+    hold the candidate arms needs one the base arms. T1-285: cumulative leaves and drained tokens (removed by stored
+    leaves and condensations only, never by a survival-fit cut) are compared with a one-pass lag (the candidate at pass
+    k against the base at pass k - 1), and at the end of the walk the candidate has at least the base's totals."""
     found = []
-    for b, c in zip(base, cand):
+    for index, (b, c) in enumerate(zip(base, cand)):
         if b["calls_started"] > 0 and not (c["calls_started"] > 0 or c["prompt_before"] < c["trigger"]):
             found.append(f"pass {b['pass']}: calls started 0 with the prompt {c['prompt_before']} at or over the "
                          f"trigger {c['trigger']}, base {b['calls_started']}")
-        if c["leaves_cum"] < b["leaves_cum"]:
-            found.append(f"pass {b['pass']}: cumulative leaves {c['leaves_cum']} < base {b['leaves_cum']}")
-        if c["drained_cum"] < b["drained_cum"]:
-            found.append(f"pass {b['pass']}: cumulative drained {c['drained_cum']} < base {b['drained_cum']}")
+        for key, label in (("leaves_cum", "leaves"), ("summary_drained_cum", "drained")):
+            if index and c[key] < base[index - 1][key]:
+                found.append(f"pass {b['pass']}: cumulative {label} {c[key]} < base {base[index - 1][key]} at pass "
+                             f"{base[index - 1]['pass']}")
         if c["hold_armed"] and not b["hold_armed"]:
             found.append(f"pass {b['pass']}: the candidate armed a hold the base did not")
+    for key, label in (("leaves_cum", "leaves"), ("summary_drained_cum", "drained")):
+        if base and cand and cand[-1][key] < base[-1][key]:
+            found.append(f"end of walk: cumulative {label} {cand[-1][key]} < base {base[-1][key]}")
     return found
 
 
@@ -604,6 +616,34 @@ def test_extension_call_on_a_no_progress_window_host_is_never_a_hang(grid_dir):
             or r["circuit"]["last_error_class"] == "hung" or r["holds"]["hung_strike"]]
     assert not hung, f"an extension call was classified as a hang in passes {hung}"
     assert not a2_violations(records)
+
+
+C_STAND_IN_PEAK = 27_524  # round 5: the (c) stand-in's peak summary area over the steady cells
+
+
+@pytest.mark.parametrize("cell", S)
+def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
+    """T1-285 (a): per pass the candidate stores at least the base's leaves, a pass that condenses still stores a
+    leaf, no pass passes 250 s, at least one condensation is stored, and the peak summary area is at most 1.2 x the
+    (c) stand-in's."""
+    base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
+    fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"]]
+    assert not fewer, f"{cell}: fewer leaves than the base in passes {fewer}"
+    no_leaf = [c["pass"] for c in cand if c["condensations"] and not c["leaves"]]
+    assert not no_leaf, f"{cell}: a condensation without a leaf in passes {no_leaf}"
+    assert not a2_violations(cand), a2_violations(cand)
+    assert sum(c["condensations"] for c in cand) >= 1, f"{cell}: no condensation stored"
+    peak = max(c["summary_area"] for c in cand)
+    assert peak <= 1.2 * C_STAND_IN_PEAK, f"{cell}: peak summary area {peak} > 1.2 x {C_STAND_IN_PEAK}"
+
+
+def test_shipped_budget_condensation_then_leaf(grid):
+    """T1-285 (a), issue 2878: at shipped budgets the condensation completes and a leaf is stored in the same pass."""
+    base, cand = (grid[tree]["by_cell"]["r-shipped-cond-then-leaf"][0] for tree in ("base", "cand"))
+    assert cand["condensations"] >= 1 and cand["leaves"] >= 1, (
+        f"candidate pass 0: {cand['condensations']} condensations, {cand['leaves']} leaves (base: "
+        f"{base['condensations']}, {base['leaves']}; call timeouts {cand['call_timeouts']})")
+    assert not a2_violations([cand])
 
 
 @pytest.mark.parametrize("cell", S)
