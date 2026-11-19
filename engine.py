@@ -2531,14 +2531,15 @@ class LCMEngine(
 
     def _compression_owned_by_another_thread(self) -> bool:
         owner = self._compress_owner
-        return owner not in (None, threading.get_ident())
+        return owner not in (None, threading.get_ident()) and not self._bypasses_lcm_context_management()
 
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """Defer while another thread owns a pass, including on host recovery attempts.
 
         The #651 and #625 holds exempt recovery, cleanup-only, forced overflow, the survival ceiling
         and bypassed sessions."""
-        if self._compression_owned_by_another_thread():
+        self._thread_context.compression_busy = self._compression_owned_by_another_thread()
+        if self._thread_context.compression_busy:
             return True
         if ignore_cooldown or self._compaction_request.below_threshold_cleanup_only:
             return False
@@ -2568,6 +2569,9 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if getattr(self._thread_context, "compression_busy", False):
+            self._thread_context.compression_busy = False
+            return "cooldown:lcm_compaction_in_progress"
         if self._compression_owned_by_another_thread():
             return "cooldown:lcm_compaction_in_progress"
         if self._retained_stop_hold_active():
