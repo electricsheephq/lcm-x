@@ -1,9 +1,15 @@
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import sqlite3
 from statistics import median
-from time import thread_time
+from threading import Barrier
+from time import monotonic, thread_time
 from timeit import Timer
 
-from hermes_lcm.db_bootstrap import get_schema_version
+import pytest
+
+from hermes_lcm import store as store_module
+from hermes_lcm.db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, get_schema_version
 from hermes_lcm.store import MessageStore
 
 
@@ -26,7 +32,8 @@ def test_fresh_store_has_partial_tool_call_index(tmp_path):
         assert " ".join(sql.split()).endswith("WHERE tool_call_id IS NOT NULL")
 
 
-def test_open_adds_missing_index_to_existing_store(tmp_path):
+@pytest.fixture
+def unindexed_store(tmp_path):
     path = tmp_path / "lcm.db"
     with closing(MessageStore(path)) as store:
         conn = store.connection
@@ -36,12 +43,83 @@ def test_open_adds_missing_index_to_existing_store(tmp_path):
         before = store.find_session_tool_rows("session", "call", conversation_id="conv", tool_name="shell")
         version = get_schema_version(conn)
         assert before and INDEX not in _indexes(conn)
+    return path, before, version
 
+
+def test_open_adds_missing_index_to_existing_store(unindexed_store):
+    path, before, version = unindexed_store
     with closing(MessageStore(path)) as store:
         assert INDEX in _indexes(store.connection)
         assert get_schema_version(store.connection) == version
         assert store.find_session_tool_rows("session", "call", conversation_id="conv", tool_name="shell") == before
         assert store.connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+def test_readonly_open_defers_index_creation(unindexed_store, monkeypatch):
+    path, before, _ = unindexed_store
+    path.chmod(0o444)
+    connect = sqlite3.connect
+
+    def readonly_connect(database, **kwargs):
+        assert database == str(path)
+        # Enforce read-only even when pytest runs as root.
+        return connect(f"{path.as_uri()}?mode=ro", uri=True, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", readonly_connect)
+    with closing(MessageStore(path)) as store:
+        assert INDEX not in _indexes(store.connection)
+        assert store.find_session_tool_rows("session", "call", conversation_id="conv", tool_name="shell") == before
+
+
+def test_busy_open_defers_index_creation_and_retries(unindexed_store):
+    path, before, _ = unindexed_store
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        start = monotonic()
+        with closing(MessageStore(path)) as store:
+            assert monotonic() - start < 2
+            assert store.connection.execute("PRAGMA busy_timeout").fetchone() == (SQLITE_BUSY_TIMEOUT_MS,)
+            assert INDEX not in _indexes(store.connection)
+            assert store.find_session_tool_rows("session", "call", conversation_id="conv", tool_name="shell") == before
+        writer.rollback()
+    with closing(MessageStore(path)) as store:
+        assert INDEX in _indexes(store.connection)
+
+
+def test_concurrent_opens_create_one_index(unindexed_store):
+    path, before, _ = unindexed_store
+    start = Barrier(2, timeout=900)
+
+    def open_store():
+        start.wait()
+        with closing(MessageStore(path)) as store:
+            return store.find_session_tool_rows("session", "call", conversation_id="conv", tool_name="shell")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.submit(open_store), pool.submit(open_store)
+        assert first.result(timeout=900) == second.result(timeout=900) == before
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = ?", (INDEX,)).fetchone() == (1,)
+
+
+def test_indexed_open_skips_index_ddl_and_writes(tmp_path, monkeypatch):
+    path = tmp_path / "lcm.db"
+    with closing(MessageStore(path)) as store:
+        assert INDEX in _indexes(store.connection)
+    statements = []
+    configure = store_module.configure_connection
+
+    def trace_open(conn):
+        conn.set_trace_callback(statements.append)
+        configure(conn)
+
+    monkeypatch.setattr(store_module, "configure_connection", trace_open)
+    with closing(sqlite3.connect(path)) as observer:
+        version = observer.execute("PRAGMA data_version").fetchone()
+        with closing(MessageStore(path)) as store:
+            assert INDEX in _indexes(store.connection)
+        assert observer.execute("PRAGMA data_version").fetchone() == version
+    assert not any("CREATE INDEX" in sql.upper() and INDEX in sql for sql in statements)
 
 
 def _lookup_plan(conn, lookup):
