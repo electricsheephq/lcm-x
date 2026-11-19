@@ -78,9 +78,10 @@ def walks(tmp_path_factory):
 
 
 def test_twin_premise_the_full_size_charge_stalls_and_fits(walks):
-    """Not the fix: with the old charge the twin reaches the plain fit and loses rows with no pointer."""
+    """Not the fix: with the old charge the twin reaches the plain fit and cuts rows out of the list (#2896: behind
+    the notice the head now carries, A0b, where they had no pointer, A0)."""
     old = walks["old"][TWIN]
-    assert len(old) == PASSES and _fits(old) and _a0(old) > 0, (
+    assert len(old) == PASSES and _fits(old) and _a0(old) + sum(grid.a0b_rows(old)) > 0, (
         f"premise lost: fits {_fits(old)}, A0 {_a0(old)}, leaves {[r['leaves'] for r in old]}")
     assert any(r["status"] == "noop" and r["triggered"] for r in old), "no carrier-led no-op pass before the fit"
 

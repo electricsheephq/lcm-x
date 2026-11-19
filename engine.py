@@ -165,7 +165,8 @@ from .host_uid_emit import (
     sync_cached_host_metadata,
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
-from .survival_fit import (SurvivalFitMixin, _NOTICE_BLOCK_RE, _carries_survival_notice, _host_estimate,
+from .emission_projection import admitted_notice_block
+from .survival_fit import (SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_notice_block_start,
                            survival_reserve_fraction)
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
@@ -6752,6 +6753,10 @@ class LCMEngine(
         if not self._compiled_ignore_message_patterns:
             return False
         content = msg.get("content")
+        if isinstance(content, str) and not stored_row and "\n\n<lcm-survival-notice digest=" in content:
+            end = self._verified_lcm_summary_prefix_end(content)  # #2896: the fit's block is never a host row's text
+            start = survival_notice_block_start(content, end) if end is not None else None
+            content = content if start is None else content[:start] + content[end:]
         text = (
             stored_text_content_for_pattern_matching(content)
             if stored_row
@@ -7127,7 +7132,7 @@ class LCMEngine(
             break
         # #2896: one marked survival notice block after the last verified part, then a separator or the end of the
         # text, belongs to the prefix; anything else (malformed, misplaced, before a further part) stays content
-        block = _NOTICE_BLOCK_RE.match(content, pos) if node_ids else None
+        block = admitted_notice_block(content, pos, node_ids) if node_ids else None
         if block is not None and not self._LCM_SUMMARY_PART_HEADER_RE.match(
                 content, block.end() + (7 if content.startswith("\n\n---\n\n", block.end()) else 2)):
             pos = block.end()

@@ -179,7 +179,11 @@ def test_6_prefix_first_and_summary_uid_shadow(engine, tmp_path, rough_counts, m
     assert engine._is_verified_replay_scaffold_message(prefix) or kind == "carrier"
     fitted = engine._survival_fit(active, active, 0, "issue_798", request_cap=100)
     assert [row["role"] for row in fitted] == ["user", "assistant", "user"]
-    assert fitted[0]["content"] == summary and fitted[1] is view[2] and fitted[2] is view[3]
+    # #2896: no system row: the summary as it was, then the fit's notice as its one marked block
+    end = engine._verified_lcm_summary_prefix_end(fitted[0]["content"])
+    start = survival_fit.survival_notice_block_start(fitted[0]["content"], end)
+    assert fitted[0]["content"][:start] == summary and fitted[1] is view[2] and fitted[2] is view[3]
+    assert fitted[0]["content"][start:end].split("\n")[3] == engine._last_survival_fit["notice"]
     lineage = engine._host_uid_lineage_key()[0]
     expected = emit.engine_uid(lineage, uid_kind, hashlib.sha256(summary.encode()).hexdigest(), 0)
     assert fitted[0]["message_uid"] == expected

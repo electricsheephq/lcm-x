@@ -16,6 +16,8 @@ import pytest
 
 import hermes_lcm.engine as lcm_engine
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.emission_projection import survival_notice_block
+from hermes_lcm.survival_fit import survival_fit_notice as _fit_notice, survival_notice_block_start
 from hermes_lcm.engine import LCMEngine
 
 PAD = " alpha beta gamma delta" * 30
@@ -119,8 +121,19 @@ def _cold_ingest_adds(tmp_path, fitted) -> int:
 # -- T1 (+ #650 round 2: carrier turn integrity, appended rows) ---------------------------------------
 
 def _summary_part(engine, message) -> str:
+    """The verified summary parts' bytes (#2896: without the fit's notice block, asserted on its own)."""
     content = message["content"]
-    return content[:engine._verified_lcm_summary_prefix_end(content)]
+    end = engine._verified_lcm_summary_prefix_end(content)
+    start = survival_notice_block_start(content, end)
+    return content[:end if start is None else start]
+
+
+def _block_notice(engine, message) -> str | None:
+    """#2896: the notice in the head's one marked block, else None."""
+    content = message["content"]
+    end = engine._verified_lcm_summary_prefix_end(content) if isinstance(content, str) else None
+    start = survival_notice_block_start(content, end) if end is not None else None
+    return None if start is None else content[start:end].split("\n")[3]
 
 
 def _assert_turns_whole(result) -> None:
@@ -148,9 +161,9 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
         assert (carrier is not None) is (not list_users)
         assert engine._survival_measure(pre) > budget and engine._last_survival_fit is not None
         store_ids = engine._get_store_id_map_for_messages(pre)
-        if list_users:
-            assert result[0] is pre[0], str(result[0]["content"])[:60]
-            dropped = _left(pre, result)
+        if list_users:  # #2896: the summary row as it was, plus the notice block
+            assert _summary_part(engine, result[0]) == pre[0]["content"], str(result[0]["content"])[:60]
+            dropped = _left(pre[1:], result)
         else:  # re-formed exactly as assembly forms a carrier: summary + the first kept raw user row
             kept = _left(result, pre)
             assert kept == [result[0]] and _summary_part(engine, result[0]) == _summary_part(engine, pre[0])
@@ -166,7 +179,9 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
         _assert_turns_whole(result)
         assert engine._survival_measure(result) <= budget and host(result) <= budget
         assert engine._last_survival_fit["dropped_rows"] == len(dropped)
-        assert not any(NOTICE in str(m.get("content")) for m in result)  # no system row: no in-list notice
+        # #2896: no system row: the notice is the head's one block (and nowhere else in the list)
+        assert _block_notice(engine, result[0]) == engine._last_survival_fit["notice"]
+        assert sum(str(m.get("content")).count(NOTICE) for m in result) == 1
         stored = len(_rows(engine))
         engine.ingest(result)
         assert len(_rows(engine)) == stored
@@ -287,6 +302,7 @@ def test_t4_a_carrier_in_the_prefix_is_never_silently_lost(tmp_path, host, monke
             first = engine._generated_context_carrier_remainder(result[0])
             assert first is not None and first != remainder and result[1]["role"] == "assistant"
             assert _summary_part(engine, result[0]) == _summary_part(engine, pre[0])
+            assert _block_notice(engine, result[0]) == engine._last_survival_fit["notice"]  # #2896
     finally:
         engine.shutdown()
 
@@ -337,6 +353,9 @@ def test_r2_f1_the_prefix_cut_maps_the_whole_list(tmp_path, host, stored_copy, l
             first = {"role": "user", "content": f"{summary}\n\n{phrase['content']}"}
             assert engine._generated_context_carrier_remainder(first) == phrase["content"]
             expected = [{"role": "user", "content": summary}, newest]
+            # #2896: no system row: the budget includes the head's notice block for that list (P and the copy left)
+            expected[0]["content"] += survival_notice_block(summary, [node], _fit_notice(
+                engine, expected, {node}, left=[3, 4] if stored_copy else [3]))
         active = [first, copy, newest]
         whole = engine._get_store_id_map_for_messages(active)
         result = engine._survival_fit(active, list(active), 0, "test", after_exception=True,
@@ -460,10 +479,12 @@ def test_r3_split_carrier_without_a_carrier_shape_matches_assembly(tmp_path, hos
         assert engine._generated_context_carrier_remainder(carrier) == rows[0]["content"]
         active = [carrier, *rows[1:]]
         expected = [{"role": "user", "content": summary}, *rows[2:]]
+        # #2896: no system row: the head carries the notice for that list (U1's turn, ids 1 and 2, left) as its block
+        expected[0]["content"] += survival_notice_block(summary, [node], _fit_notice(engine, expected, {node}, left=[1, 2]))
         engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
         result = engine._survival_fit(active, list(active), 0, "test",
                                       request_cap=engine._survival_measure(expected))
-        assert result == expected
+        assert result == expected and _summary_part(engine, result[0]) == summary
         assert engine._is_replayed_context_scaffold_message(result[0])
     finally:
         engine.shutdown()
