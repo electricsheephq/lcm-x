@@ -87,6 +87,10 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 })
 
 
+# The owner guard's refusal: the caller gets its own list back, never the canonical copy (#2783 on this tree).
+_OWNER_REFUSED = object()
+
+
 def _counted_compaction(operation):
     """Keep connections live through the entire pass, including its finalizers."""
     @wraps(operation)
@@ -95,8 +99,17 @@ def _counted_compaction(operation):
             if self._compaction_closing:
                 return messages
             self._compaction_inflight += 1
+        raw = messages
         try:
-            return operation(self, messages, *args, **kwargs)
+            messages, host_view = self._canonical_host_view(messages)
+        except Exception as exc:
+            self._last_compression_status = "error"
+            self._record_ingest_failure("compress", exc)
+            return messages
+        else:
+            # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
+            result = operation(self, messages, *args, **{**kwargs, **host_view})
+            return raw if result is _OWNER_REFUSED else result
         finally:
             with self._compaction_gate:
                 self._compaction_inflight -= 1
@@ -278,6 +291,11 @@ class CompactionMixin:
             return self._should_compress_preflight_impl(messages)
 
     def _should_compress_preflight_impl(self, messages):
+        try:
+            messages, host_view = self._canonical_host_view(messages)
+        except Exception as exc:
+            self._record_ingest_failure("preflight", exc)
+            return self._should_force_overflow_recovery(observed_tokens=self.last_prompt_tokens)
         self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
         self._compaction_request.below_threshold_cleanup_only = False
         self._compaction_request.automatic_request = False
@@ -335,7 +353,7 @@ class CompactionMixin:
         if self._session_id and messages:
             try:
                 with self._attribution_span("preflight", len(messages)):
-                    replay_messages = self._ingest_messages(messages)
+                    replay_messages = self._ingest_messages(messages, **host_view)
                 self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
@@ -745,7 +763,7 @@ class CompactionMixin:
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
                  force: bool = False,
-                 bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
+                 bypass_cooldown: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         if self._compaction_is_closing():
@@ -763,11 +781,12 @@ class CompactionMixin:
             if self._compress_owner not in (None, caller):
                 self._compress_reentry_refusals += 1
                 logger.info("LCM compression skipped: another pass owns this engine")
-                return messages
+                return _OWNER_REFUSED
             self._compress_owner = caller
             self._compress_owner_depth += 1
         try:
-            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown)
+            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
+                                        **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._compaction_gate:
                 self._compress_owner_depth -= 1
@@ -775,7 +794,7 @@ class CompactionMixin:
                     self._compress_owner = None
 
     @_uid_recognition_pass
-    def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown):
+    def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *, host_pairs=()):
         uid_binding = self._uid_recognition_binding() if uid_recognition_enabled(self) else None
         handle = self._emission_handle
         if handle is not None and handle.session_id == self._session_id:
@@ -844,6 +863,7 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                     recovery_attempt=bypass_cooldown,
+                    **({"host_pairs": host_pairs} if host_pairs else {}),
                 )
             if uid_binding is None and binding_changed():  # #2851: main's place when the uid mode is not active
                 return messages
@@ -915,7 +935,7 @@ class CompactionMixin:
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
-            self._rekey_host_rewrite_watch(messages, result)
+            self._rekey_host_rewrite_watch(messages, result, host_pairs=host_pairs)
             if pending_no_progress:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
@@ -2259,7 +2279,7 @@ class CompactionMixin:
                                  messages: List[Dict[str, Any]],
                                  current_tokens: int = None,
                                  force: bool = False,
-                                 recovery_attempt: bool = False) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
+                                 recovery_attempt: bool = False, *, host_pairs=()) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
         """Ingest the replay view and honor cleanup-only or held requests."""
         if self._compaction_is_closing():
             return "return", messages
@@ -2268,7 +2288,7 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         span_started = time.monotonic()
         try:
-            state.working_messages = self._ingest_messages(messages)
+            state.working_messages = self._ingest_messages(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
             self._record_ingest_success()
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
@@ -3776,7 +3796,7 @@ class CompactionMixin:
                        current_tokens: int = None,
                        focus_topic: Optional[str] = None,
                        force: bool = False,
-                       recovery_attempt: bool = False) -> List[Dict[str, Any]]:
+                       recovery_attempt: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
         """Main compaction entry point.
 
         1. Ingest any new messages into the store
@@ -3794,7 +3814,7 @@ class CompactionMixin:
         force_overflow = state.force_overflow
         recovery_assembly_cap = state.recovery_assembly_cap
 
-        action, result = self._ingest_compression_view(state, messages, current_tokens, force, recovery_attempt)
+        action, result = self._ingest_compression_view(state, messages, current_tokens, force, recovery_attempt, host_pairs=host_pairs)
         if action == "return":
             return result
         working_messages = state.working_messages

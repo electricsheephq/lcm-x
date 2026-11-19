@@ -341,6 +341,64 @@ def test_refused_second_caller_gets_its_own_list_back_untouched(open_engine, uid
     _assert_host_keys(_kept_rows(history, result))
 
 
+def test_lone_surrogate_in_uid_stamped_rows_commits_a_pass_in_every_uid_mode(open_engine, uid_mode):
+    # Hotfix tree (port 7, #2783): uid-stamped rows hold a lone surrogate, one covered by the leaf, one kept.
+    history = _history()
+    for i, row in enumerate(history, 1):
+        _stamp(row, i)
+    history[0]["content"] += " \udc00"
+    kept = history[-2]
+    assert kept["role"] == "user"
+    kept["content"] += " \udc01"
+    kept["api_content"] += " \udc01"
+    given = copy.deepcopy(history)
+    with open_engine() as engine:
+        engine.ingest(history)
+        result = _call(engine, history, leaves=1)
+        assert engine._ingest_failure_count == 0
+        stored = stored_rows(engine)
+        assert len(stored) == len(history)
+        texts = [row["content"] for row in stored]
+        assert not any("\udc00" in text or "\udc01" in text for text in texts)
+        assert sum("\ufffd" in text for text in texts) == 2
+        output, = [row for row in result if row.get("message_uid") == kept["message_uid"]]
+        assert output["content"] == kept["content"].replace("\udc01", "\ufffd")
+        assert output["api_content"] == kept["api_content"].replace("\udc01", "\ufffd")
+        _assert_host_keys([(dict(kept, api_content=output["api_content"]), output)])  # api_content checked above
+        engine.ingest(copy.deepcopy(history))
+        assert len(stored_rows(engine)) == len(history)
+        assert engine._ingest_failure_count == 0
+    assert history == given  # host objects are never mutated
+
+
+def test_refused_second_caller_with_a_lone_surrogate_gets_its_own_list_back_untouched(open_engine, uid_mode, monkeypatch):
+    # Hotfix tree (port 7, #2783): the compress entry canonicalizes its input before the owner guard; a refused
+    # caller still gets its own list and rows back, lone surrogate and API text included.
+    history = _history()
+    for i, row in enumerate(history, 1):
+        _stamp(row, i)
+    other = [dict(_row("user", "Other caller's row \udc00"), api_content="Other caller's API \udc00 text"),
+             dict(_row("assistant", "Other reply"), api_content="Different API text")]
+    other_rows = list(other)
+    other_before = copy.deepcopy(other)
+    refused = []
+    with open_engine() as engine, ThreadPoolExecutor(max_workers=1) as worker:
+        def summarize(**_):
+            refused.append(worker.submit(engine.compress, other, 0).result(timeout=30))
+            return "Synthetic leaf summary.", 1
+
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+        engine.ingest(history)
+        result = _call(engine, history, leaves=1)
+        assert engine._compress_reentry_refusals == 1
+
+    returned, = refused
+    assert returned is other
+    assert all(a is b for a, b in zip(returned, other_rows)) and len(returned) == len(other_rows)
+    assert returned == other_before
+    _assert_host_keys(_kept_rows(history, result))
+
+
 def test_return_boundary_runs_on_every_list_the_owning_pass_returns(open_engine, uid_mode, monkeypatch):
     def rows(tag):
         return [dict(_row("user", f"{tag} question"), api_content=f"{tag} question with context"),

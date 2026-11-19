@@ -29,6 +29,7 @@ import os
 import logging
 import sqlite3
 from collections import Counter, defaultdict
+from contextlib import suppress
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
@@ -47,7 +48,7 @@ from .recognition_matching import (
 )
 from .config import identity_anchor_enabled
 from .fresh_tail import tool_group_safe_end
-from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
 
@@ -686,7 +687,7 @@ class IdentityAnchorMixin:
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
                 try:
-                    value = json.loads(value)
+                    value = canonical_value(json.loads(value))
                 except ValueError:
                     return _UNREADABLE_CALLS  # unreadable: equal to nothing, so never proof of a copy
             if not stored and isinstance(value, list) and any(
@@ -816,7 +817,7 @@ class IdentityAnchorMixin:
             def canonical(arguments):
                 if isinstance(arguments, str):
                     try:
-                        arguments = json.loads(arguments)
+                        arguments = canonical_value(json.loads(arguments))
                     except ValueError:
                         return arguments.strip()
                 return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
@@ -824,7 +825,8 @@ class IdentityAnchorMixin:
             def shape(msg, parse=False):
                 value = msg.get("tool_calls") or ()
                 if isinstance(value, str):
-                    value = json.loads(value)
+                    with suppress(ValueError, TypeError):
+                        value = canonical_value(json.loads(value))
                 parts = []
                 for c in value if isinstance(value, list) else ():
                     function = (c.get("function") or {}) if isinstance(c, dict) else {}

@@ -10,21 +10,6 @@ from tests.harness.engine import engine_context
 from tests.invariants.test_issue_2855_kept_row_keys import _assert_host_keys
 
 
-# Hotfix tree (port 4): these cells need #2783 (a lone surrogate stored as U+FFFD), which this tree lacks.
-# Here a lone surrogate in content fails ingest's store write; one in api_content alone comes back as given.
-_NEEDS_2783 = {
-    f"test_kept_api_text_matches_canonical_input_pair[{surrogate}-{path}]"
-    for surrogate in ("content", "api_content", "both", "other-row") for path in ("cleanup", "force")
-}
-
-
-@pytest.fixture(autouse=True)
-def _needs_2783(request):
-    if request.node.name in _NEEDS_2783:
-        request.applymarker(pytest.mark.xfail(strict=True, reason=(
-            "hotfix tree: needs #2783 (lone surrogates stored as U+FFFD), not on this tree")))
-
-
 @pytest.fixture
 def engine(tmp_path):
     with engine_context(tmp_path, window=32_768, fresh_tail_count=6, embeddings_enabled=False,

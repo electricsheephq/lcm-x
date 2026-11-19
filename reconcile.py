@@ -60,7 +60,7 @@ from .ingest_protection import (
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
-from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
 from .store import _normalize_observed_at
 
@@ -437,13 +437,12 @@ class ReconcileMixin:
                 if _json_has_duplicate_object_keys(value):
                     return value
                 try:
-                    parsed = json.loads(value)
+                    parsed = canonical_value(json.loads(value))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     return value
                 if isinstance(parsed, (dict, list)):
                     canonical = ReconcileMixin._canonicalize_tool_call_identity_value(parsed)
                     return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            return value
         return value
 
     @staticmethod
@@ -818,23 +817,33 @@ class ReconcileMixin:
             return override.get("content") if isinstance(override.get("content"), str) else None
         return None
 
-    def _watch_stored_user_rows(self, stored) -> None:
+    @staticmethod
+    def _canonical_host_view(raw):
+        messages = canonical_value(raw)
+        if messages is raw:
+            return messages, {}
+        pairs = tuple((original, clean) for original, clean in zip(raw, messages) if original is not clean)
+        return messages, {"host_pairs": pairs}
+
+    def _watch_stored_user_rows(self, stored, host_pairs=()) -> None:
         """Remember the user rows this process just stored: (object, store_id, identity, content)."""
         watch = self._host_rewrite_state()[0]
+        originals = {id(copy): raw for raw, copy in host_pairs}
         for message, protected, store_id in stored:
             if message.get("role") == "user":
                 content = normalize_content_value(protected.get("content")) or ""
-                watch[int(store_id)] = (self._message_replay_identity(message), content, [message])
+                objects = [message, originals[id(message)]] if id(message) in originals else [message]
+                watch[int(store_id)] = (self._message_replay_identity(message), content, objects)
         for store_id in sorted(watch)[:-8]:  # bounded: a rewrite follows its store within the turn
             del watch[store_id]
 
-    def _rekey_host_rewrite_watch(self, messages, result) -> None:
+    def _rekey_host_rewrite_watch(self, messages, result, host_pairs=()) -> None:
         """compress() returns copies: also watch the unique output copy of a watched row."""
         watch = self._host_rewrite_state()[0]
-        present = {id(message) for message in messages}
+        present = {id(message) for message in messages} | {id(raw) for raw, _ in host_pairs}
         if not isinstance(result, list) or not any(id(o) in present for _i, _c, objs in watch.values() for o in objs):
             return
-        identities = [self._message_replay_identity(message) for message in result]
+        identities = [self._message_replay_identity(canonical_value(message)) for message in result]
         inputs = Counter(self._message_replay_identity(message) for message in messages)
         for identity, _content, objects in watch.values():
             # Only an unambiguous input occurrence transfers to its unique output copy.
@@ -843,13 +852,17 @@ class ReconcileMixin:
             if unambiguous and all(copies[0] is not o for o in objects):
                 objects.append(copies[0])
 
-    def _capture_host_rewrites(self, messages) -> None:
+    def _capture_host_rewrites(self, messages, host_pairs=()) -> None:
         """A host rewrote a user row LCM stored, in place, by edge whitespace only:
         record a store_id-keyed identity override. The stored row is never modified."""
         watch = self._host_rewrite_state()[0]
-        present = {id(message): message for message in messages} if watch else {}
+        if not watch:
+            return
+        present = {id(message): message for message in messages}
+        # The canonical copies are aliases for this capture only. Keep the watch bounded.
+        present.update((id(raw), copy) for raw, copy in host_pairs)
         for store_id, (identity, stored, objects) in list(watch.items()):
-            message = next((o for o in objects if present.get(id(o)) is o), None)
+            message = next((present[id(o)] for o in objects if id(o) in present), None)
             live = self._message_replay_identity(message) if message is not None else identity
             if live == identity:
                 continue
