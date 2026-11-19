@@ -6542,9 +6542,17 @@ class LCMEngine(
             for host, row in zip(host_messages, current):
                 if row is host or id(row) in generated_ids:
                     continue
-                # Preflight can see a row before Hermes stamps its host fields.
-                # Other absent keys may belong to the engine's replay view.
+                # Preflight can see a row before Hermes stamps its host fields, and the host
+                # can later drop one. The engine writes only excluded keys on a kept row.
+                for key in [key for key in row if key not in excluded and key not in host]:
+                    del row[key]
                 row.update((key, value) for key, value in host.items() if key not in excluded)
+                if not normalize_content_value(host.get("content")) and not normalize_content_value(row.get("content")):
+                    # The replay identity reads "", None and no content as the same: keep the host's form.
+                    if "content" in host:
+                        row["content"] = host["content"]
+                    else:
+                        row.pop("content", None)
                 if "api_content" in host and row.get("content") == host.get("content"):
                     row["api_content"] = host["api_content"]
                 else:
