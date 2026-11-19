@@ -167,9 +167,15 @@ def _text(m):
     return c if isinstance(c, str) else json.dumps(c) if c is not None else ""
 
 
+def _call_key(t):
+    fn = t.get("function") if isinstance(t.get("function"), dict) else {}
+    args = fn.get("arguments")
+    return str(t.get("id")), str(fn.get("name")), args if isinstance(args, str) else json.dumps(args, sort_keys=True)
+
+
 def _row_key(m):
-    ids = tuple(sorted(str(t.get("id")) for t in (m.get("tool_calls") or []) if isinstance(t, dict)))
-    return m.get("role"), _text(m), m.get("tool_call_id") or ids or None
+    calls = tuple(sorted(_call_key(t) for t in (m.get("tool_calls") or []) if isinstance(t, dict)))
+    return m.get("role"), _text(m), m.get("tool_call_id") or calls or None
 
 
 def is_stub(m):
@@ -201,10 +207,10 @@ def pairing_problems(out, newest_id):
 
 
 def conservation_violations(eng, out):
-    """By content digest, copies counting. Every stored row is covered: a byte-equal stored copy of it is under a
-    node whose summary is in `out`, or it appears in `out` (a tool row may appear as its externalized pointer, or as
-    the payload of the pointer the store holds). No row appears in `out` more often than the store holds byte-equal
-    copies of it outside those nodes."""
+    """By content digest, counting occurrences in both directions. For each digest, its copies in `out` plus its
+    stored copies under a node whose summary is in `out` cover every stored copy; `out` holds no more copies than the
+    store has outside those nodes. A stored tool row may instead appear in `out` as its externalized pointer, or as
+    the payload of the pointer the store holds; each such list row stands for one stored row."""
     sid = eng._session_id
     texts = [_text(m) for m in out]
     joined = "\n".join(texts)
@@ -214,22 +220,28 @@ def conservation_violations(eng, out):
         if node.node_id in header_ids or (node.summary and node.summary in joined):
             covered.update(eng._dag.source_message_ids(node.node_id, limit=1_000_000))
     rows = eng._store.get_session_messages(sid, limit=100_000)
-    summarised = {_digest(r) for r in rows if r["store_id"] in covered}
-    outside = Counter(_digest(r) for r in rows if r["store_id"] not in covered)
+    summarised = Counter(_digest(r) for r in rows if r["store_id"] in covered)
+    outside_rows = [r for r in rows if r["store_id"] not in covered]
+    outside = Counter(_digest(r) for r in outside_rows)
     listed = Counter(_digest(m) for m in out)
-    stub_ids = {m.get("tool_call_id") for m in out if is_stub(m)}
-    out_tool = {m.get("tool_call_id"): _text(m) for m in out if m.get("role") == "tool"}
-    violations = []
-    for row in rows:
+    spare, short, violations = listed.copy(), [], []
+    for row in outside_rows:  # each list copy covers one stored copy
         digest = _digest(row)
-        if digest in summarised or digest in listed:
-            continue
-        cid = row.get("tool_call_id")
-        if row.get("role") == "tool" and (cid in stub_ids or (cid in out_tool and any(
-                (load_externalized_payload(ref, config=eng._config, hermes_home=eng._hermes_home) or {})
-                .get("content") == out_tool[cid] for ref in extract_externalized_refs(row.get("content") or "")))):
-            continue
-        violations.append(("missing", row["store_id"], row.get("role"), cid))
+        if spare[digest] > 0:
+            spare[digest] -= 1
+        else:
+            short.append(row)
+    for row in short:  # a tool row in its other form: one unused list row with its call id
+        cid, alt = row.get("tool_call_id"), None
+        if row.get("role") == "tool":
+            payloads = [(load_externalized_payload(ref, config=eng._config, hermes_home=eng._hermes_home) or {})
+                        .get("content") for ref in extract_externalized_refs(row.get("content") or "")]
+            alt = next((m for m in out if m.get("role") == "tool" and m.get("tool_call_id") == cid
+                        and spare[_digest(m)] > 0 and (is_stub(m) or _text(m) in payloads)), None)
+        if alt is None:
+            violations.append(("missing", row["store_id"], row.get("role"), cid))
+        else:
+            spare[_digest(alt)] -= 1
     for digest, n in listed.items():
         if (digest in outside or digest in summarised) and n > outside[digest]:
             m = next(x for x in out if _digest(x) == digest)
@@ -449,13 +461,20 @@ def test_auxiliary_response_leaves_both_host_flags(engine, monkeypatch):
     assert _host_flags(engine) == (False, False)
 
 
-@pytest.mark.parametrize("kind", ["stateless", "ignore"])
-def test_side_channel_response_leaves_both_host_flags_until_the_foreground_answers(tmp_path, monkeypatch, kind):
+def _side_engine(tmp_path, monkeypatch, kind):
     force_char_estimate(monkeypatch)
     home = tmp_path / "hermes-home"
     home.mkdir()
     config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **{f"{kind}_session_patterns": ["side-*"]})
-    eng = LCMEngine(config=config, hermes_home=str(home))
+    return LCMEngine(config=config, hermes_home=str(home))
+
+
+@pytest.mark.parametrize("kind", ["stateless", "ignore"])
+def test_known_limit_a_side_channel_response_on_a_shared_engine_clears_the_foregrounds_host_flags(
+        tmp_path, monkeypatch, kind):
+    # Hermes 3b421578 gives each agent its own engine copy (agent_init.py:1779-1785), so this shape needs a host that
+    # shares one engine across agents. There the side channel's response ends the foreground's post-compaction wait.
+    eng = _side_engine(tmp_path, monkeypatch, kind)
     try:
         eng.on_session_start("s2863", platform="cli", model="probe-model", context_length=WINDOW)
         eng.update_from_response({"prompt_tokens": 47_000, "completion_tokens": 100, "total_tokens": 47_100})
@@ -463,13 +482,29 @@ def test_side_channel_response_leaves_both_host_flags_until_the_foreground_answe
         eng.on_session_start("side-1", platform="cron", model="probe-model", context_length=WINDOW)
         assert eng.side_channel_active and eng._bypasses_lcm_context_management()
         eng.update_from_response({"prompt_tokens": 900, "completion_tokens": 50, "total_tokens": 950})
-        eng.update_from_response({})
-        assert _host_flags(eng) == (True, True)
-        eng.on_session_start("s2863", platform="cli", model="probe-model", context_length=WINDOW)
-        assert not eng.side_channel_active and not eng._bypasses_lcm_context_management()
-        assert _host_flags(eng) == (True, True)
+        assert _host_flags(eng) == (False, False)
+        _arm_host_flags(eng)
         eng.update_from_response({})
         assert _host_flags(eng) == (False, False)
+    finally:
+        eng.shutdown()
+
+
+@pytest.mark.parametrize("kind", ["stateless", "ignore"])
+def test_a_rebound_ignored_or_stateless_sessions_own_responses_clear_its_host_flags(tmp_path, monkeypatch, kind):
+    # One agent's engine copy moves from a normal session to an ignored or stateless one, compacts through the host
+    # fallback and waits for usage (conversation_compression.py:3414): its own responses end that wait.
+    eng = _side_engine(tmp_path, monkeypatch, kind)
+    try:
+        eng.on_session_start("s2863", platform="cli", model="probe-model", context_length=WINDOW)
+        eng.update_from_response({"prompt_tokens": 47_000, "completion_tokens": 100, "total_tokens": 47_100})
+        eng.on_session_start("side-1", platform="cron", model="probe-model", context_length=WINDOW)
+        assert eng.side_channel_active and eng._bypasses_lcm_context_management()
+        for usage in ({"prompt_tokens": 900, "completion_tokens": 5, "total_tokens": 905}, {},
+                      {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}):
+            _arm_host_flags(eng)
+            eng.update_from_response(usage)
+            assert _host_flags(eng) == (False, False), usage
     finally:
         eng.shutdown()
 
@@ -478,11 +513,7 @@ def test_side_channel_response_leaves_both_host_flags_until_the_foreground_answe
 def test_standalone_ignored_or_stateless_session_response_clears_both_host_flags(tmp_path, monkeypatch, kind):
     # A process whose only binding is an ignored or stateless session (a cron process of its own): no foreground
     # binding exists, so it is not a side channel and its own responses end the host's post-compaction wait.
-    force_char_estimate(monkeypatch)
-    home = tmp_path / "hermes-home"
-    home.mkdir()
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **{f"{kind}_session_patterns": ["side-*"]})
-    eng = LCMEngine(config=config, hermes_home=str(home))
+    eng = _side_engine(tmp_path, monkeypatch, kind)
     try:
         eng.on_session_start("side-1", platform="cron", model="probe-model", context_length=WINDOW)
         assert not eng.side_channel_active and eng._bypasses_lcm_context_management()
@@ -497,9 +528,9 @@ def test_standalone_ignored_or_stateless_session_response_clears_both_host_flags
 
 
 # ---------------------------------------------------------------- the checks themselves flag what they guard
-def _calls(*ids):
+def _calls(*ids, arguments="{}"):
     return {"role": "assistant", "content": "", "tool_calls": [
-        {"id": cid, "type": "function", "function": {"name": "terminal", "arguments": "{}"}} for cid in ids]}
+        {"id": cid, "type": "function", "function": {"name": "terminal", "arguments": arguments}} for cid in ids]}
 
 
 def _result(cid, text="ok"):
@@ -529,7 +560,25 @@ def test_conservation_violations_flags_a_duplicated_row_and_counts_stored_copies
     assert conservation_violations(engine, again) == []
     found = conservation_violations(engine, again + [dict(USER)])
     assert [v[0] for v in found] == ["duplicate"], found
-    assert [v[0] for v in conservation_violations(engine, msgs[:-1])] == ["missing"]
+    assert [v[0] for v in conservation_violations(engine, again[:-2] + again[-1:])] == ["missing"]
+    # Two identical unsummarised user rows represented once: one stored copy is missing.
+    found = conservation_violations(engine, msgs)
+    assert [v[0] for v in found] == ["missing"] and found[0][2] == "user", found
+
+
+def test_conservation_violations_tells_calls_apart_by_name_and_arguments(engine):
+    # The same call id with different arguments, the first row returned twice: the second call is missing.
+    first, second = _calls("a", arguments='{"command": "ls"}'), _calls("a", arguments='{"command": "make clean"}')
+    user2 = {"role": "user", "content": "Now clean the build folder."}
+    msgs = [dict(USER), first, _result("a"), user2, second, _result("a", "done")]
+    engine.ingest(list(msgs))
+    assert conservation_violations(engine, msgs) == []
+    found = conservation_violations(engine, msgs[:4] + [dict(first)] + msgs[5:])
+    assert sorted(v[0] for v in found) == ["duplicate", "missing"], found
+    renamed = copy.deepcopy(second)
+    renamed["tool_calls"][0]["function"]["name"] = "read_file"
+    found = conservation_violations(engine, msgs[:4] + [renamed] + msgs[5:])
+    assert [v[0] for v in found] == ["missing"], found
 
 
 def test_summary_target_ratio_is_the_host_default():

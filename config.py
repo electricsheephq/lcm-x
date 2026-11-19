@@ -1006,7 +1006,6 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("stub_first_exit_target_ratio", "LCM_STUB_FIRST_EXIT_TARGET_RATIO", float),
     _EnvFieldSpec("depth_target_ratio", "LCM_DEPTH_TARGET_RATIO", float),
     _EnvFieldSpec("summary_prefix_target_ratio", "LCM_SUMMARY_PREFIX_TARGET_RATIO", float),
-    _EnvFieldSpec("progress_landing_margin_ratio", "LCM_PROGRESS_LANDING_MARGIN_RATIO", float),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
     _EnvFieldSpec("survival_fit", "LCM_SURVIVAL_FIT", bool),
@@ -1123,7 +1122,6 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "stub_first_exit_target_ratio",
     "depth_target_ratio",
     "summary_prefix_target_ratio",
-    "progress_landing_margin_ratio",
 })
 
 # Fields exposed as runtime preset overrides (consumed by presets.py).
@@ -1585,8 +1583,6 @@ class LCMConfig:
     # Shares of the model window. Zero disables the depth target or leaves the prefix ratio unset.
     depth_target_ratio: float = 0.0
     summary_prefix_target_ratio: float = 0.0
-    # #2863: share m of the threshold; progress is reported only for a projected landing <= (1 - m) x threshold.
-    progress_landing_margin_ratio: float = 0.0
     # #48: absolute compaction trigger in tokens (0 = ratio-based). from_env() reads
     # LCM_ABSOLUTE_THRESHOLD_TOKENS, then config.yaml lcm.context_threshold_tokens.
     absolute_threshold_tokens: int = 0
@@ -1903,14 +1899,6 @@ class LCMConfig:
                 ratio, source = default, "default"
             setattr(c, name, ratio)
             _record(name, source, warning)
-        c.progress_landing_margin_ratio, source, warning = _parse_float_env_with_source(
-            "LCM_PROGRESS_LANDING_MARGIN_RATIO", c.progress_landing_margin_ratio
-        )
-        if not 0 <= c.progress_landing_margin_ratio <= 0.5:
-            warning = (f"invalid env LCM_PROGRESS_LANDING_MARGIN_RATIO={c.progress_landing_margin_ratio!r} ignored "
-                       "(must be >= 0 and <= 0.5)")
-            c.progress_landing_margin_ratio, source = LCMConfig.progress_landing_margin_ratio, "default"
-        _record("progress_landing_margin_ratio", source, warning)
 
         # Every other scalar LCM_* override is applied uniformly from the spec.
         for spec in ENV_FIELD_SPECS:

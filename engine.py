@@ -1931,14 +1931,15 @@ class LCMEngine(
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
         self._record_turn_compaction_telemetry()
-        if not self.side_channel_active:
-            # #2863: any response on the foreground path ends the host's post-compaction wait, with or without a
-            # count, as the host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host
-            # reads the verify flag before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume
-            # the wait when a provider omits usage (turn_usage.py 3b421578:87-91). A side channel's response (an ignored
-            # or stateless session such as cron, over a bound foreground) leaves both; such a session alone clears them.
-            self._verify_compaction_cleared_threshold = False
-            self.awaiting_real_usage_after_compression = False
+        # #2863: any response on the main path ends the host's post-compaction wait, with or without a count, as the
+        # host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host reads the verify flag
+        # before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume the wait when a provider
+        # omits usage (turn_usage.py 3b421578:87-91). The host gives each agent its own engine copy (agent_init.py
+        # 3b421578:1779-1785), so a response seen here is its bound session's own, ignored or stateless ones included.
+        # Known limit: on a host that shares one engine across agents, a side channel's response clears these flags
+        # for the foreground too.
+        self._verify_compaction_cleared_threshold = False
+        self.awaiting_real_usage_after_compression = False
 
     @property
     def cache_read_ratio(self) -> float:
