@@ -271,11 +271,21 @@ class SurvivalFitMixin:
                 self._survival_scaffold(result[prefix], store_ids)
                 or self._generated_context_carrier_remainder(result[prefix]) is not None):
             prefix += 1
+        keep_from = self._fresh_tail_start(result) if exit_fit else None
+        cut = None
+        if exit_fit or prefix > system:
+            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True, **({"keep_from": keep_from} if exit_fit else {}))
+        if cut is None and prefix > system:
+            last = result[prefix - 1]
+            if (self._generated_context_carrier_remainder(last) is not None
+                    and self._is_literal_user_text(last["content"], self._bound_user_text(store_ids.get(id(last))))):
+                cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True,
+                                         keep_from=keep_from, split_literal=True)
+                if cut is None:
+                    cut = self._survival_cut(result, prefix - 1, budget, persisted, reason, store_ids, True,
+                                             keep_from=keep_from)
         if exit_fit:
-            # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
-            # prefix, a protected fresh-tail row or a projection. The window budget still holds the list.
-            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True,
-                                     keep_from=self._fresh_tail_start(result))
+            # #668: headroom drops whole turns without projecting or cutting into the fresh tail.
             if cut is None:
                 if log_skip:
                     logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
@@ -283,7 +293,6 @@ class SurvivalFitMixin:
                 return None, persisted
             emergency = False
         else:
-            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
             emergency = prefix > system and cut is None
             # #1281: preserve user text when marks cannot fit and the list already fits the window.
             # Recovery caps keep the existing last-resort marks unconditionally (#608).
@@ -354,7 +363,8 @@ class SurvivalFitMixin:
         return next((u for u in candidates if u in engine), None)
 
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
-                      whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None):
+                      whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None, *,
+                      split_literal: bool = False):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
         oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
         projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
@@ -363,12 +373,17 @@ class SurvivalFitMixin:
         returned list's re-formed carrier, its summary span and its user row's store id, else None (#1000)."""
         self._survival_cut_carrier = None
         head, body = list(result[:lead]), list(result[lead:])
-        summary = summary_uid = formed = None
+        summary = summary_uid = formed = literal = None
         naming_ids = store_ids
         # #2895: a nested carrier ("summary\n\nold summary\n\nrow") splits down to its real row, which is counted
         remainder = (self._carried_user_text(head[-1], store_ids.get(id(head[-1])))
                      if whole_turns and head else None)
-        if remainder is not None:
+        if split_literal:
+            literal = head.pop()
+            summary = literal["content"][:self._verified_lcm_summary_prefix_end(literal["content"])]
+            # Only the verified span is rendered. Use the original occurrence for durability and notice IDs.
+            body.insert(0, literal)
+        elif remainder is not None:
             carrier = head.pop()
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
@@ -398,7 +413,7 @@ class SurvivalFitMixin:
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(naming_ids[id(message)] for message in dropped if id(message) in naming_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
-            counted = [m for m in dropped if not self._survival_generated(
+            counted = [m for m in dropped if m is literal or not self._survival_generated(
                 m, naming_ids.get(id(m)), carrier_cache=carrier_cache)]
             ids = sorted(naming_ids[id(message)] for message in counted if id(message) in naming_ids)
             count = len(counted)
