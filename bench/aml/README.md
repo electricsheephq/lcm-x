@@ -95,6 +95,10 @@ Run the synthetic tests from the LCM-X repository root:
 ```
 
 Delete evaluation data within 30 days, including retained copies and backups.
+Before any evaluation data is deleted, archive the platform's aggregate result
+file (scores and per-leaf item counts only, never evaluation content) beside the
+run's result card. Per-leaf counts are what make confidence and rank intervals
+possible (#2971).
 
 ## Opt-in v2 coding delivery
 
