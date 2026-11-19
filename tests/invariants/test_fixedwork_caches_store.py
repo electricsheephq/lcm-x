@@ -6,10 +6,13 @@ writes on either connection, frontier moves, carry-range changes and rebinds. Th
 disabled; after every step a held slot the next build could use is also compared with an independent fresh read.
 Synthetic data only.
 """
+import gc
 import json
 import random
+import weakref
 from contextlib import contextmanager
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -169,3 +172,74 @@ def test_c4_remembered_candidate_rows_equal_fresh_reads(tmp_path, seed):
             other.close()
     # Not vacuous: the slot served some builds and filled on others.
     assert all(calls > loads > 0 for calls, loads in hits.values()), hits
+
+
+def test_c4_reopen_releases_old_store_before_paging(tmp_path):
+    db_path = tmp_path / "lcm.db"
+    owner = SimpleNamespace(_store=MessageStore(db_path))
+    try:
+        owner._store.append("S", {"role": "user", "content": "row before reopen"})
+        expected = reconcile._store_generation_memo(
+            owner, C_SLOT, "S", lambda: _page(owner._store, "S", 0, ()), reconcile._copy_store_rows,
+        )
+        assert len(expected) == 1
+        old_store = weakref.ref(owner._store)
+        owner._store.close()
+        owner._store = MessageStore(db_path)
+        assert old_store() is not None  # the old slot is still held at the start of the miss
+        released_at_page = []
+
+        def observe_page():
+            gc.collect()
+            released_at_page.append(old_store() is None)
+            return _page(owner._store, "S", 0, ())
+
+        assert reconcile._store_generation_memo(
+            owner, C_SLOT, "S", observe_page, reconcile._copy_store_rows,
+        ) == expected
+        assert released_at_page == [True]
+        assert old_store() is None
+    finally:
+        owner._store.close()
+
+
+@pytest.mark.parametrize(("limit", "cap"), [
+    ("_STORE_GENERATION_MEMO_MAX_ROWS", 2),
+    ("_STORE_GENERATION_MEMO_MAX_BYTES", 4096),
+], ids=["row-count", "accounted-bytes"])
+def test_c4_oversize_candidate_rows_page_again_with_equal_results(tmp_path, monkeypatch, limit, cap):
+    monkeypatch.setattr(reconcile, limit, cap, raising=False)
+    view = [
+        {"role": "user", "content": "row one"},
+        {"role": "assistant", "content": "row two", "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {
+                "name": "test", "arguments": json.dumps({"input": "x" * 8192}),
+            }},
+        ]},
+        {"role": "tool", "content": "row three", "tool_call_id": "call_1", "name": "test"},
+    ]
+    with engine_context(tmp_path, window=200_000, conversation_id="conv", **QUIET) as engine:
+        store = engine._store
+        for row in view:
+            store.append(engine._session_id, row, conversation_id="conv")
+        expected_rows = _page(store, engine._session_id, engine._last_compacted_store_id, ())
+        assert len(expected_rows) == len(view)
+        with _no_memo():
+            expected_map = engine._get_store_id_map_for_messages(view)
+        returned_rows = []
+        memo = reconcile._store_generation_memo
+
+        def capture_rows(owner, slot, key, load, copy):
+            rows = memo(owner, slot, key, load, copy)
+            returned_rows.append(rows)
+            return rows
+
+        with mock.patch.object(reconcile, "_store_generation_memo", capture_rows), mock.patch.object(
+            engine, "_page_store_id_map_candidates", wraps=engine._page_store_id_map_candidates,
+        ) as page:
+            assert engine._get_store_id_map_for_messages(view) == expected_map
+            assert engine._get_store_id_map_for_messages(view) == expected_map
+
+        assert returned_rows == [expected_rows, expected_rows]
+        assert page.call_count == 2
+        assert C_SLOT not in engine.__dict__

@@ -579,6 +579,20 @@ class _ReplayIdentityMemo:
             self.size += size
 
 
+_STORE_GENERATION_MEMO_MAX_ROWS = 20_000
+_STORE_GENERATION_MEMO_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _store_memo_value_size(value) -> int:
+    """Account for containers and their JSON contents, counting shared references conservatively."""
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        size += sum(sys.getsizeof(key) + _store_memo_value_size(item) for key, item in value.items())
+    elif isinstance(value, list):
+        size += sum(map(_store_memo_value_size, value))
+    return size
+
+
 def _store_generation_memo(owner, slot: str, key, load, copy):
     """``load()``, remembered in one slot on ``owner`` per store write generation (#2856).
 
@@ -586,11 +600,17 @@ def _store_generation_memo(owner, slot: str, key, load, copy):
     ``total_changes`` is not decremented by a ROLLBACK and ``PRAGMA data_version`` ignores this connection,
     so a value read inside a transaction could outlive the rows it saw. The connection object is part of the
     key (a reopened store restarts both counters); a fill needs the same generation before and after the
-    load; a load that raises is not remembered; a hit returns a copy."""
+    load; a load that raises is not remembered; a hit returns a copy. A different store or connection drops
+    the old slot before loading. Only values within both retention caps are copied into the slot."""
     state = getattr(owner, "__dict__", None)
+    held = state.get(slot) if state is not None else None
     try:
         store = owner._store  # the load reads it next; opening storage here changes nothing it does
         conn = store._conn
+        if held is not None and (held[0] is not store or held[1] is not conn):
+            if state.get(slot) is held:
+                state.pop(slot, None)
+            held = None
         quiet = (state is not None and conn is not None and conn.in_transaction is False
                  and store._ingest_is_prelock() is False)
         generation = store.write_generation() if quiet else None
@@ -598,12 +618,14 @@ def _store_generation_memo(owner, slot: str, key, load, copy):
         quiet = False
     if not quiet:
         return load()
-    held = state.get(slot)
-    if held is not None and held[0] is store and held[1] is conn and held[2] == (generation, key):
+    if held is not None and held[2] == (generation, key):
         return copy(held[3])
     value = load()
     try:
-        if conn.in_transaction is False and store.write_generation() == generation:
+        if (len(value) <= _STORE_GENERATION_MEMO_MAX_ROWS
+                and owner._store is store and store._conn is conn
+                and conn.in_transaction is False and store.write_generation() == generation
+                and _store_memo_value_size(value) <= _STORE_GENERATION_MEMO_MAX_BYTES):
             state[slot] = (store, conn, (generation, key), copy(value))
     except Exception:
         pass
