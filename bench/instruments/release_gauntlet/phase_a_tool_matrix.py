@@ -294,12 +294,10 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"])
     elif tool == "lcm_status":
         status = _payload(engine, tool, {})
-        # The cloud-default posture's privacy battery ingests 10 extra rows before
-        # the matrix runs, so totals are posture-aware exact values.
-        expected_total = 40 if posture == "cloud-default" else 30
+        # Both matrix databases contain only the three 10-message sessions from _seed.
         assert (
             status["store"]["messages"] == 10
-            and status["lifecycle_fragmentation"]["messages_total"] == expected_total
+            and status["lifecycle_fragmentation"]["messages_total"] == 30
             and status["ingest_protection"]["enabled"] is patterns
             and status["proactive_recall"]["privacy_policy_errors"] == 0
         )
@@ -569,7 +567,6 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     if known and expect_365_fixed:
         raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
-    engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
     return bool(known)
 
 
@@ -788,16 +785,16 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
     batteries = []
     try:
         outbound = []
-        # The planted-secret battery tests the opt-in filter (off by default since #2977), so it opts in.
-        cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-default-", dir=state_root)), "cloud", patterns=False, embedding_privacy=True)
+        cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-default-", dir=state_root)), "cloud", patterns=False)
         try:
             context = _seed(mod, cloud)
             try:
-                known = _planted_secret(mod, cloud, outbound, expect_365_fixed=expect_365_fixed)
-                batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "lossless durable rows, protected dispatch, revision, raw recall checks passed"))
-            except Exception as exc:
-                batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
-            try:
+                command = mod["command"].handle_lcm_command
+                # Register and populate the cloud identities used by recall and doctor.
+                assert "status: ready" in command("embed warmup", cloud), "cloud matrix warmup failed"
+                assert "status: complete" in command("embed backfill --apply --limit 50", cloud), "cloud matrix summary backfill failed"
+                chunk_report = command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", cloud)
+                assert "status: complete" in chunk_report, "cloud matrix chunk backfill failed"
                 assert "Constellation anchor" in json.dumps(_payload(cloud, "lcm_recall", {"query": "Constellation anchor"})["hits"])
                 default_control_error = None
             except Exception as exc:
@@ -805,6 +802,16 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
             records = _run_matrix(cloud, registered, context, patterns=False, posture="cloud-default", missing=missing)
         finally:
             cloud.shutdown()
+
+        outbound = []
+        planted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-privacy-opt-in-", dir=state_root)), "cloud", patterns=False, embedding_privacy=True)
+        try:
+            known = _planted_secret(mod, planted, outbound, expect_365_fixed=expect_365_fixed)
+            batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "lossless durable rows, protected dispatch, revision, raw recall checks passed"))
+        except Exception as exc:
+            batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
+        finally:
+            planted.shutdown()
 
         outbound = []
         opt_out = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-opt-out-", dir=state_root)), "cloud", patterns=False, embedding_privacy=False)

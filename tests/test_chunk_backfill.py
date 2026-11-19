@@ -333,9 +333,11 @@ class TestChunkRawTextConsentGate:
         assert "--confirm-raw-text" in out
         # The filter is off by default (#2977): the refusal must not claim that anything is removed.
         assert "No provider-input privacy filter is applied" in out
+        assert "only when LCM_EMBEDDING_PRIVACY_ENABLED is set to true" in out
         assert "privacy transform removes" not in out
         # Nothing was sent to the cloud provider and nothing was written.
         assert provider.calls == []
+        assert _chunk_meta_ids(engine) == []
 
     def test_cloud_refusal_names_the_filter_only_when_opted_in(self, monkeypatch, tmp_path):
         engine = self._voyage_engine(tmp_path, privacy=True)
@@ -347,6 +349,24 @@ class TestChunkRawTextConsentGate:
         assert "status: refused" in out
         assert "privacy transform removes configured detector matches" in out
         assert "No provider-input privacy filter is applied" not in out
+        assert provider.calls == []
+        assert _chunk_meta_ids(engine) == []
+
+    @pytest.mark.parametrize(("patterns", "policy_error"), [
+        ("", "cloud embedding privacy requires a nonempty sensitive-pattern policy"),
+        ("api_key,unknown-test-pattern", "cloud embedding privacy policy contains unknown pattern names: unknown-test-pattern"),
+    ])
+    def test_cloud_consent_gate_refuses_invalid_opt_in_policy(self, monkeypatch, tmp_path, patterns, policy_error):
+        engine = self._voyage_engine(tmp_path, privacy=True)
+        monkeypatch.setenv("LCM_SENSITIVE_PATTERNS", patterns)
+        engine._config.sensitive_patterns = LCMConfig.from_env().sensitive_patterns
+        provider = FakeProvider()
+        monkeypatch.setattr(command_mod, "resolve_provider", lambda _c, **_k: provider)
+
+        out = handle_lcm_command("embed backfill --corpus chunks --apply", engine)
+
+        assert "status: refused" in out
+        assert f"error: {policy_error}" in out
         assert provider.calls == []
         assert _chunk_meta_ids(engine) == []
 
