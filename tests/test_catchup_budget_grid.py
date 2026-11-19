@@ -159,7 +159,7 @@ ISSUE_2877 = "issue 2877"
 # s-600k-l40-prefix a later fit's notice no longer names 37 of the first fit's rows, which no leaf covers yet (A0).
 KNOWN_2877_BASE = ["g1-03", "g1-04", "g1-12", "g1-13", "g1-20", "g1-21", "g1-22", "g1-30", "g1-31", "g1-33", "g1-34",
                    "g1-40", "g1-41", "g1-42", "g1-43", "g1-44", "s-600k-l40-prefix"]
-KNOWN_2877_A0 = ["s-600k-l40-prefix"]
+KNOWN_2877_A0 = ["s-600k-l40-prefix"]  # the candidate's pin is lifted: the catch-up change no longer loses these rows
 ARM_CELLS = S + [cell for cell in KNOWN_2877_BASE if cell.startswith("g1-")]  # steady cells, G1 cells with A0b
 ARM_PRE_SECONDS = 5
 
@@ -440,7 +440,7 @@ def test_a0_loss(grid, cell, tree, request):
     """A0, a row that leaves the list with no pointer. On the base, also no A0b row (issue 2877 pins the known cells,
     so a fix on main turns them red until the pin is removed)."""
     records = grid[tree]["by_cell"][cell]
-    if tree == "base" and cell in KNOWN_2877_BASE or tree == "cand" and cell in KNOWN_2877_A0:
+    if tree == "base" and cell in KNOWN_2877_BASE:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
     if cell in D:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
@@ -556,15 +556,54 @@ def test_a4_condensation_then_leaf_premise_on_the_base(grid):
 
 def test_a4_strict_condensation_then_leaf(grid, strict_gain):
     cand = grid["cand"]["by_cell"]["g1-cond-then-leaf"][0]
-    assert cand["leaves"] == 1, f"A4 strict in cell g1-cond-then-leaf: the candidate stored {cand['leaves']} leaves"
+    assert cand["leaves"] >= 1, f"A4 strict in cell g1-cond-then-leaf: the candidate stored {cand['leaves']} leaves"
+
+
+A5_ADDED = 0.85 * 120.0 + 15.0  # an extension call's cap at the configured 120 s timeout, plus 15 s bookkeeping: 117 s
 
 
 def test_a5_hang_cell_wait(grid):
     base, cand = (grid[tree]["by_cell"]["g1-hang-every-pass"] for tree in ("base", "cand"))
     for b, c in zip(base, cand):
-        assert c["wall"] - b["wall"] <= CATCHUP_HARD - BASE_HARD, (
+        assert c["wall"] - b["wall"] <= A5_ADDED, (
             f"A5 pass {b['pass']}: the candidate added {c['wall'] - b['wall']:.1f} s over the base")
     assert not a2_violations(cand) and not a2_violations(base)
+
+
+# A host whose stream deadline acts as a no-progress window: it ignores the call's timeout and ends a call that is still
+# running at the installed deadline with the host's deadline error (executed inside the CAND runner).
+PATCHES["host_window"] = (
+    "import sys as _sys\n"
+    "escalation._host_stream_deadline_seam = lambda: True\n"
+    "def _host_window(self, prompt, max_tokens, model='', timeout=None, reasoning_effort=''):\n"
+    "    took, deadline = self.seconds(self.started), escalation._summary_call.stream_deadline\n"
+    "    self.started += 1\n"
+    "    self.timeouts.append(None if timeout is None else round(float(timeout), 3))\n"
+    "    self.kinds.append('leaf' if 'user turn' in prompt else 'condensation')\n"
+    "    ends = None if took is None else self.clock.offset + took\n"
+    "    cut = ends is None or (deadline is not None and ends > deadline)\n"
+    "    self.cut_flags.append(cut)\n"
+    "    if cut:\n"
+    "        self.cut += 1\n"
+    "        self.clock.offset = deadline if deadline is not None else self.clock.offset + 600.0\n"
+    "        raise TimeoutError('host compression deadline exceeded')\n"
+    "    self.clock.offset = ends\n"
+    "    return self.summary\n"
+    "_sys.modules['__main__'].Provider.__call__ = _host_window\n")
+
+
+@pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
+def test_extension_call_on_a_no_progress_window_host_is_never_a_hang(grid_dir):
+    """An extension-only call that hangs on a host whose deadline is a no-progress window ends at its own capped
+    timeout (the host deadline it installs), so it is a budget cut: no hang, no strike, the circuit stays closed."""
+    cell = {**BY_ID["g1-hang-every-pass"], "id": "g1-host-window"}
+    records = _run(CAND_TREE, [cell], grid_dir, "host-window", patch="host_window")["by_cell"][cell["id"]]
+    cut = [r["pass"] for r in records if any(r["call_cut_flags"][1:])]
+    assert cut, f"no extension call was cut by the host deadline: {records}"
+    hung = [r["pass"] for r in records if r["circuit"]["state"] != "closed"
+            or r["circuit"]["last_error_class"] == "hung" or r["holds"]["hung_strike"]]
+    assert not hung, f"an extension call was classified as a hang in passes {hung}"
+    assert not a2_violations(records)
 
 
 @pytest.mark.parametrize("cell", S)

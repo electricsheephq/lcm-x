@@ -29,7 +29,6 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
 from .escalation import (
-    _CATCHUP_HARD_SECONDS,
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
     ForegroundEstimates,
@@ -2430,14 +2429,13 @@ class CompactionMixin:
 
     def _open_catchup(self, state: _CompressionState) -> float:
         """Design B: open the catch-up admit after progress while the whole prompt is above the mark, and return the
-        step deadline: t0 + the catch-up bound - reserve while it is open, else the sweep deadline."""
+        step deadline: the catch-up bound while it is open, else the sweep deadline."""
         budget = state.budget
         catchup = bool(state.catchup_mark and budget.progress
                        and state.estimated_active_tokens + state.depth_load_addend > state.catchup_mark)
         if catchup or budget.catchup:  # set only once engaged: the base's pass keeps the base's budget state
             budget.catchup = catchup
-        state.step_deadline = (budget.t0 + _CATCHUP_HARD_SECONDS - budget.reserve if budget.catchup
-                               else state.sweep_deadline)
+        state.step_deadline = budget.catchup_deadline() if budget.catchup else state.sweep_deadline
         return state.step_deadline
 
     def _prepare_compression_sweep(self, state: _CompressionState,

@@ -70,6 +70,7 @@ _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
 # expected to end by t0 + this - reserve (soft target ignored), with its timeout under the hang share (0.9) of its window.
 _CATCHUP_HARD_SECONDS = 210.0  # provisional until bench numbers
 _CATCHUP_TIMEOUT_SHARE = 0.85
+_CATCHUP_MIN_RESERVE_SECONDS = 20.0  # an extension-only admit's finalize reserve (a cold pass has a 5 s reserve)
 
 _summary_call = threading.local()  # #682: the last summary call's error and host route, per thread
 _route_info_support: dict[int, tuple[object, bool]] = {}
@@ -163,12 +164,22 @@ class ForegroundBudget:
         return _CATCHUP_HARD_SECONDS if self.extended else self.hard
 
     @property
+    def call_reserve(self) -> float:
+        """The finalize reserve of the admitted call: at least the catch-up minimum for an extension-only call."""
+        return max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS) if self.extended else self.reserve
+
+    @property
     def usable_deadline(self) -> float:
-        return self.t0 + self.call_hard - self.reserve - self.leaf_reserve
+        return self.t0 + self.call_hard - self.call_reserve - self.leaf_reserve
+
+    def catchup_deadline(self) -> float:
+        """Design B: the catch-up bound, t0 + 210 s less the extension-only reserve."""
+        return self.t0 + _CATCHUP_HARD_SECONDS - max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS)
 
     def catchup_timeout(self) -> float:
         """Design B: an extension-only call's timeout cap, below the hang share of the window the outcome reads."""
-        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, self.call_hard - self.reserve - self.leaf_reserve)
+        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout,
+                                            self.call_hard - self.call_reserve - self.leaf_reserve)
 
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
@@ -818,6 +829,8 @@ def _invoke_summary_attempt(
     _summary_call.route, _summary_call.error = {}, None  # #682: filled by _call_llm_for_summary
     _summary_call.contract = ""
     _summary_call.stream_deadline = budget.usable_deadline if budget is not None else None
+    if getattr(budget, "extended", False) and timeout is not None:  # design B: the capped timeout bounds the host too
+        _summary_call.stream_deadline = min(_summary_call.stream_deadline, time.monotonic() + timeout)
     deadline_installed = budget is not None and _host_stream_deadline_seam()
     started = time.monotonic()
     try:
@@ -1145,11 +1158,13 @@ def _invoke_summary_llm_routes(
             )
             continue
         call_timeout, budget_bound = timeout, False
+        extended = False
         if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
             usable_left = budget.admit(route_key)
             budget_bound = timeout is None or usable_left < timeout
             call_timeout = usable_left if budget_bound else timeout
-            if getattr(budget, "extended", False):  # design B: a cut is a budget cut, never a hang
+            extended = bool(getattr(budget, "extended", False))
+            if extended:  # design B: a cut is a budget cut, never a hang
                 call_timeout, budget_bound = min(usable_left, budget.catchup_timeout()), True
         elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
@@ -1188,8 +1203,8 @@ def _invoke_summary_llm_routes(
             budget_bound=budget_bound,
             call_timeout=call_timeout,
             configured_timeout=budget.configured_timeout if budget is not None else 0.0,
-            hard=(budget.call_hard if getattr(budget, "extended", False) else budget.hard) if budget is not None else 0.0,
-            reserve=budget.reserve if budget is not None else 0.0,
+            hard=(budget.call_hard if extended else budget.hard) if budget is not None else 0.0,
+            reserve=(budget.call_reserve if extended else budget.reserve) if budget is not None else 0.0,
             leaf_reserve=budget.leaf_reserve if budget is not None else 0.0,
             usable_deadline=budget.usable_deadline if budget is not None else 0.0,
             now=time.monotonic() if budget is not None and result is None and error is not None else 0.0,
