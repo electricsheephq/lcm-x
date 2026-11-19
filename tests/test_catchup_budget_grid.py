@@ -33,7 +33,7 @@ RUNNER = HERE / "behaviour" / "catchup_grid_runner.py"
 BASE_TREE = Path(os.environ["LCMX_GRID_BASE"]).resolve() if os.environ.get("LCMX_GRID_BASE") else None
 NO_BASE = "two-tree grid: set LCMX_GRID_BASE to a copy of the base commit's tree (CI has none)"
 CAND_TREE = Path(os.environ.get("LCMX_GRID_CAND", str(HERE.parent))).resolve()
-RUN_TIMEOUT = 900  # seconds per runner process
+RUN_TIMEOUT = int(os.environ.get("LCMX_GRID_RUN_TIMEOUT", "900"))  # seconds per runner process
 WALL_PLUGIN, WALL_HOST, HOST_COMMIT = 250.0, 270.0, 17.0
 CATCHUP_HARD, BASE_HARD = 210.0, 120.0
 STRICT = "needs the catch-up change"
@@ -163,8 +163,8 @@ def _reference_cells() -> list[dict]:
     38 s leaf, the route estimate 44 s) and a prefix over target: the condensation and a leaf land in the same pass."""
     return [{**G1_FIXED, **_g1_load(1_000_000), "group": "R", "id": "r-shipped-cond-then-leaf", "window": 1_000_000,
              "pre": 37, "estimate": 44, "call": [44, 38], "delta": 0, "prefix": "over2x"}] + [
-        # T1-289's boundary: the reserve is released only when pre + condensation + leaf estimates <= 210 - 20 s;
-        # route estimate 70 s: 49 + 140 = 189 s releases it, 52 + 140 = 192 s keeps the base's reserve
+        # T1-289's former boundary cells (pre + condensation + leaf estimates of 189 s and 192 s against 210 - 20 s),
+        # kept as regression cells: the pre-leaf leaf reserve is never released, so both keep the base's reserve
         {**G1_FIXED, **_g1_load(1_000_000), "group": "R", "id": f"r-release-{side}", "window": 1_000_000, "pre": pre,
          "estimate": 70, "call": [60, 60], "delta": 0, "prefix": "over2x"} for side, pre in (("inside", 49), ("outside", 52))]
 
@@ -246,8 +246,14 @@ ISSUE_2877 = "issue 2877"
 # s-600k-l40-prefix a later fit's notice no longer names 37 of the first fit's rows, which no leaf covers yet (A0).
 KNOWN_2877_BASE = ["g1-03", "g1-04", "g1-12", "g1-13", "g1-20", "g1-21", "g1-22", "g1-30", "g1-31", "g1-33", "g1-34",
                    "g1-40", "g1-41", "g1-42", "g1-43", "g1-44", "s-600k-l40-prefix",
-                   "r-release-inside", "r-release-outside"]  # T1-289's boundary cells: the base fits at pass 9
-KNOWN_2877_A0 = ["s-600k-l40-prefix"]  # the candidate's pin is lifted: the catch-up change no longer loses these rows
+                   "r-release-inside", "r-release-outside",  # T1-289's former boundary cells: the base fits at pass 9
+                   # round 2 (6): the V/VR cells where the base puts rows behind a fit notice (v-ctl-c70-l70 also loses
+                   # 512 rows that a later fit's notice no longer names, A0)
+                   "v-ctl-c45-l35", "v-ctl-c70-l70", "v-ctl-pre37-c70-l45",
+                   "v5-recover-at-9", "v5-recover-at-10", "v5-recover-at-11", "v5-recover-at-12"]
+# The candidate's A0 pins under issue 2877: v-ctl-c70-l70 loses the same 512 rows as the base (B reproduces the base's
+# fits there and never worsens them; test_a0_candidate_no_worse_than_the_base stays unpinned).
+KNOWN_2877_A0 = ["v-ctl-c70-l70"]
 ARM_CELLS = S + [cell for cell in KNOWN_2877_BASE if cell.startswith("g1-")]  # steady cells, G1 cells with A0b
 ARM_PRE_SECONDS = 5
 
@@ -557,7 +563,7 @@ def test_a0_loss(grid, cell, tree, request):
     """A0, a row that leaves the list with no pointer. On the base, also no A0b row (issue 2877 pins the known cells,
     so a fix on main turns them red until the pin is removed)."""
     records = grid[tree]["by_cell"][cell]
-    if tree == "base" and cell in KNOWN_2877_BASE:
+    if cell in (KNOWN_2877_BASE if tree == "base" else KNOWN_2877_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
     if cell in D:
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
@@ -744,23 +750,30 @@ def _base_sweep_target(window: int) -> int:
     return max(min(24_000, trigger // 4), min(int(0.05 * window), trigger // 4))
 
 
+# Round 2 (5): B's area per stored leaf is compared with the base's by integer cross-products, with this many tokens of
+# total area for the rounding of the per-leaf summary count (s-1m-l45-d15 is 0.6 tokens over the exact proportion).
+AREA_TOLERANCE = 2
+
+
 @pytest.mark.parametrize("cell", S)
 def test_steady_cells_condense_and_keep_their_leaves(grid, cell):
     """A6 restated (the RM's ruling on review round 1): per pass the candidate stores at least the base's leaves (a pass
     where its own prompt is under its trigger is excused), a pass that condenses still stores a leaf, no pass passes
-    250 s; and over the walk its summary area per stored leaf (peak area / leaves stored, with a 1-token rounding
-    allowance), its end prompt (against the base's last non-fit prompt), its mean prompt, and its A0 and A0b rows are
-    each at most the base's. The 60,000 / 36,000 figure (1.2 x
-    the base's sweep target) is reported as a target only. Boundedness is test_a6_bounded_summary_area."""
+    250 s; and over the walk its summary area per stored leaf (peak area / leaves stored, within AREA_TOLERANCE tokens
+    of total area), its end prompt (against the base's last non-fit prompt), its mean prompt, and its A0 and A0b rows
+    are each at most the base's. The 60,000 / 36,000 figure (1.2 x the base's sweep target) is reported as a target
+    only. Boundedness is test_a6_bounded_summary_area."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
     fewer = [c["pass"] for b, c in zip(base, cand) if c["leaves"] < b["leaves"] and c["prompt_before"] >= c["trigger"]]
     assert not fewer, f"{cell}: fewer leaves than the base in passes {fewer}"
     no_leaf = [c["pass"] for c in cand if c["condensations"] and not c["leaves"]]
     assert not no_leaf, f"{cell}: a condensation without a leaf in passes {no_leaf}"
     assert not a2_violations(cand), a2_violations(cand)
-    per_leaf = {tree: max(r["summary_area"] for r in records) / max(1, records[-1]["leaves_cum"])
-                for tree, records in (("base", base), ("cand", cand))}
-    assert per_leaf["cand"] <= per_leaf["base"] + 1, f"{cell}: summary area per stored leaf {per_leaf}"
+    (area_b, leaves_b), (area_c, leaves_c) = (
+        (max(r["summary_area"] for r in records), max(1, records[-1]["leaves_cum"])) for records in (base, cand))
+    # area_c / leaves_c <= area_b / leaves_b, in integers, with AREA_TOLERANCE tokens of total area for rounding
+    assert area_c * leaves_b <= area_b * leaves_c + AREA_TOLERANCE * leaves_b, (
+        f"{cell}: summary area per stored leaf: candidate {area_c} / {leaves_c}, base {area_b} / {leaves_b}")
     # T1-327: the end prompt is compared with the base's prompt on its last pass that was not itself a fit pass (one that
     # moved more rows behind a notice than the pass before: a lossy fit cut is not the base doing better), and the mean
     # prompt over the walk must also be at most the base's
@@ -801,8 +814,8 @@ def test_recovery_cells_bounded_lag(grid, cell):
     """Route recovery (the RM's restatement): never behind by more than one firing's publications (the base's largest
     one-pass count of leaves + condensations), never behind for longer than one hold period (600 s of turn gaps,
     counted in passes) except where A1's excuse holds (the candidate under its trigger and at or below the base's
-    prompt), the same or a better rate over the walk (publications up to each tree's last publishing pass, per pass),
-    rows behind a notice at most the base's, and no hung strike the base lacks."""
+    prompt), the same or a better rate over whole firing cycles (see ``rate``), rows behind a notice at most the base's,
+    and no hung strike the base lacks."""
     base, cand = (grid[tree]["by_cell"][cell] for tree in ("base", "cand"))
     assert len(base) == len(cand), f"{cell}: walks of {len(base)} and {len(cand)} passes"
     firing = max(r["leaves"] + r["condensations"] for r in base)
@@ -820,12 +833,15 @@ def test_recovery_cells_bounded_lag(grid, cell):
         assert not (c["holds"]["hung_strike"] and not b["holds"]["hung_strike"]), f"{cell} pass {b['pass']}: hung strike"
 
     def rate(records):
-        cum, best = 0, 0.0
-        for r in records:
-            cum += r["leaves"] + r["condensations"]
-            if r["leaves"] + r["condensations"]:
-                best = cum / (r["pass"] + 1)
-        return best
+        """Round 2 (4), T1-324: publications per pass over whole firing cycles, each from one firing to the next and
+        credited with that firing's count; the open cycle after the last firing is left out, unless it has run past one
+        hold period (the tree stopped firing), when it counts whole, to the end of the walk."""
+        fired = [(r["pass"], r["leaves"] + r["condensations"]) for r in records if r["leaves"] + r["condensations"]]
+        if not fired:
+            return 0.0
+        if len(fired) == 1 or len(records) - fired[-1][0] > hold_passes:
+            return sum(n for _, n in fired) / (len(records) - fired[0][0])
+        return sum(n for _, n in fired[:-1]) / (fired[-1][0] - fired[0][0])
     assert rate(cand) >= rate(base), f"{cell}: rate {rate(cand):.3f} < base {rate(base):.3f}"
 
 
@@ -843,10 +859,11 @@ def test_mark_per_rule_4_engages_at_a_400k_trigger(grid):
 
 
 # (2): an extension-only call on a host with the stream-deadline seam. The pass's second call (the extension call) is
-# either masked at its own deadline as a non-timeout error (MASK), or returns late, 11 s past it (LATE).
+# either masked at its own deadline as a non-timeout error (MASK), or returns late, 11 s past it (LATE). Round 2 (2):
+# PAUSE seconds pass between installing the stream deadline and sampling the call's start (a scheduling stall).
 _EXT_HOST = (
     "import sys as _sys\n"
-    "escalation._host_stream_deadline_seam = lambda: True\n"
+    "escalation._host_stream_deadline_seam = lambda: setattr(clock, 'offset', clock.offset + PAUSE) or True\n"
     "_P = _sys.modules['__main__'].Provider\n"
     "_orig = _P.__call__\n"
     "def _ext(self, prompt, max_tokens, model='', timeout=None, reasoning_effort=''):\n"
@@ -859,21 +876,109 @@ _EXT_HOST = (
     "    self.clock.offset = deadline + LATE\n"
     "    raise (TimeoutError('timed out') if LATE else RuntimeError('invalid argument: stream closed'))\n"
     "_P.__call__ = _ext\n")
-PATCHES["ext_masked"] = _EXT_HOST.replace("LATE", "0")
-PATCHES["ext_late"] = _EXT_HOST.replace("LATE", "11")
+PATCHES["ext_masked"] = _EXT_HOST.replace("LATE", "0").replace("PAUSE", "0")
+PATCHES["ext_late"] = _EXT_HOST.replace("LATE", "11").replace("PAUSE", "0")
+PATCHES["ext_masked_pause_1_1"] = _EXT_HOST.replace("LATE", "0").replace("PAUSE", "1.1")
+PATCHES["ext_masked_pause_2"] = _EXT_HOST.replace("LATE", "0").replace("PAUSE", "2.0")
 
 
 @pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
-@pytest.mark.parametrize("variant", ["ext_masked", "ext_late"])
+@pytest.mark.parametrize("variant", ["ext_masked", "ext_late", "ext_masked_pause_1_1", "ext_masked_pause_2"])
 def test_extension_call_classified_against_its_own_deadline(grid_dir, variant):
     """(2): (a) a timeout the host masks at the extension call's own deadline charges no route failure; (b) a return
-    past its own timeout opens no circuit and marks no hang."""
+    past its own timeout opens no circuit and marks no hang. Round 2 (2): (a) holds after a pause between installing
+    the deadline and the call's start, because the call is classified against the deadline it installed."""
     cell = {**BY_ID["g1-hang-every-pass"], "id": f"e-{variant}", "passes": 3}
     records = _run(CAND_TREE, [cell], grid_dir, variant, patch=variant)["by_cell"][cell["id"]]
     assert any(any(r["call_cut_flags"][1:]) for r in records), f"no extension call ran: {records}"
     bad = [(r["pass"], r["circuit"]) for r in records if r["circuit"]["state"] != "closed"
            or r["circuit"]["last_error_class"] in ("provider_failure", "hung") or r["holds"]["hung_strike"]]
     assert not bad, f"{variant}: the extension call was charged to the route: {bad}"
+
+
+# Round 2 (1): every summary-frontier scan costs 0.2 s on both trees. The base admits pass 0's leaf at 39.9 s (59.9 s
+# with its 20 s estimate, under the 60 s soft target); B must not spend a scan of its own before that admission.
+PATCHES["frontier_cost"] = (
+    "_ft = engine.LCMEngine._summary_frontier_tokens\n"
+    "def _costly(self, _ft=_ft):\n"
+    "    clock.offset += 0.2\n"
+    "    return _ft(self)\n"
+    "engine.LCMEngine._summary_frontier_tokens = _costly\n")
+
+
+@pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
+def test_no_candidate_only_frontier_scan_before_the_leaf(grid_dir):
+    """(1): a pre-leaf condensation brings B's estimate under M (depth 0.49), so only the base admit applies; with a
+    charged scan the candidate still admits every call the base admits, pass by pass."""
+    cell = {**_R1M, "group": "M", "id": "m1-frontier-scan", "passes": 4, "over_tokens": 1_000, "pre": 28.9,
+            "estimate": 20, "call": 20, "call_kind": {"condensation": 10, "leaf": 20}, "depth_ratio": 0.49}
+    base, cand = (_run(tree, [cell], grid_dir, f"frontier-{name}", patch="frontier_cost")["by_cell"][cell["id"]]
+                  for name, tree in (("base", BASE_TREE), ("cand", CAND_TREE)))
+    assert base[0]["leaves"] >= 1 and base[0]["condensations"] >= 1, "premise: the base condenses, then stores a leaf"
+    for b, c in zip(base, cand):
+        assert c["leaves_cum"] >= b["leaves_cum"], f"pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}"
+
+
+# Round 2 (9): a summariser that fails ``FAIL_IF`` calls with a genuine provider error, alike on both trees. The admit
+# is wrapped to mark the failures of extension-only calls ("ext_fail") apart from the base-admitted ones ("fail").
+_FAILING = (
+    "import sys as _sys\n"
+    "_P = _sys.modules['__main__'].Provider\n"
+    "_orig, _admit, _st = _P.__call__, escalation.ForegroundBudget.admit, {'end': -1e9, 'n': 0, 'ext': False}\n"
+    "def _admit_seen(self, route_key, _admit=_admit):\n"
+    "    left = _admit(self, route_key)\n"
+    "    _st['ext'] = bool(getattr(self, 'extended', False))\n"
+    "    return left\n"
+    "escalation.ForegroundBudget.admit = _admit_seen\n"
+    "def _failing(self, prompt, max_tokens, model='', timeout=None, reasoning_effort=''):\n"
+    "    _st['n'] += 1\n"
+    "    if FAIL_IF:\n"
+    "        self.started += 1\n"
+    "        self.timeouts.append(None if timeout is None else round(float(timeout), 3))\n"
+    "        self.kinds.append('leaf' if 'user turn' in prompt else 'condensation')\n"
+    "        self.cut_flags.append('ext_fail' if _st['ext'] else 'fail')\n"
+    "        self.clock.offset += SECONDS\n"
+    "        _st['end'] = self.clock.offset\n"
+    "        raise RuntimeError(ERROR)\n"
+    "    try:\n"
+    "        return _orig(self, prompt, max_tokens, model=model, timeout=timeout, reasoning_effort=reasoning_effort)\n"
+    "    finally:\n"
+    "        _st['end'] = self.clock.offset\n"
+    "_P.__call__ = _failing\n")
+_RATE_LIMIT = _FAILING.replace("SECONDS", "3.0").replace("ERROR", "'Error code: 429 - rate limit exceeded'")
+# a call that starts within 10 s of the previous call's end is rate-limited: always, or only among the first 3 calls
+PATCHES["burst"] = _RATE_LIMIT.replace("FAIL_IF", "self.clock.offset - _st['end'] < 10.0")
+PATCHES["burst_once"] = _RATE_LIMIT.replace("FAIL_IF", "_st['n'] <= 3 and self.clock.offset - _st['end'] < 10.0")
+# the control: every third call fails, whatever its index in the pass
+PATCHES["flaky"] = _FAILING.replace("FAIL_IF", "_st['n'] % 3 == 0").replace("SECONDS", "5.0").replace(
+    "ERROR", "'HTTP 500 upstream'")
+_FAILING_CELLS = {
+    "burst": {**_R1M, "id": "f-burst", "passes": 14, "pre": 37, "estimate": 44, "call": 40, "prefix": "under"},
+    "burst_once": {**_R1M, "id": "f-burst-once", "passes": 20, "pre": 37, "estimate": 44, "call": 40, "prefix": "under"},
+    "flaky": {"group": "S", "id": "f-flaky", "passes": 12, "raw_tokens": 150_000, "over_tokens": 20_000,
+              "growth_tokens": 26_000, "turn_gap": 60, "finalize": 32, "chunk": 24_000, "summary_tokens": 1_500,
+              "window": 1_000_000, "pre": 37, "estimate": 44, "call": 40, "delta": 0, "prefix": "none"},
+}
+
+
+@pytest.mark.skipif(BASE_TREE is None, reason=NO_BASE)
+@pytest.mark.parametrize("variant", list(_FAILING_CELLS))
+def test_extension_call_failure_counts_nothing(grid_dir, variant):
+    """(9): a genuine provider failure of an extension-only call charges the route nothing and ends the catch-up for
+    the rest of the pass (at most one such failure a pass); base-admitted calls are charged as before. Per pass: the
+    candidate's cumulative leaves at least the base's (A1's excuse: its prompt under its trigger and at or below the
+    base's), and no open circuit the base does not have."""
+    cell = _FAILING_CELLS[variant]
+    base, cand = (_run(tree, [cell], grid_dir, f"{variant}-{name}", patch=variant)["by_cell"][cell["id"]]
+                  for name, tree in (("base", BASE_TREE), ("cand", CAND_TREE)))
+    assert any({"fail", "ext_fail"} & set(r["call_cut_flags"]) for r in base + cand), f"premise: no call failed"
+    for b, c in zip(base, cand):
+        excused = c["prompt_before"] < c["trigger"] and c["prompt_before"] <= b["prompt_before"]
+        assert excused or c["leaves_cum"] >= b["leaves_cum"], (
+            f"{variant} pass {b['pass']}: leaves {c['leaves_cum']} < {b['leaves_cum']}")
+        assert c["circuit"]["state"] == "closed" or b["circuit"]["state"] != "closed", (
+            f"{variant} pass {b['pass']}: circuit {c['circuit']}, base {b['circuit']}")
+        assert c["call_cut_flags"].count("ext_fail") <= 1, f"{variant} pass {b['pass']}: {c['call_cut_flags']}"
 
 
 # A6 boundedness, pinned BY CELL NAME on both trees (the RM's ruling): the summary area grows without bound in every

@@ -2513,7 +2513,7 @@ class CompactionMixin:
     def _open_catchup(self, state: _CompressionState) -> float:
         """Design B: open the catch-up after progress while the prompt is above the mark; return the step deadline."""
         budget = state.budget
-        catchup = bool(state.catchup_mark and budget.progress
+        catchup = bool(state.catchup_mark and budget.progress and not budget.catchup_ended
                        and state.estimated_active_tokens + state.depth_load_addend - state.catchup_condensed
                        > state.catchup_mark)
         if catchup or budget.catchup:  # set only once engaged: the base's pass keeps the base's budget state
@@ -2656,6 +2656,8 @@ class CompactionMixin:
             and self._summary_route_available()
         ):
             state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
+            if state.catchup_mark:  # design B: the loop records the frontier it measures
+                state.budget.catchup_frontier = state.sweep_summary_prefix_before
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (
@@ -2694,8 +2696,8 @@ class CompactionMixin:
                 state.budget.leaf_reserve = 0.0
                 self._pre_leaf_span("condensation", span_started)
             state.max_leaf_passes -= state.pre_leaf_condensation_passes
-            if state.catchup_mark and state.pre_leaf_condensation_passes:  # design B: what the condensations freed
-                state.catchup_condensed = max(0, state.sweep_summary_prefix_before - self._summary_frontier_tokens())
+            if state.catchup_mark and state.pre_leaf_condensation_passes:  # design B: freed, as the loop measured it
+                state.catchup_condensed = max(0, state.sweep_summary_prefix_before - state.budget.catchup_frontier)
         if self._compress_binding_changed() or self._compaction_is_closing():
             return "return", state.host_messages
         if state.threshold_full_sweep_active:

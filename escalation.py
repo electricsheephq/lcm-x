@@ -153,36 +153,27 @@ class ForegroundBudget:
         self.selected = False  # #1162: this compaction selected a leaf chunk (its zero-leaf pass counts)
         self.summary_failure = ""  # #1162: sticky across every summary call/route in this pass
 
-    # Design B: compaction opens the catch-up admit (after progress, above the mark); ``extended`` marks an admit that
-    # only the catch-up made, whose deadlines use the catch-up bound. Class defaults: only an engaged pass sets them.
-    catchup = extended = False
-
-    @property
-    def call_hard(self) -> float:
-        return _CATCHUP_HARD_SECONDS if self.extended else self.hard
-
-    @property
-    def call_reserve(self) -> float:
-        return max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS) if self.extended else self.reserve
+    # Design B: the catch-up admit is open (after progress, above the mark); ``extended`` marks an admit only it made.
+    catchup = extended = catchup_ended = False  # class defaults: only an engaged pass sets them
+    catchup_frontier: Optional[int] = None  # the summary frontier the condensation loop last measured
 
     @property
     def usable_deadline(self) -> float:
-        return self.t0 + self.call_hard - self.call_reserve - self.leaf_reserve
+        if self.extended:  # design B: an extension-only call ends by the catch-up bound
+            return self.catchup_deadline() - self.leaf_reserve
+        return self.t0 + self.hard - self.reserve - self.leaf_reserve
 
     def catchup_deadline(self) -> float:
         return self.t0 + _CATCHUP_HARD_SECONDS - max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS)
 
-    def catchup_timeout(self) -> float:
-        """Design B: an extension-only call's timeout cap, below the hang share of the window the outcome reads."""
-        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, self.call_hard - self.call_reserve - self.leaf_reserve)
+    def catchup_timeout(self) -> float:  # design B: under the hang share of the window the outcome reads
+        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, self.usable_deadline - self.t0)
 
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
 
     def admit(self, route_key: str) -> float:
-        """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left.
-        Design B: when the base refuses with the catch-up open, the attempt may start if its estimate fits by the
-        catch-up bound; ``extended`` then marks it."""
+        """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
         stop_reason = self.stop_reason
         if self.extended:
             self.extended = False
@@ -191,7 +182,7 @@ class ForegroundBudget:
         except SweepBudgetExhausted:
             if not (self.catchup and self.progress):
                 raise
-            self.extended = True
+            self.extended = True  # design B: the base refused; the estimate may still fit by the catch-up bound
             usable_left = self.usable_deadline - time.monotonic()
             if self.estimate(route_key) > usable_left:
                 self.extended = False
@@ -825,7 +816,8 @@ def _invoke_summary_attempt(
     _summary_call.contract = ""
     _summary_call.stream_deadline = budget.usable_deadline if budget is not None else None
     if getattr(budget, "extended", False) and timeout is not None:  # design B: the capped timeout bounds the host too
-        _summary_call.stream_deadline = min(_summary_call.stream_deadline, time.monotonic() + timeout)
+        budget.call_deadline = min(_summary_call.stream_deadline, time.monotonic() + timeout)
+        _summary_call.stream_deadline = budget.call_deadline
     deadline_installed = budget is not None and _host_stream_deadline_seam()
     started = time.monotonic()
     try:
@@ -1201,8 +1193,8 @@ def _invoke_summary_llm_routes(
             hard=budget.hard if budget is not None else 0.0,
             reserve=budget.reserve if budget is not None else 0.0,
             leaf_reserve=budget.leaf_reserve if budget is not None else 0.0,
-            # design B: an extension-only call is classified against its own stream deadline
-            usable_deadline=(min(budget.usable_deadline, started + call_timeout) if extended else budget.usable_deadline)
+            # design B: an extension-only call is classified against the stream deadline it installed
+            usable_deadline=(budget.call_deadline if extended else budget.usable_deadline)
             if budget is not None else 0.0,
             now=time.monotonic() if budget is not None and result is None and error is not None else 0.0,
             breaker_present=circuit_breaker is not None,
@@ -1260,6 +1252,8 @@ def _invoke_summary_llm_routes(
             note_error(None)
             if provenance is not None:  # #751: the chunk is too large for this route; the caller shrinks it
                 provenance["context_length_error"] = True
+        elif extended and outcome.kind is SummaryOutcomeKind.FAILURE:  # design B: no strike; the catch-up ends
+            budget.catchup, budget.catchup_ended = False, True
         elif circuit_breaker is not None:
             if outcome.kind is SummaryOutcomeKind.FAILURE:
                 circuit_breaker.record_failure(route_key)

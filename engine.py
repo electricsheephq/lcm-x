@@ -11062,6 +11062,8 @@ class LCMEngine(
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
                 raise
+            if getattr(budget, "catchup_frontier", None) is not None:  # design B: the frontier this loop measured
+                budget.catchup_frontier = after
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"
