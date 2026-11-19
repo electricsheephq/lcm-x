@@ -20,10 +20,11 @@ from pathlib import Path
 import pytest
 
 import hermes_lcm.compaction as compaction
+import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.tokens import count_message_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 from tests import test_catchup_budget_grid as grid
 
 pytestmark = pytest.mark.issue(2901)
@@ -148,3 +149,28 @@ def test_unglued_rows_charged_unchanged(engine):
     for budget in range(1, total + 2, 37):
         assert engine._select_oldest_leaf_chunk(rows, budget) == _old_charge(rows, budget), budget
     assert compaction.select_oldest_leaf_chunk(rows, total // 2) == _old_charge(rows, total // 2)
+
+
+def test_rescue_does_not_discount_an_inner_summary_prefix_again(engine, monkeypatch):
+    """The rescue reselects over the summariser input, where a carrier is already its remainder. A remainder that
+    itself starts with a verified summary prefix is charged in full, so a retry after a size refusal stays within its
+    target (review of #2901: a second discount admitted about the target plus the inner prefix)."""
+    outer, inner = _summary_part(engine, "Outer turns." + PAD), _summary_part(engine, "Inner turns." + PAD * 50)
+    carrier = {"role": "user", "content": f"{outer}\n\n{inner}\n\nthe user's own words{PAD}"}
+    chunk = engine._leaf_summary_input(None, [carrier, *_turns(60)])[0]
+    assert chunk[0]["content"].startswith(inner) and engine._generated_context_carrier_remainder(chunk[0])
+    attempts = []
+
+    def summarize(**kwargs):
+        attempts.append(kwargs["source_tokens"])
+        if len(attempts) == 1:
+            raise RuntimeError("context length exceeded")
+        return "Earlier turns.\nExpand for details about: turns", 1
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    engine._summarize_leaf_chunk_with_rescue(chunk)
+    floor = min(int(engine._config.leaf_chunk_tokens), engine_module._LEAF_RESCUE_FLOOR_TOKENS)
+    target = max(floor, int(attempts[0] * 0.75))
+    inner_tokens = count_messages_tokens([{"role": "user", "content": inner}])
+    assert attempts[0] == count_messages_tokens(chunk) and inner_tokens > 2_000, (attempts, inner_tokens)
+    assert len(attempts) == 2 and attempts[1] <= target, f"retry {attempts[1]} over its target {target}"
