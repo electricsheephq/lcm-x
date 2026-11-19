@@ -642,3 +642,23 @@ def test_escape_chains_and_deep_containers_are_never_remembered(stored_row):
     assert not _admitted({"role": "assistant", "content": "x", "tool_calls": calls, "session_id": "S"}, stored_row)
     shallow = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": '{"path": "a\\\\b"}'}}]
     assert _admitted({"role": "assistant", "content": "x", "tool_calls": shallow, "session_id": "S"}, stored_row)
+
+
+def test_a_hit_near_the_recursion_limit_computes_fresh(tmp_path, monkeypatch):
+    """Close to the recursion limit a remembered identity is not served: the row is computed fresh, as before."""
+    calls = []
+    original = ReconcileMixin._message_replay_identity_uncached
+
+    def counted(engine, msg, **kwargs):
+        calls.append(1)
+        return original(engine, msg, **kwargs)
+    monkeypatch.setattr(ReconcileMixin, "_message_replay_identity_uncached", counted)
+    with _engine(tmp_path) as engine:
+        row = {"role": "assistant", "content": "x",
+               "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "[" * 150 + "0" + "]" * 150}}]}
+        first = engine._message_replay_identity(dict(row))
+        engine._message_replay_identity(dict(row))
+        assert len(calls) == 1  # the second call was a hit
+        monkeypatch.setattr(reconcile, "_replay_identity_stack_headroom", lambda: reconcile._REPLAY_IDENTITY_MEMO_MIN_HEADROOM)
+        assert engine._message_replay_identity(dict(row)) == first
+        assert len(calls) == 2  # without headroom the hit is not served

@@ -459,6 +459,18 @@ def _shallow_replay_identity_text(text: str) -> str:
 
 
 _REPLAY_IDENTITY_MEMO_MAX_DEPTH = 32  # containers nested deeper than this are never remembered (encoding depth)
+# Any cache shortens the call path, so near the interpreter's recursion limit a fresh computation could raise where a
+# hit would return. An admitted row nests at most MAX_BRACKETS + MAX_DEPTH + 1 levels, plus the body's own frames; a hit
+# is served only with more headroom than that, so a fresh call there could not have raised either. With less, the row is
+# computed fresh, exactly as before.
+_REPLAY_IDENTITY_MEMO_MIN_HEADROOM = 400
+
+
+def _replay_identity_stack_headroom() -> int:
+    frame, depth = sys._getframe(1), 0
+    while frame is not None:
+        depth, frame = depth + 1, frame.f_back
+    return sys.getrecursionlimit() - depth
 
 
 def _freeze_replay_identity_value(value: Any, depth: int = 0) -> tuple:
@@ -1178,7 +1190,7 @@ class ReconcileMixin:
         except Exception:
             return uncached(self, msg, stored_row=stored_row, strip_carrier=strip_carrier,
                             allow_pruned_tool_alias=allow_pruned_tool_alias)
-        if hit is not None:
+        if hit is not None and _replay_identity_stack_headroom() > _REPLAY_IDENTITY_MEMO_MIN_HEADROOM:
             return hit
         if _replay_identity_memo_gate(key[3], key[4], _frozen):
             # Not admitted: the body may read keys the memo key does not hold (a projection's timestamp, a
