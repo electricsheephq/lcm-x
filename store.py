@@ -550,6 +550,8 @@ class MessageStore:
                 ON messages(session_id, store_id);
             CREATE INDEX IF NOT EXISTS idx_msg_session_ts
                 ON messages(session_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_msg_session_tool_call
+                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,

@@ -189,7 +189,7 @@ def test_corpus_reuses_reader_and_preserves_bytes(tmp_path, monkeypatch):
     manifest["preimage"].pop("provenance", None)
     manifest.pop("expected_metadata", None)
     assert hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest() == (
-        "fa81d53f9f53a91e9fba3ea6aaad7c9eee09f247ea127fd731ad7cd1d27e5b88")
+        "4a60fad4227031a5c1c70c565efcdc65165bf9b7ab825c6fd409d421a63e1b0e")
     # Normalize only setup clocks; compare canonical schema/row bytes (page counters vary).
     with sqlite3.connect(db) as c:
         c.execute("UPDATE lcm_embedding_profile SET registered_at='fixture-clock'")
