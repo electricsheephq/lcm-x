@@ -35,7 +35,7 @@ from .compaction_policy import (
     threshold_tokens,
 )
 from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
-from .dag import SummaryDAG, SummaryNode
+from .dag import CondensationPublicationRejected, SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
 from . import tokens as _token_counter
@@ -805,6 +805,7 @@ class LCMEngine(
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
         self._condensation_inflight_ids: Counter[int] = Counter()
         self._condensation_inflight_lock = threading.Lock()
+        self._condensation_publication_rejections: Counter[str] = Counter()
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
         self._pending_session_tails: list[dict] = []
@@ -10811,6 +10812,8 @@ class LCMEngine(
                     if condensed is None:
                         break
                     source_tokens, summary_tokens, level = condensed
+            except CondensationPublicationRejected:
+                continue  # the candidate rolled back; check the next depth
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
@@ -10938,9 +10941,19 @@ class LCMEngine(
         )
         if self._compaction_is_closing():
             return None
-        self._dag.add_node(
-            condensed_node, escalation_level=level, model=provenance.get("model", "")
-        )
+
+        def validate_sources(conn, node_id):
+            self._dag.validate_condensation_sources(conn, condensed_node, node_id)
+
+        try:
+            self._dag.add_node(
+                condensed_node, before_commit=validate_sources,
+                escalation_level=level, model=provenance.get("model", ""),
+            )
+        except CondensationPublicationRejected as exc:
+            self._condensation_publication_rejections[exc.reason] += 1
+            logger.info("LCM condensation publication rejected: reason=%s", exc.reason)
+            raise
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
@@ -11032,6 +11045,8 @@ class LCMEngine(
                     )
                     if condensed is None:
                         return passes, "shutdown"
+            except CondensationPublicationRejected as exc:
+                return passes, exc.reason  # continue compaction without retrying the stale group
             except SweepBudgetExhausted as exc:
                 return passes, getattr(exc, "reason", "time_budget_exhausted")  # #605: keep a soft stop
             except SummaryResultRejected:
