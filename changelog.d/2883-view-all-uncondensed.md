@@ -1,1 +1,1 @@
-- Fixed: Context assembly considers every uncondensed summary at each depth before applying the summary token budget.
+- Fixed: Context assembly can show older uncondensed summaries at each depth while the summary prefix fits within the sweep target plus one leaf chunk and its summary budget.

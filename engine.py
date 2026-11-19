@@ -11533,13 +11533,15 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
+        older_nodes = []
         # #750: every depth in the session, deepest first; get_session_nodes() stops at 1000 rows.
         depths = self._dag.get_session_depths(self._session_id)[::-1]
         if depths:
-            # Give prefix selection the full uncondensed frontier at each depth.
             for group, d in enumerate(depths):
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, limit=None, newest=True)
-                for node in uncondensed:
+                # Save where to insert older nodes before this depth's newest 100.
+                older_nodes.extend((len(summary_parts), node) for node in reversed(uncondensed[:-100]))
+                for node in uncondensed[-100:]:
                     part_keys.append((group, node.node_id))
                     summary_parts.append(_summary_part_text(node))
 
@@ -11557,8 +11559,25 @@ class LCMEngine(
             kept_indexes, selected_parts = selection.kept_indexes, selection.selected_parts
             active_summary_node_ids.update(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
-            if selected_parts:
-                combined = "\n\n---\n\n".join(selected_parts)
+            combined = "\n\n---\n\n".join(selected_parts)
+            if older_nodes and (self.context_length > 0 or self._config.summary_prefix_target_tokens > 0):
+                limit = self._summary_prefix_target() + self._config.leaf_chunk_tokens
+                if summary_budget is not None:
+                    limit = min(limit, summary_budget)
+                if count_message_tokens({"role": summary_role, "content": combined}) <= limit:
+                    older_parts = [(index, _summary_part_text(node)) for index, node in older_nodes]
+                    primary_parts = list(zip(kept_indexes, selected_parts))
+                    keep = len(older_parts)
+                    while keep:
+                        # Restore chronology in each depth, including before tier 1 at ties.
+                        ordered = sorted(older_parts[:keep][::-1] + primary_parts, key=lambda part: part[0])
+                        trial = "\n\n---\n\n".join(part for _, part in ordered)
+                        if count_message_tokens({"role": summary_role, "content": trial}) <= limit:
+                            combined = trial
+                            active_summary_node_ids.update(node.node_id for _, node in older_nodes[:keep])
+                            break
+                        keep //= 2
+            if combined:
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
