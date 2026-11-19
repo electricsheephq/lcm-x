@@ -310,9 +310,10 @@ def _todo_annotation_span(content: str, start: int) -> int:
 
 
 class _UidStoreMap(dict):
-    def __init__(self, ids, legacy):
+    def __init__(self, ids, legacy, held=None):
         super().__init__(ids)
         self._legacy = lru_cache(maxsize=1)(legacy)
+        self.held = {} if held is None else held
 
     def legacy_id(self, message_id):
         return self._legacy().get(message_id)
@@ -3935,7 +3936,8 @@ class ReconcileMixin:
                 }.values()
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
-        resolved = (self._host_uid_resolve(messages, excluded=exclude_store_ids)
+        held = {}
+        resolved = (self._host_uid_resolve(messages, excluded=exclude_store_ids, held=held)
                     if uid_first and uid_recognition_enabled(self) and any(m.get("message_uid") for m in messages) else {})
         if resolved:
             frontier = self._store_complete_frontier()
@@ -3943,14 +3945,15 @@ class ReconcileMixin:
             uid_map = {id(messages[i]): int(row["store_id"]) for i, row in resolved.items()
                        if row["store_id"] > frontier or row["store_id"] in anchors}
             ordered = {}
+            excluded = set(exclude_store_ids) | held.keys()
             fallback = [i for i in range(len(messages)) if i not in resolved]
             if fallback:
                 ordered = self._get_store_id_map_for_messages(
                     [messages[i] for i in fallback], [occurrences[i] for i in fallback] if occurrences else None,
-                    exclude_store_ids=set(exclude_store_ids).union(row["store_id"] for row in resolved.values()),
+                    exclude_store_ids=excluded.union(row["store_id"] for row in resolved.values()),
                     uid_first=False)
             return _UidStoreMap({**ordered, **uid_map}, lambda: self._get_store_id_map_for_messages(
-                messages, occurrences, exclude_store_ids=exclude_store_ids, uid_first=False))
+                messages, occurrences, exclude_store_ids=excluded, uid_first=False), held)
         next_candidate_after = self._last_compacted_store_id
         while True:
             page = self._store.get_session_messages_after(

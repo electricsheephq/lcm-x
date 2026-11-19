@@ -1264,7 +1264,9 @@ class CompactionMixin:
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
-            store_ids = self._get_store_id_map_for_messages(result, occurrences, uid_first=False)
+            held = getattr(self._compress_run.store_ids_by_message_id, "held", {})
+            store_ids = self._get_store_id_map_for_messages(
+                result, occurrences, uid_first=False, **({"exclude_store_ids": held} if held else {}))
             carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in result if id(m) in store_ids}))
             proof = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
@@ -1753,8 +1755,12 @@ class CompactionMixin:
         input row id). A carrier row is read as the real row glued behind its summary prefix."""
         summary_input_chunk, sources = [], {}
         anchor_claims: dict[int, list[int]] = {}  # #436 R4: id(input row) -> the store ids its text covers
+        substitutes = getattr(self, "_store_complete_substitutes", {}) if uid_recognition_enabled(self) else {}
         for message, claims in anchored_input or [(message, []) for message in selected_input]:
             remainder = self._generated_context_carrier_remainder(message)
+            substitute = substitutes.get(id(message))
+            if substitute is not None:
+                remainder = substitute.get("content", "")
             if remainder is not None:
                 original = message
                 message = {**message, "content": remainder}
@@ -1810,8 +1816,12 @@ class CompactionMixin:
         saved_diagnostics = (getattr(self, "_store_complete_blocked", None),
                              getattr(self, "_store_complete_empty_reason", ""), getattr(self, "_store_complete_escaped", []),
                              getattr(self, "_store_complete_order", {}), getattr(self, "_store_complete_hole", None))
+        recognize = uid_recognition_enabled(self)
+        saved_substitutes = getattr(self, "_store_complete_substitutes", {}) if recognize else None
         selected_input = [message for message in chunk if id(message) not in dependent_reply_message_ids]
         self._store_complete_excluded, self._store_complete_cut = [], False
+        if recognize:
+            self._store_complete_substitutes = {}
         try:
             anchored_input = self._identity_anchor_summary_input(
                 selected_input, self._compress_run.store_ids_by_message_id, working_messages, chunk,
@@ -1841,6 +1851,8 @@ class CompactionMixin:
             self._store_complete_excluded, self._store_complete_cut = saved
             (self._store_complete_blocked, self._store_complete_empty_reason, self._store_complete_escaped,
              self._store_complete_order, self._store_complete_hole) = saved_diagnostics
+            if recognize:
+                self._store_complete_substitutes = saved_substitutes
 
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
@@ -2108,6 +2120,7 @@ class CompactionMixin:
         start: int,
         *,
         uid_first: bool = True,
+        exclude_store_ids=(),
     ) -> tuple[list[int], Optional[dict[int, int]], int, int]:
         """(#457) Positions of the replayed run at ``start`` that committed lineage accounts
         for, the store-id map of ``working[start:]`` when computed, the token cost of the
@@ -2130,8 +2143,9 @@ class CompactionMixin:
             or int(self._last_compacted_store_id or 0) != frontier
         ):
             return [], None, 0, 0
-        ids = self._get_store_id_map_for_messages(working[start:], uid_first=False) if not uid_first else (
-            self._get_store_id_map_for_messages(working[start:]))
+        ids = (self._get_store_id_map_for_messages(
+            working[start:], uid_first=False, **({"exclude_store_ids": exclude_store_ids} if exclude_store_ids else {}))
+            if not uid_first else self._get_store_id_map_for_messages(working[start:]))
         # #524: LCM scaffold heading a superseded emission drops with the run it heads.
         scaffold, (start, carrier) = start, self._replay_head(working, start, frontier)
         end = next(
@@ -2637,7 +2651,9 @@ class CompactionMixin:
                 scaffold = {i for i in resumed if leaf.leading_anchor_count <= i < leaf.fresh_tail_start
                             and self._host_uid_whole_scaffold(working[i], allow_task_list=False)}
                 replay = {i: None if i in scaffold else (store_ids or {}).get(id(working[i])) for i in resumed}
-                base = (self._committed_replay_drops(working, start, uid_first=False)[0]
+                held = getattr(store_ids, "held", {})
+                base = (self._committed_replay_drops(
+                    working, start, uid_first=False, **({"exclude_store_ids": held} if held else {}))[0]
                         if None in replay.values() or (not scope.uid_trimmed and hasattr(store_ids, "legacy_id")) else resumed)
                 exempt = set(base) | scaffold
                 scope.removed.update((id(working[i]), (sid, False, sid is None and i in exempt)) for i, sid in replay.items())
@@ -3757,6 +3773,8 @@ class CompactionMixin:
         self._store_complete_hole = None  # Refs #2815: this leaf's diagnostic, including nested escape walks.
         self._store_complete_escaped = []
         self._store_complete_order = {}  # #2007: also when identity anchoring is off (a stale id() could recur)
+        if uid_recognition_enabled(self):
+            self._store_complete_substitutes = {}
         step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
         leaf.anchored_input = self._identity_anchor_summary_input(
             selected_input, self._compress_run.store_ids_by_message_id, state.working_messages, leaf.selected_raw_chunk,

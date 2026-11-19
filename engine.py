@@ -11510,7 +11510,9 @@ class LCMEngine(
         text = next((t for m in reversed(tail_messages) if (t := _visible_reply_text(m))), "")
         if a is None or not kept or a >= start or _visible_reply_text(selection[a]) != text:
             return kept, room, None
-        ids = self._get_store_id_map_for_messages(selection, uid_first=False)
+        held = getattr(self._compress_run.store_ids_by_message_id, "held", {})
+        ids = self._get_store_id_map_for_messages(
+            selection, uid_first=False, **({"exclude_store_ids": held} if held else {}))
         reply_id = int(ids.get(id(selection[a])) or 0)
         if reply_id <= int(self._last_compacted_store_id or 0):
             return kept, room, None

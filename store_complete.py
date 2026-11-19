@@ -55,6 +55,7 @@ class _UidDropState:
     binding: tuple
     uid_trimmed: bool = False
     binding_changed: bool = False
+    open_tool_group_logged: bool = False
     scaffold_ids: set[int] = field(default_factory=set)
     legacy_replay: Optional[tuple[list, bool, bool, int]] = None
     # Object id -> (store id, re-resolve UID, base removes or whole scaffold).
@@ -232,7 +233,37 @@ class StoreCompleteMixin:
         )
         return self._redact_active_replay_messages(messages)
 
-    def _store_complete_copy_twins(self, rows, carry) -> tuple[dict, set]:
+    def _store_complete_placeholder_twins(self, conn, rows):
+        if not uid_recognition_enabled(self):
+            return {}
+        conversation = {"", str(self._conversation_id or "")}
+        copies = {row["store_id"]: row for row in rows
+                  if row.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                  and row.get("session_id") == self._session_id
+                  and str(row.get("conversation_id") or "").strip() in conversation}
+        if not copies or not (lineage := self._host_uid_lineage_key()[0]) or not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'"
+        ).fetchone():
+            return {}
+        twins = {}
+        for copy_id, *values in conn.execute(
+            "SELECT version.store_id, source.store_id, source.session_id, source.conversation_id, "
+            "source.role, source.content, source.tool_call_id, source.tool_name "
+            "FROM host_uid_bindings AS version JOIN host_uid_bindings AS canonical USING(lineage_key, uid) "
+            "JOIN messages AS source ON source.store_id=canonical.store_id "
+            "WHERE version.store_id IN (SELECT value FROM json_each(?)) AND version.lineage_key=? "
+            "AND version.kind='version' AND canonical.kind='canonical' AND source.store_id<version.store_id "
+            "AND source.session_id=? ORDER BY source.store_id",
+            (json.dumps(list(copies)), lineage, self._session_id),
+        ):
+            source = dict(zip(("store_id", "session_id", "conversation_id", "role", "content",
+                               "tool_call_id", "tool_name"), values))
+            if (str(source["conversation_id"] or "").strip() in conversation
+                    and self._uid_placeholder_source(copies[copy_id], source)):
+                twins.setdefault(copy_id, []).append(source["store_id"])
+        return twins
+
+    def _store_complete_copy_twins(self, rows, carry, placeholder_twins=None) -> tuple[dict, set]:
         """One bounded batched read, keyed by exact stored columns, not normalized replay identity.
         Only hidden callers may use these candidates; coverage still requires a node or THIS leaf.
         Extending a tool-group scan reuses the lookup: misses safely remain summarizer input."""
@@ -281,6 +312,9 @@ class StoreCompleteMixin:
             by_key.setdefault(key, []).append(sid)
         if lineage and uid_recognition_enabled(self):
             try:
+                if placeholder_twins is None:
+                    placeholder_twins = self._store_complete_placeholder_twins(self._store.connection, rows)
+                twins.update(placeholder_twins)
                 sources = self._store_complete_uid_copy_sources(lineage, carry)
                 raw_columns = {int(raw[0]): raw[3:] for raw in owned}
                 for sid in stored.keys() & raw_columns.keys():
@@ -348,6 +382,8 @@ class StoreCompleteMixin:
             return False
         names = ("store_id", "session_id", "conversation_id", "content", "role", "tool_call_id", "tool_calls", "tool_name")
         copy, source = (dict(zip(names, entry)) for entry in (raw, twin))
+        if source["store_id"] in self._store_complete_placeholder_twins(conn, (copy,)).get(copy["store_id"], ()):
+            return True
         for row in (copy, source):
             row["tool_calls"] = json.loads(row["tool_calls"]) if row["tool_calls"] else None
         key = self._uid_copy_key(copy)
@@ -384,13 +420,18 @@ class StoreCompleteMixin:
         loose = [int(row["store_id"]) for row in rows if int(row["store_id"]) not in mapped and row.get("role") != "system"
                  and str(row.get("conversation_id") or "").strip() in conversation
                  and not self._matches_ignore_message_patterns(row, stored_row=True)]
-        twins, twin_covered = self._store_complete_copy_twins(rows, carry) if loose else ({}, set())
+        placeholder_twins = self._store_complete_placeholder_twins(self._store.connection, rows)
+        twins, twin_covered = {}, set()
+        if loose:
+            twins, twin_covered = (self._store_complete_copy_twins(rows, carry, placeholder_twins)
+                                   if placeholder_twins else self._store_complete_copy_twins(rows, carry))
         if copy_lookup_out is not None:
             copy_lookup_out.append((twins, twin_covered))  # this leaf reuses the scheduler's bounded lookup
         # No current leaf yet: only node-covered twins prove a drained backlog. Retained unmapped
         # occurrences are never subtracted (the walk will block them).
         from .identity_anchor import _match_occurrences
-        candidates = [row for row in rows if int(row["store_id"]) in loose]
+        not_shown = placeholder_twins.keys() | getattr(full_map, "held", {}).keys()
+        candidates = [row for row in rows if int(row["store_id"]) in loose and int(row["store_id"]) not in not_shown]
         occurrences = [(i, self._message_replay_identity(m, strip_carrier=False))
                        for i, m in enumerate(working) if id(m) not in full_map]
         self._load_host_rewrite_overrides(candidates)
@@ -425,6 +466,9 @@ class StoreCompleteMixin:
         self._store_complete_empty_reason = ""
         self._store_complete_escaped = []
         self._store_complete_order = {}  # #2007: id(input row) -> store-order rank, set only for a host-reordered leaf
+        recognize = uid_recognition_enabled(self)
+        if recognize:
+            self._store_complete_substitutes = {}
         given_claims = claims
         retry_allowed = (allow_retained_escape and not escape_retained) if retry_allowed is None else retry_allowed
         retry_budget = budget if retry_budget is None else retry_budget
@@ -446,10 +490,13 @@ class StoreCompleteMixin:
         ignored = {int(row["store_id"]) for row in loose if self._matches_ignore_message_patterns(row, stored_row=True)}
         covered = self._store_complete_node_covered([int(row["store_id"]) for row in loose if int(row["store_id"]) not in ignored])
         candidates = [row for row in loose if int(row["store_id"]) not in ignored | covered]
+        placeholder_twins = self._store_complete_placeholder_twins(self._store.connection, rows)
+        not_shown = placeholder_twins.keys() | getattr(full_map, "held", {}).keys()
+        matchable = [row for row in candidates if int(row["store_id"]) not in not_shown] if not_shown else candidates
         occurrences = [(idx, self._message_replay_identity(message, strip_carrier=False))
                        for idx, message in enumerate(view) if id(message) not in full_map and not claims.get(id(message))]
-        self._load_host_rewrite_overrides(candidates)
-        shown = _match_occurrences(candidates, self._stored_row_forms, occurrences) if occurrences else {}
+        self._load_host_rewrite_overrides(matchable)
+        shown = _match_occurrences(matchable, self._stored_row_forms, occurrences) if occurrences else {}
         blocked = set()
 
         def retained_kind(store_id):
@@ -457,7 +504,7 @@ class StoreCompleteMixin:
                 legacy_id(id(message)) == store_id for message in view)
             return "shown" if shown else "mapped"
 
-        escaped = {int(row["store_id"]): retained_kind(int(row["store_id"])) for row in candidates
+        escaped = {int(row["store_id"]): retained_kind(int(row["store_id"])) for row in matchable
                    if escape_retained and int(row["store_id"]) in full_map.values()}
         for store_id, idx in shown.items():
             if id(view[idx]) in in_chunk:  # the chunk row's own text is this stored occurrence
@@ -469,10 +516,22 @@ class StoreCompleteMixin:
                 blocked.add(store_id)
         hidden = [row for row in candidates if int(row["store_id"]) not in taken | blocked]
         if copy_lookup is None and hidden:
-            copy_lookup = self._store_complete_copy_twins(rows, carry)
+            copy_lookup = (self._store_complete_copy_twins(rows, carry, placeholder_twins)
+                           if placeholder_twins else self._store_complete_copy_twins(rows, carry))
         twins, twin_covered = copy_lookup if copy_lookup is not None else ({}, set())
         copy_proofs, admitted, group_twins = {}, set(), {}
         text = dict(zip((int(row["store_id"]) for row in hidden), self._store_complete_messages(hidden)))
+        substitutes = {}
+        if recognize:
+            pruned = [m for m in chunk if id(m) in full_map and m.get("role") == "tool"
+                      and m.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER]
+            if pruned:
+                by_id = {row["store_id"]: row for row in rows}
+                by_id.update(self._store.get_batch(sorted({full_map[id(m)] for m in pruned} - by_id.keys())))
+                sources = [(m, source) for m in pruned
+                           if (source := self._uid_placeholder_source(m, by_id.get(full_map[id(m)])))]
+                substitutes = dict(zip((id(m) for m, _ in sources),
+                                       self._store_complete_messages([source for _, source in sources])))
 
         def ids_of(message, ids) -> list:
             return list(ids) + ([full_map[id(message)]] if id(message) in full_map else [])
@@ -486,6 +545,12 @@ class StoreCompleteMixin:
         def results(messages):
             return {str(m.get("tool_call_id") or "").strip() for m in messages if m.get("role") == "tool"} - {""}
 
+        def caller_ids(message) -> set:
+            return calls([message]) if message.get("role") == "assistant" else set()
+
+        def tool_id(message) -> str:
+            return str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
+
         retained = ([text[sid] for sid in escaped if sid in text] +
                     [m for m in view if id(m) not in in_chunk]) if escape_retained else []
         cross = (calls(chunk) & results(retained)) | (calls(retained) & results(chunk))
@@ -498,7 +563,7 @@ class StoreCompleteMixin:
 
         def take(message, ids) -> bool:  # the budget cuts only at a group boundary, never before the first
             nonlocal used, group          # row that carries a store id (the leaf's coverage)
-            tokens = count_message_tokens(message)
+            tokens = count_message_tokens(substitutes.get(id(message), message))
             answers = message.get("role") == "tool" and group and \
                 str(message.get("tool_call_id") or "").strip() in group[0]
             if message.get("role") != "tool":
@@ -609,6 +674,31 @@ class StoreCompleteMixin:
                                "admitted as read (frontier=%d)", _SCAN_LIMIT * scale, frontier)
         # Contiguity: every owned row up to the leaf's last row is accounted for, else the leaf ends
         # before the first one that is not (a chunk row the budget cut, a claim left behind).
+        def pending_caller():
+            skipped = set(excluded) | covered | passive | ignored
+            skipped_answers, last_result = set(), {}
+            for row in rows:
+                if call_id := tool_id(row):
+                    sid = int(row["store_id"])
+                    if sid in skipped:
+                        skipped_answers.add(call_id)
+                    last_result[call_id] = sid
+            emitted = {id(message) for message, _ids in out}
+            waiting = results(message for message in chunk if id(message) not in emitted)
+            answered, pending = set(), None
+            for i in range(len(out) - 1, -1, -1):
+                message, ids = out[i]
+                if call_id := tool_id(message):
+                    answered.add(call_id)
+                elif opens := caller_ids(message):
+                    at = position(message, ids)
+                    unanswered = opens - answered - skipped_answers
+                    count = sum(call_id in waiting or last_result.get(call_id, 0) > at for call_id in unanswered)
+                    if count:
+                        pending = i, at, count
+                    answered.difference_update(opens)
+            return pending
+
         hole_stop = None  # #1998: (hole, taken rows not emitted) of the cut that empties the leaf
         while out:
             accounted = {s for m, ids in out for s in ids_of(m, ids)} | set(excluded) | ignored | passive
@@ -616,6 +706,18 @@ class StoreCompleteMixin:
             hole = next((int(row["store_id"]) for row in rows
                          if int(row["store_id"]) < last and int(row["store_id"]) not in accounted), None)
             if hole is None:
+                if recognize and (pending := pending_caller()) is not None:
+                    i, caller_id, count = pending
+                    if any(ids_of(m, ids) for m, ids in out[:i]):
+                        del out[i:]
+                        complete = False
+                        continue
+                    scope = _UID_DROP_INPUT.get()
+                    if scope is None or not scope.open_tool_group_logged:
+                        logger.info("LCM store-complete leaf: first tool group remains open caller_store_id=%d pending=%d",
+                                    caller_id, count)
+                        if scope is not None and scope.owner is self:
+                            scope.open_tool_group_logged = True
                 break
             out = out[:next(i for i, (m, ids) in enumerate(out) if any(s > hole for s in ids_of(m, ids)))]
             complete = False
@@ -711,25 +813,19 @@ class StoreCompleteMixin:
         # the call stays first and its results follow in store order. A leaf whose stored rows are already
         # in store order gets no rank, even when the store holds a row inside a group; in a regrouped
         # leaf such a row follows the group. The sorts are stable.
-        def call_ids(message) -> set:
-            return calls([message]) if message.get("role") == "assistant" else set()
-
-        def tool_id(message) -> str:
-            return str(message.get("tool_call_id") or "").strip() if message.get("role") == "tool" else ""
-
-        answered = {call_id for message, _ids in out for call_id in call_ids(message)}
+        answered = {call_id for message, _ids in out for call_id in caller_ids(message)}
         parts, part = [], None  # part = [row, *id-less rows behind it], in walk order
         for message, ids in out:
-            if tool_id(message) in answered or call_ids(message) or position(message, ids) or part is None:
+            if tool_id(message) in answered or caller_ids(message) or position(message, ids) or part is None:
                 part = [(message, ids)]
                 parts.append(part)
             else:
                 part.append((message, ids))
         heads, owners = {}, {}  # walk index of a unit's head -> unit; call id -> [(store position, walk index)]
         for index, part in enumerate(parts):
-            if call_ids(part[0][0]):
+            if caller_ids(part[0][0]):
                 heads[index] = [part]  # unit = [[head, *id-less], [result, *id-less], ...]
-                for call_id in call_ids(part[0][0]):
+                for call_id in caller_ids(part[0][0]):
                     owners.setdefault(call_id, []).append((position(*part[0]), index))
         for index, part in enumerate(parts):
             if index in heads:
@@ -755,6 +851,8 @@ class StoreCompleteMixin:
             ordered = [pair for unit in by_position(units)
                        for part in [unit[0], *(p[0] for p in by_position([[r] for r in unit[1:]]))] for pair in part]
             self._store_complete_order = {id(m): i for i, (m, _ids) in enumerate(ordered)}
+        if recognize:
+            self._store_complete_substitutes = {id(m): substitutes[id(m)] for m, _ids in out if id(m) in substitutes}
         if emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out):
             return None  # nothing hidden, claimed or excluded: today's input and mapping
         last = max(s for m, ids in out for s in ids_of(m, ids)) if any(ids_of(m, ids) for m, ids in out) else frontier

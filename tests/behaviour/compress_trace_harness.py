@@ -46,6 +46,7 @@ dag: Any = importlib.import_module("hermes_lcm.dag")
 tokens: Any = importlib.import_module("hermes_lcm.tokens")
 leaf_prep: Any = importlib.import_module("hermes_lcm.leaf_prep")
 host_uid_emit: Any = importlib.import_module("hermes_lcm.host_uid_emit")
+config: Any = importlib.import_module("hermes_lcm.config")
 harness: Any = importlib.import_module("tests.harness")
 GOLDEN = Path(__file__).parents[1] / "fixtures" / "compress_trace.json"
 Trace = list[str]
@@ -525,6 +526,7 @@ OBSERVED_ATTRIBUTES = (
     "_store_complete_excluded",
     "_store_complete_hole",
     "_store_complete_order",
+    "_store_complete_substitutes",
     "_stored_publication_filter_exclusions",
     "_stub_first_exit",
     "_stub_first_exit_now",
@@ -861,6 +863,8 @@ def prepared_state(engine: Any, canonical: Canonical) -> Any:
 def state(engine: Any, canonical: Canonical) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in OBSERVED_ATTRIBUTES:
+        if name == "_store_complete_substitutes" and not config.host_uid_recognition_enabled():
+            continue  # Only UID-recognition passes can populate this scratch map.
         value = observed_attribute(engine, name)
         if name == "_store":
             value = engine._store.get_session_messages(engine._session_id, limit=10000)

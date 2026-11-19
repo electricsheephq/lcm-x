@@ -25,7 +25,9 @@ from typing import Any, Optional
 from .config import host_message_uid_mode, host_uid_recognition_enabled
 from .host_uid_emit import engine_uid, identity_emit_enabled
 from .message_content import normalize_content_value
-from .reconcile import _OOB_MESSAGE_BLOCK_RE, _PRESERVED_TODO_CONTEXT_PREFIX, _todo_annotation_span
+from .reconcile import (
+    _HERMES_PRUNED_TOOL_PLACEHOLDER, _OOB_MESSAGE_BLOCK_RE, _PRESERVED_TODO_CONTEXT_PREFIX, _todo_annotation_span,
+)
 from .reconcile import _has_lossy_redacted_identity as _lossy_identity
 
 logger = logging.getLogger(__name__)
@@ -308,9 +310,20 @@ class HostUidShadowMixin:
         return sum((not _valid_uid(uid := row.get("message_uid")) or uid not in bound_uids)
                    and not self._host_uid_whole_scaffold(row) for row in messages)
 
+    def _uid_placeholder_source(self, message, source):
+        """Accept the canonical output of a pruned tool result in the bound session."""
+        if (not source or message.get("role") != "tool" or message.get("content") != _HERMES_PRUNED_TOOL_PLACEHOLDER
+                or source.get("session_id") != self._session_id or source.get("role") != "tool"
+                or source.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                or not (call_id := message.get("tool_call_id")) or source.get("tool_call_id") != call_id):
+            return None
+        name = message.get("tool_name") or message.get("name")
+        if not name or not source.get("tool_name") or source["tool_name"] == name:
+            return source
+
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
-                          bound_uids=None):
-        """Resolve byte-proven occurrences and optionally collect durable bindings across the whole view."""
+                          bound_uids=None, held=None):
+        """Resolve durable occurrences and optionally report placeholder versions superseded by their source."""
         if not self._uid_recognition_enabled():
             return {}
         uids = [m.get("message_uid") for m in messages]
@@ -324,7 +337,7 @@ class HostUidShadowMixin:
             engine = (self._host_uid_engine_uids(wanted, bound_uids=bound_uids)
                       if prefix_only or identities is not None else set())
             fetched = {} if fetched is None else fetched
-            resolved, claimed = {}, set(excluded)
+            resolved, claimed, placeholder_versions = {}, set(excluded), {}
             self._host_uid_fetch({sid for items in bindings.values() for sid, _kind in items}, fetched)
             carry = self._load_compression_carry_ranges() if fetched else ()
             conversation = {"", str(self._conversation_id or "")}
@@ -340,8 +353,14 @@ class HostUidShadowMixin:
                         elif prefix_only:
                             break
                         continue
-                    candidates = [sid for sid, _kind in bindings.get(uid, ()) if sid in owned and sid not in claimed]
-                    hit = self._host_uid_bytes_match(candidates, identity, owned, lossless=True) if candidates else None
+                    candidates = [(sid, kind) for sid, kind in bindings.get(uid, ()) if sid in owned and sid not in claimed]
+                    hit = next((sid for sid, kind in candidates
+                                if kind == "canonical" and self._uid_placeholder_source(message, owned[sid])), None)
+                    if hit is not None and held is not None:
+                        placeholder_versions[idx] = {sid: hit for sid, _ in candidates
+                                                     if owned[sid].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER}
+                    if hit is None and candidates:
+                        hit = self._host_uid_bytes_match([sid for sid, _ in candidates], identity, owned, lossless=True)
                     if hit is not None:
                         resolved[idx] = owned[hit]
                         claimed.add(hit)
@@ -355,6 +374,9 @@ class HostUidShadowMixin:
                     {j: [resolved[i]] for j, i in enumerate(visible) if resolved.get(i)})
                 for j in set(range(len(visible))) - hits:
                     resolved.pop(visible[j], None)
+            if held is not None:
+                for idx in resolved.keys() & placeholder_versions.keys():
+                    held.update(placeholder_versions[idx])
             return resolved
         except Exception:
             logger.debug("LCM host UID recognition unavailable", exc_info=True)
