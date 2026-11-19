@@ -604,3 +604,20 @@ def test_s2_admitted_stored_rows_read_no_state_on_a_miss_and_on_a_hit(tmp_path, 
     assert len(admitted) >= 300
     _evidence("s2_reads_no_state.json", dict(admitted_rows=len(admitted), flag_sets=len(flags), state_reads=len(log),
                                              miss_computations=filled, hit_computations=len(computed) - filled))
+
+
+@pytest.mark.parametrize("stored_row", [False, True])
+def test_deeply_bracketed_text_is_never_remembered(stored_row):
+    """JSON parsing gives up at a depth that depends on the caller's stack, so a remembered identity of deeply nested
+    text could return where a fresh call at a deeper site raises. Text with more brackets than the bound is never
+    admitted, in content or in any tool-call key or value; text at the bound still is."""
+    limit = reconcile._REPLAY_IDENTITY_MEMO_MAX_BRACKETS
+    deep, shallow = "[" * (limit + 1) + "]" * (limit + 1), "[" * limit + "]" * limit
+    base = {"role": "user", "content": shallow, "session_id": "S"}
+    assert _admitted(base, stored_row)
+    assert not _admitted({**base, "content": deep}, stored_row)
+    calls = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": deep}}]
+    assert not _admitted({"role": "assistant", "content": "x", "tool_calls": calls, "session_id": "S"}, stored_row)
+    keyed = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}, deep: 1}]
+    assert not _admitted({"role": "assistant", "content": "x", "tool_calls": keyed, "session_id": "S"}, stored_row)
+    assert not _admitted({**base, "content": [{"type": "text", "text": deep}]}, stored_row)

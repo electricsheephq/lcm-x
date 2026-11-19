@@ -438,15 +438,31 @@ _REPLAY_IDENTITY_MEMO_MAX_BYTES = 32 * 1024 * 1024  # R3: this memo's share of 6
 _REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES = 1024 * 1024
 
 
+# JSON parsing gives up at a nesting depth that depends on the caller's stack depth, so a deeply nested string can
+# parse at one call site and raise RecursionError at a deeper one. A remembered identity would hide that difference,
+# so text whose brackets could nest anywhere near the limit is never remembered (its depth is at most this count).
+_REPLAY_IDENTITY_MEMO_MAX_BRACKETS = 200
+
+
+def _replay_identity_text_is_shallow(text: str) -> bool:
+    return text.count("[") + text.count("{") <= _REPLAY_IDENTITY_MEMO_MAX_BRACKETS
+
+
+def _shallow_replay_identity_text(text: str) -> str:
+    if not _replay_identity_text_is_shallow(text):
+        raise TypeError("not a replay identity memo input")
+    return text
+
+
 def _freeze_replay_identity_value(value: Any) -> tuple:
     """A hashable, type-tagged copy of a plain JSON value (exact str, int, float, bool, None, list, and dict with
     exact str keys, all the way down): True/1/1.0 never collide, dicts keep item order, floats compare by repr.
     Anything else raises TypeError (no memo): its identity may fall back to ``str(value)``."""
     kind = type(value)
     if kind is str:
-        return ("s", value)
+        return ("s", _shallow_replay_identity_text(value))
     if kind is dict:
-        if any(type(k) is not str for k in value):
+        if any(type(k) is not str or not _replay_identity_text_is_shallow(k) for k in value):
             raise TypeError("not a replay identity memo input")
         return ("d", tuple((("s", k), _freeze_replay_identity_value(v)) for k, v in value.items()))
     if kind is list:
@@ -510,7 +526,7 @@ def _replay_identity_memo_key(fields: tuple, strip_carrier: bool, allow_pruned_t
     frozen_calls = _freeze_replay_identity_value(calls)
     role = role or "unknown"
     return (bool(stored_row), bool(strip_carrier), bool(allow_pruned_tool_alias), role,
-            normalize_content_value(content) or "", call_id or "", frozen_calls,
+            _shallow_replay_identity_text(normalize_content_value(content) or ""), call_id or "", frozen_calls,
             (tool_name or name or "") if role == "tool" else ""), frozen_calls
 
 
