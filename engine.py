@@ -1076,6 +1076,7 @@ class LCMEngine(
         # #651: (monotonic until, reason) after an automatic threshold pass made no progress or
         # the host refused one. #597: a progress refusal also ends at turn end.
         self._no_progress_hold: Optional[tuple[float, str]] = None
+        self._held_back_returns: dict[str, Any] = {}  # #2982: the open streak of grown returns held back
         self._last_compress_leaves: Optional[tuple[str, int]] = None  # #597: latest call, bound conversation
         self._last_hidden_backlog: Optional[HiddenBacklog] = None  # #597: latest check in this compress()
         self._hidden_backlog_unknown_warned: set[str] = set()
@@ -6388,6 +6389,7 @@ class LCMEngine(
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
             "last_stub_first_exit": dict(self._last_stub_first_exit) if self._last_stub_first_exit else None,
             "no_progress_hold": self._no_progress_hold_status(),
+            "held_back_returns": dict(self._held_back_returns) or None,
             **({"background_leaf_prep": leaf_prep.status()}  # #787 D-13; absent while off
                if getattr(self._config, "background_leaf_prep_enabled", False) else {}),
             "zero_leaf_streak": self._zero_leaf_streak_status(),

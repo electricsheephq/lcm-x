@@ -58,7 +58,7 @@ from .reconcile import (
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import PhaseSqlTrace, _is_sqlite_locked_error
-from .survival_fit import _RECOVERY_THRESHOLD_SHARE
+from .survival_fit import _RECOVERY_THRESHOLD_SHARE, _host_estimate
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 _UNPROVEN_FILTER_EXCLUSION = object()
@@ -107,6 +107,37 @@ def _made_progress(before, returned) -> bool:
         return count_messages_tokens(after) < count_messages_tokens(before)
     except Exception:
         return False
+
+
+def _host_rough(messages) -> int:
+    """#2982: the host's estimate_messages_tokens_rough; without the host, a copy of its ASCII form (bytes / 4 of each
+    row's repr, persistence-only fields dropped)."""
+    estimate = _host_estimate(messages)
+    if estimate is not None:
+        return estimate
+    return sum((len(str({k: v for k, v in m.items() if k not in _HOST_UNPRICED}).encode("utf-8", "replace")) + 3) // 4
+               for m in messages if isinstance(m, dict))
+
+
+_HOST_UNPRICED = frozenset({"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id",
+                            "message_uid", "_absorbed_message_uids", "_tool_call_uids", "_tool_call_uid"})
+
+
+def _host_post_step_rows(before, returned) -> list:
+    """#2982: rows the host's post-steps can add to ``returned`` before its grown-transcript guard, in its order: the
+    last visible assistant reply when ``returned`` lacks it, the todo snapshot, and a user turn when no input user
+    turn is kept."""
+    added = []
+    reply = next((m for m in reversed(before) if m.get("role") == "assistant" and not m.get("tool_calls")
+                  and str(m.get("content") or "").strip()), None)
+    if reply is not None and not any(m.get("role") == "assistant" and m.get("content") == reply.get("content")
+                                     for m in returned):
+        added.append(reply)
+    added.extend(m for m in before if m.get("_todo_snapshot_synthetic") and m not in returned)
+    users = [m for m in before if m.get("role") == "user"]
+    if users and not any(m in returned for m in users):
+        added.append(users[-1])
+    return added
 
 
 def _reports_progress(operation):
@@ -863,6 +894,7 @@ class CompactionMixin:
         self._last_hidden_backlog = None
         self._compress_escaped = []
         self._compress_forced_overflow = False
+        self._compress_adoption = "not_tried"  # #2982: this pass's #457 adoption result
         self._last_compression_noop_reason = ""  # #1162: a fit's cause belongs to this pass
         _summary_call.error = None  # the thread-local summary failure must not outlive its pass
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
@@ -944,6 +976,7 @@ class CompactionMixin:
                                                                   and self._last_compression_status != "error"))
             if binding_changed():
                 return caller_messages
+            held_back = False
             if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
                     and len(result) >= len(messages)
                     and count_messages_tokens(result) >= count_messages_tokens(messages)):
@@ -955,7 +988,12 @@ class CompactionMixin:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
-            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+            elif (not force and not bypass_cooldown and not self._compress_forced_overflow
+                  and self._last_compression_status != "error" and self._held_back_grown_return(messages, result)):
+                held_back, result = True, messages  # #2982: the leaves stay stored; the host gets its own list back
+                self._ingest_cursor = len(result)
+                self._start_no_progress_hold("hidden_only")
+            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown and not held_back
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
             if binding_changed():
@@ -977,7 +1015,7 @@ class CompactionMixin:
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
                                              persist=self._no_progress_proof_complete)
             returned = result
-            return result
+            return caller_messages if held_back else result
         except BaseException as exc:
             if binding_changed():
                 if isinstance(exc, Exception):
@@ -1075,6 +1113,27 @@ class CompactionMixin:
             finally:
                 _compaction_binding_check.reset(binding_scope)
                 store_id_scope.__exit__(None, None, None)  # #2344: last, even if the cleanup above raises
+
+    def _held_back_grown_return(self, messages, result) -> bool:
+        """#2982: True when an automatic pass would return a list larger than its input by the host's estimate, after
+        the host's post-steps. Counts held-back passes and the carried deficit; the first accepted return closes the
+        streak with the adoption result (status ``held_back_returns``, and the pass log)."""
+        if result is messages:
+            return False
+        before, after = _host_rough(messages), _host_rough(list(result) + _host_post_step_rows(messages, result))
+        streak = self._held_back_returns
+        if after > before:
+            streak.update(open=True, passes=streak.get("passes", 0) + 1,
+                          deficit_tokens=streak.get("deficit_tokens", 0) + after - before, last_in=before, last_out=after)
+            logger.info("LCM grown return held back (#2982): host estimate %d -> %d; held-back passes=%d deficit=%d",
+                        before, after, streak["passes"], streak["deficit_tokens"])
+            return True
+        if streak.get("open") and after < before:  # a return that frees nothing does not end the streak
+            streak.update(open=False, adoption=self._compress_adoption, accepted_in=before, accepted_out=after)
+            logger.info("LCM held-back streak closed (#2982): passes=%d deficit=%d adoption=%s host estimate %d -> %d",
+                        streak["passes"], streak["deficit_tokens"], self._compress_adoption, before, after)
+            streak.update(passes=0, deficit_tokens=0)
+        return False
 
     def _compress_bypassed(self, messages, current_tokens, focus_topic, force):
         """Bypassed calls own a local budget; only child diagnostics are thread-local."""
@@ -2759,6 +2818,7 @@ class CompactionMixin:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
             state.resumed_prefix = bool(resumed)
+            self._compress_adoption = "kept_rows" if resumed and kept else "adopted" if resumed else "declined"
             state.resumed_ahead = resumed[0] - leaf.candidate_start if resumed else 0  # kept rows before lineage
             leaf.premapped_store_ids = None if drops or resumed else store_ids
             if resumed:  # the committed summary replaces the dropped rows in the estimate
