@@ -10347,6 +10347,11 @@ class LCMEngine(
 
     # -- Internal: tool-pair sanitization ------------------------------------
 
+    @staticmethod
+    def _is_api_only_assistant_message(row: Dict[str, Any]) -> bool:
+        api_content = row.get("api_content")
+        return isinstance(api_content, str) and bool(api_content) and _clean_active_assistant_message(row) is None
+
     def _sanitize_active_context_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -10391,10 +10396,7 @@ class LCMEngine(
                         )
                         merged, merged_generated, start = [], [], 0
                         for index, row in enumerate([*paired, None]):
-                            if row is not None and not (
-                                isinstance(row.get("api_content"), str) and row["api_content"]
-                                and _clean_active_assistant_message(row) is None
-                            ):
+                            if row is not None and not self._is_api_only_assistant_message(row):
                                 continue
                             generated_run = list(generated_rows or ())
                             merged.extend(_merge_adjacent_assistant_messages(
@@ -10691,6 +10693,7 @@ class LCMEngine(
             messages,
             stub=self._missing_tool_result_stub,
             insert_missing_tool_stubs=insert_missing_tool_stubs,
+            is_api_only=self._is_api_only_assistant_message,
         )
 
         if dropped_tool_results:

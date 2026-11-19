@@ -279,6 +279,79 @@ def test_publishing_pass_keeps_api_only_tail(open_engine, summaries):
     assert kept == snapshot, [item.get("message_uid") for item in output]
 
 
+@pytest.mark.parametrize("path", ["compress", "ingest-then-compress", "cold-reopen", "cleanup"])
+@pytest.mark.parametrize("position", ["between-call-and-result", "between-two-results", "before-call"])
+@pytest.mark.parametrize("api_only", [
+    pytest.param({"role": "assistant", "content": "", "display_kind": "hidden",
+                  "api_content": "[interrupt: no assistant output for this turn]"}, id="hidden-placeholder"),
+    pytest.param({"role": "assistant", "content": "", "reasoning_content": "thinking it over",
+                  "api_content": "promoted final text"}, id="promoted-reasoning"),
+    pytest.param({"role": "assistant", "content": "<think>inner</think>",
+                  "api_content": "sent bytes"}, id="think-only-content"),
+])
+def test_api_only_row_preserves_tool_group(open_engine, summaries, path, position, api_only):
+    call, first_result = tool_pair("x1", f"RESULTTEXT-x1-zq{PAD}")
+    call["content"] = ""
+    results = [first_result]
+    if position == "between-two-results":
+        second_call, second_result = tool_pair("x2", f"RESULTTEXT-x2-zq{PAD}")
+        call["tool_calls"].extend(second_call["tool_calls"])
+        results.append(second_result)
+        incoming = [call, first_result, api_only, second_result]
+    elif position == "before-call":
+        incoming = [api_only, call, first_result]
+    else:
+        incoming = [call, api_only, first_result]
+
+    view = [{"role": "system", "content": "system prompt"}]
+    for index in range(7):
+        view.extend([{"role": "user", "content": f"[T{index}] user{PAD}"},
+                     {"role": "assistant", "content": f"reply {index}{PAD}"}])
+    tail = [{"role": "user", "content": "probe ask"}, *incoming,
+            {"role": "assistant", "content": f"final reply{PAD}"},
+            {"role": "user", "content": "latest ask"}]
+    view.extend(tail)
+    engine = open_engine(fresh_tail_count=len(tail))
+    if path == "cleanup":
+        output = engine._sanitize_active_context_messages(deepcopy(view))
+    else:
+        if path in ("ingest-then-compress", "cold-reopen"):
+            engine.ingest(deepcopy(view))
+        if path == "cold-reopen":
+            engine.shutdown()
+            engine = open_engine(fresh_tail_count=len(tail))
+        output = engine.compress(deepcopy(view), current_tokens=24_000)
+        assert engine._last_compress_leaves[1] > 0
+
+    index = next(i for i, row in enumerate(output) if row.get("tool_calls"))
+    assert output[index] == call
+    end = index + 1 + len(results)
+    assert output[index + 1:end] == results
+    if position == "before-call":
+        assert json.dumps(output[index - 1:end]).encode() == json.dumps(incoming).encode()
+    else:
+        assert output[end] == api_only
+
+
+@pytest.mark.parametrize("missing_result", [False, True], ids=["complete", "stubbed"])
+def test_api_only_rows_keep_order_after_results_and_stubs(open_engine, missing_result):
+    engine = open_engine()
+    call, result = tool_pair("answered", "original result")
+    second_call, second_result = tool_pair("second", "second original result")
+    call["tool_calls"].extend(second_call["tool_calls"])
+    first = {"role": "assistant", "content": "", "api_content": "first API-only row"}
+    second = {"role": "assistant", "content": "", "api_content": "second API-only row"}
+    orphan = {"role": "tool", "tool_call_id": "orphan", "content": "unmatched result"}
+    user = {"role": "user", "content": "next turn"}
+    following_results = [] if missing_result else [second_result]
+    view = [call, first, result, *following_results, second, orphan, user]
+
+    output = engine._sanitize_active_context_messages(view)
+
+    expected = engine._missing_tool_result_stub("second") if missing_result else second_result
+    assert output == [call, result, expected, first, second, user]
+
+
 def test_generated_list_keeps_api_only_row_and_direct_cleaners_keep_their_contract(open_engine):
     engine = open_engine()
     row = empty_row()
