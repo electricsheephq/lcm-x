@@ -23,6 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 
@@ -264,7 +265,8 @@ def test_b_the_notice_bound_holds_for_long_ids(ids):
     assert count_tokens(notice) <= _NOTICE_MAX_TOKENS, count_tokens(notice)
     today = survival_fit._NOTICE.format(n=3, first=1, last=3)
     single = survival_fit.survival_notice_text(3, [("20261119_120000_abcdef12", 1, 3)])
-    # no longer than the single-range notice of the reviewed head b488389d (228 characters): budget-edge tests depend on it
+    # the single-range, current-session notice for a 1-character id and 1-digit store ids stays within b488389d's 228
+    # characters; the ceiling for every input (b488389d's formula) is the cell below
     assert len(survival_fit.survival_notice_text(3, [("S", 1, 3)])) <= 228
     assert count_tokens(single) <= count_tokens(today) + 40, (count_tokens(single), count_tokens(today))
     assert json.dumps(notice)[1:-1] == notice and json.dumps(single)[1:-1] == single  # nothing JSON escapes
@@ -683,3 +685,137 @@ def test_r2_tool_calls_keys_follow_replay_identity(engine):
               {"role": "assistant", "content": "other", "tool_calls": '[{"id":"x"}]'}]
     (first, last, _), = _calls(survival_fit_notice(engine, listed, set(), store_ids=ids))
     assert (first, last) == (1, 1)
+
+
+# -- the notice shape (each session id kept; the ceiling; the budget edge) ------------------------------------------
+
+def _b488389d(count, ranges, rest=None):
+    """The reviewed head b488389d's notice for the same input, as its formula wrote it (the ceiling's reference)."""
+    groups = []
+    for session, first, last in ranges:
+        if not groups or groups[-1][0] != session:
+            groups.append((session, []))
+        groups[-1][1].append(f"after_store_id={first - 1} for store ids {first}..{last}")
+    calls = "; ".join(f"session_id={session} " + ", ".join(items) for session, items in groups)
+    calls += survival_fit._NOTICE_REST.format(count=rest[0], first=rest[1], last=rest[2]) if rest else ""
+    bounds = [x for _, first, last in ranges for x in (first, last)] + (list(rest[1:]) if rest else [])
+    return ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in live "
+            "context; read each range with lcm_load_session and limit=200, paging with next_cursor: {calls}.]").format(
+        n=count, first=min(bounds), last=max(bounds), calls=calls)
+
+
+EDGE_IDS = {1: "S", 24: COLON_ID[:24], 81: COLON_ID}
+EDGE_TESTS = {"916": ("test_issue_916_projection_keeps_head.py",
+                      ("test_newest_user_keeps_opening_under_survival_budget",
+                       "test_head_plus_mark_re_ingests_without_storing_again")),
+              "608": ("test_issue_608_sweep_budget_stop.py",
+                      ("test_a_second_recovery_attempt_shrinks_again_and_stops_where_nothing_can_leave",))}
+
+
+@pytest.fixture(scope="module")
+def edge_runs(tmp_path_factory):
+    """The #916 and #608 budget-edge cells as written, with the session id "S" replaced engine-wide by an id of each
+    length (every "S" literal in their source), in one isolated pytest process: {(file, length, test): (outcome,
+    the fit's logged tokens and budget)}."""
+    work = tmp_path_factory.mktemp("edge")
+    targets = []
+    for key, (name, tests) in EDGE_TESTS.items():
+        source = (TREE / "tests" / name).read_text()
+        for length, sid in EDGE_IDS.items():
+            assert len(sid) == length and set(sid) <= set("abcdefghijklmnopqrstuvwxyz0123456789:_-S")
+            (work / f"test_edge_{key}_{length}.py").write_text(source.replace('"S"', json.dumps(sid)))
+            targets += [f"test_edge_{key}_{length}.py::{test}" for test in tests]
+    (work / "pytest.ini").write_text((TREE / "pytest.ini").read_text())
+    paths = [str(TREE), *_syspaths()]
+    if (TREE / "agent" / "context_engine.py").is_file():  # CI's host stub, as _walk takes it
+        shutil.copytree(TREE / "agent", work / "stub" / "agent")
+        paths.append(str(work / "stub"))
+    report = work / "report.xml"
+    script = (f"import sys; sys.path[:0] = {paths!r}; import pytest; sys.exit(pytest.main(['-p', 'tests.conftest', "
+              f"'-p', 'no:cacheprovider', '-o', 'addopts=', '-o', 'junit_logging=all', '--junitxml', {str(report)!r}, "
+              f"'--basetemp', {str(work / 'bt')!r}, *{targets!r}]))")
+    home = work / "home"
+    home.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "HERMES_HOME": str(home / ".hermes"), "LANG": "C.UTF-8",
+           "PYTHONHASHSEED": "0"}
+    done = subprocess.run([sys.executable, "-I", "-B", "-c", script], cwd=work, env=env, capture_output=True,
+                          text=True, timeout=600)
+    assert done.returncode in (0, 1) and report.is_file(), done.stdout[-2000:] + done.stderr[-2000:]
+    runs = {}
+    for case in ElementTree.parse(report).getroot().iter("testcase"):
+        logged = "".join(node.text or "" for node in case.iter() if node.tag in ("system-out", "system-err"))
+        fits = [tuple(map(int, found)) for found in re.findall(r"tokens=(\d+)->(\d+), budget=(\d+)\)", logged)]
+        failed = any(node.tag in ("failure", "error") for node in case)
+        runs[(case.get("classname"), case.get("name"))] = (not failed, fits)
+    return runs
+
+
+class EdgeMoved(Exception):
+    """A budget-edge cell as written failed with a longer session id: the accepted trade-off below."""
+
+
+def _edge_reason(what: str) -> str:
+    return ("accepted trade-off (#2877): every named range keeps its explicit session id, so a longer id moves the "
+            f"budget edge against main by the id's length (view only, the same cliff main has at its own edge): {what}; "
+            "no stored row is lost")
+
+
+_916_NEWEST = ("the 1-character id's fit uses 397 of 399 tokens; the longer id's notice does not fit those 2, so the "
+               "newest user row goes mark-only")
+_608_FLOOR = ("the floor attempt (budget 140) writes a second fit record where the 1-character id's returns the same "
+              "list once")
+EDGE = [
+    *(pytest.param(key, test, length, fits, marks=() if length == 1 else pytest.mark.xfail(
+        strict=True, raises=EdgeMoved, reason=_edge_reason(f"{what}, measured {fits}")), id=f"{key}-{short}-id{length}")
+      for key, test, short, what, by_length in (
+          ("916", "test_newest_user_keeps_opening_under_survival_budget", "newest", _916_NEWEST,
+           {1: [(594, 397, 399)], 24: [(594, 102, 399)], 81: [(594, 116, 399)]}),
+          ("916", "test_head_plus_mark_re_ingests_without_storing_again", "reingest", _916_NEWEST,
+           {1: [(594, 397, 399)], 24: [(594, 102, 399)], 81: [(594, 116, 399)]}),
+          ("608", "test_a_second_recovery_attempt_shrinks_again_and_stops_where_nothing_can_leave", "D7", _608_FLOOR,
+           {1: [(2896, 1508, 1850), (1508, 787, 1131), (2896, 426, 140)],
+            24: [(2896, 1514, 1850), (1514, 793, 1136), (2896, 432, 140)],
+            81: [(2896, 1528, 1850), (1528, 807, 1148), (2896, 446, 140)]}))
+      for length, fits in by_length.items())]
+
+
+@pytest.mark.parametrize("key,test,length,fits", EDGE)
+def test_the_budget_edge_with_a_longer_session_id_is_pinned(edge_runs, key, test, length, fits):
+    """Strict: the #916 and #608 budget-edge cells as written pass with a 1-character session id and fail with 24 and
+    81 characters (colon keys), each at its measured fits (tokens before, after, budget)."""
+    cases = {name: run for (module, name), run in edge_runs.items()
+             if module == f"test_edge_{key}_{length}" and name.split("[")[0] == test}
+    assert cases and all(logged == fits for _, logged in cases.values()), cases
+    if not all(passed for passed, _ in cases.values()):
+        raise EdgeMoved(f"#{key} {test} with a {length}-character session id")
+
+
+@pytest.mark.parametrize("length", sorted(EDGE_IDS))
+def test_the_notice_is_no_longer_than_b488389ds_for_the_same_input(length):
+    """The ceiling: for one session id length, single ranges from 1- to 12-digit store ids and of several widths, several
+    ranges, a second session (a rotation's parent) and the counted clause, the notice is never longer than b488389d's."""
+    sid, other = EDGE_IDS[length], COLON_ID[::-1][:length]
+    inputs = [(last - first + 1, [(sid, first, last)], None) for digits in range(1, 13) for width in (1, 3, 200, 201, 5000)
+              for first in [10 ** (digits - 1)] for last in [first + width - 1]]
+    inputs += [(9, [(sid, 1, 3), (sid, 12, 14), (sid, 1_200, 1_202)], None),
+               (8, [(other, 7, 9), (sid, 10 ** 6, 10 ** 6 + 4)], (4, 1, 5)),
+               (40, [(sid, 10 ** 11 + 3 * i, 10 ** 11 + 3 * i + 1) for i in range(8)], (12, 1, 10 ** 10))]
+    for count, ranges, rest in inputs:
+        text = survival_fit.survival_notice_text(count, ranges, rest)
+        assert len(text) <= len(_b488389d(count, ranges, rest)), (text, _b488389d(count, ranges, rest))
+
+
+def test_r2_one_range_whose_id_passes_the_cap_falls_back_to_the_counted_notice(tmp_path):
+    """NB3: a single range whose session id alone passes the token cap: the counted form (no call), within the cap."""
+    sid = "a1" * 600
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "long.db"), survival_reserve=0.0))
+    engine._hermes_home = str(tmp_path)
+    engine.on_session_start(sid, platform="telegram", conversation_id="conv", context_length=20_000)
+    try:
+        rows = _store(engine, [f"row {i}" for i in range(1, 7)], session=sid)
+        messages, ids = _listed(rows, {4, 5, 6})
+        notice = survival_fit_notice(engine, messages, set(), store_ids=ids)
+        assert notice == survival_fit._NOTICE.format(n=3, first=1, last=3), notice[:200]
+        assert count_tokens(notice) <= _NOTICE_MAX_TOKENS
+    finally:
+        engine.shutdown()
