@@ -1099,7 +1099,10 @@ class ReconcileMixin:
         one: it always computes) on a bound engine (no detached-store arguments), a live row (stored rows are
         not remembered yet), no host-rewrite overlay, a plain dict, storage already open (a miss opens it as
         before), a key that builds and an empty gate. The memo is dropped when the config object, the session,
-        the conversation, the Hermes home or the interpreter's integer-digit limit changes, and on overflow."""
+        the conversation, the Hermes home or the interpreter's integer-digit limit changes, and on overflow.
+        Purity relies on the admitted path's helpers reading state only behind the gate's markers: a subclass or
+        instance override of _generated_context_carrier_remainder or _survival_projection_source that reads
+        state without a marker would need the memo bypassed."""
         uncached = ReconcileMixin._message_replay_identity_uncached
         state = getattr(self, "__dict__", None)
         if (stored_row or with_host_rewrite or store is not None or hermes_home is not None
