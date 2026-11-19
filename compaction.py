@@ -214,11 +214,14 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
+    carrier_remainder: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
     for msg in candidate_raw:
-        msg_tokens = count_message_tokens(msg)
+        # #2901: a generated summary carrier is charged at the row the summariser reads (_leaf_summary_input)
+        remainder = carrier_remainder(msg) if carrier_remainder is not None else None
+        msg_tokens = count_message_tokens(msg if remainder is None else {**msg, "content": remainder})
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
             break
         selected.append(msg)
@@ -738,7 +741,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, self._generated_context_carrier_remainder)
 
     def _stop_pass_for_shutdown(self) -> None:
         """#2101: a pass that stops for shutdown leaves the state of an identity no-op."""
