@@ -152,7 +152,7 @@ from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin,
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
-from .compaction import CompactionMixin
+from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
@@ -762,6 +762,9 @@ class LCMEngine(
     # store, and prepared leaves (#787) publish inside compress(). A class attribute and the bool singleton, so the
     # fresh type(self)(...) that clone_for_agent() builds carries it too.
     compacts_outside_compress = False
+    # #2872: the host's built-in default (agent/context_compressor.py 3b421578:2801); the host's idle compaction reads it
+    # (turn_context_compaction.py 3b421578:171).
+    summary_target_ratio = 0.20
 
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
@@ -1038,6 +1041,7 @@ class LCMEngine(
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
+        self._last_compression_made_progress = False  # #2863: read by the host after each compress()
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -1931,6 +1935,15 @@ class LCMEngine(
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
         self._record_turn_compaction_telemetry()
+        # #2863: any response on the main path ends the host's post-compaction wait, with or without a count, as the
+        # host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host reads the verify flag
+        # before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume the wait when a provider
+        # omits usage (turn_usage.py 3b421578:87-91). The host gives each agent its own engine copy (agent_init.py
+        # 3b421578:1779-1785), so a response seen here is its bound session's own, ignored or stateless ones included.
+        # Known limit: on a host that shares one engine across agents, a side channel's response clears these flags
+        # for the foreground too.
+        self._verify_compaction_cleared_threshold = False
+        self.awaiting_real_usage_after_compression = False
 
     @property
     def cache_read_ratio(self) -> float:
@@ -2970,8 +2983,9 @@ class LCMEngine(
         current_source_tokens: int,
         final: bool = False,
     ) -> List[Dict[str, Any]]:
+        # #2901: the plain charge; the rescue's rows are the summariser input, carriers already read as their remainder.
         return _next_leaf_rescue_chunk_for(
-            self._config, self._select_oldest_leaf_chunk, current_chunk, current_source_tokens, final=final)
+            self._config, select_oldest_leaf_chunk, current_chunk, current_source_tokens, final=final)
 
     def _leaf_target_tokens(self, source_tokens: int) -> int:
         """Leaf summary target (#614); defaults give a fixed 2,000-token target: min(2000, max(2000, 20%))."""
