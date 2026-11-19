@@ -256,8 +256,8 @@ separate fleet-migration change owned outside this repository.
 No manual core migration or data import is required for the upgrade itself.
 Existing v0.20-v0.23 databases remain on core schema version 5. Existing cloud
 vectors from a pre-v0.23.1, revisionless identity are intentionally ineligible:
-confirm the embedding-privacy posture (auto-on for cloud, or the explicit
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` opt-out) and the pattern catalog, run
+confirm the embedding-privacy setting (off by default, with experimental
+filtering enabled by explicit `true`) and any active pattern catalog, run
 `/lcm embed warmup`, and verify its reported
 provider/model/dimension/privacy identity. Dry-run the selected corpus and
 record its initial `remaining` count. The default page limit is 200, so allow no
@@ -276,16 +276,13 @@ bind creates the rollup tables and schedules background maintenance; set
 `LCM_TEMPORAL_ROLLUPS_ENABLED=false` to opt out. If you later enable one of those stores, keep the pre-upgrade cold set
 as the downgrade path rather than mixing old code with newly created sidecars.
 
-Cloud embeddings are a separate operator decision. Provider-bound copies are protected
-automatically for known cloud providers; do NOT enable `LCM_SENSITIVE_PATTERNS_ENABLED`
-for this — that flag is the separate, irreversible durable-redaction opt-in. Before
-warmup, summary or chunk backfill, or semantic-query dispatch, confirm
-`LCM_SENSITIVE_PATTERNS` holds at least one recognized pattern name, or set
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` to opt out deliberately under the `privacy:off`
-vector revision. Run `/lcm embed backfill` without `--apply` first. Raw-chunk
-cloud backfill additionally requires `--confirm-raw-text`; the privacy
-transform only catches configured patterns and is not a general data
-classification system.
+Cloud embeddings are a separate operator decision. Known cloud providers
+receive unfiltered copies by default under the `privacy:off` vector revision.
+Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to the experimental filter.
+When it is enabled, configure at least one recognized name in
+`LCM_SENSITIVE_PATTERNS`. `LCM_SENSITIVE_PATTERNS_ENABLED` controls irreversible
+durable redaction separately. Run `/lcm embed backfill` without `--apply` first.
+Raw-chunk cloud backfill requires `--confirm-raw-text`.
 
 Temporal rollup settings do not change. When rollups are enabled, maintenance
 now runs through bounded eventual background work instead of blocking session
@@ -573,7 +570,7 @@ Useful environment variables:
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content (plain text, extracted text parts for structured/multimodal content, or normalized JSON fallback when no text parts exist) is excluded from LCM storage |
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
-| `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
+| `LCM_EMBEDDING_PRIVACY_ENABLED` | off (unset or `false`) | Experimental filter for provider-bound copies on known cloud embedding providers. Opt in with `true`. The default sends unfiltered input under the `privacy:off` vector revision |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
@@ -783,8 +780,8 @@ refs. Provider-neutral evidence tools do not upload them by themselves.
 Embedding-backed retrieval, including automatic pre-answer baseline retrieval,
 assertion extraction, and the optional selective compiler can send configured
 content to their selected providers. Review those provider and redaction settings before opting in. Durable sensitive-pattern
-redaction is default-off and forward-only; cloud provider-copy privacy is separate, on by
-default for known cloud providers, and never rewrites durable rows.
+redaction is default-off and forward-only. The separate experimental cloud embedding
+filter is opt-in and applies only to provider input.
 
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
@@ -842,12 +839,14 @@ table. Both paths are read-only and make no LLM calls. When the feature is off
 or its tables are empty, the block remains present with zero counts and null
 age/error values so monitoring consumers do not need a second schema.
 
+<a id="sensitive-pattern-redaction"></a>
+
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
-Cloud embedding privacy is independent and transforms provider-bound copies
-only. It defaults on for known cloud providers; setting
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw embedding input and
-binds vectors to `privacy:off`. Local providers remain byte-identical.
+The experimental cloud embedding filter applies to provider-bound copies
+only and defaults to off. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in
+for known cloud providers. The default sends unfiltered input and binds vectors
+to `privacy:off`. Local providers receive byte-identical input.
 
 When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
 secret values are replaced with metadata-only placeholders before SQLite, FTS,
@@ -877,31 +876,28 @@ canonicalizes historical redaction placeholders, replaces current matches with
 pattern-only placeholders that contain no raw value, length, byte count, or
 secret-derived digest, and rejects any residual detector match before transport.
 The transform version and a digest of sorted active pattern names are stored in the vector
-profile revision; the explicit opt-out stores the distinguished `privacy:off` revision
-instead. While the transform is on, changing the pattern policy changes that identity, as
+profile revision. The default stores the `privacy:off` revision. While the filter
+is on, changing the pattern policy changes that identity, as
 does flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either direction after warmup; either
 change keeps existing vectors ineligible until re-embedded. `lcm_recall` serves full-text
 hits with `degraded=true` and an `embedding_identity_stale:` reason; `lcm_grep` semantic
-mode falls back to full-text, and `lcm_doctor` warns. Backfill still refuses until a new
-warmup registers the profile (run
-`/lcm embed warmup` then `/lcm embed backfill --apply`, adding `--corpus chunks`, or
-`--corpus both`, when the doctor's `stale_tasks` lists `chunk`; LCM never re-embeds
-automatically). Cloud providers also require `--confirm-raw-text` on every chunk or
-combined apply. Inspect the doctor's complete `remedy` and consent warning.
+mode falls back to full-text, and `lcm_doctor` warns. When the filter is disabled
+for an existing matching cloud summary profile, incremental catch-up re-embeds
+summaries under `privacy:off`. For manual recovery, run `/lcm embed warmup` then
+`/lcm embed backfill --apply`. Add `--corpus chunks` or `--corpus both` when the
+doctor's `stale_tasks` lists `chunk`. Cloud providers require `--confirm-raw-text`
+on every chunk or combined apply. Inspect the doctor's complete `remedy` and consent warning.
 Repeat the backfill apply only while `remaining` is above 0 and each run lowers it.
 Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining`
-stops falling, and inspect the warnings, errors, and detail output. Under the explicit opt-out the
-pattern catalog is not part of the `privacy:off` identity, so catalog edits alone
-change nothing until you opt back in. Durable messages, summaries, FTS rows, and payloads are not
-rewritten by this provider boundary.
+stops falling, and inspect the warnings, errors, and detail output. Pattern catalog
+edits affect vector identity only while the filter is enabled.
 
 The cloud gate applies to provider identity `voyage`/`voyageai` and
 `openai-compatible` (including the `openai` and `siliconflow` configuration
 aliases after resolution). An OpenAI-compatible endpoint can be local or
-remote, but the shipped provider identity is conservatively cloud-gated. Set `LCM_EMBEDDING_BASE_URL` and the configured API-key environment name; provider-copy
-privacy resolves ON for that identity exactly as it does for Voyage, and the same nonempty
-known-catalog requirement applies unless you take the explicit `privacy:off` opt-out or a
-future reviewed endpoint-locality contract says otherwise.
+remote. The shipped provider identity follows the same opt-in filter and enabled
+catalog requirements as Voyage. Set `LCM_EMBEDDING_BASE_URL` and the configured
+API-key environment name.
 
 ### Cache policy boundary
 
@@ -1459,8 +1455,8 @@ before applying any work:
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=ollama   # voyage or fastembed are also supported
 export LCM_EMBEDDING_MODEL=nomic-embed-text
-# Known cloud providers protect provider-bound copies automatically.
-# Optional explicit raw-cloud opt-out: export LCM_EMBEDDING_PRIVACY_ENABLED=false
+# Optional experimental filter for known cloud providers (default off).
+# export LCM_EMBEDDING_PRIVACY_ENABLED=true
 
 /lcm embed warmup
 /lcm embed backfill

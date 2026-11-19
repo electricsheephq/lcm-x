@@ -60,6 +60,7 @@ def _setup(tmp_path, monkeypatch, corpus, *, refused=(5,), contextualized=False)
     config = LCMConfig(
         database_path=str(db), embeddings_enabled=True,
         embedding_provider="voyage", embedding_model=model,
+        embedding_privacy_enabled=True,
     )
     engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=db))
     texts = [
@@ -268,14 +269,16 @@ VALID_PARTIAL_OUTBOUND = ["Chunk safety sentence [LCM embedding privacy: api_key
 
 def test_gauntlet_chunk_battery_control_report_passes():
     # Positive control for the rejection cases below: each one changes only one field.
-    _gauntlet_chunk_check(VALID_PARTIAL_REPORT, list(VALID_PARTIAL_OUTBOUND), LCMConfig())
+    _gauntlet_chunk_check(
+        VALID_PARTIAL_REPORT, list(VALID_PARTIAL_OUTBOUND), LCMConfig(embedding_privacy_enabled=True),
+    )
 
 
 @pytest.mark.parametrize(
     "failure", ["error", "no_blocked", "no_selected", "no_dispatch", "leak", "failed_docs", "stopped"]
 )
 def test_gauntlet_chunk_battery_rejects_invalid_partial(tmp_path, failure):
-    config = LCMConfig()
+    config = LCMConfig(embedding_privacy_enabled=True)
     report = VALID_PARTIAL_REPORT
     outbound = list(VALID_PARTIAL_OUTBOUND)
     if failure == "failed_docs":

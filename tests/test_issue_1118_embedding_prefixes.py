@@ -161,6 +161,7 @@ def test_set_identity_digest(provider_name, task, pair, tmp_path, monkeypatch):
 @pytest.mark.parametrize("task", ("summary", "chunk"))
 def test_cloud_query_write_identity_and_privacy_order(task, tmp_path, monkeypatch):
     config = configured("openai-compatible", "password=fixture-prefix ", DOCUMENT_PREFIX)
+    config.embedding_privacy_enabled = True
     store = VectorStore(tmp_path / "vectors.db", config=config)
     try:
         revision = embedding_privacy_revision(config)
@@ -200,7 +201,11 @@ def test_diagnostics_show_digest_without_prefix_text(surface, tmp_path):
         assert DOCUMENT_PREFIX not in output
 
 
-@pytest.mark.parametrize("revision", ("", "binprescreen", embedding_privacy_revision(configured("openai-compatible"))))
+@pytest.mark.parametrize("revision", (
+    "",
+    "binprescreen",
+    embedding_privacy_revision(LCMConfig(embedding_privacy_enabled=True)),
+))
 @pytest.mark.parametrize("suffix", ("", "+prefix:0123456789ab"))
 def test_split_keeps_base(revision, suffix):
     from hermes_lcm.ingest_policy import split_prefix_revision
@@ -402,6 +407,7 @@ def test_provider_override_uses_own_id(tmp_path, monkeypatch):
 @pytest.mark.parametrize("task", ("summary", "chunk"))
 def test_cloud_document_privacy_before_prefix(task, tmp_path, monkeypatch):
     engine, _, _, payloads = seeded_engine(tmp_path, monkeypatch, "openai-compatible", QUERY_PREFIX)
+    engine._config.embedding_privacy_enabled = True
     engine._config.embedding_document_prefix = "password=fixture-prefix "
     provider, payloads = provider_with_transport(engine._config, monkeypatch)
     monkeypatch.setattr(command, "resolve_provider", lambda *a, **kw: provider)
