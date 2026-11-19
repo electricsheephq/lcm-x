@@ -10,11 +10,12 @@ from threading import Event
 import pytest
 
 from hermes_lcm import engine as engine_module
-from hermes_lcm.dag import SummaryNode
+from hermes_lcm.dag import SummaryDAG, SummaryNode
 from tests.test_issue_2851_rebind_cursor import _view
 from tests.test_issue_581_582_store_complete_survival import _engine, _frontier, _rows, _turn
 
 WAIT = 60
+REJECTION_REASONS = ("source_missing", "source_wrong_depth", "source_already_claimed")
 
 
 def _digest(text):
@@ -113,6 +114,87 @@ def test_concurrent_compress(tmp_path, monkeypatch, hold_point, fresh_engine):
         first.shutdown()
 
 
+def test_concurrent_routine_compress(tmp_path, monkeypatch):
+    held, release = Event(), Event()
+    first = _new_engine(tmp_path, sweep=False, condensation_fanin=2, incremental_max_depth=0)
+    second = None
+    stalled_rows = _view(8)
+    later_rows = _view(11)
+
+    def held_summarize(**kwargs):
+        if kwargs["depth"] > 0 and not held.is_set():
+            held.set()
+            assert release.wait(WAIT), "routine compression was never released"
+        return _summarize(**kwargs)
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", _summarize)
+    try:
+        for turns in range(4, 8):
+            first.compress(deepcopy(stalled_rows[: 4 * turns]), current_tokens=24000, bypass_cooldown=True)
+        leaves = [node.node_id for node in first._dag.get_uncondensed_at_depth("S", 0)]
+        assert len(leaves) == 4  # Two full fan-in groups before either engine starts.
+        first._config.incremental_max_depth = 1
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", held_summarize)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            running = pool.submit(first.compress, stalled_rows, current_tokens=24000, bypass_cooldown=True)
+            try:
+                assert held.wait(WAIT), "routine compression did not reach condensation"
+                # Bind after the held engine's leaf commits and advance the raw input.
+                second = first.clone_for_agent()
+                second.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
+                retry = pool.submit(second.compress, later_rows, current_tokens=24000, bypass_cooldown=True)
+                retry.result(timeout=WAIT)
+            finally:
+                release.set()
+            running.result(timeout=WAIT)
+
+        nodes = _nodes(first)
+        parents = [node.source_ids for node in nodes if node.depth == 1]
+        assert parents == [leaves[:2]]
+        assert {node.node_id for node in first._summary_frontier_nodes()} >= set(leaves[2:])
+        assert first._condensation_publication_rejections == {"source_already_claimed": 1}
+        assert first.last_compression_status == second.last_compression_status == "compacted"
+        assert len(_rows(first)) == len(later_rows)
+        assert [row[0] for row in _provenance(first)] == [node.node_id for node in nodes]
+    finally:
+        if second is not None:
+            second.shutdown()
+        first.shutdown()
+
+
+@pytest.mark.parametrize("reason", REJECTION_REASONS)
+def test_post_leaf_rejection_reports_partial_sweep(tmp_path, monkeypatch, reason):
+    from hermes_lcm.dag import CondensationPublicationRejected
+
+    engine = _new_engine(tmp_path, sweep=True)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", _summarize)
+    validate = SummaryDAG.validate_condensation_sources
+    calls = 0
+
+    def reject_after_first(conn, node, node_id):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise CondensationPublicationRejected(reason)
+        validate(conn, node, node_id)
+
+    try:
+        engine.compress(_view(12), current_tokens=24000)
+        monkeypatch.setattr(engine._dag, "validate_condensation_sources", reject_after_first)
+        rows = _view(13)
+        engine.compress(deepcopy(rows), current_tokens=24000, bypass_cooldown=True)
+        engine.compress(rows, current_tokens=24000, bypass_cooldown=True)
+        sweep = engine._last_threshold_full_sweep
+        assert sweep["leaf_passes"] == 2
+        assert sweep["condensation_passes"] == 0
+        assert sweep["stop_reason"] == reason
+        assert engine._condensation_publication_rejections == {reason: 3}
+        assert sweep["status"] == "partial"
+    finally:
+        engine.shutdown()
+
+
 def _snapshot(engine):
     nodes = _nodes(engine)
     return {
@@ -169,9 +251,11 @@ def test_solo_output(tmp_path, monkeypatch, shape):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("reason", ["source_missing", "source_wrong_depth", "source_already_claimed"])
-def test_rejects_invalid_source_inside_publication(tmp_path, monkeypatch, reason):
-    monkeypatch.setattr(engine_module, "summarize_with_escalation", _summarize)
+@pytest.mark.parametrize("reason", REJECTION_REASONS)
+def test_rollback_complete(tmp_path, monkeypatch, reason):
+    rejected_text = "rejectedcondensation"
+    fts_match = "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?"
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kwargs: (rejected_text, 1))
     engine = _new_engine(tmp_path, sweep=False, condensation_fanin=2, incremental_max_depth=1)
     dag = engine._dag
     for index in range(2):
@@ -196,6 +280,7 @@ def test_rejects_invalid_source_inside_publication(tmp_path, monkeypatch, reason
             def observe_validation(publication_conn, node_id):
                 assert publication_conn is conn and publication_conn.in_transaction
                 assert _provenance(engine)[-1][0] == node_id
+                assert conn.execute(fts_match, (rejected_text,)).fetchall() == [(node_id,)]
                 before["validated_inside_transaction"] = True
                 validate(publication_conn, node_id)
 
@@ -209,9 +294,33 @@ def test_rejects_invalid_source_inside_publication(tmp_path, monkeypatch, reason
         assert before["validated_inside_transaction"]
         assert _snapshot(engine) == before["snapshot"]
         assert _provenance(engine) == before["provenance"]
+        assert dag._conn.execute(fts_match, (rejected_text,)).fetchall() == []
         assert not dag._conn.in_transaction
     finally:
         engine.shutdown()
+
+
+def test_claimant_query_uses_session_depth_index(tmp_path):
+    dag = SummaryDAG(tmp_path / "lcm.db")
+    conn = dag._conn
+    try:
+        leaf_id = dag.add_node(SummaryNode(session_id="S", summary="leaf", token_count=2))
+        dag.add_node(SummaryNode(session_id="other", depth=1, summary="unrelated", token_count=1,
+                                 source_type="nodes", source_ids=[leaf_id + 100]))
+        parent = SummaryNode(session_id="S", depth=1, summary="parent", token_count=1,
+                             source_type="nodes", source_ids=[leaf_id])
+        statements = []
+        conn.set_trace_callback(statements.append)
+        try:
+            dag.add_node(parent, before_commit=lambda c, n: dag.validate_condensation_sources(c, parent, n))
+        finally:
+            conn.set_trace_callback(None)
+        query, = [stmt for stmt in statements if "FROM summary_nodes AS parent" in stmt]
+        plan = [row[-1] for row in conn.execute("EXPLAIN QUERY PLAN " + query)]
+        assert any(step.startswith("SEARCH parent USING INDEX idx_nodes_session_depth ")
+                   and "(session_id=? AND depth=?)" in step for step in plan), plan
+    finally:
+        dag.close()
 
 
 def test_fresh_engine_ingest_lock_propagates_on_recovery(tmp_path):

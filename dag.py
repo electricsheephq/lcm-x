@@ -364,11 +364,13 @@ class SummaryDAG:
             raise CondensationPublicationRejected("source_wrong_depth")
         claimed = conn.execute(
             """SELECT 1
-               FROM summary_nodes AS parent, json_each(parent.source_ids) AS edge
-               WHERE parent.depth = ? AND parent.node_id != ? AND parent.source_type = 'nodes'
+               FROM summary_nodes AS parent INDEXED BY idx_nodes_session_depth,
+                    json_each(parent.source_ids) AS edge
+               WHERE parent.session_id = ? AND parent.depth = ?
+                 AND parent.node_id != ? AND parent.source_type = 'nodes'
                  AND CAST(edge.value AS INTEGER) IN (SELECT value FROM json_each(?))
                LIMIT 1""",
-            (node.depth, node_id, source_ids),
+            (node.session_id, node.depth, node_id, source_ids),
         ).fetchone()
         if claimed is not None:
             raise CondensationPublicationRejected("source_already_claimed")
