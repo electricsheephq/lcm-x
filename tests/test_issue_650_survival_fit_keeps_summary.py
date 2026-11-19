@@ -16,6 +16,7 @@ import pytest
 
 import hermes_lcm.engine as lcm_engine
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.survival_fit import survival_notice_block_start
 from hermes_lcm.engine import LCMEngine
 
 PAD = " alpha beta gamma delta" * 30
@@ -119,8 +120,19 @@ def _cold_ingest_adds(tmp_path, fitted) -> int:
 # -- T1 (+ #650 round 2: carrier turn integrity, appended rows) ---------------------------------------
 
 def _summary_part(engine, message) -> str:
+    """The verified summary parts' bytes (#2896: without the fit's notice block, asserted on its own)."""
     content = message["content"]
-    return content[:engine._verified_lcm_summary_prefix_end(content)]
+    end = engine._verified_lcm_summary_prefix_end(content)
+    start = survival_notice_block_start(content, end)
+    return content[:end if start is None else start]
+
+
+def _block_notice(engine, message) -> str | None:
+    """#2896: the notice in the carrier's one marked block, else None."""
+    content = message["content"]
+    end = engine._verified_lcm_summary_prefix_end(content) if isinstance(content, str) else None
+    start = survival_notice_block_start(content, end) if end is not None else None
+    return None if start is None else content[start:end].split("\n")[3]
 
 
 def _assert_turns_whole(result) -> None:
@@ -166,7 +178,11 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
         _assert_turns_whole(result)
         assert engine._survival_measure(result) <= budget and host(result) <= budget
         assert engine._last_survival_fit["dropped_rows"] == len(dropped)
-        assert not any(NOTICE in str(m.get("content")) for m in result)  # no system row: no in-list notice
+        if list_users:  # no system row and a standalone summary row: no in-list notice (#2896: main's shape)
+            assert not any(NOTICE in str(m.get("content")) for m in result)
+        else:  # #2896: the re-formed carrier holds the notice as its one block, and nothing else does
+            assert _block_notice(engine, result[0]) == engine._last_survival_fit["notice"]
+            assert sum(str(m.get("content")).count(NOTICE) for m in result) == 1
         stored = len(_rows(engine))
         engine.ingest(result)
         assert len(_rows(engine)) == stored

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -31,6 +32,38 @@ class EmissionProjection:
     def slice(self, offset: int, length: Optional[int] = None) -> "EmissionProjection":
         stop = None if length is None else offset + length
         return EmissionProjection(self.entries[offset:stop], self.offset + offset, self.complete_length)
+
+
+# #2896: the survival notice as one marked block after the last verified summary part (then a separator or the end of
+# the text). Its digest binds it to the parts before it and to its notice, so the summary verifier admits only a block
+# the fit wrote for exactly that summary; the carrier keys leave the block out.
+_NOTICE_BLOCK_RE = re.compile(r"\n\n<lcm-survival-notice digest=([0-9a-f]{16})>\n(\[LCM survival fit: \d+ earlier messages "
+                              r"\(store ids [^()\n\]]*\) are stored verbatim but not in live context[^\n]*?\.\])\n"
+                              r"</lcm-survival-notice>(?=\n\n|\Z)")
+
+
+def _notice_block_digest(parts: str, node_ids, notice: str) -> str:
+    return hashlib.sha256(json.dumps([parts, [int(node) for node in node_ids], notice]).encode("utf-8")).hexdigest()[:16]
+
+
+def survival_notice_block(parts: str, node_ids, notice: str) -> str:
+    """#2896: the marked block for ``notice`` after the verified summary ``parts`` (whose node ids are ``node_ids``)."""
+    return f"\n\n<lcm-survival-notice digest={_notice_block_digest(parts, node_ids, notice)}>\n{notice}\n</lcm-survival-notice>"
+
+
+def admitted_notice_block(content: str, pos: int, node_ids):
+    """The marked block at ``pos``, right after the verified parts ``content[:pos]``, when its digest is theirs."""
+    block = _NOTICE_BLOCK_RE.match(content, pos)
+    return block if block is not None and block.group(1) == _notice_block_digest(
+        content[:pos], node_ids, block.group(2)) else None
+
+
+def _span_without_notice_block(span: str) -> str:
+    """A generated span with the marked notice block that ends it (before its separator) left out."""
+    start = span.rfind("\n\n<lcm-survival-notice digest=")
+    block = _NOTICE_BLOCK_RE.match(span, start) if start >= 0 else None
+    return (span[:start] + span[block.end():]
+            if block is not None and span[block.end():] in ("", "\n\n", "\n\n---\n\n") else span)
 
 
 def _emission_identity(message: Mapping[str, Any], content: Optional[str] = None) -> tuple[str, str, str, str, str]:
@@ -103,6 +136,9 @@ def _finalize_emission_descriptors(messages: Sequence[dict[str, Any]], candidate
                 "output_occurrence": {"index": index, "same_identity_ordinal": ordinal, "of": len(messages)},
                 "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
                 "generated_span_bytes": len(span_bytes),
+                # #2896 (additive): the carrier key's span without the notice block, only when the span holds one
+                **({"generated_span_key_sha256": hashlib.sha256(keyed.encode("utf-8")).hexdigest()}
+                   if (keyed := _span_without_notice_block(span)) != span else {}),
                 "suffix_sha256": suffix_sha256,
                 "suffix_length": suffix_length,
                 "retained_source": candidate.get("retained_source"),
@@ -129,10 +165,11 @@ def _carrier_emission_key(descriptor_or_entry: Any) -> tuple[Any, Any, Any]:
     carried-forward copy of a retired carrier is retired too)."""
     if isinstance(descriptor_or_entry, EmissionProjectionEntry):
         span = descriptor_or_entry.generated_span
-        span_sha256 = hashlib.sha256(span.encode("utf-8")).hexdigest() if isinstance(span, str) else None
+        span_sha256 = (hashlib.sha256(_span_without_notice_block(span).encode("utf-8")).hexdigest()
+                       if isinstance(span, str) else None)
         suffix_sha256, source = descriptor_or_entry.suffix_sha256, descriptor_or_entry.retained_source
-    else:
-        span_sha256 = descriptor_or_entry.get("generated_span_sha256")
+    else:  # #2896: the key leaves the notice block out
+        span_sha256 = descriptor_or_entry.get("generated_span_key_sha256") or descriptor_or_entry.get("generated_span_sha256")
         suffix_sha256, source = descriptor_or_entry.get("suffix_sha256"), descriptor_or_entry.get("retained_source")
     return span_sha256, suffix_sha256, source.get("store_id") if isinstance(source, Mapping) else None
 

@@ -165,6 +165,7 @@ from .host_uid_emit import (
     sync_cached_host_metadata,
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
+from .emission_projection import _NOTICE_BLOCK_RE, admitted_notice_block
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
@@ -6751,6 +6752,11 @@ class LCMEngine(
         if not self._compiled_ignore_message_patterns:
             return False
         content = msg.get("content")
+        if isinstance(content, str) and not stored_row and "\n\n<lcm-survival-notice digest=" in content:
+            # #2896: ignored only when the text matches with and without its notice blocks (a block only keeps a row)
+            return all(matches_message_pattern(text_content_for_pattern_matching(text) or "",
+                                               self._compiled_ignore_message_patterns)
+                       for text in (content, _NOTICE_BLOCK_RE.sub("", content)))
         text = (
             stored_text_content_for_pattern_matching(content)
             if stored_row
@@ -7124,6 +7130,12 @@ class LCMEngine(
                 pos += 7
                 continue
             break
+        # #2896: one marked survival notice block after the last verified part, then a separator or the end of the
+        # text, belongs to the prefix; anything else (malformed, misplaced, before a further part) stays content
+        block = admitted_notice_block(content, pos, node_ids) if node_ids else None
+        if block is not None and not (content.startswith("\n\n---\n\n", block.end())
+                                      and self._LCM_SUMMARY_PART_HEADER_RE.match(content, block.end() + 7)):
+            pos = block.end()  # (a quoted header after a blank line is the host row's own text)
         return (pos, node_ids) if node_ids else (None, [])
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
