@@ -117,7 +117,7 @@ def test_bound_prefix_with_200_unbound_rows_uses_full_cold_walk(tmp_path, monkey
     _, base, base_cuts = _cold(tmp_path / "unset", monkeypatch, on=False, bound=True, added=added, unlocated=True)
     assert stored == base
     assert cuts == base_cuts and len(cuts) > 64
-    assert "LCM UID cut budget disabled: unbound_host_rows=137" in caplog.text
+    assert "LCM UID cut budget disabled: unbound_host_rows=136" in caplog.text
 
 
 @pytest.mark.parametrize("shape", _TASK_ROWS)

@@ -3214,15 +3214,14 @@ class ReconcileMixin:
             for row in stored_tail_rows
         ]
         run.stored_tail = stored_tail
-        # A located durable tail prevents later cuts from mistaking fresh rows for older
-        # equal content (#1511), whether or not the cut budget is used.
-        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if uid_cursor and stored_tail_rows else None
-        budgeted = bool(uid_cursor) and identity_anchor_enabled()
+        budgeted = bool(uid_cursor)
         if budgeted and (unbound := self._host_uid_unbound_rows(
-            messages[uid_cursor:max(uid_cursor, len(messages) - _UID_ON_CURSOR_CUT_BUDGET + 1)], bound_uids
+            messages[uid_cursor:-_UID_ON_CURSOR_CUT_BUDGET], bound_uids
         )):
             logger.info("LCM UID cut budget disabled: unbound_host_rows=%d", unbound)
             budgeted = False
+        # Later cuts can mistake new rows for older equal content (#1511). Earlier ones keep their own proof.
+        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if budgeted and stored_tail_rows else None
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -3231,8 +3230,7 @@ class ReconcileMixin:
             session_count=len(stored_tail),
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
-            content_cut=content_cut,
-            **({"cut_budget": _UID_ON_CURSOR_CUT_BUDGET, "uid_cursor": uid_cursor}
+            **({"content_cut": content_cut, "cut_budget": _UID_ON_CURSOR_CUT_BUDGET, "uid_cursor": uid_cursor}
                if budgeted else {}),
         )
         head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)

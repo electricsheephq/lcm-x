@@ -154,7 +154,7 @@ def test_mixed_bound_prefix_and_unbound_legacy_stretch_uses_full_walk(tmp_path, 
     assert len(seed) == 82
     assert stored == base == seed + _contents(added)
     assert cuts == base_cuts == list(range(152, 81, -1))
-    assert "LCM UID cut budget disabled: unbound_host_rows=87" in caplog.text
+    assert "LCM UID cut budget disabled: unbound_host_rows=86" in caplog.text
 
 
 def test_unbound_tool_pair_with_64_new_rows_still_stores_66(tmp_path, monkeypatch):
