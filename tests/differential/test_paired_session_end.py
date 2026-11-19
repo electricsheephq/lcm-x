@@ -438,6 +438,33 @@ def test_fake_candidates(tmp_path, monkeypatch, end_versions, kind, record_prope
         judge(snapshots['main'], snapshots['candidate'], stage)
 
 
+@pytest.mark.parametrize('change, accepted', (
+    ('unchanged', True), ('add-tool-call-index', True), ('remove-tool-call-index', False),
+    ('different-index-name', False), ('different-index-sql', False),
+    ('extra-index', False), ('changed-table', False),
+))
+def test_schema_delta_allows_only_the_exact_tool_call_index(change, accepted):
+    table = ('table', 'messages', 'messages', 'CREATE TABLE messages(session_id, tool_call_id)')
+    index = session_end_contract.TOOL_CALL_INDEX
+    other_name = 'idx_other_tool_call'
+    other_index = ('index', other_name, 'messages', index[3].replace(index[1], other_name))
+    wrong_sql = (*index[:3], index[3].replace(' IS NOT NULL', ' IS NULL'))
+    changed_table = (*table[:3], table[3].replace('session_id', 'session_id TEXT'))
+    baseline = [index, table] if change == 'remove-tool-call-index' else [table]
+    observed = {
+        'unchanged': [table], 'add-tool-call-index': [index, table], 'remove-tool-call-index': [table],
+        'different-index-name': [other_index, table], 'different-index-sql': [wrong_sql, table],
+        'extra-index': [other_index, index, table], 'changed-table': [index, changed_table],
+    }[change]
+    main = dict(canonical={}, schema={'lcm.db': baseline}, tables={}, payload={}, pending={}, ledger={}, lifecycle={})
+    candidate = dict(main, schema={'lcm.db': observed})
+    if accepted:
+        judge(main, candidate, 'seed')
+    else:
+        with pytest.raises(AssertionError, match='seed: schema changed'):
+            judge(main, candidate, 'seed')
+
+
 @pytest.mark.parametrize('key', ('canonical', 'tables'))
 @pytest.mark.parametrize('kind, reason', (
     ('exempt-drop', 'lost'), ('exempt-duplicate', 'doubled'),

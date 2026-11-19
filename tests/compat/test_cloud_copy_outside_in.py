@@ -694,7 +694,7 @@ def test_refusals(chain, tmp_path):
         "origin_wal_without_sidecars": wal,
         "manifest_unreadable": lambda c: c.manifest.write_bytes(b"{not json"),
         "newer_layout": manifest(lambda m: m.update(layout=2)),
-        "replica_newer_contract": manifest(lambda m: m["stamp"]["contract"].update(version=2)),
+        "replica_newer_contract": manifest(lambda m: m["stamp"]["contract"].update(version=contract()[0] + 1)),
         "bad_name/payload": manifest(lambda m: m["payloads"][0].update(name="a/b.json")),
         "bad_name/part": manifest(lambda m: m["database"]["base"]["parts"][0].update(
             key=m["database"]["base"]["parts"][0]["key"].upper().replace("PARTS/", "parts/"))),
