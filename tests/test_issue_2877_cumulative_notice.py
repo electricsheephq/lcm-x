@@ -862,7 +862,8 @@ def test_r2_the_counted_fallback_spans_interleaved_sessions_ranges():
 def test_r3_a_carried_row_whose_copy_is_under_a_kept_summary_is_not_named(engine):
     """P:3's byte-equal child copy S:8 sits under the kept node, and no uncovered child row has P:3's role and length:
     the read still loads S:8's key, so P:3 is in view and not named."""
-    add = lambda s, role, content: engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
+    def add(s, role, content):
+        return engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
     for role, content in (("user", "p one"), ("assistant", "p two"), ("user", "same"), ("assistant", "p four")):
         add("P", role, content)
     for role, content in (("user", "child five"), ("assistant", "child six"), ("assistant", "child seven"),
@@ -880,7 +881,8 @@ def test_r3_a_carried_row_whose_copy_is_under_a_kept_summary_is_not_named(engine
 def test_r3_a_carried_copy_under_a_kept_summary_does_not_push_a_real_range_out_of_its_call(engine):
     """Out-of-view carried P:1, a carried P:3 whose copy is under the kept node, and seven child ranges: eight real
     ranges, so P:1 keeps its call."""
-    add = lambda s, role, content: engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
+    def add(s, role, content):
+        return engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
     p1 = add("P", "user", "p one")
     add("P", "assistant", "p two")
     p3 = add("P", "user", "same")
