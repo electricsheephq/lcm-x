@@ -1,0 +1,1 @@
+- Fixed: Context assembly considers every uncondensed summary at each depth before applying the summary token budget.

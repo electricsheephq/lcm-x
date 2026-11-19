@@ -338,7 +338,7 @@ def test_t7_assembly_renders_the_newest_nodes_oldest_first(tmp_path, monkeypatch
     tail = _turn("tail", 5000.0)
     try:
         rendered = [node_id for _depth, node_id in _rendered(engine._assemble_context(None, tail))]
-        assert rendered == ids[-100:]  # the newest 100, oldest first
+        assert rendered == ids  # every uncondensed node, oldest first
         assert [node.node_id for node in engine._dag.get_uncondensed_at_depth("S", 0)] == ids[:100]
         assert engine._maybe_condense() >= 1
         condensed = [node for node in _nodes(engine) if node.depth == 1]

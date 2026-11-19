@@ -11536,11 +11536,9 @@ class LCMEngine(
         # #750: every depth in the session, deepest first; get_session_nodes() stops at 1000 rows.
         depths = self._dag.get_session_depths(self._session_id)[::-1]
         if depths:
-            # Group by depth, take the most recent uncondensed at each level
-            # For active context, we want the highest-level summaries
-            # that haven't been condensed into even higher levels
+            # Give prefix selection the full uncondensed frontier at each depth.
             for group, d in enumerate(depths):
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
+                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, limit=None, newest=True)
                 for node in uncondensed:
                     part_keys.append((group, node.node_id))
                     summary_parts.append(_summary_part_text(node))
