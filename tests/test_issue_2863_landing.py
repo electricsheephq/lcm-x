@@ -42,7 +42,7 @@ def prose_step(r, chars):
 
 
 def fixed_saving(eng, save_chars):
-    """compress() runs the engine's own _counted_compaction around a pass that cuts save_chars chars from the oldest
+    """compress() runs the engine's own progress report around a pass that cuts save_chars chars from the oldest
     tool row long enough to hold them; pairing is untouched."""
     def op(messages):
         out = [dict(m) for m in messages]
@@ -51,7 +51,7 @@ def fixed_saving(eng, save_chars):
                 m["content"] = m["content"][save_chars:]
                 return out
         return list(messages)
-    eng.compress = types.MethodType(C._counted_compaction(lambda self, messages, *a, **k: op(messages)), eng)
+    eng.compress = types.MethodType(C._reports_progress(lambda self, messages, *a, **k: op(messages)), eng)
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ def test_the_flag_matches_the_list_the_host_receives_after_the_return_boundary(e
         out = [dict(m) for m in messages]
         out[-1]["content"] = out[-1]["content"][:100]  # keeps the input's api_content: the boundary drops it
         return out
-    monkeypatch.setattr(C.CompactionMixin, "compress", C._counted_compaction(op))
+    monkeypatch.setattr(C.CompactionMixin, "compress", C._reports_progress(op))
     out = engine.compress(msgs, current_tokens=10)
     assert "api_content" not in out[-1] and "api_content" in msgs[-1]
     assert engine._last_compression_made_progress is True

@@ -15,3 +15,4 @@ tests/differential/test_paired_merged_user_turns.py  # Needs LCM_DIFFERENTIAL=1;
 tests/differential/test_paired_session_end.py  # Needs LCM_DIFFERENTIAL=1; executes under LCM_DIFFERENTIAL=1 in differential.yml (python -m pytest tests/differential).
 tests/test_p1h_store_identity.py  # Needs LCMX_P1H_BASE_TREE, an archived comparison tree; run by hand for #2293 store-identity proofs, with results in the PR.
 tests/test_issue_1160_session_end_flush_recovery.py  # Needs a real Hermes runtime (LCM_REAL_HERMES_PYTHON); its cases execute in the pinned-host full suite (host-suite.yml).
+tests/invariants/test_fixedwork_identity_memo_differential.py  # Needs LCMX_FIXEDWORK_BASE_TREE, a checkout of the base; the whole-session differential is run by hand on each head, with results in the PR (#2856).

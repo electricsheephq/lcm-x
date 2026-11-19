@@ -17,6 +17,7 @@ def repair_tool_pairs(
     *,
     stub: Callable[[str], Dict[str, Any]],
     insert_missing_tool_stubs: bool = True,
+    is_api_only: Callable[[Dict[str, Any]], bool] | None = None,
 ) -> RepairResult:
     """Repair the emitted rows without mutating their contents or durable history."""
     sanitized: List[Dict[str, Any]] = []
@@ -40,27 +41,40 @@ def repair_tool_pairs(
                 for call_id in (_tool_call_id(tool_call) for tool_call in (msg.get("tool_calls") or []))
                 if call_id
             ]
+            deferred_api_rows: List[Dict[str, Any]] = []
 
             for expected_id in expected_ids:
                 matched_direct_result = False
-                while i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
+                while i + 1 < len(messages):
                     next_msg = messages[i + 1]
-                    next_id = str(next_msg.get("tool_call_id") or "").strip()
-                    if next_id == expected_id:
-                        sanitized.append(next_msg)
-                        i += 1
-                        matched_direct_result = True
+                    if next_msg.get("role") == "tool":
+                        next_id = str(next_msg.get("tool_call_id") or "").strip()
+                        if next_id == expected_id:
+                            sanitized.append(next_msg)
+                            i += 1
+                            matched_direct_result = True
+                            break
+                        dropped_tool_results += 1
+                    elif is_api_only is not None and is_api_only(next_msg):
+                        deferred_api_rows.append(next_msg)
+                    else:
                         break
-                    dropped_tool_results += 1
                     i += 1
 
                 if not matched_direct_result and insert_missing_tool_stubs:
                     sanitized.append(stub(expected_id))
                     inserted_stub_results += 1
 
-            while i + 1 < len(messages) and messages[i + 1].get("role") == "tool":
-                dropped_tool_results += 1
+            while i + 1 < len(messages):
+                next_msg = messages[i + 1]
+                if next_msg.get("role") == "tool":
+                    dropped_tool_results += 1
+                elif is_api_only is not None and is_api_only(next_msg):
+                    deferred_api_rows.append(next_msg)
+                else:
+                    break
                 i += 1
+            sanitized.extend(deferred_api_rows)
 
         i += 1
 
