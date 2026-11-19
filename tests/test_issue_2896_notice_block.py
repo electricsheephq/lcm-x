@@ -148,7 +148,7 @@ def _without_block(engine, message: dict) -> dict:
 
 
 @pytest.mark.parametrize("list_users", [False, True], ids=["carrier", "standalone-summary"])
-def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_path, host, list_users):
+def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_path, host, list_users):  # noqa: F811 (the imported pytest fixture)
     """Cell 2: the fit's notice is the head's one block (the re-formed carrier, or the standalone summary row), and
     each named call, run through the real handlers, returns its stored rows."""
     engine = _hermes_engine(tmp_path)
@@ -172,7 +172,7 @@ def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_p
 
 
 @pytest.mark.parametrize("list_users", [False, True], ids=["carrier", "standalone-summary"])
-def test_3_reopen_and_restart_store_nothing_twice(tmp_path, host, list_users):
+def test_3_reopen_and_restart_store_nothing_twice(tmp_path, host, list_users):  # noqa: F811 (the imported pytest fixture)
     """Cell 3: the host sends the fitted list back (same process, then a cold one with a new turn): nothing is stored
     twice, and every row maps to its own stored row (the head to the user row behind its summary and block)."""
     engine = _hermes_engine(tmp_path)
@@ -207,7 +207,7 @@ def test_3_reopen_and_restart_store_nothing_twice(tmp_path, host, list_users):
         cold.shutdown()
 
 
-def test_4_two_fits_in_a_row_leave_one_block(tmp_path, host):
+def test_4_two_fits_in_a_row_leave_one_block(tmp_path, host):  # noqa: F811 (the imported pytest fixture)
     """Cell 4: a second fit on the first's list plus new turns replaces the block: one block, the newest notice."""
     engine = _hermes_engine(tmp_path)
     try:
@@ -239,7 +239,7 @@ def test_5_the_cap_covers_the_wrapped_block(engine):
     assert _read(engine, parts + block)["scaffold"]  # the counted notice is a block too
 
 
-def test_7_no_system_row_and_no_summary_head_places_nothing_and_warns_once(tmp_path, host, caplog):
+def test_7_no_system_row_and_no_summary_head_places_nothing_and_warns_once(tmp_path, host, caplog):  # noqa: F811 (the imported pytest fixture)
     """Cell 7: with no system row and no summary head the notice is not placed; one warning."""
     engine = _hermes_engine(tmp_path, window=24_000)
     try:
@@ -255,7 +255,7 @@ def test_7_no_system_row_and_no_summary_head_places_nothing_and_warns_once(tmp_p
         engine.shutdown()
 
 
-def test_8_head_bytes_are_stable_while_nothing_changes(tmp_path, host):
+def test_8_head_bytes_are_stable_while_nothing_changes(tmp_path, host):  # noqa: F811 (the imported pytest fixture)
     """Cell 8: two engines from the same stored state return byte-identical heads."""
     heads = []
     for name in ("one", "two"):
