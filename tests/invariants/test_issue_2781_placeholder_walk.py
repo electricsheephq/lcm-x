@@ -342,7 +342,7 @@ def test_complete_group_followed_by_version(tmp_path, monkeypatch, summaries, ca
         _assert_no_orphan_or_stub(output)
 
 
-@pytest.mark.xfail(strict=True, reason="first-group exception gap, pre-existing, issue 2934")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="first-group exception gap, pre-existing, issue 2934")
 def test_first_open_group_keeps_its_real_result(tmp_path, monkeypatch, summaries):
     _mode(monkeypatch, "on")
     with _open(tmp_path / "store") as engine:
@@ -355,7 +355,9 @@ def test_first_open_group_keeps_its_real_result(tmp_path, monkeypatch, summaries
         seen = _observe_resolution(engine, monkeypatch, [(live, result_id, None)])
         output = _pass(engine, [summary, caller, live, later, retained, tail])
         _assert_resolution(seen, [(live, result_id, None)])
-        assert result_id in _present_node_sources(engine, output) or live in output or result in output
+        assert result_id in _present_node_sources(engine, output) or any(
+            row.get("role") == "tool" and row.get("tool_call_id") == result["tool_call_id"]
+            and row.get("content") == result["content"] for row in output)
 
 
 @pytest.mark.parametrize("exit_at", ["retained", "hole", "scan"])

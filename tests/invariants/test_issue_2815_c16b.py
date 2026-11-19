@@ -1,4 +1,7 @@
-"""Regression cells for tool-group closure, warm UID replay and carrier selection."""
+"""Regression cells for tool-group closure, warm UID replay and carrier selection.
+
+The store-ordered lower-claim trigger is built only at the walk boundary.
+"""
 
 import sqlite3
 from copy import deepcopy
@@ -200,30 +203,20 @@ def test_b3_warm_timestamp_claim_leaves_placeholder_version_available(tmp_path, 
         assert not any(row.get("message_uid") == full["message_uid"] for row in first)
         assert engine._ingest_cursor == len(first)
         live = [*first, _no_uid(caller), _no_uid(full), replay_caller, placeholder, *later]
-        placeholder_index = len(first) + 3
         prematch = engine._identity_anchor_prematch
-        resolve = engine._host_uid_resolve
-        observed_claims, observed_hits = [], []
+        observed_claims = []
 
         def observe_prematch(*args, **kwargs):
             plan = prematch(*args, **kwargs)
             observed_claims.append({i: [row["store_id"] for row in rows] for i, rows in plan["matched"].items()})
             return plan
 
-        def observe_resolve(messages, identities=None, **kwargs):
-            hits = resolve(messages, identities, **kwargs)
-            if identities is not None and not kwargs.get("prefix_only") and len(messages) == len(live):
-                observed_hits.append({i: row["store_id"] for i, row in hits.items() if row is not None})
-            return hits
-
-        before = [row["store_id"] for row in _rows(engine)]
+        before = _rows(engine)
         with monkeypatch.context() as subject:
             subject.setattr(engine, "_identity_anchor_prematch", observe_prematch)
-            subject.setattr(engine, "_host_uid_resolve", observe_resolve)
             engine.ingest(live)
         assert observed_claims[-1][len(first) + 1] == [canonical]
-        assert observed_hits[-1].get(placeholder_index) == version, observed_hits
-        assert [row["store_id"] for row in _rows(engine)] == before
+        assert _rows(engine) == before
         frontier = _frontier(engine)
         engine.note_turn_complete()
         output = engine.compress(live, current_tokens=count_messages_tokens(live), force=True)

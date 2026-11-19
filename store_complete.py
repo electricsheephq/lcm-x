@@ -692,7 +692,7 @@ class StoreCompleteMixin:
             # A mapped caller in the live view can bound a result beyond the scan.
             for message, sid in ([(row, int(row["store_id"])) for row in rows]
                                  + [(m, position(m)) for m in view]):
-                if sid:
+                if sid and sid not in skipped:
                     for call_id in caller_ids(message):
                         caller_positions.setdefault(call_id, set()).add(sid)
             caller_positions = {call_id: sorted(positions) for call_id, positions in caller_positions.items()}
@@ -706,9 +706,9 @@ class StoreCompleteMixin:
             waiting, live_callers = {}, {}
             for message in chunk:
                 for call_id in caller_ids(message):
-                    live_callers[call_id] = position(message)
+                    live_callers[call_id] = position(message), id(message)
                 if id(message) not in emitted and (call_id := tool_id(message)):
-                    waiting.setdefault(call_id, []).append((position(message), live_callers.get(call_id)))
+                    waiting.setdefault(call_id, []).append((position(message), *live_callers.get(call_id, (None, None))))
 
             def has_answer(positions, at, end):
                 index = bisect_right(positions, at)
@@ -730,8 +730,9 @@ class StoreCompleteMixin:
                             continue
                         only_caller = len(positions) <= 1 and index == len(positions)
                         count += has_answer(stored_answers.get(call_id, ()), at, end) or any(
-                            only_caller or (at < sid < end if sid else owner in (None, at))
-                            for sid, owner in waiting.get(call_id, ()))
+                            only_caller or owner_id == id(message)
+                            or (at < sid < end if sid else owner in (None, at))
+                            for sid, owner, owner_id in waiting.get(call_id, ()))
                     if count:
                         pending = i, at, count
                     answered.difference_update(opens)
@@ -744,7 +745,10 @@ class StoreCompleteMixin:
             last = max((s for m, ids in out for s in ids_of(m, ids)), default=0)
             hole = next((int(row["store_id"]) for row in rows
                          if int(row["store_id"]) < last and int(row["store_id"]) not in accounted), None)
-            restore = hole is not None and before_pending is not None
+            restore = hole is not None and before_pending is not None and not (
+                allow_retained_escape and self._retained_escape_enabled and (
+                    (self._store_complete_blocked and not escape_retained)
+                    or (lift_allowed and (self._context_aware_leaf_cap() or max(budget, 1) * _SCAN_EXTEND) > budget)))
             if hole is None or restore:
                 if restore:
                     # The walk prefix lost a lower store ID carried by a later walk row.

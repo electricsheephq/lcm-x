@@ -362,6 +362,9 @@ class HostUidShadowMixin:
                                                      if owned[sid].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER}
                     if hit is None and candidates:
                         hit = self._host_uid_bytes_match([sid for sid, _ in candidates], identity, owned, lossless=True)
+                    if hit is None and avoid:
+                        hit = next((sid for sid, kind in candidates if kind == "canonical" and sid in avoid
+                                    and self._uid_placeholder_source(message, owned[sid])), None)
                     if hit is not None:
                         resolved[idx] = owned[hit]
                         claimed.add(hit)
