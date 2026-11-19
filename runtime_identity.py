@@ -10,6 +10,7 @@ functions that own it. ``engine.py`` imports the entry points it calls.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -79,11 +80,17 @@ def _git_runtime_identity(root: Path) -> dict[str, Any]:
             "plugin_git_remote": "",
         }
 
+    # The GIT_OPTIONAL_LOCKS=0 environment variable: plain `git status`
+    # refreshes the index and takes `index.lock`; a probe killed at the timeout
+    # would leave that lock in the checkout and break the next git write there
+    # (#2884). The output is the same, and git older than 2.15 (which rejects the
+    # `--no-optional-locks` flag) ignores the variable.
     def _git(*args: str) -> str | None:
         try:
             result = subprocess.run(
                 ["git", "-C", str(root), *args],
                 check=False,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
                 capture_output=True,
                 text=True,
                 timeout=1,

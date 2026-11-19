@@ -23,7 +23,8 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial, wraps
+from functools import partial
+from threading import get_ident
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -81,30 +82,6 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "condensation_no_progress",
     "no_same_depth_condensation_group",
 })
-
-
-def _counted_compaction(operation):
-    """Keep connections live through the entire pass, including its finalizers."""
-    @wraps(operation)
-    def counted(self, messages, *args, **kwargs):
-        with self._compaction_gate:
-            if self._compaction_closing:
-                return messages
-            self._compaction_inflight += 1
-        try:
-            canonical, host_view = self._canonical_host_view(messages)
-        except Exception as exc:
-            self._last_compression_status = "error"
-            self._record_ingest_failure("compress", exc)
-            return messages
-        else:
-            # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
-            return operation(self, canonical, *args, **{**kwargs, **host_view, "caller_messages": messages})
-        finally:
-            with self._compaction_gate:
-                self._compaction_inflight -= 1
-                self._compaction_gate.notify_all()
-    return counted
 
 
 @dataclass
@@ -775,7 +752,22 @@ class CompactionMixin:
         engine, changed = _compaction_binding_check.get()
         return engine is self and changed()
 
-    @_counted_compaction
+    def _claim_compress_owner(self, caller: int) -> bool:
+        """Claim under the compaction gate, preserving same-thread nesting."""
+        if self._compress_owner not in (None, caller):
+            self._compress_reentry_refusals += 1
+            logger.info("LCM compression skipped: another pass owns this engine")
+            return False
+        self._compress_owner = caller
+        self._compress_owner_depth += 1
+        return True
+
+    def _release_compress_owner(self) -> None:
+        """Release one claim under the compaction gate."""
+        self._compress_owner_depth -= 1
+        if not self._compress_owner_depth:
+            self._compress_owner = None
+
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
@@ -783,17 +775,57 @@ class CompactionMixin:
                  bypass_cooldown: bool = False, *, host_pairs=(), caller_messages=None) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
-        if self._compaction_is_closing():
-            return messages
-        self._maybe_reclassify_late_auxiliary_before_compaction_write()
-        with self._bypass_compression_binding() as bypassed:
-            sid = self._bypass_lcm_session_id() if bypassed else self._session_id
-            if self._emission_handle is not None and self._emission_handle.session_id == sid:
-                self._emission_handle = None
-            if bypassed:
-                # #1931: a delegated child's rows are stored before the host's compaction rewrites its view.
-                return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
-        caller_messages = messages if caller_messages is None else caller_messages
+        caller = get_ident()
+        # Bypass detection can inspect the auxiliary registry. Keep it outside the compaction gate.
+        owned = not self._bypasses_lcm_context_management()
+        with self._compaction_gate:
+            if self._compaction_closing or (owned and not self._claim_compress_owner(caller)):
+                return messages
+            self._compaction_inflight += 1
+        try:
+            caller_messages = messages
+            try:
+                messages, host_view = self._canonical_host_view(caller_messages)
+            except Exception as exc:
+                self._last_compression_status = "error"
+                self._record_ingest_failure("compress", exc)
+                return caller_messages
+            # Generated pairs match the copy made here and take precedence.
+            host_pairs = host_view.get("host_pairs", host_pairs)
+            if self._compaction_is_closing():
+                return messages
+            self._maybe_reclassify_late_auxiliary_before_compaction_write()
+            with self._bypass_compression_binding() as bypassed:
+                if bypassed:
+                    if owned:  # First-ingest reclassification found a late auxiliary caller.
+                        with self._compaction_gate:
+                            self._release_compress_owner()
+                            owned = False
+                    handle = self._emission_handle
+                    if handle is not None and handle.session_id == self._bypass_lcm_session_id():
+                        self._emission_handle = None
+                    # #1931: store a delegated child's rows before the host rewrites its view.
+                    return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+            if not owned:  # A bypass may have ended while the call was preparing.
+                with self._compaction_gate:
+                    owned = self._claim_compress_owner(caller)
+                    if not owned:
+                        return caller_messages
+            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
+                                        host_pairs=host_pairs, caller_messages=caller_messages)
+        finally:
+            # Keep the store open and the owner held through the pass's finalizers.
+            with self._compaction_gate:
+                if owned:
+                    self._release_compress_owner()
+                self._compaction_inflight -= 1
+                self._compaction_gate.notify_all()
+
+    def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *,
+                        host_pairs, caller_messages):
+        handle = self._emission_handle
+        if handle is not None and handle.session_id == self._session_id:
+            self._emission_handle = None
         # The session reset epoch also detects a reset or a rebind back to the same IDs.
         binding = (self._session_id, self._conversation_id, self._pressure_yield_reset_epoch)
 
@@ -833,10 +865,15 @@ class CompactionMixin:
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
-            elif (not force and (self._retained_stop_hold_active() or (self._no_progress_hold is not None
-                  and (self._no_progress_hold[1] != "no_progress"
-                       or not getattr(self, "_no_progress_hold_persisted", False))))) and self._no_progress_hold_blocks(
-                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+            elif (
+                not force
+                and (self._retained_stop_hold_active() or (
+                    (hold := self._no_progress_hold) is not None
+                    and (hold[1] != "no_progress" or not getattr(self, "_no_progress_hold_persisted", False))
+                ))
+                and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages))
+            ):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._compaction_request.below_threshold_cleanup_only = True
@@ -2311,7 +2348,7 @@ class CompactionMixin:
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
                 and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-                and (retained_hold or (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"))):
+                and (retained_hold or ((hold := self._no_progress_hold) is not None and hold[1] == "no_progress"))):
             # A cold direct caller now has current replay proof. Ingest cleanup
             # is adopted, but no attribution/leaf/condensation work is repeated.
             self._ingest_cursor = len(state.working_messages)
@@ -2870,8 +2907,8 @@ class CompactionMixin:
                 self._start_sweep_budget_hold(seconds_left, turn_paced=(
                     self._sweep_budget_hold_turn_paced
                     and self._sweep_budget_hold_active()
-                    and self._hung_summary_strike is not None
-                    and self._hung_summary_strike[0] == self._hold_conversation_key()
+                    and (strike := self._hung_summary_strike) is not None
+                    and strike[0] == self._hold_conversation_key()
                 ))
         elif state.sweep_stop_reason == "summary_result_rejected":
             warn_rejected()
@@ -2880,8 +2917,8 @@ class CompactionMixin:
 
         if state.budget.hung_route is not None:
             first_hang = (
-                self._hung_summary_strike is None
-                or self._hung_summary_strike[0] != self._hold_conversation_key())
+                (strike := self._hung_summary_strike) is None
+                or strike[0] != self._hold_conversation_key())
             if not first_hang:
                 # #1369: even an exempt forced retry consumes the pending turn-end release.
                 self._sweep_budget_hold_turn_paced = False
