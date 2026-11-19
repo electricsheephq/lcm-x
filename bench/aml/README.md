@@ -54,6 +54,13 @@ and `CODING_TOTAL_CHARS = 40000`. It preserves ranked order and full-content
 IDs while returning excerpts through the same endpoints. Use a separate
 `AML_DB_ROOT` per mode.
 
+`AML_ITEM_FIELDS=v2` (default `v1`, byte-identical) adds `text` (a copy of
+`content`) to each search item, and `created_at` (ISO 8601 UTC) when the item
+starts with a timezone-aware bracketed time; naive or free-text times get none.
+Per-request receipts then carry `degraded` and `degraded_reasons`, the
+adapter's degraded or abort notice that a v1 worker loses. Other values prevent
+startup.
+
 Use a Python environment with the pinned client's and LCM-X's dependencies.
 Load your token from your own secret store into `AML_ADDSEARCH_TOKEN`; do not
 put it in command history. Set the remaining environment variables:
