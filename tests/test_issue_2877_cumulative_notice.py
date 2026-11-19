@@ -712,16 +712,15 @@ EDGE_TESTS = {"916": ("test_issue_916_projection_keeps_head.py",
                       ("test_a_second_recovery_attempt_shrinks_again_and_stops_where_nothing_can_leave",))}
 
 
-@pytest.fixture(scope="module")
-def edge_runs(tmp_path_factory):
-    """The #916 and #608 budget-edge cells as written, with the session id "S" replaced engine-wide by an id of each
-    length (every "S" literal in their source), in one isolated pytest process: {(file, length, test): (outcome,
-    the fit's logged tokens and budget, the failure text)}."""
-    work = tmp_path_factory.mktemp("edge")
+def _edge_run(work: Path, lengths, mutate=lambda key, source: source) -> dict:
+    """The #916 and #608 budget-edge cells as written (``mutate`` may edit their source), with the session id "S"
+    replaced engine-wide by an id of each length (every "S" literal in their source), in one isolated pytest process:
+    {(file, length, test): (outcome, the fit's logged tokens and budget, the failure text, its terminal message)}."""
     targets = []
     for key, (name, tests) in EDGE_TESTS.items():
-        source = (TREE / "tests" / name).read_text()
-        for length, sid in EDGE_IDS.items():
+        source = mutate(key, (TREE / "tests" / name).read_text())
+        for length in lengths:
+            sid = EDGE_IDS[length]
             assert len(sid) == length and set(sid) <= set("abcdefghijklmnopqrstuvwxyz0123456789:_-S")
             (work / f"test_edge_{key}_{length}.py").write_text(source.replace('"S"', json.dumps(sid)))
             targets += [f"test_edge_{key}_{length}.py::{test}" for test in tests]
@@ -745,9 +744,16 @@ def edge_runs(tmp_path_factory):
     for case in ElementTree.parse(report).getroot().iter("testcase"):
         logged = "".join(node.text or "" for node in case.iter() if node.tag in ("system-out", "system-err"))
         fits = [tuple(map(int, found)) for found in re.findall(r"tokens=(\d+)->(\d+), budget=(\d+)\)", logged)]
-        failure = "".join(node.text or "" for node in case if node.tag in ("failure", "error"))
-        runs[(case.get("classname"), case.get("name"))] = (not failure, fits, failure)
+        failed = [node for node in case if node.tag in ("failure", "error")]
+        failure = "".join(node.text or "" for node in failed)
+        runs[(case.get("classname"), case.get("name"))] = (not failed, fits, failure,
+                                                           failed[0].get("message", "") if failed else "")
     return runs
+
+
+@pytest.fixture(scope="module")
+def edge_runs(tmp_path_factory):
+    return _edge_run(tmp_path_factory.mktemp("edge"), sorted(EDGE_IDS))
 
 
 class EdgeMoved(Exception):
@@ -760,7 +766,9 @@ def _edge_reason(what: str) -> str:
             "no stored row is lost")
 
 
-# the cause each trade-off names: the line that fails, read from the failure text
+# the cause each trade-off names: the line that fails and the message it raises, in the terminal exception (the last
+# section of a chained traceback), so a later failure (in a finally, at shutdown) is never taken for it
+EDGE_MESSAGE = {"916": "AssertionError: assert False", "608": "AssertionError: assert (1 == 1 and 2 == 1)"}
 EDGE_CAUSE = {
     "916": re.compile(r">\s+assert (?:newest|projected)\[\"content\"\]\.startswith\(view\[-1\]\[\"content\"\]\[:1200\]\)\n"),
     "608": re.compile(r">\s+assert _count\(caplog, \"could not reach budget\"\) == 1 and _fit_records\(engine\) == 1\n"
@@ -789,13 +797,22 @@ def test_the_budget_edge_with_a_longer_session_id_is_pinned(edge_runs, key, test
     """Strict: the #916 and #608 budget-edge cells as written pass with a 1-character session id and fail with 24 and
     81 characters (colon keys), each at its measured fits (tokens before, after, budget), and only at the line its
     trade-off names: any other failure is a real one."""
-    cases = {name: run for (module, name), run in edge_runs.items()
+    _edge_verdict(edge_runs, key, test, length, fits)
+
+
+def _edge_verdict(runs, key, test, length, fits):
+    """EdgeMoved when every case of the cell failed with the named cause as its terminal exception; passes when every
+    case passed; any other outcome is an AssertionError."""
+    cases = {name: run for (module, name), run in runs.items()
              if module == f"test_edge_{key}_{length}" and name.split("[")[0] == test}
-    assert cases and all(logged == fits for _, logged, _ in cases.values()), cases
-    if not all(passed for passed, _, _ in cases.values()):
-        assert all(not passed and EDGE_CAUSE[key].search(text) for passed, _, text in cases.values()), [
-            text[-600:] for _, _, text in cases.values()]
-        raise EdgeMoved(f"#{key} {test} with a {length}-character session id")
+    assert cases and all(run[1] == fits for run in cases.values()), cases
+    if all(run[0] for run in cases.values()):
+        return
+    chain = re.compile(r"\n(?:During handling of the above exception, another exception occurred|The above exception "
+                       r"was the direct cause of the following exception):\n")
+    assert all(not passed and message.startswith(EDGE_MESSAGE[key]) and EDGE_CAUSE[key].search(chain.split(text)[-1])
+               for passed, _, text, message in cases.values()), [(m, t[-600:]) for _, _, t, m in cases.values()]
+    raise EdgeMoved(f"#{key} {test} with a {length}-character session id")
 
 
 @pytest.mark.parametrize("length", sorted(EDGE_IDS))
@@ -923,10 +940,10 @@ def test_r3_the_counted_clause_spans_every_range_it_folds():
     assert "; and 2 earlier ranges (store ids 1..100); lcm_grep reaches them" in notice, notice
 
 
-def test_r3_interleaved_parent_and_child_rows_leave_no_row_outside_every_pointer(engine, monkeypatch):
-    """Twenty turns where this session's rows and its parent's carried rows alternate in the store (one each), then
-    newer rows: the parent gives many one-row ranges inside this session's one range. Every out-of-view row is named
-    or inside a counted span (rows 41..52 included)."""
+def _interleaved(engine, monkeypatch):
+    """Twenty turns where this session's rows and its parent's carried rows alternate in the store (one each: S at odd
+    ids 1..39, P at even ids 2..40), then newer rows; one fit. Returns the notice, the rows its calls name, the spans it
+    states (head and counted clause) and the out-of-view rows."""
     _rough(monkeypatch)
     pad = " older words" * 60
     parent = []
@@ -955,8 +972,59 @@ def test_r3_interleaved_parent_and_child_rows_leave_no_row_outside_every_pointer
     listed = {m["content"] for m in result}
     out = [x for x, content in conn.execute("SELECT store_id, content FROM messages ORDER BY store_id")
            if content not in listed]
-    assert set(range(41, 53)) <= set(out), out  # the premise: rows 41..52 are out of view
+    assert parent == list(range(2, 41, 2)) and set(range(41, 53)) <= set(out), out  # the premise
+    return notice, named, spans, out
+
+
+def _interleaved_parent_calls(notice) -> list[tuple[int, int]]:
+    return [(a, b) for a, b, args in _calls(notice) if args["session_id"] == "P"]
+
+
+# the newest 8 ranges by start id are named: the parent's one-row ranges at 26, 28, ..., 40; the rest are counted
+INTERLEAVED_PARENT_CALLS = [(x, x) for x in range(26, 41, 2)]
+
+
+def test_r3_interleaved_parent_and_child_rows_leave_no_row_outside_every_pointer(engine, monkeypatch):
+    """Every out-of-view row is named or inside a counted span (rows 41..52 included), and, separately from the
+    spans, each expected parent call is there."""
+    notice, named, spans, out = _interleaved(engine, monkeypatch)
     assert not [x for x in out if x not in named and not any(a <= x <= b for a, b in spans)], notice
+    assert _interleaved_parent_calls(notice) == INTERLEAVED_PARENT_CALLS, notice
+
+
+def test_r4_the_interleaved_cell_fails_when_a_parent_call_is_omitted(engine, monkeypatch):
+    """A mutant that names one range fewer drops P:26's call into the counted clause: the spans still hold every row,
+    and only the separate call check catches it."""
+    monkeypatch.setattr(survival_fit, "_NOTICE_MAX_RANGES", _NOTICE_MAX_RANGES - 1)
+    notice, named, spans, out = _interleaved(engine, monkeypatch)
+    assert not [x for x in out if x not in named and not any(a <= x <= b for a, b in spans)], notice
+    assert _interleaved_parent_calls(notice) == INTERLEAVED_PARENT_CALLS[1:] != INTERLEAVED_PARENT_CALLS, notice
+
+
+SHUTDOWN_RAISES = {  # a mutant whose engine shutdown raises in the cell's finally, after the accepted assertion failed
+    "608": ('        assert _count(caplog, "could not reach budget") == 1 and _fit_records(engine) == 1\n'
+            '    finally:\n        engine.shutdown()\n'),
+    "916": ('        assert engine._store.get_session_messages("S")[-1]["content"] == view[-1]["content"]\n'
+            '    finally:\n        engine.shutdown()\n')}
+
+
+def test_r4_a_failure_at_shutdown_is_never_taken_for_the_accepted_cause(tmp_path):
+    """With a 24-character id the accepted assertion fails, then shutdown raises in the finally: the accepted line is
+    in the traceback, but the terminal exception is the shutdown's, so the wrapper raises AssertionError, never
+    EdgeMoved (its strict xfail would go red)."""
+    def mutate(key, source):
+        assert source.count(SHUTDOWN_RAISES[key]) == 1
+        return source.replace(SHUTDOWN_RAISES[key], SHUTDOWN_RAISES[key] + '        raise RuntimeError("shutdown failed")\n')
+
+    runs = _edge_run(tmp_path, [24], mutate)
+    for param in EDGE:
+        key, test, length, fits = param.values
+        if length != 24 or "reingest" in param.id:
+            continue
+        cases = [run for (module, name), run in runs.items() if module == f"test_edge_{key}_24" and name == test]
+        assert cases and all(EDGE_CAUSE[key].search(text) and "shutdown failed" in message for _, _, text, message in cases)
+        with pytest.raises(AssertionError):
+            _edge_verdict(runs, key, test, length, fits)
 
 
 def test_r3_an_emergency_fit_runs_each_carry_query_once(engine, monkeypatch, caplog):
