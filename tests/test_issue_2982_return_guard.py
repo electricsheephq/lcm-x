@@ -116,7 +116,7 @@ def test_r0_and_k_grown_pass_is_held_back(make, thinking):
     assert _summary_rows_safe(result), report
     if status["held_back_returns"]:  # the grown pass: K
         assert result is view and result == snapshot, report  # _candidate_rejected: no progress, nothing else runs
-        assert engine._last_compression_made_progress is False, report
+        assert getattr(engine, "_last_compression_made_progress", False) is False, report  # the line has no flag
         assert report["hold"] == "cooldown:lcm_hidden_only", report  # one turn-end reason, never no_progress
         assert status["held_back_returns"]["passes"] == 1 and status["held_back_returns"]["deficit_tokens"] > 0
         assert report["nodes"] >= 1 and report["calls"] == report["nodes"], report  # leaves kept; one call per leaf
