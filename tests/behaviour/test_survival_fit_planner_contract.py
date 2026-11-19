@@ -147,7 +147,7 @@ def test_real_cut_reforms_carrier(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         engine._generated_context_carrier_remainder = lambda row: (
             row["content"][9:] if row["content"].startswith("summary\n\n") else None)
         engine._verified_lcm_summary_prefix_end = lambda text: 7
-        engine._survival_generated = lambda row: False
+        engine._survival_generated = lambda row, store_id=None, *, carrier_cache=None: False
         engine._survival_host_overhead = lambda *a: 0
         engine._get_store_id_map_for_messages = lambda value: {id(row): i + 10 for i, row in enumerate(rows)}
         # Identity emission is independently tested; keep this carrier recipe deterministic.
