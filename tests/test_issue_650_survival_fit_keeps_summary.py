@@ -344,7 +344,9 @@ def test_r2_f1_the_prefix_cut_maps_the_whole_list(tmp_path, host, stored_copy, l
         if stored_copy:
             assert whole.get(id(copy)) == 4 and result == expected
             assert engine._get_store_id_map_for_messages(active[1:]).get(id(copy)) == 2  # a sublist map errs
-            assert "store ids 3..4" in engine._last_survival_fit["notice"]
+            from hermes_lcm.survival_fit import survival_fit_notice
+            shown = {n for m in result if m["role"] == "user" for n in engine._verified_lcm_summary_prefix(m["content"])[1]}
+            assert engine._last_survival_fit["notice"] == survival_fit_notice(engine, result, shown)
         else:
             assert id(copy) not in whole
             assert any(m is copy for m in result) and engine._last_survival_fit is None
@@ -360,7 +362,7 @@ def test_r2_f2_the_notice_never_pushes_a_whole_turn_cut_over_budget(tmp_path, mo
     where the old cut fits without its notice. Where v0.24.6's list (its notice included) fits, the result
     fits; elsewhere it is never larger than v0.24.6's."""
     from hermes_lcm.dag import SummaryNode
-    from hermes_lcm.survival_fit import _NOTICE
+    from hermes_lcm.survival_fit import survival_fit_notice
 
     monkeypatch.setitem(sys.modules, "agent.model_metadata", None)  # LCM's own character-based count
     rows = [r for i in range(5) for r in _turn(f"D{i}", 10.0 * i)]
@@ -375,7 +377,7 @@ def test_r2_f2_the_notice_never_pushes_a_whole_turn_cut_over_budget(tmp_path, mo
         assert engine._generated_context_carrier_remainder(carrier) == rows[0]["content"]
         measure, budget = engine._survival_measure, engine._survival_fit_budget([system], 0)
         old_head = {"role": "system", "content": engine._survival_with_notice(
-            "systemxx", _NOTICE.format(n=9, first=1, last=10))}  # v0.24.6's head for this cut
+            "systemxx", survival_fit_notice(engine, [system], set()))}  # v0.24.6's head for this cut
         exact = 0
         for pad in range(81_384 - 200, 81_384 + 1, 4):
             turn = [{"role": "user", "content": "the newest question", "timestamp": 500.0},

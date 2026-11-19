@@ -220,21 +220,17 @@ S = [cell["id"] for cell in CELLS if cell["group"] == "S"]
 N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
-# Part 2's base already carries the issue-2901 fix (merge of fa4cad11 and main 2c75f52b), so the three fixed twins lose
-# nothing on the base either: their base pin is lifted (each was a strict XPASS on that base).
-KNOWN_2896 = [cell for cell in N if cell not in ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]]
 # Issue 2901: leaf selection charges a glued carrier at its remainder, so these twins no longer stall into the fit.
 FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
+# twins main fails on the base test (A0 or A0b); main 2c75f52b carries the 2901 fix, so FIXED_2901 pass on the base
+KNOWN_2896 = [cell for cell in N if cell not in FIXED_2901]
 KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
 # Part 2: the candidate loses no row in s-600k-l40-prefix-nosys (A0 0 against the base's 2,080), so its candidate pin
-# and its per-pass pin are lifted (both were strict XPASSes).
+# is lifted (a strict XPASS).
 KNOWN_2896_A0 = [cell for cell in KNOWN_2896_A0 if cell != "s-600k-l40-prefix-nosys"]
-# Issue 2901 moves these twins' trajectories: on some passes the candidate shows rows out of the list where the base did
-# not, while its totals stay at most the base's. Only the per-pass clause is pinned; the totals test is not.
-PER_PASS_2901 = ["d-depth0-past-100-nosys"]  # Part 2 lifts s-600k-l40-prefix-nosys (see KNOWN_2896_A0)
-PER_PASS_2901_REASON = ("issues 2896, 904, 2883: the candidate's own later survival fit (notice not delivered without a "
-                        "system row), a kept leaf not rendered under the hidden-only rule, and depth-0 nodes beyond "
-                        "the per-level limit")
+# Issue 2901 moved these twins' trajectories against a base without it. With the fix on main 2c75f52b (the base) the
+# per-pass clause holds and is no longer pinned; the totals test stays.
+PER_PASS_2901 = ["s-600k-l40-prefix-nosys", "d-depth0-past-100-nosys"]
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 V = [cell["id"] for cell in CELLS if cell["group"] == "V"]
 VR = [cell["id"] for cell in CELLS if cell["group"] == "VR"]
@@ -251,9 +247,9 @@ KNOWN_2877_BASE = ["g1-03", "g1-04", "g1-12", "g1-13", "g1-20", "g1-21", "g1-22"
                    # 512 rows that a later fit's notice no longer names, A0)
                    "v-ctl-c45-l35", "v-ctl-c70-l70", "v-ctl-pre37-c70-l45",
                    "v5-recover-at-9", "v5-recover-at-10", "v5-recover-at-11", "v5-recover-at-12"]
-# The candidate's A0 pins under issue 2877: v-ctl-c70-l70 loses the same 512 rows as the base (B reproduces the base's
-# fits there and never worsens them; test_a0_candidate_no_worse_than_the_base stays unpinned).
-KNOWN_2877_A0 = ["v-ctl-c70-l70"]
+# The candidate's A0 pins under issue 2877: none. With #2877's cumulative notice (main abb3f82f) the candidate loses no
+# row in v-ctl-c70-l70 (its round-2 pin was a strict XPASS); the seven base cells above still fail and stay pinned.
+KNOWN_2877_A0: list[str] = []
 ARM_CELLS = S + [cell for cell in KNOWN_2877_BASE if cell.startswith("g1-")]  # steady cells, G1 cells with A0b
 ARM_PRE_SECONDS = 5
 
@@ -565,7 +561,7 @@ def test_a0_loss(grid, cell, tree, request):
     records = grid[tree]["by_cell"][cell]
     if cell in (KNOWN_2877_BASE if tree == "base" else KNOWN_2877_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2877))
-    if cell in D:
+    if cell in D and not (tree == "cand" and cell == "d-depth0-past-100"):  # T1-293: N1 names the rows the limit hides
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=LIMIT_100))
     if cell in KNOWN_2896 and (tree == "base" or cell in KNOWN_2896_A0):
         request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=ISSUE_2896))
@@ -606,15 +602,16 @@ def test_no_duplicate_content_rows(grid, cell, tree):
 
 
 @pytest.mark.parametrize("cell", ALL)
-def test_a0_candidate_no_worse_than_the_base(grid, cell, request):
-    """Per pass: the candidate's A0b rows, and (in the pinned A0 cells) its A0 rows, are at most the base's."""
-    if cell in PER_PASS_2901:
-        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=PER_PASS_2901_REASON))
+def test_a0_candidate_no_worse_than_the_base(grid, cell):
+    """Per pass (#2877, ruling T1-275): the candidate's A0 rows are at most the base's, and its A0 + A0b rows are at most
+    the base's (N1 moves rows with no pointer behind its notice). The PER_PASS_2901 cells are not pinned: the base
+    (main 2c75f52b) carries the 2901 fix, so both trees share that trajectory."""
     base, cand = grid["base"]["by_cell"][cell], grid["cand"]["by_cell"][cell]
     for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
-        assert nc <= nb, f"A0b in cell {cell} pass {b['pass']}: candidate {nc} rows behind a notice, base {nb}"
         lost = [r["loss"]["missing_count"] if r["loss"] else 0 for r in (b, c)]
         assert lost[1] <= lost[0], f"A0 in cell {cell} pass {b['pass']}: candidate {lost[1]} rows, base {lost[0]}"
+        assert lost[1] + nc <= lost[0] + nb, (f"A0 + A0b in cell {cell} pass {b['pass']}: candidate {lost[1]} + {nc}, "
+                                              f"base {lost[0]} + {nb}")
 
 
 @pytest.mark.parametrize("cell", PER_PASS_2901)
