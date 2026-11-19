@@ -2644,11 +2644,14 @@ class ReconcileMixin:
         return identity
 
     def _replay_uid_evidence(self, messages, rows) -> tuple[bool, bool]:
-        """Return (any UID contradiction, every row UID-matched) for aligned replay rows."""
+        """Return (any UID contradiction, every row UID-matched) for aligned replay rows.
+
+        ``LCM_HOST_MESSAGE_UID=off`` treats uids as absent, so this reads no bindings there.
+        """
         pairs = [(self._host_occurrence_metadata(message)["message_uid"], row.get("store_id"))
                  for message, row in zip(messages, rows)]
         ids = [store_id for uid, store_id in pairs if uid is not None and store_id is not None]
-        if not ids or not self._store._host_uid_table_exists():
+        if not ids or host_message_uid_mode() == "off" or not self._store._host_uid_table_exists():
             return False, False
         lineage, _ = self._host_uid_lineage_key()
         if lineage is None:

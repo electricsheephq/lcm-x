@@ -25,7 +25,7 @@ def _open(path):
     return engine
 
 
-def _cold_ingest(path, stored, view):
+def _cold_ingest(path, stored, view, before_cold=None):
     _state_db(path, [("S", None, None)])
     seed = _open(path)
     try:
@@ -40,6 +40,8 @@ def _cold_ingest(path, stored, view):
     finally:
         seed.shutdown()
 
+    if before_cold is not None:
+        before_cold()
     cold = _open(path)
     try:
         cold.ingest(deepcopy(view))
@@ -71,6 +73,23 @@ def test_cold_bind_preserves_fresh_repeated_turn(tmp_path, overlap):
     assert (len(rows), cursor) == (len(stored) + len(fresh), overlap)
     _assert_rows_and_bindings(rows, bindings, stored + fresh)
 
+
+
+@pytest.mark.parametrize("overlap", [2, 0], ids=["A-two-turn-store", "B-one-turn-store"])
+def test_uid_mode_off_reads_no_bindings(tmp_path, monkeypatch, overlap):
+    # off treats uids as absent (operator guide), so bindings left by an earlier shadow run
+    # cannot reject the cut: the result equals the one before #2962, which stays open under off.
+    stored = _turn("s1", 1000.0) + (_turn("s2", 1002.0) if overlap else [])
+    fresh = _turn("f", 2000.0) + _turn("next", 2002.0, "Next question", "Next answer")
+    rows, _bindings, cursor = _cold_ingest(
+        tmp_path, stored, stored[len(stored) - overlap:] + fresh,
+        before_cold=lambda: monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off"),
+    )
+
+    assert cursor == len(stored)
+    assert [(r["role"], r["content"]) for r in rows] == [
+        (m["role"], m["content"]) for m in stored + fresh[2:]
+    ]
 
 def test_genuine_full_replay(tmp_path):
     stored = _turn("s1", 1000.0) + _turn("s2", 1002.0)

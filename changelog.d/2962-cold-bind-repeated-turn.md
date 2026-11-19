@@ -1,1 +1,1 @@
-- Fix: Cold bind preserves fresh turns that repeat stored text when host UIDs identify different occurrences (#2962). Unkeyed replay retains its existing behavior (#1566).
+- Fix: Cold bind preserves fresh turns that repeat stored text when host UIDs identify different occurrences (#2962). Unkeyed replay retains its existing behavior (#1566). With `LCM_HOST_MESSAGE_UID=off` the check reads no uid bindings, so `off` keeps the earlier behavior.
