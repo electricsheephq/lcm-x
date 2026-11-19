@@ -14,6 +14,9 @@ step, ``delta`` after every stored leaf, ``finalize`` before the stop line of a 
 Growth between passes is ``growth_turns`` turns plus whole turns until ``growth_tokens``. Steady cells hand out a
 summary of ``summary_tokens`` tokens; ``summary_area`` is the tokens of the verified summary heads in the returned list.
 
+A cell with ``no_system_row`` gives the host view no leading system row. Pointers (survival-fit notices, projected
+stubs) count only when they are in the RETURNED list: loss_check parses them from ``result``, never from the store.
+
 The per-pass loss oracle reads the store rows and the DAG, not the engine's frontier bookkeeping: every stored row
 that is not under a node whose verified summary head is in the returned list must be in the returned list by
 content (its own row, or the text carried behind a summary head), tool calls and results stay paired, and a pass
@@ -300,7 +303,8 @@ def run_cell(mods, clock: SimClock, cell: dict, workdir: Path) -> list[dict]:
     _seed_prefix(mods, engine, cell, sweep_target)
     count = mods["tokens"].count_messages_tokens
     row_tokens, tool_every = int(cell.get("row_tokens", 500)), int(cell.get("tool_every", 3))
-    view = [{"role": "system", "content": "system prompt"}]
+    # no_system_row: the host view starts with the first conversation row (issue 2896: the reference host has none).
+    view = [] if cell.get("no_system_row") else [{"role": "system", "content": "system prompt"}]
     view += make_turns(0, int(cell["raw_tokens"]) // (2 * row_tokens), row_tokens, tool_every)
     next_turn = len([row for row in view if row["role"] == "user"])
     fixed = max(0, engine.threshold_tokens + int(cell.get("over_tokens", 0)) - count(view))
