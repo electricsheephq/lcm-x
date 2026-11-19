@@ -208,7 +208,7 @@ def survival_fit_notice(engine: Any, messages, shown_node_ids, *, left=(), carri
         if count_tokens(text) <= _NOTICE_MAX_TOKENS:
             return text
         if len(named) == 1:  # one range whose session id alone passes the cap: the counted form, which has no call
-            return _NOTICE.format(n=len(rows), first=ranges[0][1], last=ranges[-1][2])
+            return _NOTICE.format(n=len(rows), first=ranges[0][1], last=max(r[2] for r in ranges))
         named = named[1:]
 
 

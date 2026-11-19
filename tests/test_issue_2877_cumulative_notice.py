@@ -819,3 +819,14 @@ def test_r2_one_range_whose_id_passes_the_cap_falls_back_to_the_counted_notice(t
         assert count_tokens(notice) <= _NOTICE_MAX_TOKENS
     finally:
         engine.shutdown()
+
+
+def test_r2_the_counted_fallback_spans_interleaved_sessions_ranges():
+    """NB3 with two sessions: this session's rows 1..9 (one range in its row order) and a parent's rows 4..5 between
+    them, whose long id keeps the newest named range over the cap. The counted notice's span is 1..9, the true bounds."""
+    order = [1, 2, 3, 8, 9]
+    read = OutOfViewRead(frozenset(), frozenset(), order, {s: i for i, s in enumerate(order)}, {}, order, {}, {}, {},
+                         {4: "p1" * 600, 5: "p1" * 600})
+    notice = survival_fit_notice(SimpleNamespace(_session_id="S", _store=None), [], set(), left=[4, 5], read=read,
+                                 store_ids={})
+    assert notice == survival_fit._NOTICE.format(n=7, first=1, last=9), notice[:200]
