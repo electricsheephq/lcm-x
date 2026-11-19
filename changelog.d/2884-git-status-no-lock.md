@@ -1,0 +1,1 @@
+- Fix: The plugin's git identity probe for `/lcm status` and `/lcm doctor` in a source checkout now runs git without optional locks, so a probe stopped at its one-second timeout no longer leaves an empty `index.lock` that makes the next git write in that checkout fail (#2884). The reported commit, branch, dirty flag and remote are unchanged.

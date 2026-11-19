@@ -79,10 +79,13 @@ def _git_runtime_identity(root: Path) -> dict[str, Any]:
             "plugin_git_remote": "",
         }
 
+    # `--no-optional-locks`: plain `git status` refreshes the index and takes
+    # `index.lock`; a probe killed at the timeout would leave that lock in the
+    # checkout and break the next git write there (#2884). The output is the same.
     def _git(*args: str) -> str | None:
         try:
             result = subprocess.run(
-                ["git", "-C", str(root), *args],
+                ["git", "--no-optional-locks", "-C", str(root), *args],
                 check=False,
                 capture_output=True,
                 text=True,
