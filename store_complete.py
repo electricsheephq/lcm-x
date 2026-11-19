@@ -571,7 +571,11 @@ class StoreCompleteMixin:
 
         def take(message, ids) -> bool:  # the budget cuts only at a group boundary, never before the first
             nonlocal used, group          # row that carries a store id (the leaf's coverage)
-            tokens = count_message_tokens(substitutes.get(id(message), message))
+            charged = substitutes.get(id(message))
+            if charged is None:
+                remainder = self._generated_context_carrier_remainder(message) if recognize else None
+                charged = message if remainder is None else {**message, "content": remainder}
+            tokens = count_message_tokens(charged)
             answers = message.get("role") == "tool" and group and \
                 str(message.get("tool_call_id") or "").strip() in group[0]
             if message.get("role") != "tool":

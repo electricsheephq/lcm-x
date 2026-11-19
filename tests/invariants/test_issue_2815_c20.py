@@ -73,8 +73,8 @@ def test_leaf_guard_compares_stub_free_restore(tmp_path, monkeypatch, summaries)
         expected = guarded + [engine._missing_tool_result_stub(call) for call in calls]
         assert len(guarded) == len(view) <= len(expected)
         assert count_messages_tokens(guarded) < count_messages_tokens(view) <= count_messages_tokens(expected)
-        assert not any(call.args == ("hidden_only",) for call in hold.call_args_list)
         assert output == expected
+        assert not any(call.args == ("hidden_only",) for call in hold.call_args_list)
         assert engine._ingest_cursor == len(output)
 
 
@@ -155,6 +155,9 @@ def test_binding_change_returns_original(tmp_path, monkeypatch, summaries):
             assert scope.uid_trimmed and scope.legacy_replay is not None
             engine.on_session_start("B", platform="telegram", context_length=200_000, conversation_id="B-conv")
             result = finish(state, *args)
+            action, output = result
+            assert output is view
+            assert action == "return"
             exits.append(result)
             return result
 

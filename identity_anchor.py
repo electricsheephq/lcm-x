@@ -46,7 +46,7 @@ from .recognition_matching import (
     _reserve_shown as _reserve_shown,
     _reroute_for_null as _reroute_for_null,
 )
-from .config import identity_anchor_enabled
+from .config import identity_anchor_enabled, uid_recognition_enabled
 from .fresh_tail import tool_group_safe_end
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
@@ -1726,10 +1726,13 @@ class IdentityAnchorMixin:
         if bound is not None and any(store_id > bound for store_id in claimed):
             claims = {key: [store_id for store_id in ids if store_id < bound] for key, ids in claims.items()}
             claimed = {store_id for ids in claims.values() for store_id in ids}
-        if budget is None:
-            budget = count_messages_tokens(chunk)
+        charged_chunk = chunk
+        if uid_recognition_enabled(self):
+            charged_chunk = [row if (remainder := self._generated_context_carrier_remainder(row)) is None
+                             else {**row, "content": remainder} for row in chunk]
+        floor = count_messages_tokens(charged_chunk)
         return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
-                                          max(budget, count_messages_tokens(chunk)), accounted_ids,
+                                          floor if budget is None else max(budget, floor), accounted_ids,
                                           copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
 
     def _retained_escape_memo(self) -> dict:

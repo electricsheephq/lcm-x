@@ -182,6 +182,13 @@ def _compare_no_leaf(tmp_path, monkeypatch, shape, exit_case):
         assert (status, reason) == (base_status, base_reason)
         assert CALL not in _pairs(output)[1]
     else:
+        if exit_case in {"fresh", "hidden"}:
+            def after_call(rows):
+                index = next(i for i, row in enumerate(rows)
+                             if any(call["id"] == CALL for call in row.get("tool_calls", ())))
+                return rows[index + 1:index + 2]
+
+            assert after_call(output) == after_call(base) == [LCMEngine._missing_tool_result_stub(CALL)]
         assert _pairs(output) == _pairs(base)
         assert [row for row in output if row in view] == view
         assert CALL in _pairs(output)[1]
@@ -237,8 +244,8 @@ def _no_leaf_arm(path, monkeypatch, shape, exit_case, *, on):
         if on and compute_drops is not None:
             drops = []
 
-            def observe_drops(*args):
-                decision = compute_drops(*args)
+            def observe_drops(*args, **kwargs):
+                decision = compute_drops(*args, **kwargs)
                 drops.append(decision[0])
                 return decision
 

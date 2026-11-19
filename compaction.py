@@ -120,6 +120,7 @@ def _counted_compaction(operation):
 @dataclass
 class _CompactionUidDropState(_UidDropState):
     adopt_before_stop: bool = False
+    drop_stage_reached: bool = False
 
 
 @dataclass
@@ -881,6 +882,7 @@ class CompactionMixin:
                 self._stop_pass_for_shutdown()
                 returned = messages
                 return messages
+            occurrences = self._compress_occurrences
             self._compress_occurrences = None
             scope = _UID_DROP_INPUT.get()
             restore_trimmed = False
@@ -897,7 +899,9 @@ class CompactionMixin:
             if restore_trimmed:
                 result = self._sanitize_active_context_messages(
                     scope.before,
-                    insert_missing_tool_stubs=guarded_restore is not None or self._uid_restore_needs_tool_stubs(scope),
+                    insert_missing_tool_stubs=guarded_restore is not None or self._uid_restore_needs_tool_stubs(
+                        scope, adopt_before_stop=False, occurrences=occurrences,
+                    ),
                 )
                 if guarded_restore is not None:
                     stubbed_guard_restore = result
@@ -2620,6 +2624,8 @@ class CompactionMixin:
         if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.sweep_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
+        if leaf_passes == 0 and scope is not None and scope.owner is self:
+            scope.drop_stage_reached = True
         leaf.filter_exclusion_proofs: Dict[int, Any] = {}
         leaf.hidden_backlog = False
         leaf.copy_lookup = []  # per-leaf only: backlog and input share one bounded twin read
@@ -2665,6 +2671,8 @@ class CompactionMixin:
             )
             if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
+                if scope is not None and scope.owner is self:
+                    scope.drop_stage_reached = False
                 return "break", None
             if ((scope := _UID_DROP_INPUT.get()) is not None and scope.owner is self and scope.before
                     and scope.matches_binding()):
@@ -2901,26 +2909,32 @@ class CompactionMixin:
 
 
     def _uid_pretrim_replay_drops(
-        self, before: List[Dict[str, Any]], adopt_before_stop: bool,
+        self, before: List[Dict[str, Any]], adopt_before_stop: bool, occurrences=None,
     ) -> tuple[set[int], int, int, list[int]]:
         """Return the mode-unset replay drops and the indexes used for adoption."""
         leading, tail = self._leading_anchor_count(before), self._fresh_tail_start(before)
         if tail <= leading:
             return set(), leading, leading, []
         start = leading
+        if occurrences is None:
+            occurrences = self._compress_occurrences
         while start < tail and (
             self._is_replayed_context_scaffold_message(before[start])
-            if self._compress_occurrences is None
-            else self._compress_occurrences.get(id(before[start]), (None, ()))[1] is None
+            if occurrences is None
+            else occurrences.get(id(before[start]), (None, ()))[1] is None
         ):
             start += 1
         resumed = self._committed_replay_drops(before, start, uid_first=False)[0]
         drops = set() if adopt_before_stop and not resumed else set(range(leading, start)).union(resumed)
         return drops, leading, start, resumed
 
-    def _uid_restore_needs_tool_stubs(self, scope: _CompactionUidDropState) -> bool:
-        return scope.legacy_replay is not None or bool(
-            self._uid_pretrim_replay_drops(scope.before, scope.adopt_before_stop)[0]
+    def _uid_restore_needs_tool_stubs(
+        self, scope: _CompactionUidDropState, *, adopt_before_stop: bool, occurrences=None,
+    ) -> bool:
+        if scope.legacy_replay is not None:
+            return True
+        return scope.drop_stage_reached and bool(
+            self._uid_pretrim_replay_drops(scope.before, adopt_before_stop, occurrences=occurrences)[0]
         )
 
     def _uid_trimmed_base_replay(
@@ -3089,7 +3103,9 @@ class CompactionMixin:
             else:
                 sanitized_messages = self._sanitize_active_context_messages(
                     active_context_messages,
-                    insert_missing_tool_stubs=restored_uid_trim and self._uid_restore_needs_tool_stubs(scope),
+                    insert_missing_tool_stubs=restored_uid_trim and self._uid_restore_needs_tool_stubs(
+                        scope, adopt_before_stop=scope.adopt_before_stop,
+                    ),
                 )
                 if restored_uid_trim and scope.matches_binding():
                     self._ingest_cursor = len(sanitized_messages)
