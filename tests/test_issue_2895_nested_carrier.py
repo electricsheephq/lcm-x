@@ -139,6 +139,7 @@ class Session:
         self.stamp, self.host = mode == "on", host
         self.msgs = [{"role": "system", "content": "You are a helpful assistant."}] if system else []
         self.turn_no = self.uid_n = 0
+        self.clock = 1_700_000_000.0
         self.passes = []  # (before, result, applied fit plans)
         self.on_pass = None
 
@@ -147,6 +148,9 @@ class Session:
         return f"[{kind}-{self.turn_no:03d}-{self.rng.randrange(10**6):06d}] {words}"
 
     def row(self, **row):
+        self.clock += 1.0
+        if row.get("timestamp") is None:
+            row["timestamp"] = self.clock
         if self.stamp:  # a uid-capable host stamps every row it persists
             self.uid_n += 1
             row["message_uid"] = hashlib.sha256(f"{self.tag}-{self.uid_n}".encode()).hexdigest()[:32]
@@ -213,7 +217,7 @@ class Session:
                 self.engine.ingest(self.msgs)
                 self.msgs = self.msgs[:-1]
             elif kind == "k2":  # a delivery row the engine ingests at turn end that the list never carries
-                self.engine.ingest(self.msgs + [{"role": "assistant", "content": self.text("DELIVERY", event[1])}])
+                self.engine.ingest(self.msgs + [self.row(role="assistant", content=self.text("DELIVERY", event[1]))])
                 self.engine.note_turn_complete()
             elif kind == "k4":  # a row another writer appends to the store
                 self.engine._store.append(self.engine._session_id, {"role": event[1], "content": self.text(
@@ -292,7 +296,7 @@ def lines():
         root.setLevel(level)
 
 
-def _checked(session, lines, failures, stats, allowed=("kept", "named")):
+def _checked(session, lines, failures, stats):
     """Install the per-pass checks: the property (A, F) and a returned head that is never nested (B)."""
     def check(s, before, result, plans):
         engine = s.engine
@@ -300,7 +304,7 @@ def _checked(session, lines, failures, stats, allowed=("kept", "named")):
         if fate is not None:
             stats["carrier_in"] += 1
             stats[fate[1]] = stats.get(fate[1], 0) + 1
-            if fate[1] not in allowed:
+            if fate[1] not in ("kept", "named"):
                 failures.append(f"pass={len(s.passes)} carried row {fate[1]}: {fate[0][:40]!r}")
         if _nested_head(engine, result):
             failures.append(f"pass={len(s.passes)} nested head returned")
@@ -543,8 +547,7 @@ def test_random_walks_leave_no_carried_row_uncounted(tmp_path, monkeypatch, stan
         ctx, overhead = _WALKS[seed % len(_WALKS)]
         session = Session(tmp_path, monkeypatch, stand_ins, ctx=ctx, seed=seed, overhead=overhead,
                           mode="on" if seed % 2 else "unset", tag=f"walk{seed}", host="harness")
-        # A row no ingest stored is outside this issue's storage coverage.
-        _checked(session, lines, failures, stats, allowed=("kept", "named", "unstored"))
+        _checked(session, lines, failures, stats)
         try:
             session.replay(_random_events(random.Random(seed), 30))
         finally:
@@ -552,7 +555,7 @@ def test_random_walks_leave_no_carried_row_uncounted(tmp_path, monkeypatch, stan
         failures[:] = [f if f.startswith("seed=") else f"seed={seed} {f}" for f in failures]
     print(f"chunk {chunk}: {stats}")
     assert stats["carrier_in"] > 0
-    assert not failures, "\n".join(failures[:5])
+    assert not failures, "\n".join(failures)
 
 
 @pytest.fixture
@@ -582,6 +585,28 @@ def _tail(session):
         ("user", "carried question"), ("assistant", "answer"),
         ("user", "next question"), ("assistant", "next answer"),
     )]
+
+
+@pytest.mark.parametrize("live_emission", [True, False], ids=["emitted-row", "byte-copy"])
+def test_survival_cut_names_freshly_emitted_carrier(carrier_session, live_emission):
+    engine = carrier_session.engine
+    rows = _tail(carrier_session)
+    engine.ingest(rows)
+    carried_id, reply_id, *newer_ids = engine._get_store_ids_for_messages(rows)
+    _leaf(engine, "new hidden leaf")
+    result = engine._assemble_context(None, rows)
+    emission, = engine._pending_emission_candidates
+    assert emission["row"] is result[0] and emission["retained_source"] == {"store_id": carried_id}
+    if not live_emission:
+        result[0] = dict(result[0])
+
+    summary = {"role": "user", "content": emission["span"][:-2]}
+    budget = engine._survival_measure([summary, *result[2:]])
+    mapped = {id(row): store_id for row, store_id in zip(result[1:], [reply_id, *newer_ids], strict=True)}
+    fitted, count, ids, _, _ = engine._survival_cut(result, 1, budget, True, "test", mapped, True)
+    assert fitted == [summary, *result[2:]]
+    assert count == 2
+    assert ids == ([carried_id, reply_id] if live_emission else [reply_id])
 
 
 @pytest.mark.parametrize("cap", [*range(400, 1501, 50), None], ids=lambda cap: "survival" if cap is None else str(cap))

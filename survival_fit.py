@@ -333,6 +333,7 @@ class SurvivalFitMixin:
         self._survival_cut_carrier = None
         head, body = list(result[:lead]), list(result[lead:])
         summary = summary_uid = formed = None
+        naming_ids = store_ids
         # #2895: a nested carrier ("summary\n\nold summary\n\nrow") splits down to its real row, which is counted
         remainder = self._carried_user_text(head[-1]) if whole_turns and head else None
         if remainder is not None:
@@ -342,7 +343,15 @@ class SurvivalFitMixin:
             if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid
                 summary_uid = self._carrier_user_row_identity(carrier, body[0])
             if id(carrier) in store_ids:
-                store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
+                naming_ids = store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
+            else:
+                # This fit runs before the new carrier's occurrence proof is published (#2895).
+                for emission in getattr(self, "_pending_emission_candidates", ()):
+                    source_id = (emission.get("retained_source") or {}).get("store_id")
+                    if (source_id and emission.get("kind") == "carrier" and emission.get("row") is carrier
+                            and carrier["content"] == emission["span"] + remainder and source_id not in store_ids.values()):
+                        naming_ids = {**store_ids, id(body[0]): source_id}
+                        break
 
         body_ids = {id(m) for m in body}
 
@@ -354,10 +363,10 @@ class SurvivalFitMixin:
             formed = None
             kept_ids = {id(row) for row in kept}  # live rows: identity, one pass (not kept x dropped)
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
-            mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            mapped = sorted(naming_ids[id(message)] for message in dropped if id(message) in naming_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
-            ids = sorted(store_ids[id(message)] for message in dropped
-                         if id(message) in store_ids and not self._survival_generated(message))
+            ids = sorted(naming_ids[id(message)] for message in dropped
+                         if id(message) in naming_ids and not self._survival_generated(message))
             count = sum(1 for message in dropped if not self._survival_generated(message))
             # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
             notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
