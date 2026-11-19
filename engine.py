@@ -10989,6 +10989,7 @@ class LCMEngine(
         stub_over_cap_tool_results: bool = False,
         persist: bool = True,
         _reply_rejected: tuple = (),
+        _prepared_tail: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
         trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
@@ -11037,8 +11038,9 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages, write=persist)
-        tail_selected = assembly_tail_messages
+        assembly_tail_messages = (_prepared_tail if _prepared_tail is not None else
+                                  self._stub_large_tool_results_for_active_replay(tail_messages, write=persist))
+        tail_for_selection = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
@@ -11047,8 +11049,6 @@ class LCMEngine(
         summary_budget = None
         kept_reply = None
         if assembly_cap is not None:
-            used = count_messages_tokens(result)
-            tail_token_total = 0
             tail_for_selection = self._sanitize_active_context_messages(
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
@@ -11058,6 +11058,19 @@ class LCMEngine(
                 # it. The final assembled result is merged downstream.
                 merge_adjacent_assistants=False,
             )
+        # Charge only the carried user row to the tail. The new summary has its own budget (#2895).
+        unwrapped = None
+        source_id = None
+        if _prepared_tail is None and retained_user_msg is None and tail_for_selection:
+            incoming_carrier = tail_for_selection[0]
+            source_id = self._incoming_carrier_source_id(incoming_carrier, tail_for_selection)
+            first = self._unwrap_incoming_carrier(incoming_carrier, source_id)
+            if first is not incoming_carrier:
+                unwrapped = first
+                tail_for_selection = [first, *tail_for_selection[1:]]
+        tail_selected = tail_for_selection
+        if assembly_cap is not None:
+            used = count_messages_tokens(result)
             if not stub_over_cap_tool_results:
                 selection = select_tail(
                     tail_for_selection, assembly_cap, used, count_message_tokens,
@@ -11074,7 +11087,9 @@ class LCMEngine(
             tail_selected, summary_budget, kept_reply = self._keep_newest_reply(
                 tail_messages, anchor_source, tail_for_selection, tail_selected, summary_budget, _reply_rejected)
         if anchor_source is not None:
-            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, tail_selected)
+            anchor_tail = ([incoming_carrier if row is unwrapped else row for row in tail_selected]
+                           if unwrapped is not None else tail_selected)
+            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, anchor_tail)
             anchor_part = anchor_candidates[0] if anchor_candidates else None
 
         # Collect DAG summaries — highest depth first for context hierarchy
@@ -11151,6 +11166,12 @@ class LCMEngine(
                     }
                     emission_candidates.append(summary_candidate)
 
+        if unwrapped is not None and summary_message is None:
+            # Without a replacement prefix, rerun selection with the original carrier intact.
+            return self._assemble_context(
+                system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
+                stub_over_cap_tool_results, persist, _reply_rejected, _prepared_tail=assembly_tail_messages)
+
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
         # cache-stable summaries and above the volatile fresh tail — so the
@@ -11181,6 +11202,7 @@ class LCMEngine(
 
         carried_tail, tail_selected = self._emit_summary_carrier(
             summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+            source_id if tail_selected and tail_selected[0] is unwrapped else None,
         )
         self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
                                          proactive_msg, generated_context_row, tail_selected)
@@ -11209,7 +11231,8 @@ class LCMEngine(
                                                                      is not None else []) + list(anchor_source))):
             return self._assemble_context(  # #1162 E: the next step, or the base output with the residual log
                 system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
-                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"))
+                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"),
+                _prepared_tail=_prepared_tail)
 
         if not persist:
             _stamp_generated_model_only(result, generated_rows)
@@ -11400,7 +11423,7 @@ class LCMEngine(
                 folded_result_index, folded_original_tail, tail_selected)
 
     def _emit_summary_carrier(
-        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail, source_id=None,
     ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
         # Fresh tail. A user-role summary directly ahead of a historical user
         # row is emitted as the carrier a host's alternation repair would build
@@ -11425,7 +11448,8 @@ class LCMEngine(
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
             if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
-                source_ids = self._get_store_ids_for_messages([tail_selected[0]])
+                source_ids = ([source_id] if source_id and self._bound_user_text(source_id) == tail_selected[0]["content"]
+                              else self._get_store_ids_for_messages([tail_selected[0]]))
                 result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:
                     summary_candidate.update({
@@ -11437,6 +11461,25 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
+
+    def _incoming_carrier_source_id(self, row, tail):
+        if self._generated_context_carrier_remainder(row) is None:
+            return None
+        return (self._compress_run.store_ids_by_message_id.get(id(row))
+                or self._get_store_id_map_for_messages(tail).get(id(row)))
+
+    def _unwrap_incoming_carrier(self, row: Dict[str, Any], store_id=None) -> Dict[str, Any]:
+        """``row``, or the real row behind it when it is a verified carrier at any nesting depth. As the
+        survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
+        single proven host uid; the carrier's API-side content is not the row's either."""
+        remainder = self._carried_user_text(row, store_id)
+        if remainder is None:
+            return row
+        unwrapped = {key: value for key, value in row.items() if key != "api_content"}
+        unwrapped["content"] = remainder
+        if identity_emit_enabled():
+            self._carrier_user_row_identity(row, unwrapped)
+        return unwrapped
 
     def _trim_preserved_objective_last_resort(
         self, result, generated_rows, assembly_cap, kept_reply,
