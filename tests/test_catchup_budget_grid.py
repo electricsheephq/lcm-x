@@ -220,13 +220,18 @@ S = [cell["id"] for cell in CELLS if cell["group"] == "S"]
 N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
-KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
+# Part 2's base already carries the issue-2901 fix (merge of fa4cad11 and main 2c75f52b), so the three fixed twins lose
+# nothing on the base either: their base pin is lifted (each was a strict XPASS on that base).
+KNOWN_2896 = [cell for cell in N if cell not in ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]]
 # Issue 2901: leaf selection charges a glued carrier at its remainder, so these twins no longer stall into the fit.
 FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
 KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
+# Part 2: the candidate loses no row in s-600k-l40-prefix-nosys (A0 0 against the base's 2,080), so its candidate pin
+# and its per-pass pin are lifted (both were strict XPASSes).
+KNOWN_2896_A0 = [cell for cell in KNOWN_2896_A0 if cell != "s-600k-l40-prefix-nosys"]
 # Issue 2901 moves these twins' trajectories: on some passes the candidate shows rows out of the list where the base did
 # not, while its totals stay at most the base's. Only the per-pass clause is pinned; the totals test is not.
-PER_PASS_2901 = ["s-600k-l40-prefix-nosys", "d-depth0-past-100-nosys"]
+PER_PASS_2901 = ["d-depth0-past-100-nosys"]  # Part 2 lifts s-600k-l40-prefix-nosys (see KNOWN_2896_A0)
 PER_PASS_2901_REASON = ("issues 2896, 904, 2883: the candidate's own later survival fit (notice not delivered without a "
                         "system row), a kept leaf not rendered under the hidden-only rule, and depth-0 nodes beyond "
                         "the per-level limit")
