@@ -80,8 +80,10 @@ _OUT_OF_VIEW_SQL = _WALK_SQL + (
     "SELECT message.store_id, message.role, length(message.content), group_concat(covered.root) FROM messages AS "
     "message LEFT JOIN covered ON covered.store_id = message.store_id WHERE message.session_id = ? "
     "GROUP BY message.store_id ORDER BY message.store_id")
-_COVERED_SQL = _WALK_SQL + ("SELECT store_id, group_concat(root) FROM covered WHERE store_id IN (SELECT value FROM "
-                            "json_each(?)) GROUP BY store_id")
+_COVERED_SQL = _WALK_SQL + (
+    "SELECT message.store_id, message.role, length(message.content), group_concat(covered.root) FROM messages AS message "
+    "LEFT JOIN covered ON covered.store_id = message.store_id WHERE message.store_id IN (SELECT value FROM json_each(?)) "
+    "GROUP BY message.store_id")
 # a carry range is half-open (start < store id <= end), read over the source session's own rows (idx_msg_session)
 _CARRIED_SQL = "SELECT store_id FROM messages WHERE session_id = ? AND store_id > ? AND store_id <= ? ORDER BY store_id"
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
@@ -116,12 +118,16 @@ def read_out_of_view(store: Any, session_id: str, node_ids, kept=None, also=()) 
         roots[store_id] = {int(node) for node in str(covering).split(",")}
         for node in roots[store_id]:
             by_root.setdefault(node, []).append(store_id)
-    wanted = {sizes[store_id] for store_id in order if not roots.get(store_id, set()) & kept}
     sessions = dict.fromkeys(int(store_id) for store_id in also if int(store_id) not in sizes)
-    if sessions and roots_read:  # another session's rows (a rotation's carried parent rows) under a read root
-        for store_id, covering in store.connection.execute(
+    if sessions and roots_read:  # another session's rows (a rotation's carried parent rows): shapes and read roots
+        for store_id, role, size, covering in store.connection.execute(
                 _COVERED_SQL, (json.dumps(sorted(roots_read)), json.dumps(list(sessions)))).fetchall():
-            roots[store_id] = {int(node) for node in str(covering).split(",")}
+            sizes[store_id] = (role, size)
+            if covering:
+                roots[store_id] = {int(node) for node in str(covering).split(",")}
+    # the shapes of the rows that may be named, so a covered row that may be their copy is read
+    wanted = {sizes[store_id] for store_id in [*order, *sessions] if store_id in sizes
+              and not roots.get(store_id, set()) & kept}
     ids = [store_id for store_id in order if store_id not in roots or sizes[store_id] in wanted] + list(sessions)
     keys, key_roots = {}, {}
     for store_id, session, role, *fields in store.connection.execute(
@@ -204,7 +210,8 @@ def survival_fit_notice(engine: Any, messages, shown_node_ids, *, left=(), carri
     named = ranges[-_NOTICE_MAX_RANGES:]
     while True:  # the cap, by the counter the fit's budget uses: the oldest named ranges fold into the counted clause
         rest = ranges[:len(ranges) - len(named)]
-        text = survival_notice_text(len(rows), named, (len(rest), rest[0][1], rest[-1][2]) if rest else None)
+        text = survival_notice_text(len(rows), named, (len(rest), min(r[1] for r in rest), max(r[2] for r in rest))
+                                    if rest else None)
         if count_tokens(text) <= _NOTICE_MAX_TOKENS:
             return text
         if len(named) == 1:  # one range whose session id alone passes the cap: the counted form, which has no call
@@ -487,9 +494,10 @@ class SurvivalFitMixin:
         # a rotation's carried parent rows (Codex (b)): named on every fit while they are out of view, not only when cut
         read = getattr(self, "_survival_view_read", None)
         if read is None or read[0] is not result or read[1] is not None and not read[1].kept <= always:
-            try:  # one indexed statement per carry range, over the source session's own rows
-                carried = [x for source, first, last in self._load_compression_carry_ranges()
-                           if source != self._session_id for (x,) in self._store.connection.execute(_CARRIED_SQL, (source, int(first), int(last)))]
+            try:  # one indexed statement per carry range, over the source session's own rows, once per list
+                carried = read[2] if read is not None and read[0] is result else [
+                    x for source, first, last in self._load_compression_carry_ranges() if source != self._session_id
+                    for (x,) in self._store.connection.execute(_CARRIED_SQL, (source, int(first), int(last)))]
                 read = (result, read_out_of_view(self._store, self._session_id, always.union(*optional.values()), always,
                                                  also=[*store_ids.values(), *carried]), carried)
             except Exception:  # the notice then names this cut's rows only, as before

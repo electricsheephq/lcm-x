@@ -168,16 +168,14 @@ S = [cell["id"] for cell in CELLS if cell["group"] == "S"]
 N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 # Classification on main b289240a (grid v2): every twin loses rows with no pointer in the returned list (A0), because
 # the survival-fit notice goes only into a system row the view does not have. So both trees' A0 tests are pinned.
-KNOWN_2896 = list(N)  # twins main fails on the base test (A0 or A0b)
 # Issue 2901: leaf selection charges a glued carrier at its remainder, so these twins no longer stall into the fit.
 FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
+# twins main fails on the base test (A0 or A0b); main 2c75f52b carries the 2901 fix, so FIXED_2901 pass on the base
+KNOWN_2896 = [cell for cell in N if cell not in FIXED_2901]
 KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
-# Issue 2901 moves these twins' trajectories: on some passes the candidate shows rows out of the list where the base did
-# not, while its totals stay at most the base's. Only the per-pass clause is pinned; the totals test is not.
+# Issue 2901 moved these twins' trajectories against a base without it. With the fix on main 2c75f52b (the base) the
+# per-pass clause holds and is no longer pinned; the totals test stays.
 PER_PASS_2901 = ["s-600k-l40-prefix-nosys", "d-depth0-past-100-nosys"]
-PER_PASS_2901_REASON = ("issues 2896, 904, 2883: the candidate's own later survival fit (notice not delivered without a "
-                        "system row), a kept leaf not rendered under the hidden-only rule, and depth-0 nodes beyond "
-                        "the per-level limit")
 D = [cell["id"] for cell in CELLS if cell["group"] == "D"]
 ALL = [cell["id"] for cell in CELLS]
 NEGATIVE_CELLS = ["g1-00", "g1-11"]
@@ -522,11 +520,10 @@ def test_no_duplicate_content_rows(grid, cell, tree):
 
 
 @pytest.mark.parametrize("cell", ALL)
-def test_a0_candidate_no_worse_than_the_base(grid, cell, request):
+def test_a0_candidate_no_worse_than_the_base(grid, cell):
     """Per pass (#2877, ruling T1-275): the candidate's A0 rows are at most the base's, and its A0 + A0b rows are at most
-    the base's (N1 moves rows with no pointer behind its notice)."""
-    if cell in PER_PASS_2901:
-        request.applymarker(pytest.mark.xfail(strict=True, raises=AssertionError, reason=PER_PASS_2901_REASON))
+    the base's (N1 moves rows with no pointer behind its notice). The PER_PASS_2901 cells are not pinned: the base
+    (main 2c75f52b) carries the 2901 fix, so both trees share that trajectory."""
     base, cand = grid["base"]["by_cell"][cell], grid["cand"]["by_cell"][cell]
     for b, c, nb, nc in zip(base, cand, a0b_rows(base), a0b_rows(cand)):
         lost = [r["loss"]["missing_count"] if r["loss"] else 0 for r in (b, c)]

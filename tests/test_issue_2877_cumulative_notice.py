@@ -716,7 +716,7 @@ EDGE_TESTS = {"916": ("test_issue_916_projection_keeps_head.py",
 def edge_runs(tmp_path_factory):
     """The #916 and #608 budget-edge cells as written, with the session id "S" replaced engine-wide by an id of each
     length (every "S" literal in their source), in one isolated pytest process: {(file, length, test): (outcome,
-    the fit's logged tokens and budget)}."""
+    the fit's logged tokens and budget, the failure text)}."""
     work = tmp_path_factory.mktemp("edge")
     targets = []
     for key, (name, tests) in EDGE_TESTS.items():
@@ -745,8 +745,8 @@ def edge_runs(tmp_path_factory):
     for case in ElementTree.parse(report).getroot().iter("testcase"):
         logged = "".join(node.text or "" for node in case.iter() if node.tag in ("system-out", "system-err"))
         fits = [tuple(map(int, found)) for found in re.findall(r"tokens=(\d+)->(\d+), budget=(\d+)\)", logged)]
-        failed = any(node.tag in ("failure", "error") for node in case)
-        runs[(case.get("classname"), case.get("name"))] = (not failed, fits)
+        failure = "".join(node.text or "" for node in case if node.tag in ("failure", "error"))
+        runs[(case.get("classname"), case.get("name"))] = (not failure, fits, failure)
     return runs
 
 
@@ -760,6 +760,11 @@ def _edge_reason(what: str) -> str:
             "no stored row is lost")
 
 
+# the cause each trade-off names: the line that fails, read from the failure text
+EDGE_CAUSE = {
+    "916": re.compile(r">\s+assert (?:newest|projected)\[\"content\"\]\.startswith\(view\[-1\]\[\"content\"\]\[:1200\]\)\n"),
+    "608": re.compile(r">\s+assert _count\(caplog, \"could not reach budget\"\) == 1 and _fit_records\(engine\) == 1\n"
+                      r"E\s+AssertionError: assert \(1 == 1 and 2 == 1\)\n(?:E .*\n)*?E\s+\+\s+and\s+2 = _fit_records\(")}
 _916_NEWEST = ("the 1-character id's fit uses 397 of 399 tokens; the longer id's notice does not fit those 2, so the "
                "newest user row goes mark-only")
 _608_FLOOR = ("the floor attempt (budget 140) writes a second fit record where the 1-character id's returns the same "
@@ -782,11 +787,14 @@ EDGE = [
 @pytest.mark.parametrize("key,test,length,fits", EDGE)
 def test_the_budget_edge_with_a_longer_session_id_is_pinned(edge_runs, key, test, length, fits):
     """Strict: the #916 and #608 budget-edge cells as written pass with a 1-character session id and fail with 24 and
-    81 characters (colon keys), each at its measured fits (tokens before, after, budget)."""
+    81 characters (colon keys), each at its measured fits (tokens before, after, budget), and only at the line its
+    trade-off names: any other failure is a real one."""
     cases = {name: run for (module, name), run in edge_runs.items()
              if module == f"test_edge_{key}_{length}" and name.split("[")[0] == test}
-    assert cases and all(logged == fits for _, logged in cases.values()), cases
-    if not all(passed for passed, _ in cases.values()):
+    assert cases and all(logged == fits for _, logged, _ in cases.values()), cases
+    if not all(passed for passed, _, _ in cases.values()):
+        assert all(not passed and EDGE_CAUSE[key].search(text) for passed, _, text in cases.values()), [
+            text[-600:] for _, _, text in cases.values()]
         raise EdgeMoved(f"#{key} {test} with a {length}-character session id")
 
 
@@ -830,3 +838,140 @@ def test_r2_the_counted_fallback_spans_interleaved_sessions_ranges():
     notice = survival_fit_notice(SimpleNamespace(_session_id="S", _store=None), [], set(), left=[4, 5], read=read,
                                  store_ids={})
     assert notice == survival_fit._NOTICE.format(n=7, first=1, last=9), notice[:200]
+
+
+# -- review fix round 3 (each cell red on 49931b41, green after) ----------------------------------------------------
+
+def test_r3_a_carried_row_whose_copy_is_under_a_kept_summary_is_not_named(engine):
+    """P:3's byte-equal child copy S:8 sits under the kept node, and no uncovered child row has P:3's role and length:
+    the read still loads S:8's key, so P:3 is in view and not named."""
+    add = lambda s, role, content: engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
+    for role, content in (("user", "p one"), ("assistant", "p two"), ("user", "same"), ("assistant", "p four")):
+        add("P", role, content)
+    for role, content in (("user", "child five"), ("assistant", "child six"), ("assistant", "child seven"),
+                          ("user", "same"), ("assistant", "child nine"), ("user", "child ten q")):
+        add("S", role, content)
+    listed = [{"role": "user", "content": "[N] newest q"}, {"role": "assistant", "content": "[N] newest answer"}]
+    ids = {id(m): add("S", m["role"], m["content"]) for m in listed}
+    node = engine._dag.add_node(SummaryNode(session_id="S", summary="covers eight", token_count=1, source_token_count=1,
+                                            source_ids=[8], expand_hint="t"))
+    read = read_out_of_view(engine._store, "S", {node}, kept={node}, also=[3, *ids.values()])  # the fit's form
+    notice = survival_fit_notice(engine, listed, {node}, carried=[3], store_ids=ids, read=read)
+    assert not [args for _, _, args in _calls(notice) if args["session_id"] == "P"], notice
+
+
+def test_r3_a_carried_copy_under_a_kept_summary_does_not_push_a_real_range_out_of_its_call(engine):
+    """Out-of-view carried P:1, a carried P:3 whose copy is under the kept node, and seven child ranges: eight real
+    ranges, so P:1 keeps its call."""
+    add = lambda s, role, content: engine._store.append(s, {"role": role, "content": content}, conversation_id="conv")
+    p1 = add("P", "user", "p one")
+    add("P", "assistant", "p two")
+    p3 = add("P", "user", "same")
+    rows = [add("S", "assistant", f"{kind} {i}") for i in range(7) for kind in ("gone", "shown")]
+    node = engine._dag.add_node(SummaryNode(session_id="S", summary="n", token_count=1, source_token_count=1,
+                                            source_ids=[add("S", "user", "same")], expand_hint="t"))
+    listed = [{"role": "assistant", "content": f"shown {i}"} for i in range(7)]
+    ids = dict(zip(map(id, listed), rows[1::2]))
+    read = read_out_of_view(engine._store, "S", {node}, kept={node}, also=[p1, p3, *ids.values()])
+    notice = survival_fit_notice(engine, listed, {node}, carried=[p1, p3], store_ids=ids, read=read)
+    assert ("P", p1, p1) in {(args["session_id"], a, b) for a, b, args in _calls(notice)}, notice
+    assert "earlier ranges" not in notice, notice
+
+
+def test_r3_the_copy_kept_twin_through_a_fit(engine, monkeypatch):
+    """A parent's carried row whose byte-equal child copy is under the summary the fit keeps: through _survival_fit,
+    with or without an uncovered child row of the same role and length, the row is not named."""
+    _rough(monkeypatch)
+    for twin in (False, True):
+        session = f"C{int(twin)}"
+        engine.on_session_start(session, platform="telegram", conversation_id="cv", context_length=200_000)
+        store = engine._store
+        texts = [f"parent turn {i} " + "alpha beta " * (20 + 3 * i) for i in range(5)]
+        roles = ("user", "assistant", "user", "assistant", "user")
+        parent = [store.append(f"PAR{int(twin)}", {"role": r, "content": t}, conversation_id="cv")
+                  for r, t in zip(roles, texts)]
+        copy = store.append(session, {"role": "user", "content": texts[2]}, conversation_id="cv")
+        node = engine._dag.add_node(SummaryNode(session_id=session, summary="child summary of the copied parent turn",
+                                                token_count=1, source_token_count=1, source_ids=[copy], expand_hint="x"))
+        summary = {"role": "user", "content": f"[Recent Summary (d0, node {node})]\nchild summary of the copied parent "
+                                              "turn\n[Expand for details: x]"}
+        tail = ([{"role": "user", "content": "Z" * len(texts[2])}] if twin else []) + [
+            {"role": "user", "content": "newest question"}, {"role": "assistant", "content": "newest answer"}]
+        bulk = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"old {i} " + "gamma " * 120} for i in range(4)]
+        for m in [*bulk, *tail]:
+            store.append(session, dict(m), conversation_id="cv")
+        monkeypatch.setattr(engine, "_load_compression_carry_ranges",
+                            lambda *a, p=parent, s=f"PAR{int(twin)}", **k: [(s, p[0] - 1, p[-1])])
+        active = [{"role": "system", "content": "sys"}, summary, *bulk, *tail]
+        engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+        result = engine._survival_fit(active, list(active), 0, "test", request_cap=_rough(monkeypatch)(active) // 2)
+        assert any(m.get("content") == summary["content"] for m in result), twin  # the premise: the summary is kept
+        named = {x for a, b, args in _calls(engine._last_survival_fit["notice"]) if args["session_id"] == f"PAR{int(twin)}"
+                 for x in parent if a <= x <= b}
+        assert parent[2] not in named and set(parent) - {parent[2]} <= named, (twin, engine._last_survival_fit["notice"])
+
+
+def test_r3_the_counted_clause_spans_every_range_it_folds():
+    """This session's rows 1 and 100 (one range in its row order) and nine one-row parent ranges between them: the cap
+    folds the two oldest by start, and the counted clause and the head both span 1..100."""
+    order, parent = [1, 100], list(range(2, 19, 2))
+    read = OutOfViewRead(frozenset(), frozenset(), order, {s: i for i, s in enumerate(order)}, {}, order, {}, {}, {},
+                         dict.fromkeys(parent, "P"))
+    notice = survival_fit_notice(SimpleNamespace(_session_id="S", _store=None), [], set(), carried=parent, read=read,
+                                 store_ids={})
+    assert notice.startswith("[LCM survival fit: 11 earlier messages (store ids 1..100)"), notice
+    assert "; and 2 earlier ranges (store ids 1..100); lcm_grep reaches them" in notice, notice
+
+
+def test_r3_interleaved_parent_and_child_rows_leave_no_row_outside_every_pointer(engine, monkeypatch):
+    """Twenty turns where this session's rows and its parent's carried rows alternate in the store (one each), then
+    newer rows: the parent gives many one-row ranges inside this session's one range. Every out-of-view row is named
+    or inside a counted span (rows 41..52 included)."""
+    _rough(monkeypatch)
+    pad = " older words" * 60
+    parent = []
+    for i in range(20):
+        engine._store.append("S", {"role": "user" if i % 2 == 0 else "assistant", "content": f"[S{i}]{pad}"},
+                             conversation_id="conv")
+        parent.append(engine._store.append("P", {"role": "user" if i % 2 == 0 else "assistant",
+                                                 "content": f"[P{i}]{pad}"}, conversation_id="conv"))
+    for i in range(20, 26):
+        engine._store.append("S", {"role": "user" if i % 2 == 0 else "assistant", "content": f"[S{i}]{pad}"},
+                             conversation_id="conv")
+    monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, **k: [("P", parent[0] - 1, parent[-1])])
+    recent = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"[K{i}]{pad}"} for i in range(26, 34)]
+    for m in recent:
+        engine._store.append("S", dict(m), conversation_id="conv")
+    active = [{"role": "system", "content": "system prompt"}, *recent]
+    engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+    result = engine._survival_fit(active, list(active), 0, "test", request_cap=_rough(monkeypatch)(active) // 2)
+    notice = engine._last_survival_fit["notice"]
+    conn = engine._store.connection
+    named = set()
+    for first, last, args in _calls(notice):
+        named |= {x for (x,) in conn.execute("SELECT store_id FROM messages WHERE session_id = ? AND store_id >= ? AND "
+                                             "store_id <= ?", (args["session_id"], first, last))}
+    spans = [tuple(map(int, found)) for found in re.findall(r"store ids (\d+)\.\.(\d+)\)", notice)]
+    listed = {m["content"] for m in result}
+    out = [x for x, content in conn.execute("SELECT store_id, content FROM messages ORDER BY store_id")
+           if content not in listed]
+    assert set(range(41, 53)) <= set(out), out  # the premise: rows 41..52 are out of view
+    assert not [x for x in out if x not in named and not any(a <= x <= b for a, b in spans)], notice
+
+
+def test_r3_an_emergency_fit_runs_each_carry_query_once(engine, monkeypatch, caplog):
+    """The emergency cut re-reads the out-of-view rows for its own shown set; the carried ids of the same list are
+    kept, so each carry range's statement runs once per fit."""
+    _rough(monkeypatch)
+    active = _emergency_list(engine)
+    parent = [engine._store.append("P", {"role": "user", "content": f"[P{i}] parent"}, conversation_id="conv")
+              for i in range(2)]
+    monkeypatch.setattr(engine, "_load_compression_carry_ranges", lambda *a, **k: [("P", parent[0] - 1, parent[-1])])
+    statements = []
+    engine._store.connection.set_trace_callback(statements.append)
+    try:
+        engine._survival_fit(active, list(active), 0, "test", request_cap=900)
+    finally:
+        engine._store.connection.set_trace_callback(None)
+    assert "dropped the summary prefix" in caplog.text  # the premise: the emergency path ran
+    assert sum(x.startswith("SELECT store_id FROM messages WHERE session_id = 'P'") for x in statements) == 1, statements
