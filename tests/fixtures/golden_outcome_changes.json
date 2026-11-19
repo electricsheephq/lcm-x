@@ -818,9 +818,29 @@
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
     },
+    "leaf-phase-rescue-keeps": {
+      "outcome_sha": "d7f10b5f2700d47697d5076b68477e8c1e736a67b35594f9bf49a196981929e2",
+      "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
+    },
+    "no-system-prompt": {
+      "outcome_sha": "0c04f94f5af44939dade808d7f533d1adcd421c421f71b0762f40e98e36a6477",
+      "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
+    },
     "publish-advance-gc-nonlock": {
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."
+    },
+    "resume-commit-wide-tail": {
+      "outcome_sha": "952c03e3aa69e7712b205b8cfd179a3aeb132773e56d37b7adab2f145c5b6744",
+      "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
+    },
+    "retained-tail-occurrence-escape": {
+      "outcome_sha": "ac5249e2a79396f83338a2e1aefee0308ddc3cd0eedb22ea5b402022ab8d016b",
+      "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
+    },
+    "stop-reason-retained-escape": {
+      "outcome_sha": "8c120e5031d2786085658d5773f48b5bdbe7b871f0195d3805b81779c1a76dd8",
+      "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
     },
     "transcript-gc-locked": {
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
