@@ -471,6 +471,74 @@ def test_cloud_posture_blocks_non_product_cloud_provider(
     request_cleanup()
 
 
+def test_cloud_default_matrix_and_privacy_batteries_use_separate_engines(tmp_path, monkeypatch):
+    import json
+
+    from hermes_lcm import assertion_store, command, config, dag, embedding_provider, engine
+    from hermes_lcm import ingest_protection, tools
+    from tests.test_embedding_provider import _voyage_success
+
+    phase_a = _runner_module()
+    monkeypatch.setenv("LCM_GAUNTLET_CLOUD_PROVIDER", "voyage")
+    monkeypatch.setenv("LCM_GAUNTLET_CLOUD_MODEL", "voyage-3.5-lite")
+    monkeypatch.setenv("VOYAGE_API_KEY", "offline-fixture")
+
+    def offline_transport(*, payload, **_kwargs):
+        if "inputs" in payload:
+            documents = [
+                {"index": index, "data": [
+                    {"index": chunk, "embedding": [1.0, 0.0, 0.0]} for chunk in range(len(group))
+                ]}
+                for index, group in enumerate(payload["inputs"])
+            ]
+            return embedding_provider.HttpResponse(200, {}, json.dumps({"data": documents}).encode())
+        return _voyage_success(len(payload["input"]))
+
+    monkeypatch.setattr(embedding_provider, "_default_http_transport", offline_transport)
+    modules = {module.__name__.rsplit(".", 1)[-1]: module for module in (
+        assertion_store, command, config, dag, embedding_provider, engine, ingest_protection, tools,
+    )}
+    matrix_calls, battery_calls = [], []
+    payload, privacy_corpus = phase_a._payload, phase_a._privacy_corpus
+
+    def posture(target):
+        cfg = target._config
+        return Path(cfg.database_path), cfg.embedding_privacy_enabled, cfg.sensitive_patterns_enabled
+
+    def record_payload(target, tool, args):
+        matrix_calls.append((tool, *posture(target)))
+        return payload(target, tool, args)
+
+    def record_privacy_corpus(mod, target):
+        battery_calls.append(posture(target))
+        return privacy_corpus(mod, target)
+
+    monkeypatch.setattr(phase_a, "_payload", record_payload)
+    monkeypatch.setattr(phase_a, "_privacy_corpus", record_privacy_corpus)
+    registered = ["lcm_recall", "lcm_status", "lcm_doctor"]
+    records, batteries = phase_a._cloud_rows(
+        modules, tmp_path, registered, [], expect_365_fixed=True,
+    )
+
+    assert [row[:3] for row in records] == [
+        ("cloud-default", tool, "PASS") for tool in registered
+    ], records
+    assert [row[:2] for row in batteries] == [
+        (name, "PASS") for name in ("planted-secret", "opt-out", "durable-redaction", "misconfiguration")
+    ], batteries
+    (control_tool, matrix_db, setting, durable), *calls = matrix_calls
+    assert (control_tool, setting, durable) == ("lcm_recall", None, False)
+    assert matrix_db.parent.name.startswith("cloud-default-")
+    assert calls[:len(registered)] == [(tool, matrix_db, None, False) for tool in registered]
+    [(tool, misconfigured_db, setting, durable)] = calls[len(registered):]
+    assert (tool, setting, durable) == ("lcm_status", True, False)
+    assert misconfigured_db.parent.name.startswith("cloud-misconfiguration-")
+    assert [(setting, durable) for _, setting, durable in battery_calls] == [
+        (True, False), (False, False), (True, True),
+    ]
+    assert len({matrix_db, misconfigured_db, *(db for db, _, _ in battery_calls)}) == 5
+
+
 def test_known_leak_blocks_release_but_stays_loud_but_ok_in_dev():
     phase_a = _runner_module()
     batteries = [

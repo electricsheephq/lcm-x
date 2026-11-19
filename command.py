@@ -5518,11 +5518,15 @@ def _chunk_backfill_run(
     # acknowledgment before sending that to a CLOUD provider; local providers
     # (fastembed/ollama) keep the text on this machine and are exempt (F1).
     if not _is_local_embedding_provider(provider_name) and not confirm_raw_text:
-        if embedding_privacy_revision(config) == "privacy:off":
+        try:
+            consent_privacy_revision = embedding_privacy_revision(config)
+        except EmbeddingPrivacyPolicyError as exc:
+            return _refused(str(exc))
+        if consent_privacy_revision == "privacy:off":
             # The filter is off by default (#2977): say plainly that nothing is removed.
             privacy_note = (
-                "No provider-input privacy filter is applied (it is off unless "
-                "LCM_EMBEDDING_PRIVACY_ENABLED is set), so the text is sent as stored. "
+                "No provider-input privacy filter is applied, so the text is sent as stored. "
+                "The filter is on only when LCM_EMBEDDING_PRIVACY_ENABLED is set to true. "
                 "Re-run with `--confirm-raw-text` to acknowledge sending it, "
             )
         else:
