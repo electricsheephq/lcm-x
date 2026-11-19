@@ -24,6 +24,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.message_analysis import _merge_adjacent_assistant_messages
 from hermes_lcm.reconcile import _emission_identity, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from hermes_lcm.tokens import count_messages_tokens
+from tests.test_host_uid_shadow import _state_db
 from tests.test_overflow_reserves_sanitizer_stubs import (
     OBJECTIVE, add_summaries, assemble, assistant_calls, full_cap, result,
 )
@@ -90,6 +91,19 @@ def _history():
          "content": f"Human turn {i}. " + "detail " * 60}
         for i in range(20)
     ]
+
+
+def _set_replay_path(engine, monkeypatch, history, replay_path):
+    if replay_path == "shortcut-off":
+        monkeypatch.setattr(engine, "_replayed_head_covers_frontier", lambda _state: False)
+    elif replay_path == "uid-on":
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+        home = Path(engine._hermes_home)
+        home.mkdir(exist_ok=True)
+        _state_db(home, [(engine._session_id, None, None)])
+        for index, row in enumerate(history):
+            if row["role"] != "system":
+                row["message_uid"] = f"host-{index}"
 
 
 def _compress(engine, messages):
@@ -641,14 +655,19 @@ def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, 
     assert rows == before
 
 
-def test_t8_second_compress_uses_public_row_noop_shortcut(engine, monkeypatch):
-    output = _compress(engine, _history())
+@pytest.mark.parametrize("replay_path", ["shortcut", "shortcut-off", "uid-on"])
+def test_t8_second_compress_uses_public_row_noop_shortcut(engine, monkeypatch, replay_path):
+    history = _history()
+    _set_replay_path(engine, monkeypatch, history, replay_path)
+    output = _compress(engine, history)
     assert "display_metadata" not in _summary_rows(output)[0]
     compared = []
     candidates = []
+    recognition = []
     compress_impl = engine._compress_impl
-    def capture(*args, **kwargs):
-        candidate = compress_impl(*args, **kwargs)
+    def capture(messages, *args, **kwargs):
+        recognition.append(engine._uid_recognition_enabled() and any(row.get("message_uid") for row in messages))
+        candidate = compress_impl(messages, *args, **kwargs)
         candidates.append(candidate)
         return candidate
     monkeypatch.setattr(engine, "_compress_impl", capture)
@@ -658,8 +677,13 @@ def test_t8_second_compress_uses_public_row_noop_shortcut(engine, monkeypatch):
         return public_row(row)
     monkeypatch.setattr(engine, "_public_compression_row", record)
     second = _compress(engine, output)
+    assert recognition == [replay_path == "uid-on"]
     assert second is output
-    assert len(candidates) == 1 and candidates[0] is not output
-    assert len(compared) == 2 * len(output)
-    assert all(public_row(left) == public_row(right) for left, right in zip(compared[::2], compared[1::2]))
+    if replay_path == "shortcut":
+        assert len(candidates) == 1 and candidates[0] is output
+        assert not compared
+    else:
+        assert len(candidates) == 1 and candidates[0] is not output
+        assert len(compared) == 2 * len(output)
+        assert all(public_row(left) == public_row(right) for left, right in zip(compared[::2], compared[1::2]))
     assert "display_metadata" not in _summary_rows(second)[0]

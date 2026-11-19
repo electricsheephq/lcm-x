@@ -55,6 +55,7 @@ from .search_query import (
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
+from .message_content import canonical_value, count_surrogates
 from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
@@ -67,6 +68,13 @@ from .sqlite_util import (
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_message_bind(field: str, value: Any) -> Any:
+    clean = canonical_value(value)
+    if clean is not value:
+        logger.warning("LCM message insert replaced surrogates: field=%s count=%d", field, count_surrogates(value))
+    return clean
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 _INGEST_LEDGER_TABLES = (
@@ -681,7 +689,7 @@ class MessageStore:
             session_id=session_id,
             context_window_tokens=self.get_context_window_tokens(session_id),
         )
-        tool_calls = msg.get("tool_calls")
+        tool_calls = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
         tc_json = json.dumps(tool_calls) if tool_calls else None
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
@@ -694,14 +702,14 @@ class MessageStore:
                     observed_at, observed_at_source)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    session_id,
-                    _normalize_source_value(source),
-                    _normalize_conversation_id_value(conversation_id),
-                    msg.get("role", "unknown"),
-                    _normalize_content_value(msg.get("content")),
-                    msg.get("tool_call_id"),
+                    _canonical_message_bind("session_id", session_id),
+                    _canonical_message_bind("source", _normalize_source_value(source)),
+                    _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                    _canonical_message_bind("role", msg.get("role", "unknown")),
+                    _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                    _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                     tc_json,
-                    msg.get("tool_name"),
+                    _canonical_message_bind("tool_name", msg.get("tool_name")),
                     ingested_at,
                     token_estimate,
                     0,
@@ -773,7 +781,7 @@ class MessageStore:
         def insert_messages() -> List[int]:
             ids: List[int] = []
             for index, (msg, est) in enumerate(zip(messages, token_estimates)):
-                tc = msg.get("tool_calls")
+                tc = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
@@ -790,14 +798,14 @@ class MessageStore:
                         observed_at, observed_at_source, sender_id, sender_source)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        session_id,
-                        _normalize_source_value(source),
-                        _normalize_conversation_id_value(conversation_id),
-                        msg.get("role", "unknown"),
-                        _normalize_content_value(msg.get("content")),
-                        msg.get("tool_call_id"),
+                        _canonical_message_bind("session_id", session_id),
+                        _canonical_message_bind("source", _normalize_source_value(source)),
+                        _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                        _canonical_message_bind("role", msg.get("role", "unknown")),
+                        _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                        _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                         tc_json,
-                        msg.get("tool_name"),
+                        _canonical_message_bind("tool_name", msg.get("tool_name")),
                         ts,
                         est,
                         0,
@@ -2015,7 +2023,7 @@ class MessageStore:
         ).fetchone()
         if not row or not row[0]:
             return None
-        return json.loads(str(row[0]))
+        return canonical_value(json.loads(str(row[0])))
 
     def read_metadata_json_many(self, keys: list[str]) -> Dict[str, Any]:
         """Batch ``read_metadata_json``: {key: value}; malformed values are skipped."""
@@ -2025,7 +2033,7 @@ class MessageStore:
             query = f"SELECT key, value FROM metadata WHERE key IN ({','.join('?' * len(chunk))})"
             for key, value in conn.execute(query, chunk):
                 try:
-                    found[key] = json.loads(str(value)) if value else None
+                    found[key] = canonical_value(json.loads(str(value))) if value else None
                 except ValueError:
                     continue
         return found
@@ -2241,6 +2249,19 @@ class MessageStore:
         except (ValueError, TypeError):
             return None
         return data if isinstance(data, dict) else None
+
+    def try_increment_compaction_telemetry(self, conversation_id, increment, updates):
+        """Skip a turn's diagnostic update if another thread owns the store."""
+        lock = self._write_lock
+        if lock.acquire(blocking=False):
+            try:
+                if self._conn is not None and not self._conn.in_transaction:
+                    return self.increment_compaction_telemetry(conversation_id, increment, updates)
+            except Exception:
+                logger.debug("LCM turn telemetry write failed", exc_info=True)
+            finally:
+                lock.release()
+        return None
 
     def increment_compaction_telemetry(
         self,
@@ -2850,8 +2871,8 @@ class MessageStore:
         # Deserialize tool_calls JSON
         if d.get("tool_calls"):
             try:
-                d["tool_calls"] = json.loads(d["tool_calls"])
-            except (json.JSONDecodeError, TypeError):
+                d["tool_calls"] = canonical_value(json.loads(d["tool_calls"]))
+            except (ValueError, TypeError):
                 pass
         return d
 

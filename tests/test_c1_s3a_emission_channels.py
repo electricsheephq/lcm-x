@@ -110,6 +110,7 @@ def test_anchor_is_cleared_after_assembly_exception_and_retry(
         engine.ingest(compacted)
     else:
         compacted = _compacted(engine)
+        monkeypatch.setattr(engine, "_replayed_head_covers_frontier", lambda _: False)
     before = engine._store.get_session_messages(engine.current_session_id)
     count = tokens._count_tokens_cached
     observed: list[Rows] = []

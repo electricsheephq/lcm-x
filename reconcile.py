@@ -23,10 +23,11 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from .config import host_message_uid_mode, identity_anchor_enabled
+from .config import host_message_uid_mode, identity_anchor_enabled, uid_recognition_enabled
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -59,7 +60,7 @@ from .ingest_protection import (
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
-from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
 from .store import _normalize_observed_at
 
@@ -68,6 +69,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
+_UID_ON_CURSOR_CUT_BUDGET = 64
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 # The host's todo snapshot (hermes-agent tools/todo_tool.py TodoStore.format_for_injection) is the
 # header, one line per kept item ("- [>] 1. text (in_progress)", subtasks indented two spaces), and
@@ -307,6 +309,16 @@ def _todo_annotation_span(content: str, start: int) -> int:
     return end
 
 
+class _UidStoreMap(dict):
+    def __init__(self, ids, legacy, held=None):
+        super().__init__(ids)
+        self._legacy = lru_cache(maxsize=1)(legacy)
+        self.held = {} if held is None else held
+
+    def legacy_id(self, message_id):
+        return self._legacy().get(message_id)
+
+
 @dataclass(eq=False, repr=False)
 class _TailReplayRun:
     """Stack-local inputs and prepared identities for one tail replay scan."""
@@ -426,13 +438,12 @@ class ReconcileMixin:
                 if _json_has_duplicate_object_keys(value):
                     return value
                 try:
-                    parsed = json.loads(value)
+                    parsed = canonical_value(json.loads(value))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     return value
                 if isinstance(parsed, (dict, list)):
                     canonical = ReconcileMixin._canonicalize_tool_call_identity_value(parsed)
                     return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            return value
         return value
 
     @staticmethod
@@ -807,23 +818,33 @@ class ReconcileMixin:
             return override.get("content") if isinstance(override.get("content"), str) else None
         return None
 
-    def _watch_stored_user_rows(self, stored) -> None:
+    @staticmethod
+    def _canonical_host_view(raw):
+        messages = canonical_value(raw)
+        if messages is raw:
+            return messages, {}
+        pairs = tuple((original, clean) for original, clean in zip(raw, messages) if original is not clean)
+        return messages, {"host_pairs": pairs}
+
+    def _watch_stored_user_rows(self, stored, host_pairs=()) -> None:
         """Remember the user rows this process just stored: (object, store_id, identity, content)."""
         watch = self._host_rewrite_state()[0]
+        originals = {id(copy): raw for raw, copy in host_pairs}
         for message, protected, store_id in stored:
             if message.get("role") == "user":
                 content = normalize_content_value(protected.get("content")) or ""
-                watch[int(store_id)] = (self._message_replay_identity(message), content, [message])
+                objects = [message, originals[id(message)]] if id(message) in originals else [message]
+                watch[int(store_id)] = (self._message_replay_identity(message), content, objects)
         for store_id in sorted(watch)[:-8]:  # bounded: a rewrite follows its store within the turn
             del watch[store_id]
 
-    def _rekey_host_rewrite_watch(self, messages, result) -> None:
+    def _rekey_host_rewrite_watch(self, messages, result, host_pairs=()) -> None:
         """compress() returns copies: also watch the unique output copy of a watched row."""
         watch = self._host_rewrite_state()[0]
-        present = {id(message) for message in messages}
+        present = {id(message) for message in messages} | {id(raw) for raw, _ in host_pairs}
         if not isinstance(result, list) or not any(id(o) in present for _i, _c, objs in watch.values() for o in objs):
             return
-        identities = [self._message_replay_identity(message) for message in result]
+        identities = [self._message_replay_identity(canonical_value(message)) for message in result]
         inputs = Counter(self._message_replay_identity(message) for message in messages)
         for identity, _content, objects in watch.values():
             # Only an unambiguous input occurrence transfers to its unique output copy.
@@ -832,13 +853,17 @@ class ReconcileMixin:
             if unambiguous and all(copies[0] is not o for o in objects):
                 objects.append(copies[0])
 
-    def _capture_host_rewrites(self, messages) -> None:
+    def _capture_host_rewrites(self, messages, host_pairs=()) -> None:
         """A host rewrote a user row LCM stored, in place, by edge whitespace only:
         record a store_id-keyed identity override. The stored row is never modified."""
         watch = self._host_rewrite_state()[0]
-        present = {id(message): message for message in messages} if watch else {}
+        if not watch:
+            return
+        present = {id(message): message for message in messages}
+        # The canonical copies are aliases for this capture only. Keep the watch bounded.
+        present.update((id(raw), copy) for raw, copy in host_pairs)
         for store_id, (identity, stored, objects) in list(watch.items()):
-            message = next((o for o in objects if present.get(id(o)) is o), None)
+            message = next((present[id(o)] for o in objects if id(o) in present), None)
             live = self._message_replay_identity(message) if message is not None else identity
             if live == identity:
                 continue
@@ -1900,6 +1925,7 @@ class ReconcileMixin:
             candidate_store_ids = self._get_store_id_map_for_messages(
                 candidate_identity_messages,
                 [occurrence_by_id[id(m)] for m in candidate_identity_messages] if v4 else None,
+                uid_first=False,
             )
             ordered_store_ids = [
                 int(candidate_store_ids.get(id(message)) or 0)
@@ -2339,6 +2365,9 @@ class ReconcileMixin:
         session_count: int,
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
+        content_cut: int | None = None,
+        cut_budget: int | None = None,
+        uid_cursor: int = 0,
     ) -> int | None:
         run = _TailReplayRun(
             messages=messages,
@@ -2355,15 +2384,25 @@ class ReconcileMixin:
         native_recovery_snapshot_digests = run.native_recovery_snapshot_digests
         native_prefix_digests = run.native_prefix_digests
         empty_prefix_cursor: int | None = None
+        skipped = 0
+        native_cursor = None
+        cuts_left = len(messages) + 1 if cut_budget is None else cut_budget
         for cursor in range(len(messages), -1, -1):
-            candidate_messages = messages[:cursor]
             native_recovery_snapshot_digest = native_prefix_digests.get(cursor, "")
             if (
                 native_recovery_snapshot_digest
                 and native_recovery_snapshot_digest
                 in native_recovery_snapshot_digests
             ):
-                return cursor
+                native_cursor = cursor
+                break
+            if content_cut is not None and cursor > content_cut:
+                continue
+            if not cuts_left:
+                skipped += 1
+                continue
+            cuts_left -= 1
+            candidate_messages = messages[:cursor]
             candidate = _TailReplayCandidate(cursor=cursor, candidate_messages=candidate_messages)
             self._project_replay_candidate(run, candidate)
             candidate_visible_messages = candidate.candidate_visible_messages
@@ -2464,7 +2503,11 @@ class ReconcileMixin:
                 or has_durable_compacted_snapshot_replay
             ):
                 return cursor
-        return empty_prefix_cursor if allow_empty_prefix else None
+        if skipped:
+            logger.info("LCM UID cut budget exhausted: uid_cursor=%d cuts_skipped=%d", uid_cursor, skipped)
+        if native_cursor is not None:
+            return native_cursor
+        return empty_prefix_cursor if allow_empty_prefix and not skipped else None
 
     def _record_ingest_reconciliation(
         self,
@@ -3125,6 +3168,7 @@ class ReconcileMixin:
         *,
         allow_session_end_replay_proof: bool = False,
         session_counts: Optional[list] = None,
+        uid_fetched=None,
     ) -> int:
         """Infer the in-memory cursor for an existing session after process restart.
 
@@ -3136,18 +3180,27 @@ class ReconcileMixin:
         session_count = self._store.get_session_count(self._session_id)
         if session_counts is not None:
             session_counts.append(session_count)
+        recognition = uid_recognition_enabled(self)
+        uid_cursor = 0
+        if recognition:
+            bound_uids = set()
+            uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids)
+            uid_cursor = next((i for i in range(len(messages)) if i not in uid_matches), len(messages))
+            if uid_cursor == len(messages):
+                return self._record_uid_cursor(messages, uid_cursor, session_count, 0)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
         if session_count <= 0:
-            return self._reconcile_empty_store_session(run)
+            cursor = self._reconcile_empty_store_session(run)
+            return self._record_uid_cursor(messages, uid_cursor, session_count, 0) if uid_cursor > cursor else cursor
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)
         run.tail_limit = tail_limit
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
         if not stored_rows:
-            return 0
+            return self._record_uid_cursor(messages, uid_cursor, session_count, 0) if uid_cursor else 0
         stored_tail_rows = [
             row
             for row in stored_rows
@@ -3161,6 +3214,14 @@ class ReconcileMixin:
             for row in stored_tail_rows
         ]
         run.stored_tail = stored_tail
+        budgeted = bool(uid_cursor)
+        if budgeted and (unbound := self._host_uid_unbound_rows(
+            messages[uid_cursor:-_UID_ON_CURSOR_CUT_BUDGET], bound_uids
+        )):
+            logger.info("LCM UID cut budget disabled: unbound_host_rows=%d", unbound)
+            budgeted = False
+        # Later cuts can mistake new rows for older equal content (#1511). Earlier ones keep their own proof.
+        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if budgeted and stored_tail_rows else None
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -3169,12 +3230,14 @@ class ReconcileMixin:
             session_count=len(stored_tail),
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
+            **({"content_cut": content_cut, "cut_budget": _UID_ON_CURSOR_CUT_BUDGET, "uid_cursor": uid_cursor}
+               if budgeted else {}),
         )
         head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
         if head_cursor is not None and head_cursor > (cursor or 0):
             cursor = head_cursor  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
-        if proof_cursor is not None and proof_cursor > (cursor or 0):
+        if proof_cursor is not None and proof_cursor > max(cursor or 0, uid_cursor):
             # The last compaction's durable output proof covers more of this
             # snapshot than content matching could (e.g. it stopped at the
             # scaffold prefix): the proof may extend a cursor, never shrink it.
@@ -3189,7 +3252,7 @@ class ReconcileMixin:
             )
             return proof_cursor
         replay_cursor = self._cursor_from_frontier_bound_replay(messages, stored_rows)
-        if replay_cursor is not None and replay_cursor > (cursor or 0):
+        if replay_cursor is not None and replay_cursor > max(cursor or 0, uid_cursor):
             self._record_ingest_reconciliation(
                 action="advanced cursor", reason="replayed superseded own-session emission below frontier",
                 cursor=replay_cursor, incoming=len(messages), session_count=session_count,
@@ -3220,7 +3283,10 @@ class ReconcileMixin:
                 stored_tail_count=len(stored_tail),
                 effective_incoming=len(self._effective_replay_identities(messages)),
             )
-            return lossy_at
+            return (self._record_uid_cursor(messages, uid_cursor, session_count, len(stored_tail))
+                    if uid_cursor > lossy_at else lossy_at)
+        if uid_cursor > (cursor or 0):
+            return self._record_uid_cursor(messages, uid_cursor, session_count, len(stored_tail))
         if cursor is not None and cursor > 0:
             rewound = False
             # #1511: full literal replay proves position, not a later user occurrence.
@@ -3277,6 +3343,13 @@ class ReconcileMixin:
             return cursor
 
         return self._reconcile_unmatched_store_history(run)
+
+    def _record_uid_cursor(self, messages, cursor, session_count, stored_tail_count):
+        self._record_ingest_reconciliation(
+            action="advanced cursor", reason="replayed UID-bound prefix", cursor=cursor,
+            incoming=len(messages), session_count=session_count, stored_tail_count=stored_tail_count,
+            effective_incoming=cursor)
+        return cursor
 
     def _replayed_tool_segment_indexes_after_cursor(
         self,
@@ -3807,7 +3880,7 @@ class ReconcileMixin:
         return bool(self._active_folded_tail_identity_overrides([message]))
 
     def _get_store_id_map_for_messages(
-        self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(),
+        self, messages: List[Dict[str, Any]], occurrences=None, *, exclude_store_ids=frozenset(), uid_first=True,
     ) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
@@ -3863,6 +3936,24 @@ class ReconcileMixin:
                 }.values()
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
+        held = {}
+        resolved = (self._host_uid_resolve(messages, excluded=exclude_store_ids, held=held)
+                    if uid_first and uid_recognition_enabled(self) and any(m.get("message_uid") for m in messages) else {})
+        if resolved:
+            frontier = self._store_complete_frontier()
+            anchors = {int(row["store_id"]) for row in candidates}
+            uid_map = {id(messages[i]): int(row["store_id"]) for i, row in resolved.items()
+                       if row["store_id"] > frontier or row["store_id"] in anchors}
+            ordered = {}
+            excluded = set(exclude_store_ids) | held.keys()
+            fallback = [i for i in range(len(messages)) if i not in resolved]
+            if fallback:
+                ordered = self._get_store_id_map_for_messages(
+                    [messages[i] for i in fallback], [occurrences[i] for i in fallback] if occurrences else None,
+                    exclude_store_ids=excluded.union(row["store_id"] for row in resolved.values()),
+                    uid_first=False)
+            return _UidStoreMap({**ordered, **uid_map}, lambda: self._get_store_id_map_for_messages(
+                messages, occurrences, exclude_store_ids=excluded, uid_first=False), held)
         next_candidate_after = self._last_compacted_store_id
         while True:
             page = self._store.get_session_messages_after(

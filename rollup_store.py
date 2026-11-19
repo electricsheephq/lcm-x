@@ -23,6 +23,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
     verify_temporal_rollup_schema,
 )
+from .message_content import canonical_text
 from .sqlite_session import ConnectionPolicy, open_connection
 from .sqlite_util import _is_sqlite_locked_error
 
@@ -358,7 +359,7 @@ class RollupStore:
                   AND status = 'building'
                 """,
                 (
-                    summary,
+                    canonical_text(summary),
                     int(token_count),
                     self._now(),
                     fingerprint,
@@ -399,7 +400,7 @@ class RollupStore:
                   AND status = 'building'
                 """,
                 (
-                    error, now, int(token.rollup_id), int(token.generation),
+                    canonical_text(error), now, int(token.rollup_id), int(token.generation),
                     str(token.nonce),
                 ),
             )
@@ -575,7 +576,7 @@ class RollupStore:
                   AND status = 'building'
                 """,
                 (
-                    reason, int(token.rollup_id), int(token.generation),
+                    canonical_text(reason), int(token.rollup_id), int(token.generation),
                     str(token.nonce),
                 ),
             )
