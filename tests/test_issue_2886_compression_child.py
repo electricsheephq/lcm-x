@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -15,11 +16,14 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 
+pytestmark = pytest.mark.issue(2886)
+
 PARENT, CHILD = "S", "S2"
 CONVERSATION = "compression-child"
 WINDOW = 200_000
 TOOL = "read_file"
 SUMMARY = "Earlier synthetic file reads.\nExpand for details about: file reads"
+LOSSY_RESULT = "[LCM sensitive redaction: name=password_assignment; chars=12]"
 
 
 def _digest(value):
@@ -77,6 +81,9 @@ class Measurement:
     copies: list
     returned_digest: str
     expected: list
+    proof_cursors: list
+    routes: list
+    replayed_count: int
 
 
 def _measure(engine, live, new_exchange, cold, both_names):
@@ -111,7 +118,9 @@ def _measure(engine, live, new_exchange, cold, both_names):
                          json.dumps(row["tool_calls"]) if "tool_calls" in row else None))
         for row in new_exchange
     ]
-    result = Measurement(added, copies, _digest(returned), expected)
+    result = Measurement(
+        added, copies, _digest(returned), expected, proof_results, routes, len(live) - len(new_exchange),
+    )
     print(json.dumps({
         "arm": f"{'cold' if cold else 'warm'}/{'both-names' if both_names else 'name-only'}",
         "incoming": len(live), "before": len(before), "stored": len(added), "copies": len(copies),
@@ -188,13 +197,9 @@ def arms(tmp_path_factory):
         }
 
 
-@pytest.mark.issue(2886)
 @pytest.mark.parametrize(("cold", "both_names"), [
     pytest.param(False, False, id="warm-name-only"),
-    pytest.param(True, False, id="cold-name-only", marks=pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="#2886: compression-child cold bind stores 64 rows instead of 6, including 58 copies",
-    )),
+    pytest.param(True, False, id="cold-name-only"),
     pytest.param(False, True, id="warm-both-names"),
     pytest.param(True, True, id="cold-both-names"),
 ])
@@ -206,3 +211,162 @@ def test_compression_child_replay(arms, cold, both_names):
         pytest.fail("The six new rows were not stored exactly once in order")
     assert not actual.copies, f"Stored {len(actual.copies)} copies among {len(actual.added)} new rows"
     assert actual.added == actual.expected == warm.added
+    reason = "replayed proven post-compaction continuation" if cold else "append"
+    assert actual.routes == [(actual.replayed_count, reason)]
+    if cold:
+        assert set(actual.proof_cursors) == {actual.replayed_count}
+    else:
+        assert actual.proof_cursors == []
+
+
+@pytest.fixture
+def walk_engine(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), embeddings_enabled=False)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path))
+    try:
+        _start(engine, CHILD)
+        yield engine
+    finally:
+        engine.shutdown()
+
+
+def _seed_walk(engine, carried, continuation, before_proof=()):
+    """Seed the durable proof for a parent's carried view, then append child rows."""
+    parent_ids = engine._store.append_batch(PARENT, carried)
+    before_ids = engine._store.append_batch(CHILD, list(before_proof))
+    identities = [engine._proof_replay_identity(row, strip_carrier=False) for row in carried]
+    engine._persist_compress_commit_proof({
+        **engine._emission_binding(),
+        "output": identities,
+        "output_effective": identities,
+        "carry_ranges": [(PARENT, parent_ids[0] - 1, parent_ids[-1])],
+    }, last_store_id=before_ids[-1] if before_ids else 0)
+    engine._store.append_batch(CHILD, continuation)
+    assert engine._durable_commit_proof_payload()["version"] == 4
+
+
+@pytest.mark.parametrize(("case", "replayed"), [
+    ("same-page", True),
+    ("across-pages", True),
+    ("live-nameless", True),
+    ("wrong-tool-reused-id", False),
+    ("owner-before-proof", False),
+    ("restamped", False),
+    ("placeholder", False),
+    ("lossy", False),
+])
+def test_commit_proof_tool_name_guards(walk_engine, monkeypatch, case, replayed):
+    engine = walk_engine
+    # The carried group has the same id and name as the explicit result.
+    carried = _exchange(0, True)[1:3]
+    owner, named = _exchange(0, True)[1:3]
+    nameless = {key: value for key, value in named.items() if key != "tool_name"}
+    live, stored = named, nameless
+    before_proof = []
+    siblings = []
+    if case == "across-pages":
+        page_after = engine._store.get_session_messages_after
+        monkeypatch.setattr(engine._store, "get_session_messages_after",
+                            lambda *args, **kwargs: page_after(*args, **kwargs, limit=1))
+        # The owning assistant and two preceding siblings are on earlier pages.
+        for index in range(2):
+            call_id = f"sibling-{index}"
+            owner["tool_calls"].append(dict(owner["tool_calls"][0], id=call_id))
+            siblings.append(dict(named, tool_call_id=call_id, content=f"sibling {index}"))
+    if case == "live-nameless":
+        live, stored = {key: value for key, value in nameless.items() if key != "name"}, named
+    if case == "wrong-tool-reused-id":
+        owner["tool_calls"][0]["function"]["name"] = "search_files"
+    if case == "owner-before-proof":
+        before_proof = [owner]
+        carried = [*carried, owner]
+    if case == "restamped":
+        live = dict(live, timestamp=live["timestamp"] + 1)
+    if case == "placeholder":
+        live = dict(live, content=_HERMES_PRUNED_TOOL_PLACEHOLDER)
+        stored = dict(stored, content=_HERMES_PRUNED_TOOL_PLACEHOLDER)
+    if case == "lossy":
+        live, stored = dict(live, content=LOSSY_RESULT), dict(stored, content=LOSSY_RESULT)
+
+    group = [] if before_proof else [owner, *siblings]
+    _seed_walk(engine, carried, [*group, stored], before_proof)
+    history = [*carried, *group, live]
+    delta = {"role": "user", "content": "new work"}
+    assert engine._cursor_from_durable_commit_proof([*history, delta]) == (len(history) if replayed else None)
+
+
+def _differential_cases(engine, baseline_walk):
+    seed = 288603
+    rng = random.Random(seed)
+    families = (
+        ("exact", "exact-restamp"),
+        ("name-only", "live-nameless", "exact"),
+        ("name-only", "live-nameless", "cleared", "exact"),
+        ("name-only", "restamped", "wrong-tool", "placeholder", "lossy", "exact"),
+    )
+    same, added, rejected = 0, 0, 0
+    for case in range(256):
+        # Overwrite the same synthetic store and proof each time.
+        with engine._store.connection as connection:
+            connection.execute("DELETE FROM messages")
+        carried = [
+            row for index in range(rng.randint(1, 3))
+            for row in _exchange(-1 - index, rng.choice((True, False)))
+        ]
+        stored, live = [], []
+        family = rng.choice(families)
+        for index in range(rng.randint(1, 4)):
+            user, *pairs, reply = _exchange(index, True)
+            stored.append(user)
+            live.append(user)
+            for owner, tool in zip(pairs[::2], pairs[1::2]):
+                call = owner["tool_calls"][0]
+                tool["tool_call_id"] = call["id"] = f"reused-{rng.randrange(3)}"
+                name = call["function"]["name"] = rng.choice((TOOL, "search_files"))
+                durable = dict(tool, name=name, tool_name=name)
+                host = dict(durable)
+                variant = rng.choice(family)
+                if variant in {"name-only", "restamped", "wrong-tool", "placeholder", "lossy"}:
+                    durable.pop("tool_name")
+                if variant == "live-nameless":
+                    host.pop("name")
+                    host.pop("tool_name")
+                if variant in {"restamped", "exact-restamp"}:
+                    host["timestamp"] += 1
+                if variant == "wrong-tool":
+                    host["name"] = host["tool_name"] = "other_tool"
+                if variant in {"placeholder", "cleared"}:
+                    host["content"] = _HERMES_PRUNED_TOOL_PLACEHOLDER
+                if variant == "placeholder":
+                    durable["content"] = host["content"]
+                if variant == "lossy":
+                    durable["content"] = host["content"] = LOSSY_RESULT
+                stored.extend((owner, durable))
+                live.extend((owner, host))
+            stored.append(reply)
+            live.append(reply)
+        _seed_walk(engine, carried, stored)
+        history = [*carried, *live]
+        messages = [*history, *_exchange(99, True)]
+        base = baseline_walk(engine, messages)
+        candidate = engine._cursor_from_durable_commit_proof(messages)
+        assert base is None or candidate == base, (seed, case, base, candidate)
+        if candidate is None:
+            rejected += 1
+        else:
+            assert candidate == len(history), (seed, case, candidate)
+            if base is None:
+                added += 1
+            else:
+                same += 1
+    assert same and added and rejected
+    print(f"seed={seed} cases=256 same={same} added={added} rejected={rejected}")
+
+
+def test_commit_proof_walk_only_adds_cursors(walk_engine):
+    def baseline(engine, messages):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(engine, "_missing_tool_name_matches", lambda *_: False)
+            return engine._cursor_from_durable_commit_proof(messages)
+
+    _differential_cases(walk_engine, baseline)

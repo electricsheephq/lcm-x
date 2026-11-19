@@ -3055,6 +3055,7 @@ class ReconcileMixin:
             while index < n and occurrences[index] is None and projection.entries[index].kind == "recovery":
                 index += 1
             after_store_id = int(payload.get("last_store_id") or 0)
+            stored_rows = []
             while True:
                 page = self._store.get_session_messages_after(
                     self._session_id,
@@ -3063,17 +3064,32 @@ class ReconcileMixin:
                 if not page:
                     break
                 self._load_host_rewrite_overrides(page)
-                for row in page:
+                # A tool group can span pages. Keep only the preceding group
+                # when this page starts with its results. Never read before the proof.
+                carry = []
+                if stored_rows and page[0].get("role") == "tool":
+                    owner = len(stored_rows) - 1
+                    while owner >= 0 and stored_rows[owner].get("role") == "tool":
+                        owner -= 1
+                    if owner >= 0 and stored_rows[owner].get("role") == "assistant":
+                        carry = stored_rows[owner:]
+                stored_rows = carry + page if carry else page
+                for row_index, row in enumerate(page, len(carry)):
                     if index >= n:
                         return None
                     identity = proof_identity(
                         messages[index], stored_row=index + 1 == composite,
                         allow_pruned_tool_alias=index not in recent_tools)
-                    if _has_lossy_redacted_identity(identity) or not any(
-                        identity == proof_identity(row, stored_row=True, with_host_rewrite=True,
-                                                   allow_pruned_tool_alias=alias)
-                        for alias in (False, True)
-                    ):
+                    if _has_lossy_redacted_identity(identity):
+                        return None
+                    stored = proof_identity(row, stored_row=True, with_host_rewrite=True,
+                                            allow_pruned_tool_alias=False)
+                    if (identity != stored
+                            and identity != proof_identity(row, stored_row=True, with_host_rewrite=True)
+                            and not self._matches_session_with_missing_tool_names(
+                                messages, (identity,), stored_rows, (stored,),
+                                message_start=index, row_start=row_index,
+                            )):
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
@@ -3613,10 +3629,15 @@ class ReconcileMixin:
         matches = [call.get("function") for call in calls if isinstance(call, dict) and call.get("id") == call_id]
         return len(matches) == 1 and isinstance(matches[0], dict) and matches[0].get("name") == name
 
-    def _matches_session_with_missing_tool_names(self, messages, incoming_identities, rows, stored_identities):
+    def _matches_session_with_missing_tool_names(
+        self, messages, incoming_identities, rows, stored_identities, *, message_start=0, row_start=0,
+    ):
         """Add a name-only fallback to the position-bound cold replay comparison."""
         resolved = False
-        for index, (message, incoming, row, stored) in enumerate(zip(messages, incoming_identities, rows, stored_identities)):
+        for message_index, incoming, row_index, stored in zip(
+            range(message_start, len(messages)), incoming_identities, range(row_start, len(rows)), stored_identities,
+        ):
+            message, row = messages[message_index], rows[row_index]
             if _has_lossy_redacted_identity(incoming):
                 return False
             stamp = _normalize_observed_at(message.get("timestamp"))
@@ -3633,7 +3654,8 @@ class ReconcileMixin:
             explicit = message if name else row
             if str(explicit.get("tool_name") or explicit.get("name") or "") != (name or stored[4]):
                 return False
-            if not self._missing_tool_name_matches(rows if name else messages, index, call_id, name or stored[4]):
+            owner_rows, result_index = (rows, row_index) if name else (messages, message_index)
+            if not self._missing_tool_name_matches(owner_rows, result_index, call_id, name or stored[4]):
                 return False
             resolved = True
         return resolved

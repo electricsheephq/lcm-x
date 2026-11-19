@@ -1,0 +1,1 @@
+- Fix: after compaction, a cold Hermes bind can recognize a replayed tool result whose unique owning call proves its missing tool name (#2886).
