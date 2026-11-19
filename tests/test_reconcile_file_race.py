@@ -149,15 +149,26 @@ def test_reconcile_marker_between_candidates(tmp_path, monkeypatch, change):
     assert cursor == (2 if change == "none" else 0)
 
 
-@pytest.mark.parametrize("with_calls", [False, True], ids=["literal-call-id", "pruned-with-calls"])
-def test_literal_pruned_cursor_oracle(tmp_path, monkeypatch, with_calls):
+@pytest.mark.parametrize("case", ["literal-call-id", "pruned-with-calls", "rewrite-call-id", "rewrite-content"])
+def test_literal_pruned_cursor_oracle(tmp_path, monkeypatch, case):
     older = _messages(FULL_OUTPUT, "a") + _messages(FULL_OUTPUT, "b")
     suffix = _messages("durable anchor", "anchor") + _messages(CLEARED, "a") + _messages(CLEARED, "b")
-    if with_calls:
+    if case == "pruned-with-calls":
         suffix[-1]["tool_calls"] = suffix[-2]["tool_calls"]
     incoming = deepcopy(suffix) + _messages("fresh", "x") + _messages("fresh", "y")
-    cursor, *_ = _compare(tmp_path, monkeypatch, older + suffix, incoming)
-    assert cursor == len(suffix)
+    rewrite = {"rewrite-call-id": ("tool_call_id", "new-call"),
+               "rewrite-content": ("content", "New tool output")}.get(case)
+
+    def project(candidate, recovery, patch):
+        if rewrite and candidate.cursor == len(incoming) - 1:
+            assert recovery == [(len(incoming), False)]
+            patch.setitem(incoming[len(suffix) - 1], *rewrite)
+
+    # A role-keyed cache with full validation would still thrash between a and b.
+    cursor, *_ = _compare(
+        tmp_path, monkeypatch, older + suffix, incoming, project, pin_literals=case == "literal-call-id",
+    )
+    assert cursor == len(suffix) - bool(rewrite)
 
 
 def test_raw_cleanup_cursor_oracle(tmp_path, monkeypatch):
@@ -167,3 +178,29 @@ def test_raw_cleanup_cursor_oracle(tmp_path, monkeypatch):
     assert cursor == 1
     assert cleanup[0] == (6, True)
     assert (3, False) in cleanup
+
+
+def test_raw_cleanup_digit_limit_between_candidates(tmp_path, monkeypatch):
+    # Both matching suffixes contain the same reasoning-only assistant identity.
+    # The 641-digit number keeps the first cleanup from decoding it as a dict.
+    reasoning = {"role": "assistant", "content": '{"number": ' + "1" * 641 + ', "type": "thinking"}'}
+    answer = {"role": "assistant", "content": "Visible answer"}
+    stored = [reasoning, answer] * 2
+    incoming = [NOTE, *deepcopy(stored)]
+    original_limit = sys.get_int_max_str_digits()
+
+    def project(candidate, recovery, patch):
+        if candidate.cursor == 5:
+            sys.set_int_max_str_digits(640)
+        elif candidate.cursor == 3:
+            sys.set_int_max_str_digits(0)
+
+    try:
+        sys.set_int_max_str_digits(0)
+        cursor, _, _, cleanup = _compare(
+            tmp_path, monkeypatch, stored, incoming, project, reset=lambda: sys.set_int_max_str_digits(0),
+        )
+    finally:
+        sys.set_int_max_str_digits(original_limit)
+    assert cleanup[:3] == [(5, False), (4, False), (3, True)]
+    assert cursor == 1
