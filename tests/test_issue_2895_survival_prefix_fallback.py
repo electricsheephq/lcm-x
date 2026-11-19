@@ -21,7 +21,7 @@ def _tail(session, size):
     ]
 
 
-def _assert_fit(engine, rows, budget, summary_parts, kept_parts, expected_ids, *, exit_fit=False):
+def _assert_fit(engine, rows, budget, summary_parts, kept_parts, expected_ids, *, exit_fit=False, earlier_ids=()):
     engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(rows), False
     before = engine._survival_measure(rows)
     plan, _ = engine._plan_survival_fit(
@@ -37,14 +37,22 @@ def _assert_fit(engine, rows, budget, summary_parts, kept_parts, expected_ids, *
     omitted_ids = tuple(sorted(
         row["store_id"] for row in stored if not any(row["content"] in text for text in fitted_texts)
     ))
-    assert tuple(plan.ids) == omitted_ids == expected_ids
+    assert tuple(plan.ids) == expected_ids
+    assert omitted_ids == (*earlier_ids, *expected_ids)
     assert plan.count == len(expected_ids)
-    assert f"{len(expected_ids)} earlier messages (store ids {expected_ids[0]}..{expected_ids[-1]})" in plan.notice
+    # T1-341 (2): the per-cut notice names this cut's own count and store-id span.
+    per_cut = plan.notice.endswith("; lcm_grep / lcm_load_session reach them.]")
+    named_ids = expected_ids if per_cut else omitted_ids
+    first, last = named_ids[0], named_ids[-1]
+    assert f"{len(named_ids)} earlier messages (store ids {first}..{last})" in plan.notice
+    # T1-341 (2): a cumulative notice still names the explicit loader call.
+    if not per_cut:
+        assert f"session_id={engine._session_id} after_store_id={first - 1} limit={len(omitted_ids)} to {last}" in plan.notice
     assert engine._survival_measure(plan.fitted) <= budget
 
 
 @pytest.mark.parametrize(("lead", "words", "share", "expected_ids"), [
-    pytest.param("scaffold", 120, 0.6, (1, 2, 3, 4), id="scaffold-120-60"),
+    pytest.param("scaffold", 120, 0.6, (1, 2, 3, 4, 5), id="scaffold-120-60"),
     pytest.param("scaffold", 120, 0.5, (1, 2, 3, 4, 5, 6, 7), id="scaffold-120-50"),
     pytest.param("scaffold", 120, 0.4, (1, 2, 3, 4, 5, 6, 7, 8), id="scaffold-120-40"),
     pytest.param("scaffold", 300, 0.6, (1, 2, 3, 4), id="scaffold-300-60"),
@@ -76,6 +84,21 @@ def test_literal_after_verified_prefix(carrier_session, lead, words, share, expe
     rows = [{"role": "system", "content": "sys"}, leading, literal, *tail]
     budget = int(engine._survival_measure(rows) * share)
     _assert_fit(engine, rows, budget, (first, second), (0, 1), expected_ids)
+
+
+def test_split_literal_notice_also_names_an_earlier_omission(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    first, second = (_summary([_leaf(engine, label)]) for label in ("a2 leaf zero", "a2 leaf one"))
+    earlier_id = _append(engine, session.row(role="assistant", content="Earlier omitted reply"))
+    literal = session.row(role="user", content=f"{second}\n\n[R1] pasted ask " + "oak " * 300)
+    tail = _tail(session, 9)
+    for row in [literal, *tail]:
+        _append(engine, row)
+
+    rows = [{"role": "system", "content": "sys"}, {"role": "user", "content": first}, literal, *tail]
+    budget = int(engine._survival_measure(rows) * 0.6)
+    _assert_fit(engine, rows, budget, (first, second), (0, 1), (2, 3, 4, 5), earlier_ids=(earlier_id,))
 
 
 @pytest.mark.parametrize(("share", "expected_ids"), [

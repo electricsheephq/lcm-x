@@ -341,10 +341,36 @@ class _TailReplayRun:
     engine_prefix_digests: dict[int, str] = field(init=False)
     session_end_prefix_digests: dict[int, str] = field(init=False)
     # Pure identity transforms, scoped to this reconciliation invocation.
+    # The prepared messages list retains every object used as an id key.
+    literal_pruned_identities: dict[int, tuple[tuple, tuple[str, str, str, str, str]]] = field(
+        default_factory=dict, init=False
+    )
+    persisted_marker_texts: dict[int, tuple[tuple[str, str, int], str]] = field(default_factory=dict, init=False)
+    cleanup_identities: dict[
+        tuple[tuple[str, str, str, str, str], int], tuple[str, str, str, str, str] | None
+    ] = field(default_factory=dict, init=False)
     generationless_identities: dict[
         tuple[str, str, str, str, str], tuple[str, str, str, str, str]
     ] = field(default_factory=dict, init=False)
     generationless_sanitized_tail: list[tuple[str, str, str, str, str]] | None = field(default=None, init=False)
+
+    def persisted_marker_text(self, msg: Dict[str, Any]) -> str:
+        role = msg.get("role")
+        if str(role or "") != "tool":
+            return ""
+        content = msg.get("content")
+        limit = sys.get_int_max_str_digits()
+        inputs = (role, content, limit)
+        cacheable = type(role) is str and type(content) is str
+        entry = self.persisted_marker_texts.get(id(msg)) if cacheable else None
+        # Tuple equality checks each field by identity before comparing its value.
+        if entry is not None and entry[0] == inputs:
+            return entry[1]
+        content = normalize_content_value(content) or ""
+        text = content if _is_hermes_persisted_output_marker(content) else ""
+        if cacheable and sys.get_int_max_str_digits() == limit:
+            self.persisted_marker_texts[id(msg)] = (inputs, text)
+        return text
 
 
 @dataclass(eq=False, repr=False)
@@ -2273,11 +2299,7 @@ class ReconcileMixin:
         candidate_prefix = candidate.candidate_prefix
         matches_raw_tail = candidate.matches_raw_tail
 
-        candidate_has_persisted_marker = any(
-            str(msg.get("role") or "") == "tool"
-            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
-            for msg in candidate_identity_messages
-        )
+        candidate_has_persisted_marker = any(map(run.persisted_marker_text, candidate_identity_messages))
         matches_durable_persisted_output_full_replay = self._matches_persisted_output_durable_full_replay(
             candidate_identity_messages,
             candidate_prefix,
@@ -2285,10 +2307,9 @@ class ReconcileMixin:
             stored_tail_rows,
         )
         candidate_has_unrecoverable_persisted_marker = any(
-            str(msg.get("role") or "") == "tool"
-            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+            (text := run.persisted_marker_text(msg))
             and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or "",
+                text,
                 hermes_home=self._hermes_home,
             )
             is None
@@ -2317,10 +2338,19 @@ class ReconcileMixin:
                 generationless_candidate_prefix,
             )
         raw_tail_suffix = stored_tail[-len(candidate_prefix) :] if matches_raw_tail else []
-        raw_suffix_needs_cleanup_equivalence = any(
-            self._active_cleanup_replay_identity(identity) != identity
-            for identity in raw_tail_suffix
-        )
+        raw_suffix_needs_cleanup_equivalence = False
+        for identity in raw_tail_suffix:
+            limit = sys.get_int_max_str_digits()  # cleanup decodes identity JSON
+            key = (identity, limit)
+            if key in run.cleanup_identities:
+                cleaned = run.cleanup_identities[key]
+            else:
+                cleaned = self._active_cleanup_replay_identity(identity)
+                if sys.get_int_max_str_digits() == limit:
+                    run.cleanup_identities[key] = cleaned
+            if cleaned != identity:
+                raw_suffix_needs_cleanup_equivalence = True
+                break
 
         candidate.candidate_has_persisted_marker = candidate_has_persisted_marker
         candidate.matches_durable_persisted_output_full_replay = matches_durable_persisted_output_full_replay
@@ -2587,6 +2617,32 @@ class ReconcileMixin:
         candidate.has_scaffold_suffix_replay = has_scaffold_suffix_replay
         candidate.has_raw_cleanup_replay = has_raw_cleanup_replay
 
+    def _literal_pruned_replay_identity(
+        self, run: _TailReplayRun, msg: Dict[str, Any],
+    ) -> tuple[str, str, str, str, str]:
+        if type(msg) is not dict:
+            return self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+        fields = tuple(map(msg.get, _REPLAY_IDENTITY_FIELDS))
+        role, content, calls, *labels = fields
+        # A message can change after pruned_source_ids was prepared. Admit only
+        # literal tool rows with immutable labels and no calls (hence no projection).
+        if (type(role) is not str or role != "tool"
+                or type(content) is not str or content != _HERMES_PRUNED_TOOL_PLACEHOLDER
+                or (calls is not None and not (type(calls) is list and not calls))
+                or any(label is not None and type(label) is not str for label in labels)):
+            return self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+        inputs = (role, content, None if calls is None else (), *labels)
+        entry = run.literal_pruned_identities.get(id(msg))
+        if entry is not None and entry[0] == inputs:
+            return entry[1]
+        snapshot = dict(zip(_REPLAY_IDENTITY_FIELDS, inputs))
+        if calls is not None:
+            snapshot["tool_calls"] = []
+        identity = self._message_replay_identity(
+            snapshot, allow_pruned_tool_alias=False)
+        run.literal_pruned_identities[id(msg)] = (inputs, identity)
+        return identity
+
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
@@ -2642,7 +2698,7 @@ class ReconcileMixin:
                 continue
 
             literal_visible_prefix = [
-                self._message_replay_identity(msg, allow_pruned_tool_alias=False)
+                self._literal_pruned_replay_identity(run, msg)
                 if id(msg) in pruned_source_ids else active_identity(msg)
                 for msg in candidate_visible_messages
             ]
@@ -2667,10 +2723,9 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(stored_tail, candidate_visible_prefix, literal_visible_prefix)
             )
             early_candidate_has_unrecoverable_persisted_marker = any(
-                str(msg.get("role") or "") == "tool"
-                and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+                (text := run.persisted_marker_text(msg))
                 and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or "",
+                    text,
                     hermes_home=self._hermes_home,
                 )
                 is None
@@ -2691,6 +2746,11 @@ class ReconcileMixin:
                 and not matches_durable_persisted_output_full_replay
                 and not has_durable_compacted_snapshot_replay
             ):
+                if (cursor == raw_session_count == len(stored_tail) == len(stored_tail_rows or ()) == len(candidate_prefix)
+                        and not candidate_has_unrecoverable_persisted_marker
+                        and self._matches_session_with_missing_tool_names(
+                            candidate_messages, candidate_prefix, stored_tail_rows, stored_tail)):
+                    return cursor
                 continue
 
             self._collect_singleton_replay_evidence(run, candidate)
@@ -3535,6 +3595,48 @@ class ReconcileMixin:
             return cursor
 
         return self._reconcile_unmatched_store_history(run)
+
+    @staticmethod
+    def _missing_tool_name_matches(rows, index, call_id, name):
+        """Resolve a nameless result from its own contiguous assistant/tool group."""
+        row = rows[index]
+        if row.get("tool_name") or row.get("name") or row.get("tool_call_id") != call_id:
+            return False
+        owner = index - 1
+        while owner >= 0 and rows[owner].get("role") == "tool":
+            owner -= 1
+        if owner < 0 or rows[owner].get("role") != "assistant":
+            return False
+        calls = rows[owner].get("tool_calls")
+        if not isinstance(calls, list):
+            return False
+        matches = [call.get("function") for call in calls if isinstance(call, dict) and call.get("id") == call_id]
+        return len(matches) == 1 and isinstance(matches[0], dict) and matches[0].get("name") == name
+
+    def _matches_session_with_missing_tool_names(self, messages, incoming_identities, rows, stored_identities):
+        """Add a name-only fallback to the position-bound cold replay comparison."""
+        resolved = False
+        for index, (message, incoming, row, stored) in enumerate(zip(messages, incoming_identities, rows, stored_identities)):
+            if _has_lossy_redacted_identity(incoming):
+                return False
+            stamp = _normalize_observed_at(message.get("timestamp"))
+            if stamp is not None and row.get("observed_at") is not None and stamp != row["observed_at"]:
+                return False
+            if incoming == stored:
+                continue
+            role, content, call_id, _, name = incoming
+            if (role != "tool" or not call_id or incoming[:4] != stored[:4] or bool(name) == bool(stored[4])
+                    or content == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                    or content != (normalize_content_value(message.get("content")) or "")
+                    or content != (normalize_content_value(row.get("content")) or "")):
+                return False
+            explicit = message if name else row
+            if str(explicit.get("tool_name") or explicit.get("name") or "") != (name or stored[4]):
+                return False
+            if not self._missing_tool_name_matches(rows if name else messages, index, call_id, name or stored[4]):
+                return False
+            resolved = True
+        return resolved
 
     def _replayed_tool_segment_indexes_after_cursor(
         self,

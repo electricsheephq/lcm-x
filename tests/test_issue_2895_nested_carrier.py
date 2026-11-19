@@ -493,12 +493,17 @@ def _five_passes(tmp_path, monkeypatch, plans, seed, system, tag):
 @pytest.mark.parametrize("system", [True, False], ids=["system-led", "no-system"])
 def test_lists_unchanged_without_an_incoming_carrier(tmp_path, monkeypatch, stand_ins, system):
     """Assembly is byte-identical to main off the carrier path, with or without a leading system row."""
+    fixed_home, main_home = tmp_path / "fixed", tmp_path / "main"
+    fixed_home.mkdir()
+    main_home.mkdir()
     changed = []
     for seed in range(20):
-        fixed_session, fixed = _five_passes(tmp_path, monkeypatch, stand_ins, seed, system, f"fix{seed}")
+        # The cumulative notice includes the session ID. Hold it constant across the two stores.
+        tag = f"case{seed}"
+        fixed_session, fixed = _five_passes(fixed_home, monkeypatch, stand_ins, seed, system, tag)
         with monkeypatch.context() as patch:
             _neutralised(patch)
-            main_session, main = _five_passes(tmp_path, monkeypatch, stand_ins, seed, system, f"main{seed}")
+            main_session, main = _five_passes(main_home, monkeypatch, stand_ins, seed, system, tag)
         assert len(main) >= 1
         for number, ((before_main, result_main), (before_fix, result_fix)) in enumerate(zip(main, fixed), 1):
             assert before_main == before_fix  # compared up to the first divergence only: the sessions fork there
@@ -965,8 +970,13 @@ def test_round3_whole_turn_fit_names_literal_paste(carrier_session):
     result = [system, carrier, *rows[2:]]
     assert engine._get_store_id_map_for_messages(result[1:])[id(carrier)] == paste_id
 
-    # Fit both later rows plus the notice, with too little room for the previous reply.
-    notice = survival_fit._NOTICE.format(n=2, first=paste_id, last=reply_id)
+    # The earlier standalone OK was already out of view. The same call must also reach
+    # the literal paste and reply when this fit drops them.
+    notice = (
+        "[LCM survival fit: 3 earlier messages (store ids 1..3) are stored verbatim but not in live context; "
+        "read with lcm_load_session, next_cursor, and lcm_expand(store_id) if truncated: "
+        "session_id=case after_store_id=0 limit=3 to 3.]"
+    )
     noticed = {**system, "content": engine._survival_with_notice(system["content"], notice)}
     budget = engine._survival_measure([noticed, summary, *rows[3:]])
     before = engine._survival_measure(result)
