@@ -655,7 +655,7 @@ def test_a_hit_near_the_recursion_limit_computes_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(ReconcileMixin, "_message_replay_identity_uncached", counted)
     with _engine(tmp_path) as engine:
         row = {"role": "assistant", "content": "x",
-               "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "[" * 150 + "0" + "]" * 150}}]}
+               "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "[" * 60 + "0" + "]" * 60}}]}
         first = engine._message_replay_identity(dict(row))
         engine._message_replay_identity(dict(row))
         assert len(calls) == 1  # the second call was a hit

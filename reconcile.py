@@ -441,7 +441,7 @@ _REPLAY_IDENTITY_MEMO_MAX_ROW_BYTES = 1024 * 1024
 # JSON parsing gives up at a nesting depth that depends on the caller's stack depth, so a deeply nested string can
 # parse at one call site and raise RecursionError at a deeper one. A remembered identity would hide that difference,
 # so text whose brackets could nest anywhere near the limit is never remembered (its depth is at most this count).
-_REPLAY_IDENTITY_MEMO_MAX_BRACKETS = 200
+_REPLAY_IDENTITY_MEMO_MAX_BRACKETS = 100
 
 
 def _replay_identity_text_is_shallow(text: str) -> bool:
@@ -458,11 +458,12 @@ def _shallow_replay_identity_text(text: str) -> str:
     return text
 
 
-_REPLAY_IDENTITY_MEMO_MAX_DEPTH = 32  # containers nested deeper than this are never remembered (encoding depth)
+_REPLAY_IDENTITY_MEMO_MAX_DEPTH = 16  # containers nested deeper than this are never remembered (encoding depth)
 # Any cache shortens the call path, so near the interpreter's recursion limit a fresh computation could raise where a
-# hit would return. An admitted row nests at most MAX_BRACKETS + MAX_DEPTH + 1 levels, plus the body's own frames; a hit
-# is served only with more headroom than that, so a fresh call there could not have raised either. With less, the row is
-# computed fresh, exactly as before.
+# hit would return. An admitted row nests at most MAX_BRACKETS + MAX_DEPTH + 1 = 117 levels, and canonicalisation uses
+# at most about two Python frames per level plus the body's own frames (under 300 in all); a hit is served only with
+# more headroom than that, so a fresh call there could not have raised either. With less, the row is computed fresh,
+# exactly as before. Native (C) stack exhaustion from unusual host callback stacks is outside this bound.
 _REPLAY_IDENTITY_MEMO_MIN_HEADROOM = 400
 
 
