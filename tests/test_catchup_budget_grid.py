@@ -172,7 +172,10 @@ N = [cell["id"] for cell in CELLS if cell["group"] == "N"]
 FIXED_2901 = ["s-1m-l40-nosys", "s-1m-l45-d15-nosys", "s-1m-cond-then-leaf-nosys"]
 # twins main fails on the base test (A0 or A0b); main 2c75f52b carries the 2901 fix, so FIXED_2901 pass on the base
 KNOWN_2896 = [cell for cell in N if cell not in FIXED_2901]
-KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901]  # twins with A0 rows on the candidate
+# #2896: the notice reaches this twin's glued carrier, so its candidate has A0 0 on every pass. The other twins'
+# fits have no glued carrier (no summary, or a standalone summary head) and keep main's A0.
+FIXED_2896_A0 = ["s-600k-l40-prefix-nosys"]
+KNOWN_2896_A0 = [cell for cell in N if cell not in FIXED_2901 + FIXED_2896_A0]  # twins with A0 rows on the candidate
 # Issue 2901 moved these twins' trajectories against a base without it. With the fix on main 2c75f52b (the base) the
 # per-pass clause holds and is no longer pinned; the totals test stays.
 PER_PASS_2901 = ["s-600k-l40-prefix-nosys", "d-depth0-past-100-nosys"]

@@ -165,9 +165,8 @@ from .host_uid_emit import (
     sync_cached_host_metadata,
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
-from .emission_projection import admitted_notice_block
-from .survival_fit import (SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_notice_block_start,
-                           survival_reserve_fraction)
+from .emission_projection import _NOTICE_BLOCK_RE, admitted_notice_block
+from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -6754,9 +6753,7 @@ class LCMEngine(
             return False
         content = msg.get("content")
         if isinstance(content, str) and not stored_row and "\n\n<lcm-survival-notice digest=" in content:
-            end = self._verified_lcm_summary_prefix_end(content)  # #2896: the fit's block is never a host row's text
-            start = survival_notice_block_start(content, end) if end is not None else None
-            content = content if start is None else content[:start] + content[end:]
+            content = _NOTICE_BLOCK_RE.sub("", content)  # #2896: a notice block, the fit's or pasted, is never matched
         text = (
             stored_text_content_for_pattern_matching(content)
             if stored_row
@@ -7133,9 +7130,9 @@ class LCMEngine(
         # #2896: one marked survival notice block after the last verified part, then a separator or the end of the
         # text, belongs to the prefix; anything else (malformed, misplaced, before a further part) stays content
         block = admitted_notice_block(content, pos, node_ids) if node_ids else None
-        if block is not None and not self._LCM_SUMMARY_PART_HEADER_RE.match(
-                content, block.end() + (7 if content.startswith("\n\n---\n\n", block.end()) else 2)):
-            pos = block.end()
+        if block is not None and not (content.startswith("\n\n---\n\n", block.end())
+                                      and self._LCM_SUMMARY_PART_HEADER_RE.match(content, block.end() + 7)):
+            pos = block.end()  # (a quoted header after a blank line is the host row's own text)
         return (pos, node_ids) if node_ids else (None, [])
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:

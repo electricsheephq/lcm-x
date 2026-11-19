@@ -147,13 +147,12 @@ def _without_block(engine, message: dict) -> dict:
     return {**message, "content": content[:start] + content[end:]}
 
 
-@pytest.mark.parametrize("list_users", [False, True], ids=["carrier", "standalone-summary"])
-def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_path, host, list_users):  # noqa: F811 (the imported pytest fixture)
-    """Cell 2: the fit's notice is the head's one block (the re-formed carrier, or the standalone summary row), and
-    each named call, run through the real handlers, returns its stored rows."""
+def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_path, host):  # noqa: F811 (the imported pytest fixture)
+    """Cell 2: the fit's notice is the re-formed carrier's one block, and each named call, run through the real
+    handlers, returns its stored rows; the carrier is the fit's emission."""
     engine = _hermes_engine(tmp_path)
     try:
-        view = _hidden_backlog(engine, list_users=list_users)
+        view = _hidden_backlog(engine)
         result = engine.compress(view, current_tokens=host(view))
         assert result[0]["role"] == "user" and engine._last_survival_fit is not None
         notice = _notice(result[0]["content"])
@@ -164,31 +163,25 @@ def test_2_the_notice_reaches_a_list_with_no_system_row_and_its_calls_work(tmp_p
             assert [(m["store_id"], m["content"]) for m in loaded] == [
                 (x, stored[x]) for x in sorted(stored) if first <= x <= last], (first, last)
         emission = engine._survival_fit_emission
-        assert emission["kind"] == ("summary" if list_users else "carrier") and emission["row"] is result[0]
+        assert emission["kind"] == "carrier" and emission["row"] is result[0]
         assert emission["span"].startswith(result[0]["content"][:result[0]["content"].index(OPEN)])
         assert len(_finalize_emission_descriptors(result, [emission], engine._emission_binding())) == 1
     finally:
         engine.shutdown()
 
 
-@pytest.mark.parametrize("list_users", [False, True], ids=["carrier", "standalone-summary"])
-def test_3_reopen_and_restart_store_nothing_twice(tmp_path, host, list_users):  # noqa: F811 (the imported pytest fixture)
+def test_3_reopen_and_restart_store_nothing_twice(tmp_path, host):  # noqa: F811 (the imported pytest fixture)
     """Cell 3: the host sends the fitted list back (same process, then a cold one with a new turn): nothing is stored
     twice, and every row maps to its own stored row (the head to the user row behind its summary and block)."""
     engine = _hermes_engine(tmp_path)
     try:
-        view = _hidden_backlog(engine, list_users=list_users)
+        view = _hidden_backlog(engine)
         result = engine.compress(view, current_tokens=host(view))
         assert OPEN in result[0]["content"]
         ids = engine._get_store_id_map_for_messages(result)
         by_id = {r["store_id"]: r["content"] for r in _rows(engine)}
         own = [engine._generated_context_carrier_remainder(m) or normalize_content_value(m["content"]) for m in result]
-        if list_users:  # the standalone summary row is scaffold: no stored row
-            assert id(result[0]) not in ids
-            own, result_rows = own[1:], result[1:]
-        else:
-            result_rows = result
-        assert [by_id.get(ids.get(id(m))) for m in result_rows] == own
+        assert [by_id.get(ids.get(id(m))) for m in result] == own
         stored = len(_rows(engine))
         engine.ingest(result)
         assert len(_rows(engine)) == stored
@@ -240,7 +233,7 @@ def test_5_the_cap_covers_the_wrapped_block(engine):
 
 
 def test_7_no_system_row_and_no_summary_head_places_nothing_and_warns_once(tmp_path, host, caplog):  # noqa: F811 (the imported pytest fixture)
-    """Cell 7: with no system row and no summary head the notice is not placed; one warning."""
+    """Cell 7: with no system row and no glued carrier the notice is not placed; one warning."""
     engine = _hermes_engine(tmp_path, window=24_000)
     try:
         turns = [r for i in range(60) for r in _turn(f"T{i:03d}", 10.0 * i)]
@@ -250,7 +243,7 @@ def test_7_no_system_row_and_no_summary_head_places_nothing_and_warns_once(tmp_p
             result = engine._survival_fit(turns, list(turns), host(turns), "test")
         assert result is not turns and len(result) < len(turns)
         assert not any(OPEN in str(m.get("content")) for m in result)
-        assert caplog.text.count("no system row and no summary head") == 1
+        assert caplog.text.count("no system row and no glued carrier for the notice") == 1
     finally:
         engine.shutdown()
 
@@ -292,13 +285,15 @@ def test_ignore_patterns_never_drop_a_host_row_glued_behind_the_block(tmp_path, 
         engine.shutdown()
 
 
-def test_the_carrier_key_leaves_the_block_out(engine):
-    """The carry-forward and retirement key of a carrier is the same with and without its block."""
+@pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"], ids=["blank-line", "rule"])
+def test_the_carrier_key_leaves_the_block_out(engine, separator):
+    """The carry-forward and retirement key of a carrier is the same with and without its block, for either carrier
+    separator (a head carrier glued with a rule keeps it, A4)."""
     parts = _part(engine)
-    rows = [{"role": "user", "content": f"{parts}{_block(engine, parts)}\n\nthe user's row"},
-            {"role": "user", "content": f"{parts}\n\nthe user's row"}]
+    rows = [{"role": "user", "content": f"{parts}{_block(engine, parts)}{separator}the user's row"},
+            {"role": "user", "content": f"{parts}{separator}the user's row"}]
     keys = []
-    for row, span in zip(rows, (f"{parts}{_block(engine, parts)}\n\n", f"{parts}\n\n")):
+    for row, span in zip(rows, (f"{parts}{_block(engine, parts)}{separator}", f"{parts}{separator}")):
         (descriptor,) = _finalize_emission_descriptors([row], [{
             "kind": "carrier", "span": span, "row": row, "retained_source": {"store_id": 7},
             "full_identity": _emission_identity(row)}], {"s": 1})
@@ -354,7 +349,6 @@ def test_1_the_no_system_twin_leaves_no_cut_row_without_a_pointer(tmp_path, reco
 
 # -- review round 1 (Astra): each cell red on 9e69e970 ------------------------------------------------------------
 
-from hermes_lcm.emission_projection import _project_emitted_occurrences  # noqa: E402
 from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX  # noqa: E402
 from tests.test_issue_650_survival_fit_keeps_summary import _BOUNDARY  # noqa: E402
 
@@ -389,10 +383,10 @@ def test_a2_a_late_callback_for_another_binding_never_matches_the_notice(engine)
     assert not engine._matches_ignore_message_patterns(carrier)
 
 
-def test_a3_an_exception_path_fit_binds_its_marked_standalone_summary(tmp_path, host, monkeypatch):
-    """A3: a compress that fails runs the fit on its exception path; the summary row it keeps (list user rows: no
-    carrier) takes the block, and the fit's in-memory proof projects the exact row it returned as LCM's. Main: the row
-    has no block, and the fit registers no emission for a standalone summary."""
+def test_a3_a_standalone_summary_head_takes_no_block(tmp_path, host, monkeypatch):  # noqa: F811 (the imported pytest fixture)
+    """A3 (T1-344): a fit whose head is a standalone summary row (list user rows: no carrier), here on the exception
+    path, places no block and registers no emission for it: main's shape. The host glues the summary into its next user
+    row, and a later fit reaches those rows through that carrier."""
     engine = _hermes_engine(tmp_path)
     try:
         view = _hidden_backlog(engine, list_users=True, stamped_replies=True)
@@ -406,9 +400,10 @@ def test_a3_an_exception_path_fit_binds_its_marked_standalone_summary(tmp_path, 
 
         monkeypatch.setattr(engine, "_compress_impl", fail)
         fitted = engine.compress(grown, current_tokens=host(grown))
-        assert OPEN in fitted[0]["content"] and engine._last_survival_fit is not None
-        projection = _project_emitted_occurrences(fitted, proof=engine._last_emission_descriptors)
-        assert projection.entries[0].generated_span == fitted[0]["content"], projection.entries[0]
+        assert engine._last_survival_fit is not None and fitted[0]["role"] == "user"
+        assert engine._verified_lcm_summary_prefix_end(fitted[0]["content"]) == len(fitted[0]["content"])
+        assert not any(OPEN in str(m.get("content")) for m in fitted)
+        assert getattr(engine, "_survival_fit_emission", None) is None
     finally:
         engine.shutdown()
 
@@ -428,7 +423,7 @@ def test_a4_a_carrier_ahead_of_a_preserved_objective_takes_the_block(engine, mon
     with caplog.at_level("WARNING", logger="hermes_lcm"):
         result = engine._survival_fit(active, list(active), 0, "test", request_cap=_rough(monkeypatch)(active) - 50)
     assert result is not active and len(result) < len(active)
-    assert "no system row and no summary head" not in caplog.text
+    assert "no system row and no glued carrier for the notice" not in caplog.text
     assert OPEN in result[0]["content"], [str(m["content"])[:60] for m in result]
 
 
@@ -451,3 +446,34 @@ def _store_turns(engine, users):
         for row in ({"role": "user", "content": text}, {"role": "assistant", "content": f"reply {i}" + " v" * 200}):
             out.append((engine._store.append("S", dict(row), conversation_id="conv"), row))
     return out
+
+
+def test_f2_a_block_that_tips_the_whole_turn_cut_is_left_out_not_the_summary(tmp_path, host, caplog):  # noqa: F811 (the imported pytest fixture)
+    """F2: across the cap band where the re-formed carrier fits only without its block, the fit returns main's list
+    (the summary kept, the notice unplaced, one warning) instead of the emergency path that drops the summary."""
+    engine = _hermes_engine(tmp_path, window=200_000)
+    reply = {"role": "assistant", "content": "A synthetic long reply. " * 400}
+    phrase = {"role": "user", "content": "Synthetic phrase row.", "timestamp": 3.0}
+    seen = []
+    try:
+        for m in ({"role": "user", "content": "Synthetic old question.", "timestamp": 1.0}, reply, phrase, reply):
+            engine._store.append("S", dict(m), conversation_id="conv")
+        node = engine._dag.add_node(SummaryNode(session_id="S", summary="s", token_count=1, source_token_count=1,
+                                                source_ids=[1], expand_hint="turns"))
+        summary = f"[Recent Summary (d0, node {node})]\ns\n[Expand for details: turns]"
+        active = [{"role": "user", "content": f"{summary}\n\n{phrase['content']}"}, dict(reply),
+                  {"role": "user", "content": "Synthetic second question.", "timestamp": 4.0},
+                  {"role": "assistant", "content": "Second answer."},
+                  {"role": "user", "content": "Synthetic newest question?", "timestamp": 5.0}]
+        plain = engine._survival_measure([{"role": "user", "content": f"{summary}\n\nSynthetic second question."},
+                                          *active[3:]])
+        for cap in range(plain, plain + 200):
+            caplog.clear()
+            result = engine._survival_fit(active, list(active), 0, "t", after_exception=True, request_cap=cap)
+            seen.append((f"node {node})" in str(result[0].get("content")), OPEN in str(result[0].get("content")),
+                         caplog.text.count("no system row and no glued carrier for the notice")))
+    finally:
+        engine.shutdown()
+    assert all(kept for kept, _, _ in seen)  # the summary is never dropped where main keeps it
+    assert {(block, warned) for _, block, warned in seen} == {(False, 1), (True, 0)}  # the band, then the block
+    assert [block for _, block, _ in seen] == sorted(block for _, block, _ in seen)

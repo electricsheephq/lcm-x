@@ -62,7 +62,8 @@ def _span_without_notice_block(span: str) -> str:
     """A generated span with the marked notice block that ends it (before its separator) left out."""
     start = span.rfind("\n\n<lcm-survival-notice digest=")
     block = _NOTICE_BLOCK_RE.match(span, start) if start >= 0 else None
-    return span[:start] + span[block.end():] if block is not None and span[block.end():] in ("", "\n\n") else span
+    return (span[:start] + span[block.end():]
+            if block is not None and span[block.end():] in ("", "\n\n", "\n\n---\n\n") else span)
 
 
 def _emission_identity(message: Mapping[str, Any], content: Optional[str] = None) -> tuple[str, str, str, str, str]:
