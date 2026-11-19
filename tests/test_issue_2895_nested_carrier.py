@@ -5,12 +5,13 @@ as the first tail row. Assembly wrapped it as the user row of a NEW carrier ("ne
 row"); when the survival fit then cut that head it peeled one level, read the remainder (still a carrier) as
 generated and dropped the row without counting or naming it. Synthetic data only: a host loop with the #904
 stand-ins (count_tokens = len // 4, no host estimator, a content-keyed summary) on small windows.
+Assembly is byte-identical to main off the carrier path.
 """
 
 import hashlib
 import json
-import os
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -23,8 +24,10 @@ import hermes_lcm.host_uid_emit as host_uid_emit
 import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryNode
+from hermes_lcm.emission_projection import _emission_identity, _finalize_emission_descriptors
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 
 _HEADER = re.compile(r"Summary \(d(\d+), node (\d+)\)")
 _WORDS = ("amber", "birch", "cedar", "delta", "elm", "fjord")
@@ -59,15 +62,15 @@ def stand_ins(monkeypatch):
 
     monkeypatch.setattr(engine_module, "summarize_with_escalation", summary)
     plans = []
-    planned = LCMEngine._plan_survival_fit
+    apply_fit = LCMEngine._apply_survival_fit
 
-    def record(self, *args, **kwargs):
-        plan, persisted = planned(self, *args, **kwargs)
-        if plan is not None:
+    def record(self, result, plan, *args, **kwargs):
+        fitted = apply_fit(self, result, plan, *args, **kwargs)
+        if fitted is plan.fitted:
             plans.append((plan.count, set(int(x) for x in plan.ids or ())))
-        return plan, persisted
+        return fitted
 
-    monkeypatch.setattr(LCMEngine, "_plan_survival_fit", record)
+    monkeypatch.setattr(LCMEngine, "_apply_survival_fit", record)
     return plans
 
 
@@ -96,11 +99,26 @@ def _text(value):
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
+def _rendered_nodes(engine, messages):
+    """Match the DAG's rendered parts byte for byte, including parts after an objective anchor."""
+    rendered = set()
+    for message in messages:
+        for key in ("content", "api_content"):
+            content = message.get(key)
+            if not isinstance(content, str):
+                continue
+            for _, node_id in _HEADER.findall(content):
+                node = engine._dag.get_node(int(node_id))
+                if node is not None and engine_module._summary_part_text(node) in content:
+                    rendered.add(node.node_id)
+    return rendered
+
+
 class Session:
     """A host loop on the real engine: the threshold gate, compress, and the returned list handed back."""
 
     def __init__(self, tmp_path, monkeypatch, plans, *, ctx, seed, mode="unset", overhead=0, state_db=False,
-                 system=False, tag="case", host="simple"):
+                 system=False, tag="case", host="simple", assembly_cap=0):
         _set_mode(monkeypatch, mode)
         home = tmp_path / tag
         home.mkdir()
@@ -114,6 +132,7 @@ class Session:
             conn.close()
         self.engine = LCMEngine(config=LCMConfig(
             database_path=str(home / "lcm.db"), embeddings_enabled=False, temporal_rollups_enabled=False,
+            max_assembly_tokens=assembly_cap,
         ), hermes_home=str(home))
         self.engine.on_session_start(tag, conversation_id="conv-" + tag, context_length=ctx)
         self.plans, self.rng, self.tag, self.overhead = plans, random.Random(seed), tag, overhead
@@ -207,16 +226,19 @@ class Session:
 def _carried_row_fate(session, before, result, plans, caplog_lines):
     """``(carried text, fate)`` for the row the incoming head carried, else None. ``kept``: in a returned row (as a
     row or as carried text), or a stored copy under a node whose text the list renders; ``named``: an applied
-    fit counted it and named a stored copy; ``counted``: an applied fit counted rows it could not name (the
-    notice work of #2877 and #2896); ``uncounted``: none of these."""
+    fit named the exact stored row; ``uncounted``: neither. A count alone cannot identify the row."""
     engine = session.engine
     head = next((m for m in before if m.get("role") != "system"), {})
     carried = _real_row_text(engine, head)
     if carried is None:
         return None
-    fields = [_text(m[k]) for m in result for k in ("content", "api_content") if m.get(k) is not None]
-    if any(carried in field for field in fields):
-        return carried, "kept"
+    for message in result:
+        if message.get("role") != "user":
+            continue
+        for key in ("content", "api_content"):
+            field = message.get(key)
+            if field == carried or _real_row_text(engine, {"role": "user", "content": field}) == carried:
+                return carried, "kept"
     stored = engine._store.get_session_messages(engine._session_id, limit=1_000_000)
     copies = {int(r["store_id"]) for r in stored if _text(r.get("content")) == carried}
     if not copies:
@@ -231,14 +253,12 @@ def _carried_row_fate(session, before, result, plans, caplog_lines):
             return {int(x) for x in node.source_ids}
         return set().union(*[cover(int(child)) for child in node.source_ids] or [set()])
 
-    rendered = {int(n) for field in fields for _, n in _HEADER.findall(field)}
+    rendered = _rendered_nodes(engine, result)
     if copies & set().union(*[cover(n) for n in rendered] or [set()]):
         return carried, "kept"
     applied = any("survival fit applied" in line for line in caplog_lines)
     if applied and any(copies & ids for _, ids in plans):
         return carried, "named"
-    if applied and any(count > len(ids) for count, ids in plans):
-        return carried, "counted"
     return carried, "uncounted"
 
 
@@ -468,6 +488,7 @@ def _five_passes(tmp_path, monkeypatch, plans, seed, system, tag):
 
 @pytest.mark.parametrize("system", [True, False], ids=["system-led", "no-system"])
 def test_lists_unchanged_without_an_incoming_carrier(tmp_path, monkeypatch, stand_ins, system):
+    """Assembly is byte-identical to main off the carrier path, with or without a leading system row."""
     changed = []
     for seed in range(20):
         fixed_session, fixed = _five_passes(tmp_path, monkeypatch, stand_ins, seed, system, f"fix{seed}")
@@ -522,8 +543,8 @@ def test_random_walks_leave_no_carried_row_uncounted(tmp_path, monkeypatch, stan
         ctx, overhead = _WALKS[seed % len(_WALKS)]
         session = Session(tmp_path, monkeypatch, stand_ins, ctx=ctx, seed=seed, overhead=overhead,
                           mode="on" if seed % 2 else "unset", tag=f"walk{seed}", host="harness")
-        # counted but unnamed is the notice work of #2877/#2896; a row no ingest stored is not this issue's shape
-        _checked(session, lines, failures, stats, allowed=("kept", "named", "counted", "unstored"))
+        # A row no ingest stored is outside this issue's storage coverage.
+        _checked(session, lines, failures, stats, allowed=("kept", "named", "unstored"))
         try:
             session.replay(_random_events(random.Random(seed), 30))
         finally:
@@ -532,3 +553,314 @@ def test_random_walks_leave_no_carried_row_uncounted(tmp_path, monkeypatch, stan
     print(f"chunk {chunk}: {stats}")
     assert stats["carrier_in"] > 0
     assert not failures, "\n".join(failures[:5])
+
+
+@pytest.fixture
+def carrier_session(tmp_path, monkeypatch, stand_ins, request):
+    mode = getattr(request, "param", "unset")
+    session = Session(tmp_path, monkeypatch, stand_ins, ctx=12000, seed=1, mode=mode, state_db=mode == "on")
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _leaf(engine, label, source_ids=()):
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id=engine._session_id, summary=label.ljust(156, "."), token_count=39,
+        source_ids=list(source_ids), expand_hint="turns",
+    ))
+    return engine._dag.get_node(node_id)
+
+
+def _summary(nodes):
+    return "\n\n---\n\n".join(engine_module._summary_part_text(node) for node in nodes)
+
+
+def _tail(session):
+    return [session.row(role=role, content=label + (" elm" * 30)) for role, label in (
+        ("user", "carried question"), ("assistant", "answer"),
+        ("user", "next question"), ("assistant", "next answer"),
+    )]
+
+
+@pytest.mark.parametrize("cap", [*range(400, 1501, 50), None], ids=lambda cap: "survival" if cap is None else str(cap))
+def test_carrier_unwrap_precedes_prefix_budget(carrier_session, cap):
+    """Four real tail rows leave the same summary room with or without the incoming prefix."""
+    session = carrier_session
+    engine = session.engine
+    rows = [{"role": role, "content": content} for role, content in (
+        ("user", "[U-1] the carried user row " + "amber " * 10),
+        ("assistant", "[A-1] " + "birch " * 120), ("user", "[U-2] next"), ("assistant", "[A-2] ok"),
+    )]
+    nodes = [engine._dag.get_node(engine._dag.add_node(SummaryNode(
+        session_id=engine._session_id, summary=f"Node{i} " + "qz " * 40, token_count=40,
+        expand_hint=f"Expand for details about: topic{i}", created_at=1 + i,
+    ))) for i in range(8)]
+    assert all(count_message_tokens({"role": "user", "content": _summary([node])}) == 56 for node in nodes)
+    incoming = {**rows[0], "content": f"{_summary(nodes)}\n\n{rows[0]['content']}"}
+    if cap is None:
+        engine.context_length = 600
+        assert engine._effective_assembly_token_cap() is None
+    budget = cap if cap is not None else engine._survival_ceiling()
+
+    plain = engine._assemble_context(None, rows, assembly_cap_override=cap, persist=False)
+    result = engine._assemble_context(None, [incoming, *rows[1:]], assembly_cap_override=cap, persist=False)
+    expected, rendered = _rendered_nodes(engine, plain[:1]), _rendered_nodes(engine, result[:1])
+    incoming_ids = {node.node_id for node in nodes}
+    print(f"R3 cap={cap} budget={budget} rendered={sorted(rendered)} plain={sorted(expected)} "
+          f"dropped={sorted(incoming_ids - rendered)}")
+    assert expected and len(plain) == 4
+    assert engine._generated_context_carrier_remainder(result[0]) == rows[0]["content"]
+    assert rendered == expected
+    assert count_messages_tokens(result) <= budget
+    selected = [node for node in nodes if node.node_id in rendered]
+    for node in nodes:
+        if node.node_id not in rendered:
+            assert count_message_tokens({"role": "user", "content": _summary([*selected, node])}) > (
+                budget - count_messages_tokens(rows))
+            assert engine._dag.get_node(node.node_id) == node
+
+
+def test_carrier_keeps_original_prefix_when_no_replacement_fits(carrier_session):
+    engine = carrier_session.engine
+    rows = _tail(carrier_session)
+    child = _leaf(engine, "old leaf")
+    incoming = {**rows[0], "content": f"{_summary([child])}\n\n{rows[0]['content']}"}
+    parent_id = engine._dag.add_node(SummaryNode(
+        session_id=engine._session_id, depth=1, summary="longer parent " * 100,
+        token_count=350, source_ids=[child.node_id], source_type="nodes", expand_hint="turns",
+    ))
+    tail = [incoming, *rows[1:]]
+    tight = engine._assemble_context(None, tail, assembly_cap_override=300, persist=False)
+    assert tight[0]["content"] == incoming["content"]
+    wide = engine._assemble_context(None, tail, assembly_cap_override=600, persist=False)
+    assert _rendered_nodes(engine, wide[:1]) == {parent_id}
+    assert engine._dag.get_node(parent_id).source_ids == [child.node_id]
+    assert engine._generated_context_carrier_remainder(wide[0]) == rows[0]["content"]
+
+
+def test_capped_walk_preserves_carrier_nodes_at_pass_29(tmp_path, monkeypatch, stand_ins):
+    """The reviewer's seed 8014 at 32K with a 3000-token assembly cap."""
+    session = Session(tmp_path, monkeypatch, stand_ins, ctx=32000, seed=8014, assembly_cap=3000)
+    engine, rng = session.engine, session.rng
+    captured = []
+
+    def capture(_, before, result, plans):
+        if len(session.passes) == 29:
+            captured.append((list(before), list(result)))
+
+    session.on_pass = capture
+    unwrap = getattr(engine, "_unwrap_incoming_carrier", None)
+    if unwrap is not None:
+        # Replay the reviewed late unwrap through pass 28 so every candidate sees the same input at pass 29.
+        emit = engine._emit_summary_carrier
+
+        def unwrap_at_pass_29(row):
+            return unwrap(row) if len(session.passes) >= 28 else row
+
+        def late_unwrap(summary_message, leading_msg, result, tail_selected, *args):
+            if len(session.passes) < 28 and summary_message is not None and tail_selected:
+                tail_selected = [unwrap(tail_selected[0]), *tail_selected[1:]]
+            return emit(summary_message, leading_msg, result, tail_selected, *args)
+
+        monkeypatch.setattr(engine, "_unwrap_incoming_carrier", unwrap_at_pass_29)
+        monkeypatch.setattr(engine, "_emit_summary_carrier", late_unwrap)
+
+    def summary(text, source_tokens=0, token_budget=0, depth=0, *args, **kwargs):
+        digest = hashlib.sha256(str(text).encode()).hexdigest()[:10]
+        return f"Synopsis {digest} at depth {depth}: " + "notes " * 12 + "\nExpand for details about: turns", 1
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summary)
+
+    def row(role, kind, size, **fields):
+        marker = f"<{kind}-{session.turn_no:03d}-{rng.randrange(10**7):07d}> "
+        words = " ".join(rng.choice(("oak", "pine", "rowan", "yew", "ash", "larch", "hazel")) for _ in range(size))
+        return {"role": role, "content": marker + words, **fields}
+
+    def model_call():
+        engine.ingest(session.msgs)
+        sent = count_messages_tokens(session.msgs)
+        engine.update_from_response({"prompt_tokens": sent, "completion_tokens": 10, "total_tokens": sent + 10})
+        if engine.should_compress(sent):
+            session.one_pass(sent)
+            sent = count_messages_tokens(session.msgs)
+        if sent > engine.context_length:
+            session.one_pass(sent, bypass_cooldown=True)
+
+    try:
+        for session.turn_no in range(1, 31):
+            draw = rng.random()
+            if draw < 0.08:
+                engine.ingest([*session.msgs, row("user", "GONE", rng.choice((20, 80, 300)))])
+            elif draw < 0.16:
+                engine.ingest([*session.msgs, row("assistant", "DLV", rng.choice((20, 80, 300)))])
+                engine.note_turn_complete()
+            elif draw < 0.24:
+                engine._store.append(engine._session_id, row(
+                    rng.choice(("user", "assistant")), "OOB", rng.choice((20, 80, 300))),
+                    conversation_id=engine._conversation_id)
+            session.msgs.append(row("user", "U", rng.choice((15, 50, 150, 500))))
+            model_call()
+            if rng.random() < 0.45:
+                for step in range(rng.choice((1, 1, 2))):
+                    ids = [f"t{session.turn_no}x{step}y{i}" for i in range(rng.choice((1, 2, 3)))]
+                    session.msgs.append({"role": "assistant", "content": "", "tool_calls": [
+                        {"id": call_id, "type": "function",
+                         "function": {"name": "probe", "arguments": json.dumps({"q": call_id})}}
+                        for call_id in ids]})
+                    for call_id in ids:
+                        session.msgs.append(row("tool", "R", rng.choice((20, 80, 300, 900)),
+                                                tool_call_id=call_id, name="probe"))
+                    model_call()
+            session.msgs.append(row("assistant", "A", rng.choice((15, 60, 200, 700))))
+            engine.ingest(session.msgs)
+            engine.note_turn_complete()
+            if len(session.passes) >= 29:
+                break
+
+        (before, result), = captured
+        _, incoming = engine._verified_lcm_summary_prefix(before[0]["content"])
+        rendered = _rendered_nodes(engine, result)
+        covered = set(rendered)
+        pending = list(rendered)
+        while pending:
+            node = engine._dag.get_node(pending.pop())
+            if node.source_type == "nodes":
+                children = set(node.source_ids) - covered
+                covered.update(children)
+                pending.extend(children)
+        missing = set(incoming) - covered
+        room = 3000 - count_messages_tokens(result)
+        print(f"R3 walk seed=8014 pass=29 incoming={incoming} rendered={sorted(rendered)} "
+              f"missing={sorted(missing)} room={room}")
+        assert {26, 32} <= set(incoming)
+        for node_id in missing:
+            node = engine._dag.get_node(node_id)
+            assert node is not None
+            assert room < count_message_tokens({"role": "user", "content": _summary([node])}), node_id
+    finally:
+        session.close()
+
+
+def test_system_led_merging_host_does_not_nest(carrier_session):
+    """A system-led host that merges adjacent user rows exercises the carrier path."""
+    session = carrier_session
+    engine = session.engine
+    system = {"role": "system", "content": "Keep the system instructions."}
+    rows = _tail(session)
+
+    def host_merge(messages):
+        merged = []
+        for row in messages:
+            if merged and row["role"] == merged[-1]["role"] == "user":
+                merged[-1] = {**merged[-1], "content": f"{merged[-1]['content']}\n\n{row['content']}"}
+            else:
+                merged.append(row)
+        return merged
+
+    old = _leaf(engine, "first leaf")
+    incoming = host_merge(engine._assemble_context(system, rows, include_lcm_note=False, persist=False))
+    assert incoming[0] == system
+    assert engine._generated_context_carrier_remainder(incoming[1]) == rows[0]["content"]
+    new = _leaf(engine, "hidden row leaf")
+    result = host_merge(engine._assemble_context(system, incoming[1:], include_lcm_note=False, persist=False))
+    assert result[0] == system
+    assert _rendered_nodes(engine, result[1:2]) == {old.node_id, new.node_id}
+    assert not _nested_head(engine, result)
+    assert engine._generated_context_carrier_remainder(result[1]) == rows[0]["content"]
+
+
+@pytest.mark.parametrize("carrier_session", ["unset", "on"], indirect=True, ids=["emit-off", "emit-on"])
+@pytest.mark.parametrize("depth", [1, 2], ids=["single", "double"])
+def test_ingest_after_unwrap_keeps_exact_store_row(carrier_session, monkeypatch, depth):
+    session = carrier_session
+    engine = session.engine
+    rows = _tail(session)
+    engine.ingest(rows)
+    before = engine._get_store_ids_for_messages(rows)
+    assert len(before) == len(rows)
+    nodes = [_leaf(engine, f"prior leaf {i}") for i in range(depth)]
+    span = "".join(f"{_summary([node])}\n\n" for node in nodes)
+    carrier = {"role": "user", "content": span + rows[0]["content"]}
+    if session.stamp:
+        carrier["_absorbed_message_uids"] = [rows[0]["message_uid"]]
+    incoming = [carrier, *rows[1:]]
+    # A previous round's proof can bind the entire nested span to the real occurrence.
+    binding = engine._emission_binding()
+    emissions = _finalize_emission_descriptors(incoming, [{
+        "row": carrier, "kind": "carrier", "span": span,
+        "retained_source": {"store_id": before[0]}, "full_identity": _emission_identity(carrier),
+    }], binding)
+    engine._last_emission_descriptors = {"version": 4, **binding, "emissions": emissions}
+    assert engine._get_store_ids_for_messages(incoming) == before
+    _leaf(engine, "new hidden leaf")
+
+    carried = []
+    emit = engine._emit_summary_carrier
+
+    def record(*args, **kwargs):
+        row, tail = emit(*args, **kwargs)
+        carried.append(row)
+        return row, tail
+
+    monkeypatch.setattr(engine, "_emit_summary_carrier", record)
+    result = engine._assemble_context(None, incoming)
+    unwrapped, = carried
+    assert unwrapped["content"] == rows[0]["content"]
+    assert unwrapped.get("message_uid") == rows[0].get("message_uid")
+    assert engine._get_store_ids_for_messages([unwrapped]) == before[:1]
+
+    # Publish the returned list's occurrence proof as compress() does, then force reconciliation on replay.
+    engine._frontier_holder().adopt(len(result))
+    returned, emissions, reason = engine._record_compress_commit_proof(incoming, result)
+    assert reason is None and emissions[0]["retained_source"] == {"store_id": before[0]}
+    assert engine._get_store_ids_for_messages(returned) == before
+    stored = engine._store.get_session_messages(engine._session_id, limit=100)
+    engine._frontier_holder().invalidate()
+    engine.ingest(returned)
+    assert engine._store.get_session_messages(engine._session_id, limit=100) == stored
+
+
+def test_carrier_preserves_pasted_summary_identity(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    outer, inner = [_leaf(engine, label) for label in ("outer leaf", "pasted leaf")]
+    pasted = f"{_summary([inner])}\n\nOK"
+    rows = [{"role": "user", "content": pasted}, *_tail(session)[1:]]
+    other_id = engine._store.append(engine._session_id, {"role": "user", "content": "OK"},
+                                    conversation_id=engine._conversation_id)
+    pasted_id = None
+    for row in rows:
+        store_id = engine._store.append(engine._session_id, row, conversation_id=engine._conversation_id)
+        if row is rows[0]:
+            pasted_id = store_id
+    assert pasted_id != other_id
+    incoming = {"role": "user", "content": f"{_summary([outer])}\n\n{pasted}"}
+    assert engine._get_store_ids_for_messages([incoming]) == [pasted_id]
+
+    result = engine._assemble_context(None, [incoming, *rows[1:]])
+    candidate = engine._pending_emission_candidates[0]
+    remainder = engine._generated_context_carrier_remainder(result[0])
+    print(f"pasted store_id={pasted_id}, OK store_id={other_id}, emitted source={candidate['retained_source']}, "
+          f"remainder={'pasted' if remainder == pasted else 'OK' if remainder == 'OK' else 'nested'}")
+    assert candidate["retained_source"] == {"store_id": pasted_id}
+    assert remainder == pasted
+
+
+def test_carried_row_oracle_requires_exact_evidence(carrier_session):
+    session = carrier_session
+    engine = session.engine
+    content = "Exact carried question."
+    user = {"role": "user", "content": content}
+    store_id = engine._store.append(engine._session_id, user, conversation_id=engine._conversation_id)
+    node = _leaf(engine, "unrelated")
+    covering = _leaf(engine, "covers carried question", [store_id])
+    carrier = {"role": "user", "content": f"{_summary([node])}\n\n{content}"}
+    decoy = {"role": "user", "content": f"Quoting {content} {_summary([covering])[:-1]}"}
+    applied = ["LCM survival fit applied"]
+    assert _carried_row_fate(session, [carrier], [decoy], [], []) == (content, "uncounted")
+    assert _carried_row_fate(session, [carrier], [], [(2, {store_id + 1})], applied) == (content, "uncounted")
+    for row in (user, carrier, {"role": "user", "content": _summary([covering])}):
+        assert _carried_row_fate(session, [carrier], [row], [], []) == (content, "kept")
+    assert _carried_row_fate(session, [carrier], [], [(1, {store_id})], applied) == (content, "named")

@@ -4,3 +4,4 @@
   the row for generated text and dropped it without counting or naming it. The assembly now carries only the
   real row behind the new summary, which keeps its single proven host uid and its stored-row mapping, and the
   survival fit splits a nested carrier down to its real row so the row is counted and named if it is cut (#2895).
+  Assembly budgets the recovered row before selecting the summary and is byte-identical to main off the carrier path.

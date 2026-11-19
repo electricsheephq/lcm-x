@@ -11438,6 +11438,7 @@ class LCMEngine(
         stub_over_cap_tool_results: bool = False,
         persist: bool = True,
         _reply_rejected: tuple = (),
+        _prepared_tail: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
         trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
@@ -11486,8 +11487,9 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages, write=persist)
-        tail_selected = assembly_tail_messages
+        assembly_tail_messages = (_prepared_tail if _prepared_tail is not None else
+                                  self._stub_large_tool_results_for_active_replay(tail_messages, write=persist))
+        tail_for_selection = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
@@ -11496,8 +11498,6 @@ class LCMEngine(
         summary_budget = None
         kept_reply = None
         if assembly_cap is not None:
-            used = count_messages_tokens(result)
-            tail_token_total = 0
             tail_for_selection = self._sanitize_active_context_messages(
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
@@ -11507,6 +11507,17 @@ class LCMEngine(
                 # it. The final assembled result is merged downstream.
                 merge_adjacent_assistants=False,
             )
+        # Charge only the carried user row to the tail. The new summary has its own budget (#2895).
+        unwrapped = None
+        if _prepared_tail is None and retained_user_msg is None and tail_for_selection:
+            incoming_carrier = tail_for_selection[0]
+            first = self._unwrap_incoming_carrier(incoming_carrier)
+            if first is not incoming_carrier:
+                unwrapped = first
+                tail_for_selection = [first, *tail_for_selection[1:]]
+        tail_selected = tail_for_selection
+        if assembly_cap is not None:
+            used = count_messages_tokens(result)
             if not stub_over_cap_tool_results:
                 selection = select_tail(
                     tail_for_selection, assembly_cap, used, count_message_tokens,
@@ -11523,7 +11534,9 @@ class LCMEngine(
             tail_selected, summary_budget, kept_reply = self._keep_newest_reply(
                 tail_messages, anchor_source, tail_for_selection, tail_selected, summary_budget, _reply_rejected)
         if anchor_source is not None:
-            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, tail_selected)
+            anchor_tail = ([incoming_carrier if row is unwrapped else row for row in tail_selected]
+                           if unwrapped is not None else tail_selected)
+            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, anchor_tail)
             anchor_part = anchor_candidates[0] if anchor_candidates else None
 
         # Collect DAG summaries — highest depth first for context hierarchy
@@ -11600,6 +11613,12 @@ class LCMEngine(
                     }
                     emission_candidates.append(summary_candidate)
 
+        if unwrapped is not None and summary_message is None:
+            # Without a replacement prefix, rerun selection with the original carrier intact.
+            return self._assemble_context(
+                system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
+                stub_over_cap_tool_results, persist, _reply_rejected, _prepared_tail=assembly_tail_messages)
+
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
         # cache-stable summaries and above the volatile fresh tail — so the
@@ -11658,7 +11677,8 @@ class LCMEngine(
                                                                      is not None else []) + list(anchor_source))):
             return self._assemble_context(  # #1162 E: the next step, or the base output with the residual log
                 system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
-                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"))
+                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"),
+                _prepared_tail=_prepared_tail)
 
         if not persist:
             _stamp_generated_model_only(result, generated_rows)
@@ -11857,10 +11877,6 @@ class LCMEngine(
         # A rotating host (Hermes) otherwise publishes both rows, merges them in
         # memory, and re-flushes the merge as a new row; the durable child then
         # outgrows the live list and is adopted into the next compress().
-        if summary_message is not None and tail_selected:
-            # #2895: an incoming carrier kept as the first tail row (a leaf of hidden rows only) is never nested
-            # behind the new summary, which renders its prefix again: only its real row is carried.
-            tail_selected = [self._unwrap_incoming_carrier(tail_selected[0]), *tail_selected[1:]]
         if (
             summary_message is not None
             and leading_msg is None

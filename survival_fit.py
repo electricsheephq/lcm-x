@@ -297,11 +297,13 @@ class SurvivalFitMixin:
         return row
 
     def _carried_user_text(self, message) -> Optional[str]:
-        """#2895: the real row's text behind a verified carrier, through any nesting of summary prefixes, else None."""
+        """#2895: the real row's text behind a verified carrier, or None. Stop at a stored literal paste."""
         remainder = self._generated_context_carrier_remainder(message)
         while remainder is not None:
             inner = self._generated_context_carrier_remainder({"role": "user", "content": remainder})
-            if inner is None:
+            if inner is None or self._store.find_session_rows_by_content(
+                self._session_id, "user", remainder, (1 << 63) - 1, limit=1,
+            ):
                 break
             remainder = inner
         return remainder
