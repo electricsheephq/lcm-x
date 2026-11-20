@@ -14,8 +14,8 @@ HELP = """LCM command help
 - /lcm doctor clean lifecycle: read-only scan for lifecycle rows with zero messages/nodes
 - /lcm doctor clean lifecycle apply: backup-first cleanup of empty lifecycle rows only
 - /lcm doctor dedupe: read-only scan for byte-identical copies of at least 8,000 characters
-- /lcm doctor dedupe apply: backup-first deletion of eligible non-user copies with a summary-covered twin
-- /lcm doctor dedupe apply users: also include eligible user copies
+- /lcm doctor dedupe apply: backup-first deletion of eligible non-user copies with an earlier summary-covered copy
+- /lcm doctor dedupe apply users: also include eligible user copies. Both apply forms require LCM_DOCTOR_DEDUPE_APPLY_ENABLED=true
 - /lcm doctor repair: read-only scan for SQLite/FTS index repair needs
 - /lcm doctor repair apply: backup-first repair/rebuild of message and summary FTS indexes
 - /lcm doctor repair level3: read-only scan for level 3 truncation fragments and the condensed nodes built on them

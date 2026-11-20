@@ -1,6 +1,6 @@
 """Explicit, backup-first cleanup of covered message copies."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import closing
 from hashlib import sha256
 from itertools import groupby
@@ -10,8 +10,12 @@ import sqlite3
 import time
 
 from .config import host_message_uid_mode
+from .ingest_content import _EXTERNALIZED_PLACEHOLDER_PREFIX
+from .ingest_policy import _SENSITIVE_PLACEHOLDER_PREFIX
+from .ingest_protection import redact_sensitive_value
 from .maintenance import backup_database
 from .message_content import normalize_content_value
+from .reconcile import _strip_volatile_host_scaffolding
 from .store import (
     delete_chunk_inflight,
     delete_host_uid_bindings,
@@ -23,9 +27,13 @@ from .vector_store import VectorStore
 
 MIN_DEDUPE_CONTENT_LENGTH = 8000
 MIN_DEDUPE_AGE_SECONDS = 3600
+_HOST_PREFIX_LENGTH = 2000
 _UID_OFF = "unproven (host uid mode off)"
 _UID_MISSING = "unproven (no later host uid binding)"
 _HOST_UNAVAILABLE = "unproven (host list unavailable)"
+_NON_TEXT = "unproven (non-text content)"
+_PROTECTED_CONTENT = "unproven (protected content)"
+_HOST_LISTED = "host listed"
 _CITATIONS = (
     ("lcm_entity_aliases", "source_store_ids"),
     ("lcm_entity_keys", "source_store_ids"),
@@ -34,26 +42,51 @@ _CITATIONS = (
 )
 
 
-def _host_identities(engine, sessions):
-    """Read active conversation lists through the bound Hermes handle."""
-    identities = set()
+def _normalize_whitespace(content):
+    return " ".join(content.split())
+
+
+def _host_evidence(engine, sessions):
+    """Collect mapped ids and same-role text forms from both host views."""
+    mapped_ids = set()
+    forms_by_role = defaultdict(set)
     try:
         read = engine._host_session_db.get_messages_as_conversation
         for session in sorted(sessions):
             if not session:
                 return None
-            messages = read(session)
-            if not isinstance(messages, list):
-                return None
-            for message in messages:
-                role, content = message["role"], normalize_content_value(message.get("content"))
-                if not isinstance(role, str):
+            for options in ({}, {"repair_alternation": True}):
+                messages = read(session, **options)
+                if not isinstance(messages, list):
                     return None
-                if content is not None and len(content) >= MIN_DEDUPE_CONTENT_LENGTH:
-                    identities.add((role, content))
-    except Exception:  # Missing or failed host reads cannot prove absence.
+                mapped_ids.update(engine._get_store_id_map_for_messages(messages).values())
+                for message in messages:
+                    role, content = message["role"], message.get("content")
+                    if not isinstance(role, str):
+                        return None
+                    if content is None:
+                        continue
+                    redacted = redact_sensitive_value(content, engine._config, parse_json_strings=False)
+                    for value in (content, redacted):
+                        text = normalize_content_value(value)
+                        forms_by_role[role].add(_normalize_whitespace(text))
+                        forms_by_role[role].add(_normalize_whitespace(_strip_volatile_host_scaffolding(text)))
+    except Exception:  # Failed reads or mapping cannot prove absence.
         return None
-    return identities
+    return mapped_ids, forms_by_role
+
+
+def _content_veto(content, host_forms):
+    if not isinstance(content, str):
+        return _NON_TEXT
+    normalized = _normalize_whitespace(content)
+    prefix = normalized[:_HOST_PREFIX_LENGTH]
+    # Containment includes equality. These comparisons can only add a veto.
+    if any(prefix == form[:_HOST_PREFIX_LENGTH] or normalized in form or form in normalized for form in host_forms):
+        return _HOST_LISTED
+    if _SENSITIVE_PLACEHOLDER_PREFIX in content or _EXTERNALIZED_PLACEHOLDER_PREFIX in content:
+        return _PROTECTED_CONTENT
+    return None
 
 
 def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
@@ -142,21 +175,24 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
              cutoff=time.time() - MIN_DEDUPE_AGE_SECONDS),
     ).fetchall()
     candidate_sessions = {row[2] for row in rows if row[-1] is None}
-    host = _host_identities(engine, candidate_sessions | {session_id}) if candidate_sessions else set()
+    host = _host_evidence(engine, candidate_sessions | {session_id}) if candidate_sessions else (set(), {})
+    mapped_ids, host_forms = host if host is not None else (set(), {})
     lines, removable = [], {}
     copies_total = unproven_total = 0
-    for _, group in groupby(rows, key=lambda row: row[0]):
+    for group_id, group in groupby(rows, key=lambda row: row[0]):
         reasons = Counter()
         group_removable = []
         for _, store_id, row_session, role, timestamp, copies, kept_id, length, content, reason in group:
-            if content is not None:
-                digest = sha256(content.encode()).hexdigest()
-                identity = (role, content)
+            if store_id == group_id:
+                digest = sha256(content.encode()).hexdigest() if isinstance(content, str) else "n/a"
+                content_reason = _content_veto(content, host_forms.get(role, ()))
             if reason is None:
                 if host is None:
                     reason = _HOST_UNAVAILABLE
-                elif identity in host:
-                    reason = "host listed"
+                elif store_id in mapped_ids:
+                    reason = _HOST_LISTED
+                elif content_reason is not None:
+                    reason = content_reason
                 elif role == "user" and not users:
                     reason = "needs `apply users`"
             if reason is not None:
@@ -168,7 +204,8 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
                     content_sha256=digest, content_length=length, timestamp=timestamp, kept_store_id=kept_id,
                 )
         kept = sum(reasons.values())
-        unproven = reasons[_UID_OFF] + reasons[_UID_MISSING] + reasons[_HOST_UNAVAILABLE]
+        unproven = sum(reasons[reason] for reason in (_UID_OFF, _UID_MISSING, _HOST_UNAVAILABLE,
+                                                      _NON_TEXT, _PROTECTED_CONTENT))
         detail = [f"{reason}={count}" for reason, count in reasons.items()]
         if group_removable:
             detail.append(f"removable_ids={','.join(group_removable)}")
