@@ -225,6 +225,12 @@ def carrier_remainder(content, header, nodes, same_lineage):
     return content
 
 
+def verified_summary_head_store_ids(rows, strip):
+    """Count exact summary heads in a selected set of stored rows."""
+    return sorted(store_id for store_id, session, _role, content, *_ in rows
+                  if isinstance(content, str) and content and strip(content, session) == "")
+
+
 def in_place_carried_ids(rows, strip, prefixes):
     """Same-session copies at EVERY in-place compaction, in host id order, even if later archived.
 
@@ -968,6 +974,8 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
     # key; the gate's unattributed count stays in copies, and the row-based fraction counts distinct store ids.
     # An order_ambiguous row is held for a hand check: not unattributed, and counted in the fraction like an exemption.
     exempt_copies = sum(len(attributed[k]) for k in ("#1674", "#2203", "order_ambiguous"))
+    silent_ids = {row[0] for row in silent_rows}
+    summary_surplus = verified_summary_head_store_ids((row for row in resolved if row[0] in silent_ids), strip)
     exempt_ids = set(attributed["#1674"]) | set(attributed["#2203"])
     held_ids = exempt_ids | set(attributed["order_ambiguous"])
     exempt = len(exempt_ids)
@@ -1027,6 +1035,7 @@ def audit(state_db: Path, lcm_db: Path, logs=(), since=None, events_path=None, l
             "coverage": coverage, "coverage_basis": coverage_basis,
             "uid_coverage": {"table": "present" if uids is not None else "table absent", "per_source": dict(uid)},
             "m3": m3, "recorder": recorder,
+            "verified_summary_head_surplus": {"rows": len(summary_surplus), "store_ids": summary_surplus},
             "host_empty_recovery": {"rows": len(recovery), "store_ids": sorted(recovery),
                                     "ambiguous_store_ids": sorted(ambiguous_recovery)},
             "undo_retained": {"rows": len(retained), "store_ids": sorted(retained),

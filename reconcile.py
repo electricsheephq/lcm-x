@@ -1714,8 +1714,8 @@ class ReconcileMixin:
         ordered.append(digest)
         ordered = ordered[-16:]
         try:
-            store.write_metadata_json(
-                [self._replay_snapshot_metadata_key(prefix)],
+            self._write_compaction_metadata(
+                self._replay_snapshot_metadata_key(prefix),
                 json.dumps({"version": 1, "digests": ordered}, sort_keys=True),
                 skip_unchanged=True,
             )
@@ -4131,8 +4131,8 @@ class ReconcileMixin:
                     stored_row=True,
                 ),
             }
-            self._store.write_metadata_json(
-                [self._folded_tail_lineage_metadata_key()],
+            self._write_compaction_metadata(
+                self._folded_tail_lineage_metadata_key(),
                 json.dumps(payload, sort_keys=True),
                 skip_unchanged=True,
             )
@@ -4145,8 +4145,8 @@ class ReconcileMixin:
         if not self._session_id:
             return False
         try:
-            self._store.write_metadata_json(
-                [self._folded_tail_lineage_metadata_key()],
+            self._write_compaction_metadata(
+                self._folded_tail_lineage_metadata_key(),
                 json.dumps({"version": 1, "source_store_id": 0}, sort_keys=True),
                 skip_unchanged=True,
             )

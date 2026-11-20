@@ -26,6 +26,7 @@ from tests.behaviour.compress_trace_harness import (
     first_difference,
     observe,
 )
+from tests.behaviour.frontier_observer import REFUSED_INPUT
 
 
 def _self_attributes(tree: ast.AST) -> set[str]:
@@ -98,7 +99,7 @@ def test_compress_observed_attributes_complete() -> None:
         engine_names.update(vars(cls))
     # Reserved by the extraction contract; absent is itself a frozen observation
     # until the phase helpers introduce this state. All other names must exist.
-    removed = frozen - engine_names - {"_frontier"}
+    removed = frozen - engine_names - {"_frontier", REFUSED_INPUT}
     assert not removed, (
         f"Observed attributes removed from the whole engine class: {sorted(removed)}; update OBSERVED_ATTRIBUTES.\n"
         + TRACE_GUIDANCE)

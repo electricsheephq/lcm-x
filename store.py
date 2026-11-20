@@ -1908,11 +1908,11 @@ class MessageStore:
             "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
             "WHERE first_check IS NOT NULL AND kind IN ('canonical', 'version') GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
 
-    def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
-        """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
+    def add_host_uid_bindings(self, lineage_key: str, rows) -> Optional[float]:
+        """Insert unseen bindings and return the timestamp of this insert batch."""
         rows = list(rows)
         if not rows:
-            return
+            return None
         self._ensure_host_uid_schema()
         now = time.time()
         self._host_uid_write(lambda conn: conn.executemany(
@@ -1921,6 +1921,7 @@ class MessageStore:
             "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
             [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
              for store_id, uid, kind, proof_kind in rows]))
+        return now
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
         """Join the explicit owner, otherwise retain the standalone shadow boundary.

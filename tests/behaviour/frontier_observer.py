@@ -1,4 +1,4 @@
-"""Observe frontier storage through the engine's legacy property names."""
+"""Observe forwarded and holder-only frontier state."""
 from __future__ import annotations
 
 import ast
@@ -8,6 +8,7 @@ from typing import Any
 
 engine_module: Any = importlib.import_module("hermes_lcm.engine")
 HOLDER_NAME = "_frontier"
+REFUSED_INPUT = "_frontier.refused_input"
 holder_type: Any = getattr(engine_module, "FrontierState", None)
 LEGACY_FIELDS: dict[str, str] = {
     field.name: name
@@ -19,10 +20,11 @@ LEGACY_FIELDS: dict[str, str] = {
 } if holder_type is not None else {}
 
 
-def legacy_frontier_fields(method: ast.AST) -> set[str]:
+def frontier_fields(method: ast.AST) -> set[str]:
     """Translate only the holder fields actually accessed by this method."""
+    names = LEGACY_FIELDS | {"refused_input": REFUSED_INPUT}
     return {
-        LEGACY_FIELDS[node.attr]
+        names[node.attr]
         for node in ast.walk(method)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute)
         and node.value.attr == HOLDER_NAME
@@ -31,8 +33,10 @@ def legacy_frontier_fields(method: ast.AST) -> set[str]:
 
 
 def observed_attribute(engine: Any, name: str) -> Any:
+    if name == REFUSED_INPUT:
+        return getattr(getattr(engine, HOLDER_NAME, None), "refused_input", None)
     value = getattr(engine, name, {"absent": True})
-    # The frozen legacy properties already observe every holder value.
+    # The frontier fields are observed individually.
     if name == HOLDER_NAME and holder_type is not None and isinstance(value, holder_type):
         return {"absent": True}
     return value
