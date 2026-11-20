@@ -1,25 +1,32 @@
 """Backup-first duplicate cleanup on synthetic stores."""
 
 from contextlib import closing
+from copy import deepcopy
 from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_lcm import ingest_ledger, maintenance
 from hermes_lcm.command import _ensure_inflight_table, handle_lcm_command
+from hermes_lcm.compaction import _CompressionState, _LeafState
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.entity_store import EntityStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
+from tests.test_host_uid_shadow import _state_db
 
 
 CONTENT = "café " * 1600
 HASH = sha256(CONTENT.encode()).hexdigest()
 SCAN = "doctor dedupe"
 APPLY = "doctor dedupe apply"
+APPLY_USERS = f"{APPLY} users"
 
 
 @pytest.fixture
@@ -29,24 +36,34 @@ def engine(tmp_path, monkeypatch):
         database_path=str(tmp_path / "synthetic.db"), fresh_tail_count=2,
         embeddings_enabled=False, temporal_rollups_enabled=False,
     )
+    config.doctor_dedupe_apply_enabled = True
     instance = LCMEngine(config=config, hermes_home=str(tmp_path / "host"))
     instance._session_id = "session"
     instance._conversation_id = "conversation"
     instance._lifecycle.bind_session("session", conversation_id="conversation")
+    host_list(instance, lambda _: [])
     try:
         yield instance
     finally:
         instance.shutdown()
 
 
-def append(engine, content=CONTENT, *, session="session", conversation="conversation"):
-    return engine._store.append(
-        session, {"role": "assistant", "content": content}, conversation_id=conversation,
+def host_list(engine, read):
+    engine.bind_session_state(SimpleNamespace(get_messages_as_conversation=read), "session")
+
+
+def append(engine, content=CONTENT, *, session="session", conversation="conversation", role="assistant"):
+    store_id = engine._store.append(
+        session, {"role": role, "content": content}, conversation_id=conversation,
     )
+    with engine._store.atomic():
+        engine._store.connection.execute("UPDATE messages SET timestamp=1 WHERE store_id=?", (store_id,))
+    return store_id
 
 
-def cover(engine, ids):
-    engine._dag.add_node(SummaryNode(session_id="session", summary="Earlier facts", source_ids=ids))
+def cover(engine, ids, source_type="messages"):
+    engine._dag.add_node(SummaryNode(session_id="session", summary="Earlier facts", source_ids=ids,
+                                     source_type=source_type))
 
 
 def bind(engine, store_id):
@@ -159,6 +176,9 @@ def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
     seed_chunks(store, [*removable, covered[0]])
     version_sql = "SELECT data_version FROM lcm_embedding_profile"
     version = conn.execute(version_sql).fetchone()[0]
+    with store.atomic():
+        conn.executemany("UPDATE messages SET sender_id='synthetic', sender_source='test', observed_at=12, source='cli' "
+                         "WHERE store_id=?", [(store_id,) for store_id in removable])
     timestamps = dict(conn.execute("SELECT store_id,timestamp FROM messages"))
     assert cold_cursor(conn, gone_attempt)[0]["k"] == 11
     assert cold_cursor(conn, live_attempt)[0]["k"] == 2
@@ -173,7 +193,10 @@ def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
     backup = next(line.removeprefix("backup_path: ") for line in result.splitlines() if line.startswith("backup_path: "))
     with closing(sqlite3.connect(Path(backup).as_uri() + "?mode=ro", uri=True)) as saved:
         assert ids(saved, "messages") == set(timestamps)
+        contents = dict(saved.execute("SELECT store_id, CAST(content AS BLOB) FROM messages"))
     assert ids(conn, "messages") == set(covered + tail)
+    kept_content = conn.execute("SELECT CAST(content AS BLOB) FROM messages WHERE store_id=?", (covered[0],)).fetchone()[0]
+    assert all(contents[store_id] == kept_content == CONTENT.encode() for store_id in removable)
     for table in fts_tables:
         assert set(covered) <= ids(conn, table, "id")
         assert not ids(conn, table, "id").intersection(removable)
@@ -200,12 +223,12 @@ def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
         assert record == dict(
             session_id="session", conversation_id="conversation", role="assistant",
             content_sha256=HASH, content_length=8000, timestamp=timestamps[store_id],
-            kept_store_id=covered[0],
+            kept_store_id=covered[0], sender_id="synthetic", sender_source="test", observed_at=12, source="cli",
         )
 
 
 @pytest.mark.parametrize(("guard", "reason"), [
-    ("short", "below minimum length"),
+    ("short", "groups=0"),
     ("no-covered", "no covered copy"),
     ("uid-bound", "host uid bound"),
     ("too-new", "unproven (no later host uid binding)"),
@@ -220,13 +243,18 @@ def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
     ("different-tool-call-id", "no covered copy"),
     ("different-tool-calls", "no covered copy"),
     ("different-tool-name", "no covered copy"),
+    ("different-content", "no covered copy"),
+    ("too-young", "below minimum age"),
+    ("later-twin", "no earlier covered copy"),
+    ("node-id-collision", "no covered copy"),
+    ("pinned", "pinned"),
 ])
 def test_apply_guards_keep_rows(engine, monkeypatch, guard, reason):
     content = CONTENT[:-1] if guard == "short" else CONTENT
     conn = engine._store.connection
     if guard == "other-conversation":
         cover(engine, [append(engine, content, conversation="other")])
-    first = append(engine, content)
+    first = append(engine, content[:-1] + "!" if guard == "different-content" else content)
     mismatch_columns = {
         "different-role": ("role", "tool"),
         "different-tool-call-id": ("tool_call_id", "call"),
@@ -237,11 +265,19 @@ def test_apply_guards_keep_rows(engine, monkeypatch, guard, reason):
         column, value = mismatch_columns[guard]
         with engine._store.atomic():
             conn.execute(f"UPDATE messages SET {column}=? WHERE store_id=?", (value, first))
-    if guard not in {"no-covered", "other-conversation"}:
-        cover(engine, [first])
+    if guard not in {"no-covered", "other-conversation", "later-twin"}:
+        cover(engine, [first], "nodes" if guard == "node-id-collision" else "messages")
     if guard == "too-new":
         append_tail(engine)
     candidate = append(engine, content, session="single" if guard == "only" else "session")
+    if guard == "later-twin":
+        cover(engine, [append(engine, content)])
+    if guard == "too-young":
+        with engine._store.atomic():
+            conn.execute("UPDATE messages SET timestamp=? WHERE store_id=?", (time.time() - 1800, candidate))
+    if guard == "pinned":
+        with engine._store.atomic():
+            conn.execute("UPDATE messages SET pinned=1 WHERE store_id=?", (candidate,))
     if guard == "only":
         engine._config.fresh_tail_count = 0
     if guard == "uid-bound":
@@ -261,7 +297,7 @@ def test_apply_guards_keep_rows(engine, monkeypatch, guard, reason):
         append_tail(engine, "other")
     else:
         append_tail(engine)
-    if guard in mismatch_columns:
+    if guard in mismatch_columns or guard == "different-content":
         append(engine, content)  # Make the uncovered rows a group without the nonidentical covered row.
         append_tail(engine)
     before = ids(conn, "messages")
@@ -270,7 +306,7 @@ def test_apply_guards_keep_rows(engine, monkeypatch, guard, reason):
 
     assert result.startswith("LCM doctor dedupe apply\n")
     assert "deleted: 0" in result
-    assert f"{reason}=" in result
+    assert (reason if guard == "short" else f"{reason}=") in result
     assert ids(conn, "messages") == before
 
 
@@ -346,3 +382,200 @@ def test_store_complete_walk_skips_deleted_positions(engine, caplog):
     assert [store_id for _row, claims in leaf for store_id in claims] == tail
     assert not any("contiguity hole" in record.message for record in caplog.records)
     assert not ids(engine._store.connection, "messages").intersection(removable)
+
+
+def start_live_session(engine, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "on")
+    monkeypatch.setenv("LCM_INGEST_LEDGER", "shadow")
+    host = Path(engine._hermes_home)
+    host.mkdir(exist_ok=True)
+    _state_db(host, [("session", None, None)])
+    engine.on_session_start("session", platform="cli", context_length=200_000, conversation_id="conversation")
+    historical = {"role": "assistant", "content": CONTENT, "timestamp": 20.0}
+    live = [
+        {"role": "user", "content": "Next question", "timestamp": 30.0},
+        {"role": "assistant", "content": "Next answer", "timestamp": 40.0, "message_uid": "answer"},
+        {"role": "user", "content": "Follow-up question", "timestamp": 50.0},
+    ]
+    engine.ingest(deepcopy([dict(historical, timestamp=10.0, message_uid="kept"), historical, *live]))
+    store = engine._store
+    kept, candidate, _, answer, _ = sorted(ids(store.connection, "messages"))
+    assert ids(store.connection, "host_uid_bindings") == {kept, answer}
+    cover(engine, [kept])
+    engine._lifecycle.advance_frontier("conversation", "session", kept)
+    engine._last_compacted_store_id = kept
+    with store.atomic():
+        store.connection.execute("UPDATE messages SET timestamp=1 WHERE store_id=?", (candidate,))
+    return historical, live, kept, candidate
+
+
+def prepare_leaf(engine, view):
+    engine._compress_run.store_ids_by_message_id = engine._get_store_id_map_for_messages(view)
+    state = _CompressionState(working_messages=view)
+    leaf = _LeafState(to_compact=view[:1])
+    action, _ = engine._prepare_leaf_input(state, leaf, set(), lambda _: 0)
+    return action, state.noop_reason
+
+
+def test_dedupe_host_visible_copy_is_protected(engine, monkeypatch):
+    historical, live, _, candidate = start_live_session(engine, monkeypatch)
+    view = [historical, *live]
+    host_list(engine, lambda _: deepcopy(view))
+    assert engine._get_store_id_map_for_messages(view)[id(historical)] == candidate
+    assert prepare_leaf(engine, view) == ("next", "")
+    scan = handle_lcm_command(SCAN, engine)
+    result = handle_lcm_command(APPLY, engine)
+    assert "removable=0" in scan and "host listed=1" in scan
+    assert "deleted: 0" in result and "host listed=1" in result
+    assert candidate in ids(engine._store.connection, "messages")
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+def test_dedupe_host_list_unavailable(engine, read_fails):
+    _, removable, _ = seed_copies(engine)
+    if read_fails:
+        def unreadable(_):
+            raise OSError("synthetic host read failure")
+        host_list(engine, unreadable)
+    else:
+        engine._host_session_db = None
+    for command in (SCAN, APPLY):
+        result = handle_lcm_command(command, engine)
+        assert "removable=0" in result and "unproven (host list unavailable)=11" in result
+    assert set(removable) <= ids(engine._store.connection, "messages")
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+def test_dedupe_host_list_is_reread_after_backup(engine, monkeypatch, read_fails):
+    _, removable, _ = seed_copies(engine)
+    view = []
+    reads = []
+
+    def read(session_id):
+        reads.append(session_id)
+        if view and read_fails:
+            raise OSError("synthetic host read failure")
+        return deepcopy(view)
+
+    host_list(engine, read)
+    backup_pair = maintenance._backup_pair
+
+    def back_up_then_list_copy(store, path):
+        backup_pair(store, path)
+        view.append({"role": "assistant", "content": CONTENT})
+
+    monkeypatch.setattr(maintenance, "_backup_pair", back_up_then_list_copy)
+    result = handle_lcm_command(APPLY, engine)
+    assert "deleted: 0" in result and "recheck_skipped: 11" in result
+    if read_fails:
+        assert "recheck: unproven (host list unavailable)" in result
+    assert reads == ["session", "session"]
+    assert set(removable) <= ids(engine._store.connection, "messages")
+
+
+def test_dedupe_hidden_copy_preserves_same_lineage_cursor_and_leaf(engine, monkeypatch, caplog):
+    _, view, kept, candidate = start_live_session(engine, monkeypatch)
+    host_list(engine, lambda _: deepcopy(view))
+    store = engine._store
+    conn = store.connection
+    before = ids(conn, "messages") - {candidate}
+    lineage = conn.execute("SELECT lineage FROM occurrence_bindings WHERE store_id=?", (candidate,)).fetchone()[0]
+    assert ids(conn, "occurrence_bindings") - {kept, candidate} == before - {kept}
+    assert ids(conn, "occurrence_bindings", "lineage") == {lineage}
+    # Model the shortened active host view using the real ingest view's occurrence refs.
+    original = ingest_ledger.newest_view(conn, lineage, "ingest")
+    entries = ingest_ledger.decode_entries(original["entries"])[2:]
+    salt = store.ingest_ledger_salt()
+    with store.atomic():
+        ingest_ledger.write_view(conn, salt, lineage, "ingest", None, entries)
+    views = list(conn.execute("SELECT * FROM ingest_views ORDER BY view_seq"))
+    attempt = dict(lineage=lineage, entries=entries, stamps=[str(m["timestamp"]) for m in view],
+                   chain=ingest_ledger.prefix_chain(salt, entries))
+    assert cold_cursor(conn, attempt)[0]["k"] == len(view)
+
+    assert "deleted: 1" in handle_lcm_command(APPLY, engine)
+    assert ids(conn, "messages") == before
+    views_after = list(conn.execute("SELECT * FROM ingest_views ORDER BY view_seq"))
+    proof, counts = cold_cursor(conn, attempt)
+
+    cold = LCMEngine(config=engine._config, hermes_home=engine._hermes_home)
+    try:
+        cold.on_session_start("session", platform="cli", context_length=200_000, conversation_id="conversation")
+        cold.ingest(deepcopy(view))
+        assert ids(cold._store.connection, "messages") == before
+        assert cold._store_complete_frontier() == kept < candidate
+        assert cold._get_store_id_map_for_messages(view)[id(view[0])] == min(before - {kept})
+        with caplog.at_level("INFO", logger="hermes_lcm.store_complete"):
+            assert prepare_leaf(cold, view) == ("next", "")
+        assert not any("contiguity hole" in record.message for record in caplog.records)
+    finally:
+        cold.shutdown()
+    assert views_after == views
+    assert proof["k"] == len(view) and counts["stop.missing_row"] == 0
+
+
+def test_dedupe_users_require_explicit_apply_and_minimum_age(engine):
+    kept = append(engine, role="user")
+    cover(engine, [kept])
+    old = append(engine, role="user")
+    young = engine._store.append("session", {"role": "user", "content": CONTENT}, conversation_id="conversation")
+    append_tail(engine)
+    conn = engine._store.connection
+    assert "needs `apply users`=1" in handle_lcm_command(SCAN, engine)
+    assert "deleted: 0" in handle_lcm_command(APPLY, engine)
+    assert {kept, old, young} <= ids(conn, "messages")
+    assert "deleted: 1" in handle_lcm_command(APPLY_USERS, engine)
+    assert {kept, young} <= ids(conn, "messages") and old not in ids(conn, "messages")
+
+
+@pytest.mark.parametrize("enabled_command", [APPLY, APPLY_USERS])
+def test_dedupe_flag_defaults_off_and_enables_both_forms(engine, monkeypatch, enabled_command):
+    monkeypatch.delenv("LCM_DOCTOR_DEDUPE_APPLY_ENABLED", raising=False)
+    _, removable, _ = seed_copies(engine)
+    engine._config = LCMConfig.from_env()
+    engine._config.fresh_tail_count = 2
+    assert "removable=11" in handle_lcm_command(SCAN, engine)
+    for command in (APPLY, APPLY_USERS):
+        result = handle_lcm_command(command, engine)
+        assert "LCM_DOCTOR_DEDUPE_APPLY_ENABLED" in result and "deleted: 0" in result
+    assert set(removable) <= ids(engine._store.connection, "messages")
+    assert not engine.backup_dir().exists()
+    monkeypatch.setenv("LCM_DOCTOR_DEDUPE_APPLY_ENABLED", "true")
+    engine._config = LCMConfig.from_env()
+    engine._config.fresh_tail_count = 2
+    assert "deleted: 11" in handle_lcm_command(enabled_command, engine)
+
+
+def test_dedupe_multisession_reads_each_current_host_list(engine):
+    kept = append(engine)
+    cover(engine, [kept])
+    visible = append(engine, session="other-session")
+    for i in range(2):
+        append(engine, f"other session tail {i}", session="other-session")
+    hidden_content = CONTENT[:-1] + "!"
+    cover(engine, [append(engine, hidden_content)])
+    hidden = append(engine, hidden_content)
+    append_tail(engine)
+    view = {"session": [], "other-session": [{"role": "assistant", "content": CONTENT}]}
+    host_list(engine, view.__getitem__)
+    assert "deleted: 1" in handle_lcm_command(APPLY, engine)
+    remaining = ids(engine._store.connection, "messages")
+    assert {visible, kept} <= remaining and hidden not in remaining
+
+
+def test_dedupe_keeps_entity_and_note_citations(engine):
+    kept, removable, _ = seed_copies(engine)
+    entities = EntityStore(engine._store.db_path, profile_key="synthetic")
+    try:
+        entity = entities.create_entity("Synthetic entity")
+        entities.add_alias(entity, "Synthetic alias", source_store_ids=[removable[0]])
+        with entities.transaction():
+            entities.add_key("synthetic key", entity, "alias_match", [removable[1]])
+        note = entities.add_note("Synthetic note", cites=[removable[2]])
+        entities.add_note("Synthetic retraction", kind="retraction", cites=[kept[0]],
+                          retracts_store_ids=[removable[3]])
+        assert "deleted: 7" in handle_lcm_command(APPLY, engine)
+        assert set(removable[:4]) <= ids(engine._store.connection, "messages")
+        assert entities.get_note(note) is not None
+    finally:
+        entities.close()

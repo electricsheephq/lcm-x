@@ -27,6 +27,7 @@ ROUTES = (
     Route(("doctor", "clean", "lifecycle", "apply"), "_doctor_clean_lifecycle_apply_text"),
     Route(("doctor", "dedupe"), "_doctor_dedupe_text"),
     Route(("doctor", "dedupe", "apply"), "_doctor_dedupe_apply_text"),
+    Route(("doctor", "dedupe", "apply", "users"), "_doctor_dedupe_apply_users_text"),
     Route(("doctor", "repair", "apply"), "_doctor_repair_apply_text"),
     Route(("doctor", "repair", "level3"), "_doctor_repair_level3_text"),
     Route(("doctor", "repair", "level3", "apply"), "_doctor_repair_level3_apply_text"),
@@ -50,7 +51,7 @@ FALLBACK_HELP = {
         "`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, "
         "`clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, "
         "`repair schema-stamp apply`, `source`, `source apply`, and `retention` as "
-        "extra subcommands, plus `repair level3`, `repair level3 apply`, `dedupe`, and `dedupe apply`."
+        "extra subcommands, plus `repair level3`, `repair level3 apply`, `dedupe`, `dedupe apply`, and `dedupe apply users`."
     ),
     "backup": "`/lcm backup` does not accept extra arguments.",
     "rotate": "`/lcm rotate` accepts an optional `apply` subcommand.",

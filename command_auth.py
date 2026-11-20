@@ -14,6 +14,7 @@ READ_LCM_SUBCOMMANDS = frozenset({
 })
 WRITE_LCM_SUBCOMMANDS = frozenset({
     "doctor", "doctor clean apply", "doctor clean lifecycle apply", "doctor dedupe apply",
+    "doctor dedupe apply users",
     "doctor repair", "doctor repair apply", "doctor repair level3",
     "doctor repair level3 apply", "doctor repair schema-stamp",
     "doctor repair schema-stamp apply", "doctor source apply", "backup",

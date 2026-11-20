@@ -11,26 +11,69 @@ import time
 
 from .config import host_message_uid_mode
 from .maintenance import backup_database
+from .message_content import normalize_content_value
 from .store import (
     delete_chunk_inflight,
     delete_host_uid_bindings,
-    delete_ingest_ledger_rows,
+    delete_ingest_ledger_message_refs,
     delete_message_relations,
 )
 from .vector_store import VectorStore
 
 
 MIN_DEDUPE_CONTENT_LENGTH = 8000
+MIN_DEDUPE_AGE_SECONDS = 3600
 _UID_OFF = "unproven (host uid mode off)"
 _UID_MISSING = "unproven (no later host uid binding)"
+_HOST_UNAVAILABLE = "unproven (host list unavailable)"
+_CITATIONS = (
+    ("lcm_entity_aliases", "source_store_ids"),
+    ("lcm_entity_keys", "source_store_ids"),
+    ("lcm_memory_notes", "cites"),
+    ("lcm_memory_notes", "retracts_store_ids"),
+)
 
 
-def _scan(engine, conn, conversation_id):
+def _host_identities(engine, sessions):
+    """Read active conversation lists through the bound Hermes handle."""
+    identities = set()
+    try:
+        read = engine._host_session_db.get_messages_as_conversation
+        for session in sorted(sessions):
+            if not session:
+                return None
+            messages = read(session)
+            if not isinstance(messages, list):
+                return None
+            for message in messages:
+                role, content = message["role"], normalize_content_value(message.get("content"))
+                if not isinstance(role, str):
+                    return None
+                if content is not None and len(content) >= MIN_DEDUPE_CONTENT_LENGTH:
+                    identities.add((role, content))
+    except Exception:  # Missing or failed host reads cannot prove absence.
+        return None
+    return identities
+
+
+def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
     """Group by the full stored values, using the hash for display and audit."""
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name IN ('host_uid_bindings', 'message_relations')"
+        "AND name IN ('host_uid_bindings', 'message_relations', "
+        "'lcm_entity_aliases', 'lcm_entity_keys', 'lcm_memory_notes')"
     )}
+    citations = " UNION ".join(
+        f"SELECT CAST(c.value AS INTEGER) FROM {table} t, json_each(t.{column}) c"
+        for table, column in _CITATIONS if table in tables
+    )
+    cited = f"d.store_id IN ({citations})" if citations else "0"
+    # A selected row only needs its original covered witness. A lost witness skips the row.
+    messages_from = "messages"
+    scope_ids = None
+    if selected is not None:
+        scope_ids = json.dumps(sorted(set(selected) | {row["kept_store_id"] for row in selected.values()}))
+        messages_from = "json_each(:scope_ids) AS scope CROSS JOIN messages ON messages.store_id = scope.value"
     uid_off = host_message_uid_mode() == "off"
     newest_bound = 0
     bound = "0"
@@ -51,32 +94,37 @@ def _scan(engine, conn, conversation_id):
     rows = conn.execute(
         f"""
         WITH grouped AS (
-            SELECT store_id, session_id, role, content, timestamp,
+            SELECT store_id, session_id, role, content, timestamp, pinned,
                    MIN(store_id) OVER identity AS group_id, COUNT(*) OVER identity AS copies
-            FROM messages
-            WHERE conversation_id = :conversation_id
+            FROM {messages_from}
+            WHERE conversation_id = :conversation_id AND length(content) >= :minimum
             WINDOW identity AS (PARTITION BY role, content, tool_call_id, tool_calls, tool_name)
         ), covered AS (
             SELECT DISTINCT CAST(source.value AS INTEGER) AS store_id
             FROM summary_nodes AS node, json_each(node.source_ids) AS source
             WHERE node.source_type = 'messages'
+              AND CAST(source.value AS INTEGER) IN (SELECT store_id FROM grouped WHERE copies > 1)
         ), duplicates AS (
             SELECT grouped.*, covered.store_id IS NOT NULL AS covered,
                    MIN(covered.store_id) OVER (PARTITION BY group_id) AS kept_id
             FROM grouped LEFT JOIN covered USING (store_id)
             WHERE copies > 1
         )
-        SELECT group_id, store_id, session_id, role, timestamp, copies, kept_id, COALESCE(length(content), 0),
-               CASE WHEN store_id = group_id THEN CAST(COALESCE(content, '') AS BLOB) END,
+        SELECT group_id, store_id, session_id, role, timestamp, copies, kept_id, length(content),
+               CASE WHEN store_id = group_id THEN content END,
                CASE
                    WHEN covered THEN 'covered'
-                   WHEN COALESCE(length(content), 0) < :minimum THEN 'below minimum length'
                    WHEN kept_id IS NULL THEN 'no covered copy'
+                   WHEN kept_id >= store_id THEN 'no earlier covered copy'
                    WHEN store_id <= :frontier THEN 'at or below frontier'
+                   WHEN NOT (typeof(timestamp) IN ('integer', 'real') AND timestamp <= :cutoff)
+                        THEN 'below minimum age'
+                   WHEN pinned THEN 'pinned'
                    WHEN :uid_off THEN :off_reason
                    WHEN {bound} THEN 'host uid bound'
                    WHEN store_id >= :newest_bound THEN :missing_reason
                    WHEN {related} THEN 'message relation'
+                   WHEN {cited} THEN 'entity or note citation'
                    WHEN NOT EXISTS (
                        SELECT 1 FROM messages m WHERE m.session_id = d.session_id AND m.store_id <> d.store_id
                    ) THEN 'only row in session'
@@ -90,26 +138,37 @@ def _scan(engine, conn, conversation_id):
         """,
         dict(conversation_id=conversation_id, minimum=MIN_DEDUPE_CONTENT_LENGTH, frontier=frontier,
              uid_off=uid_off, off_reason=_UID_OFF, newest_bound=newest_bound, missing_reason=_UID_MISSING,
-             tail=tail, tail_offset=max(0, tail - 1)),
-    )
+             tail=tail, tail_offset=max(0, tail - 1), scope_ids=scope_ids,
+             cutoff=time.time() - MIN_DEDUPE_AGE_SECONDS),
+    ).fetchall()
+    candidate_sessions = {row[2] for row in rows if row[-1] is None}
+    host = _host_identities(engine, candidate_sessions | {session_id}) if candidate_sessions else set()
     lines, removable = [], {}
     copies_total = unproven_total = 0
     for _, group in groupby(rows, key=lambda row: row[0]):
         reasons = Counter()
         group_removable = []
-        for _, store_id, session_id, role, timestamp, copies, kept_id, length, content, reason in group:
+        for _, store_id, row_session, role, timestamp, copies, kept_id, length, content, reason in group:
             if content is not None:
-                digest = sha256(content).hexdigest()
+                digest = sha256(content.encode()).hexdigest()
+                identity = (role, content)
+            if reason is None:
+                if host is None:
+                    reason = _HOST_UNAVAILABLE
+                elif identity in host:
+                    reason = "host listed"
+                elif role == "user" and not users:
+                    reason = "needs `apply users`"
             if reason is not None:
                 reasons[reason] += 1
             else:
                 group_removable.append(str(store_id))
                 removable[store_id] = dict(
-                    session_id=session_id, conversation_id=conversation_id, role=role,
+                    session_id=row_session, conversation_id=conversation_id, role=role,
                     content_sha256=digest, content_length=length, timestamp=timestamp, kept_store_id=kept_id,
                 )
         kept = sum(reasons.values())
-        unproven = reasons[_UID_OFF] + reasons[_UID_MISSING]
+        unproven = reasons[_UID_OFF] + reasons[_UID_MISSING] + reasons[_HOST_UNAVAILABLE]
         detail = [f"{reason}={count}" for reason, count in reasons.items()]
         if group_removable:
             detail.append(f"removable_ids={','.join(group_removable)}")
@@ -123,29 +182,40 @@ def _scan(engine, conn, conversation_id):
         f"totals: groups={len(lines)} copies={copies_total} kept={copies_total - len(removable)} "
         f"removable={len(removable)} unproven={unproven_total}"
     )
-    return lines, removable
+    return lines, removable, host is not None
 
 
-def _delete_selected(engine, conversation_id, selected):
+def _delete_selected(engine, conversation_id, session_id, selected, *, users):
     store = engine._store
     conn = store.connection
     with store.atomic(immediate=True):
-        if engine._conversation_id != conversation_id:
-            return 0
-        _, rechecked = _scan(engine, conn, conversation_id)
+        if (engine._conversation_id, engine._session_id) != (conversation_id, session_id):
+            return 0, None
+        _, rechecked, host_available = _scan(engine, conn, conversation_id, session_id, users=users, selected=selected)
+        if not host_available:
+            return 0, _HOST_UNAVAILABLE
+        if (engine._conversation_id, engine._session_id) != (conversation_id, session_id):
+            return 0, None
         ids = sorted(selected.keys() & rechecked.keys())
         if not ids:
-            return 0
+            return 0, None
+        # One bound JSON array supplies the exact integer ids without a variable limit.
+        selection = "SELECT value FROM json_each(?)"
+        args = (json.dumps(ids),)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        audit_fields = sorted(columns & {"sender_id", "sender_source", "observed_at", "source"})
+        if audit_fields:
+            for store_id, *values in conn.execute(
+                f"SELECT store_id, {', '.join(audit_fields)} FROM messages WHERE store_id IN ({selection})", args,
+            ):
+                rechecked[store_id].update(zip(audit_fields, values))
         deleted_at = time.time()
         conn.executemany(
             "INSERT INTO metadata(key, value) VALUES (?, ?)",
             ((f"doctor_dedupe:{store_id}", json.dumps(dict(rechecked[store_id], deleted_at=deleted_at)))
              for store_id in ids),
         )
-        # One bound JSON array supplies the exact integer ids without a variable limit.
-        selection = "SELECT value FROM json_each(?)"
-        args = (json.dumps(ids),)
-        delete_ingest_ledger_rows(conn, selection, args)
+        delete_ingest_ledger_message_refs(conn, selection, args)
         delete_message_relations(conn, selection, args)
         delete_host_uid_bindings(conn, selection, args)
         delete_chunk_inflight(conn, selection, args)
@@ -154,12 +224,17 @@ def _delete_selected(engine, conversation_id, selected):
         deleted = conn.execute(f"DELETE FROM messages WHERE store_id IN ({selection})", args).rowcount
         if deleted != len(ids):
             raise sqlite3.IntegrityError("dedupe delete count did not match selected rows")
-    return deleted
+    return deleted, None
 
 
-def _doctor_dedupe_text(engine, *, apply=False):
+def _doctor_dedupe_text(engine, *, apply=False, users=False):
     title = "LCM doctor dedupe apply" if apply else "LCM doctor dedupe"
-    conversation_id = engine._conversation_id
+    if users:
+        title += " users"
+    if apply and not getattr(getattr(engine, "_config", None), "doctor_dedupe_apply_enabled", False):
+        return "\n".join((title, "status: disabled", "deleted: 0",
+                          "note: set LCM_DOCTOR_DEDUPE_APPLY_ENABLED=true in trusted operator environments"))
+    conversation_id, session_id = engine._conversation_id, engine._session_id
     if not conversation_id:
         lines = [title, "status: no current conversation"]
         return "\n".join([*lines, "deleted: 0"] if apply else lines)
@@ -169,7 +244,7 @@ def _doctor_dedupe_text(engine, *, apply=False):
         uri = Path(engine._store.db_path).resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             conn.execute("BEGIN")
-            groups, selected = _scan(engine, conn, conversation_id)
+            groups, selected, _ = _scan(engine, conn, conversation_id, session_id, users=users)
         lines.extend(groups)
         if not apply:
             return "\n".join(lines)
@@ -182,7 +257,9 @@ def _doctor_dedupe_text(engine, *, apply=False):
         if not backup["ok"]:
             return "\n".join([*lines, "status: error", f"error: backup failed: {backup['error']}", "deleted: 0"])
         lines.append(f"backup_path: {backup['backup_path']}")
-        deleted = _delete_selected(engine, conversation_id, selected)
+        deleted, recheck_status = _delete_selected(engine, conversation_id, session_id, selected, users=users)
+        if recheck_status:
+            lines.append(f"recheck: {recheck_status}")
         if deleted != len(selected):
             lines.append(f"recheck_skipped: {len(selected) - deleted}")
         lines.append(f"deleted: {deleted}")
@@ -195,3 +272,7 @@ def _doctor_dedupe_text(engine, *, apply=False):
 
 def _doctor_dedupe_apply_text(engine):
     return _doctor_dedupe_text(engine, apply=True)
+
+
+def _doctor_dedupe_apply_users_text(engine):
+    return _doctor_dedupe_text(engine, apply=True, users=True)

@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Added `/lcm doctor dedupe` to scan for large identical message copies in the current conversation and `/lcm doctor dedupe apply` to back up the store and delete eligible copies while retaining their summary-covered twins.
+- Added `/lcm doctor dedupe` to scan for large identical messages and opt-in, backup-first `apply` and `apply users` forms to remove eligible copies absent from the active Hermes message lists.
 
 ## v0.30.0 (nothing lost)
 

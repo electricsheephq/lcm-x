@@ -656,12 +656,15 @@ Available commands:
 - `/lcm doctor clean` - read-only scan for obvious junk/noise session candidates
 - `/lcm doctor clean apply` - backup-first cleanup for safe pattern-matched
   candidates; requires `LCM_DOCTOR_CLEAN_APPLY_ENABLED=true`
-- `/lcm doctor dedupe` - read-only scan for byte-identical message copies in the
-  current conversation
-- `/lcm doctor dedupe apply` - backs up the store before removing eligible
-  copies of at least 8,000 characters with a summary-covered twin. Apply keeps
-  copies at or below the compaction frontier, copies without host UID proof,
-  rows involved in message relations, and each session's fresh tail and sole row.
+- `/lcm doctor dedupe` - read-only scan for byte-identical message copies of at
+  least 8,000 characters in the current conversation
+- `/lcm doctor dedupe apply` - backs up the store before removing eligible copies
+  stored at least one hour ago with an earlier, summary-covered twin. Apply
+  requires host UID evidence and a readable active Hermes message list with no
+  matching role and content. It protects covered and compacted rows, pins,
+  citations, message relations, and each session's fresh tail and sole row.
+- `/lcm doctor dedupe apply users` - also includes eligible user copies. Both
+  apply forms require `LCM_DOCTOR_DEDUPE_APPLY_ENABLED=true`.
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics
 - `/lcm doctor repair apply` - backup-first SQLite/FTS repair
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
@@ -789,6 +792,7 @@ describes index fallback and timestamp handling.
 | `LCM_DEPTH_TARGET_RATIO` | `0` | Stop a threshold sweep when the estimated whole prompt reaches this share of the model window. Env only, off at `0`, and active only below the compaction trigger |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
+| `LCM_DOCTOR_DEDUPE_APPLY_ENABLED` | `false` | Permit backup-first duplicate cleanup in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires |
 | `LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS` | `24` | Automatic GC only deletes empty lifecycle rows at least this old; set `0` only in trusted/test environments that intentionally want immediate empty-row pruning |
