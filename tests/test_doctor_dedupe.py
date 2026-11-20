@@ -203,6 +203,18 @@ def test_dedupe_scan_preserves_compress_placeholder_counts(engine):
     assert engine._current_compress_placeholder_identity_counts == previous
 
 
+def test_dedupe_is_unproven_while_a_compress_pass_is_in_flight(engine):
+    seed_copies(engine)
+    assert "removable=11" in handle_lcm_command(SCAN, engine)
+    engine._compress_occurrences = {}
+    try:
+        text = handle_lcm_command(SCAN, engine)
+    finally:
+        engine._compress_occurrences = None
+    assert "removable=0" in text
+    assert "host list unavailable" in text
+
+
 def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
     covered, removable, tail = seed_copies(engine)
     store = engine._store

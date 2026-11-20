@@ -51,6 +51,10 @@ def _host_evidence(engine, session_id):
     """Collect mapped ids and same-role text forms from both host views."""
     if not session_id:
         return None
+    # A compress pass in flight maps host rows through its own registry; this read would map in a weaker
+    # mode and could miss a listed row. Unproven keeps every row.
+    if getattr(engine, "_compress_occurrences", None) is not None:
+        return None
     mapped_ids = set()
     forms_by_role = defaultdict(set)
     try:
