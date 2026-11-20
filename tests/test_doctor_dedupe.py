@@ -54,9 +54,9 @@ def host_list(engine, read):
     engine.bind_session_state(SimpleNamespace(get_messages_as_conversation=read), "session")
 
 
-def append(engine, content=CONTENT, *, session="session", conversation="conversation", role="assistant"):
+def append(engine, content=CONTENT, *, session="session", conversation="conversation", role="assistant", **fields):
     store_id = engine._store.append(
-        session, {"role": role, "content": content}, conversation_id=conversation,
+        session, {"role": role, "content": content, **fields}, conversation_id=conversation,
     )
     with engine._store.atomic():
         engine._store.connection.execute("UPDATE messages SET timestamp=1 WHERE store_id=?", (store_id,))
@@ -153,15 +153,13 @@ def seed_chunks(store, messages):
 
 @pytest.mark.parametrize("mapped", [False, True], ids=["absent", "mapping-veto"])
 def test_scan_reports_twenty_five_copies_without_changing_store(engine, monkeypatch, mapped):
-    steer = "[OUT-OF-BAND USER MESSAGE]Synthetic steer[/OUT-OF-BAND USER MESSAGE]"
-    content = f"Lead\n\n{steer}{CONTENT}" if mapped else CONTENT
-    covered, removable, _ = seed_copies(engine, content)
+    covered, removable, _ = seed_copies(engine)
     mapped_ids = []
     if mapped:
-        # The mapper strips the delivered steer block from rows with a tool call ID.
-        with engine._store.atomic():
-            engine._store.connection.execute("UPDATE messages SET tool_call_id='call' WHERE content=?", (content,))
-        view = [{"role": "assistant", "content": f"Lead\n\n{CONTENT}".rstrip(), "tool_call_id": "call"}]
+        # The mapper recognizes the projected row even though the projection changes its text.
+        message = {"role": "assistant", "content": CONTENT}
+        view = engine._survival_projection([message], {id(message): removable[0]}, 0)
+        assert view[0]["content"] != CONTENT
         host_list(engine, lambda _, repair_alternation=False: deepcopy(view))
         engine._last_compacted_store_id = covered[-1]
         real_map = engine._get_store_id_map_for_messages
@@ -203,7 +201,7 @@ def test_dedupe_scan_preserves_compress_placeholder_counts(engine):
     assert engine._current_compress_placeholder_identity_counts == previous
 
 
-def test_dedupe_is_unproven_while_a_compress_pass_is_in_flight(engine):
+def test_dedupe_is_unproven_while_a_compress_registry_exists(engine):
     seed_copies(engine)
     assert "removable=11" in handle_lcm_command(SCAN, engine)
     engine._compress_occurrences = {}
@@ -213,6 +211,41 @@ def test_dedupe_is_unproven_while_a_compress_pass_is_in_flight(engine):
         engine._compress_occurrences = None
     assert "removable=0" in text
     assert "host list unavailable" in text
+
+
+@pytest.mark.parametrize("starts_after_backup", [False, True], ids=["scan", "locked-recheck"])
+def test_dedupe_is_unproven_during_compaction_without_registry(engine, monkeypatch, starts_after_backup):
+    covered, removable, tail = seed_copies(engine)
+    engine._compress_occurrences = None
+
+    def start_compaction():
+        with engine._compaction_gate:
+            engine._compaction_inflight += 1
+
+    if starts_after_backup:
+        backup_pair = maintenance._backup_pair
+
+        def back_up_then_start_compaction(store, path):
+            backup_pair(store, path)
+            start_compaction()
+
+        monkeypatch.setattr(maintenance, "_backup_pair", back_up_then_start_compaction)
+    else:
+        start_compaction()
+
+    try:
+        result = handle_lcm_command(APPLY if starts_after_backup else SCAN, engine)
+        if starts_after_backup:
+            assert "deleted: 0" in result
+            assert "recheck: unproven (host list unavailable)" in result
+        else:
+            assert "removable=0" in result
+            assert "unproven (host list unavailable)=11" in result
+        assert ids(engine._store.connection, "messages") == set(covered + removable + tail)
+    finally:
+        with engine._compaction_gate:
+            engine._compaction_inflight = 0
+    assert "removable=11" in handle_lcm_command(SCAN, engine)
 
 
 def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
@@ -745,6 +778,44 @@ def test_dedupe_users_require_explicit_apply_and_minimum_age(engine):
     assert {kept, old, young} <= ids(conn, "messages")
     assert "deleted: 1" in handle_lcm_command(APPLY_USERS, engine)
     assert {kept, young} <= ids(conn, "messages") and old not in ids(conn, "messages")
+
+
+@pytest.mark.parametrize(("role", "fields"), [
+    ("tool", {"tool_call_id": "read-1"}),
+    ("assistant", {"tool_calls": [
+        {"id": "read-1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+    ]}),
+    ("assistant", {"tool_call_id": "read-1"}),
+], ids=["tool-result", "assistant-calls", "assistant-call-id"])
+def test_dedupe_keeps_tool_call_group_members(engine, role, fields):
+    cover(engine, [append(engine, role=role, **fields)])
+    candidate = append(engine, role=role, **fields)
+    append_tail(engine)
+
+    for command in (APPLY_USERS, APPLY, SCAN):
+        result = handle_lcm_command(command, engine)
+        assert candidate in ids(engine._store.connection, "messages")
+        assert "tool-call group (not handled)=2" in result
+        assert "removable=0" in result
+        if command != SCAN:
+            assert "deleted: 0" in result
+
+
+def test_dedupe_keeps_newest_when_selection_would_empty_bound_session(engine):
+    engine._config.fresh_tail_count = 0
+    contents = (CONTENT, "another copy " * 700)
+    earlier = [append(engine, content, session="earlier-session") for content in contents]
+    engine._dag.add_node(SummaryNode(session_id="earlier-session", summary="Earlier facts",
+                                     source_ids=earlier, source_type="messages"))
+    older, newest = [append(engine, content) for content in contents]
+    later = append(engine, "later binding", session="later-session")
+    bind(engine, later)
+
+    result = handle_lcm_command(APPLY, engine)
+
+    assert ids(engine._store.connection, "messages") == {*earlier, newest, later}
+    assert f"removable_ids={older}" in result and "deleted: 1" in result
+    assert "last row of session=1" in result
 
 
 @pytest.mark.parametrize("enabled_command", [APPLY, APPLY_USERS])

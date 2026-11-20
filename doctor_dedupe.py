@@ -51,10 +51,11 @@ def _host_evidence(engine, session_id):
     """Collect mapped ids and same-role text forms from both host views."""
     if not session_id:
         return None
-    # A compress pass in flight maps host rows through its own registry; this read would map in a weaker
-    # mode and could miss a listed row. Unproven keeps every row.
-    if getattr(engine, "_compress_occurrences", None) is not None:
-        return None
+    # Compress releases this gate before host and store work. A pass can be active
+    # even with no occurrence registry, so neither signal alone proves the mapper is idle.
+    with engine._compaction_gate:
+        if engine._compaction_inflight or getattr(engine, "_compress_occurrences", None) is not None:
+            return None
     mapped_ids = set()
     forms_by_role = defaultdict(set)
     try:
@@ -145,7 +146,7 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
     rows = conn.execute(
         f"""
         WITH grouped AS (
-            SELECT store_id, session_id, role, content, timestamp, pinned,
+            SELECT store_id, session_id, role, content, timestamp, pinned, tool_call_id, tool_calls,
                    MIN(store_id) OVER identity AS group_id, COUNT(*) OVER identity AS copies
             FROM {messages_from}
             WHERE conversation_id = :conversation_id AND length(content) >= :minimum
@@ -164,6 +165,9 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
         SELECT group_id, store_id, session_id, role, timestamp, copies, kept_id, length(content),
                CASE WHEN store_id = group_id THEN content END,
                CASE
+                   WHEN role = 'tool' OR COALESCE(tool_call_id, '') <> '' OR tool_calls IS NOT NULL
+                        THEN 'tool-call group (not handled)'
+                   WHEN role NOT IN ('user', 'assistant') THEN 'role (not handled)'
                    WHEN covered THEN 'covered'
                    WHEN kept_id IS NULL THEN 'no covered copy'
                    WHEN kept_id >= store_id THEN 'no earlier covered copy'
@@ -196,8 +200,7 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
     ).fetchall()
     host = _host_evidence(engine, session_id) if any(row[-1] is None for row in rows) else (set(), {})
     mapped_ids, host_forms = host if host is not None else (set(), {})
-    lines, removable = [], {}
-    copies_total = unproven_total = 0
+    groups, removable = [], {}
     for group_id, group in groupby(rows, key=lambda row: row[0]):
         reasons = Counter()
         group_removable = []
@@ -217,17 +220,34 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
             if reason is not None:
                 reasons[reason] += 1
             else:
-                group_removable.append(str(store_id))
+                group_removable.append(store_id)
                 removable[store_id] = dict(
                     session_id=row_session, conversation_id=conversation_id, role=role,
                     content_sha256=digest, content_length=length, timestamp=timestamp, kept_store_id=kept_id,
                 )
+        groups.append((digest, length, copies, reasons, group_removable))
+
+    last_row = None
+    if removable:
+        # Only the bound session contributes candidates. Count its entire session,
+        # including rows outside the restricted re-check and the current conversation.
+        session_count = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id IS ?", (session_id,)).fetchone()[0]
+        if len(removable) == session_count:
+            last_row = max(removable)
+            del removable[last_row]
+
+    lines = []
+    copies_total = unproven_total = 0
+    for digest, length, copies, reasons, group_removable in groups:
+        if last_row in group_removable:
+            group_removable.remove(last_row)
+            reasons["last row of session"] += 1
         kept = sum(reasons.values())
         unproven = sum(reasons[reason] for reason in (_UID_OFF, _UID_MISSING, _HOST_UNAVAILABLE,
                                                       _NON_TEXT, _PROTECTED_CONTENT))
         detail = [f"{reason}={count}" for reason, count in reasons.items()]
         if group_removable:
-            detail.append(f"removable_ids={','.join(group_removable)}")
+            detail.append(f"removable_ids={','.join(map(str, group_removable))}")
         lines.append(
             f"{digest[:12]} length={length} copies={copies} kept={kept} "
             f"removable={len(group_removable)} unproven={unproven} ({', '.join(detail)})"
