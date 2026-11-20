@@ -71,6 +71,13 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 _EXTRACTION_HEADROOM_SECONDS = 2.0  # overhead between the extraction timeout and the next admit
 _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE = 0.25
+# #2869 raised mode: above this window an automatic sweep condenses only while the frontier is over today's target AND
+# (over 5% of the window, capped at the threshold share, OR more than 80 nodes are live). It never condenses where
+# today's target would not, and a check stops with at most 80 live (the view shows 100 a level; one sweep adds <= 12).
+# Off on forced, overflow and recovery passes, with an explicit target and while background leaf preparation is on.
+_LARGE_SWEEP_WINDOW_TOKENS = 480_000
+_LARGE_WINDOW_PREFIX_SHARE = 0.05
+RAISED_MAX_LIVE = 80
 _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "pass_budget_exhausted",
     "time_budget_exhausted",
@@ -2534,6 +2541,8 @@ class CompactionMixin:
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
         state.sweep_deadline = state.budget.t0 + state.budget.hard
+        if getattr(state.budget, "sweep_raise_tokens", 0):  # #2869: set only in raised mode, never left from before
+            state.budget.sweep_raise_tokens = 0
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         if configured_sweep_target > 0:
             state.sweep_target_tokens = configured_sweep_target
@@ -2543,7 +2552,14 @@ class CompactionMixin:
             state.sweep_target_tokens = int(self._config.leaf_chunk_tokens)
             if self.threshold_tokens > 0:
                 # Default to one leaf budget capped at a quarter of the threshold, so a small window's prefix cannot fill it (rc3 compacted on every 32K call).
-                state.sweep_target_tokens = min(state.sweep_target_tokens, int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE))
+                threshold_cap = int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE)
+                state.sweep_target_tokens = min(state.sweep_target_tokens, threshold_cap)
+                if (state.threshold_full_sweep_active and self.context_length > _LARGE_SWEEP_WINDOW_TOKENS
+                        and not (force or state.force_overflow or recovery_attempt)
+                        and not self._config.background_leaf_prep_enabled):
+                    raise_tokens = min(int(self.context_length * _LARGE_WINDOW_PREFIX_SHARE), threshold_cap)
+                    if raise_tokens > state.sweep_target_tokens:  # raised mode; every check reads it from the budget
+                        state.budget.sweep_raise_tokens = raise_tokens
         state.sweep_target_tokens = max(1, state.sweep_target_tokens)
         state.sweep_summary_prefix_before = (
             self._summary_frontier_tokens() if state.threshold_full_sweep_active else 0
@@ -2616,7 +2632,9 @@ class CompactionMixin:
         state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = 0, ""
         if (
             state.threshold_full_sweep_active
-            and state.sweep_summary_prefix_before > state.sweep_target_tokens
+            and (self._sweep_condensation_due(state.sweep_target_tokens, raise_tokens)
+                 if (raise_tokens := getattr(state.budget, "sweep_raise_tokens", 0))
+                 else state.sweep_summary_prefix_before > state.sweep_target_tokens)
             and self._summary_route_available()
         ):
             state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
