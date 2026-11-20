@@ -22,6 +22,8 @@ from . import config as config_choices
 from .ingest_policy import embedding_prefix_suffix, split_prefix_revision
 from .config import effective_embedding_model, embedding_provider_id, lcm_env_get
 from .command_auth import CommandInvocation, Decision, authorize
+from .doctor_dedupe import _doctor_dedupe_apply_text as _doctor_dedupe_apply_text
+from .doctor_dedupe import _doctor_dedupe_text as _doctor_dedupe_text
 from .command_doctor import (
     _doctor_text as _doctor_text,
 )
@@ -511,6 +513,8 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm doctor clean apply: backup-first cleanup for safe pattern-matched candidates only",
         "- /lcm doctor clean lifecycle: read-only scan for lifecycle rows with zero messages/nodes",
         "- /lcm doctor clean lifecycle apply: backup-first cleanup of empty lifecycle rows only",
+        "- /lcm doctor dedupe: read-only scan for large byte-identical message copies in the current conversation",
+        "- /lcm doctor dedupe apply: backup-first deletion of eligible copies with a summary-covered twin",
         "- /lcm doctor repair: read-only scan for SQLite/FTS index repair needs",
         "- /lcm doctor repair apply: backup-first repair/rebuild of message and summary FTS indexes",
         "- /lcm doctor repair level3: read-only scan for level 3 truncation fragments and the condensed nodes built on them",

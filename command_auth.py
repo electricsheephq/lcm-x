@@ -10,10 +10,10 @@ from enum import Enum
 # INSERT. Arguments remain part of the path except for preset show.
 READ_LCM_SUBCOMMANDS = frozenset({
     "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
-    "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
+    "doctor dedupe", "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
 })
 WRITE_LCM_SUBCOMMANDS = frozenset({
-    "doctor", "doctor clean apply", "doctor clean lifecycle apply",
+    "doctor", "doctor clean apply", "doctor clean lifecycle apply", "doctor dedupe apply",
     "doctor repair", "doctor repair apply", "doctor repair level3",
     "doctor repair level3 apply", "doctor repair schema-stamp",
     "doctor repair schema-stamp apply", "doctor source apply", "backup",

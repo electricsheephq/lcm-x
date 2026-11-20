@@ -656,6 +656,12 @@ Available commands:
 - `/lcm doctor clean` - read-only scan for obvious junk/noise session candidates
 - `/lcm doctor clean apply` - backup-first cleanup for safe pattern-matched
   candidates; requires `LCM_DOCTOR_CLEAN_APPLY_ENABLED=true`
+- `/lcm doctor dedupe` - read-only scan for byte-identical message copies in the
+  current conversation
+- `/lcm doctor dedupe apply` - backs up the store before removing eligible
+  copies of at least 8,000 characters with a summary-covered twin. Apply keeps
+  copies at or below the compaction frontier, copies without host UID proof,
+  rows involved in message relations, and each session's fresh tail and sole row.
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics
 - `/lcm doctor repair apply` - backup-first SQLite/FTS repair
 - `/lcm doctor source` - read-only scan for legacy blank-source rows

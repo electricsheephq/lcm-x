@@ -10,7 +10,7 @@ from hermes_lcm.command_router import ROUTES
 # Literal pre-refactor policy, including the two reads parsed by preset itself.
 READ_PATHS = {
     "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
-    "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
+    "doctor dedupe", "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
 }
 REGISTERED_PATHS = tuple(" ".join(entry.path) for entry in ROUTES)
 EXTRA_PATHS = (
@@ -51,7 +51,7 @@ def test_registry_write_metadata_gaps_are_characterized():
     # Check, do not derive or repair the policy sets in this slice.
     assert set(REGISTERED_PATHS) - command_auth.WRITE_LCM_SUBCOMMANDS == {
         "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
-        "doctor retention", "rotate", "rollups", "assertions", "preset",
+        "doctor dedupe", "doctor retention", "rotate", "rollups", "assertions", "preset",
     }
     assert {path for path in REGISTERED_PATHS if path not in READ_PATHS} - (
         command_auth.WRITE_LCM_SUBCOMMANDS

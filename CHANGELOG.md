@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Added `/lcm doctor dedupe` to scan for large identical message copies in the current conversation and `/lcm doctor dedupe apply` to back up the store and delete eligible copies while retaining their summary-covered twins.
+
 ## v0.30.0 (nothing lost)
 
 - Fix: At default settings, when the payload of a saved tool result cannot be written (the payload folder cannot be created, or the file write fails), the saved-output marker is now stored as the host sent it, as in v0.29.2. A session that ends while another is active (or while the store is busy) no longer loses the rows after it, usually the final reply, and a helper agent no longer stores the result again on each model call (#2599).
