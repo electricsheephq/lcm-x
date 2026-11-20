@@ -1169,6 +1169,72 @@ def test_later_end_cannot_replace_fallback_appended_uid(cold, monkeypatch, caplo
     assert lifecycle(engine) == before
 
 
+@pytest.mark.parametrize('queued', [False, True], ids=['direct', 'busy-retry'])
+def test_fallback_ignores_saved_host_uids_after_switch_to_off(cold, monkeypatch, queued):
+    """Pin the #2750 gap on purpose. Under off, untrusted UID evidence does not veto."""
+    view = copy.deepcopy(VIEW)
+    view[-1].pop('timestamp')
+    changed_view = copy.deepcopy(view)
+    changed_view[-1]['message_uid'] = 'foreign-final'
+    changed_view.append(dict(role='assistant', content='EXTRA', message_uid='u4'))
+
+    def contents(engine):
+        return [row['content'] for row in engine._store.get_session_messages('S2')]
+
+    def seed(name, mode):
+        monkeypatch.setenv('LCM_HOST_MESSAGE_UID', mode)
+        engine = cold(name=name)
+        engine.on_session_end('S2', copy.deepcopy(view))
+        assert contents(engine) == ['question', 'reply', 'FINAL']
+        if mode != 'off':
+            store = engine._store
+            final_id = store.get_session_messages('S2')[-1]['store_id']
+            assert store._conn.execute("SELECT uid FROM host_uid_bindings WHERE store_id=? AND kind='canonical'",
+                                       (final_id,)).fetchall() == [('u3',)]
+        return engine
+
+    always_off = seed('always-off', 'off')
+    always_off.on_session_end('S2', copy.deepcopy(changed_view))
+    expected = contents(always_off)
+    assert expected == ['question', 'reply', 'FINAL', 'EXTRA']
+
+    switched = seed('shadow-then-off', 'shadow')
+    monkeypatch.setenv('LCM_HOST_MESSAGE_UID', 'off')
+    store, snapshots, queries = switched._store, [], []
+    inputs = switched._off_current_fallback_inputs
+
+    def capture_inputs(*args):
+        snapshot = inputs(*args)
+        snapshots.append((store._conn.in_transaction, snapshot))
+        return snapshot
+
+    monkeypatch.setattr(switched, '_off_current_fallback_inputs', capture_inputs)
+    store._conn.set_trace_callback(queries.append)
+    try:
+        with monkeypatch.context() as patch:
+            if queued:
+                patch.setattr(store, 'ingest_atomic', busy)
+            switched.on_session_end('S2', copy.deepcopy(changed_view))
+        if queued:
+            assert contents(switched) == contents(always_off)[:-1]
+            assert len(switched._pending_session_tails) == 1
+            switched._retry_pending_session_tails()
+            assert not switched._pending_session_tails
+    finally:
+        store._conn.set_trace_callback(None)
+
+    assert contents(switched) == expected
+    assert [atomic for atomic, _ in snapshots] == [False, True]
+    assert snapshots[0][1] == snapshots[1][1]
+    assert not any('FROM host_uid_bindings' in query for query in queries)
+
+    for mode in ('shadow', 'on'):
+        trusted = seed(mode, mode)
+        trusted.on_session_end('S2', copy.deepcopy(changed_view))
+        assert contents(trusted) == expected[:-1]
+        assert fallback_counts(trusted) == {'stored': 1, 'refused.gate3': 1}
+
+
 @pytest.mark.parametrize('representation', [False, True], ids=['T11-pruned-parent', 'CR-raw-to-marker'])
 def test_durable_uid_veto_survives_child_pruning(engines, monkeypatch, caplog, representation):
     """T11/CR: two real child ingests prune every view that recorded the parent's bindings."""

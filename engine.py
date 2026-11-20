@@ -34,7 +34,17 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import (
+    LCMConfig,
+    _disabled_tool_names,
+    _parse_float_env,
+    containment_base_dir,
+    host_message_uid_mode,
+    identity_anchor_enabled,
+    ingest_ledger_mode,
+    lcm_env_get,
+    profile_bound,
+)
 from .dag import CondensationPublicationRejected, SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
@@ -5626,7 +5636,7 @@ class LCMEngine(
             "SELECT store_id,uid FROM host_uid_bindings INDEXED BY idx_host_uid_store "
             "WHERE store_id IN (SELECT value FROM json_each(?)) AND kind IN ('canonical','version') "
             "ORDER BY store_id,uid", (json.dumps([row["store_id"] for row in rows]),)
-        )) if tail["store"]._host_uid_table_exists() else []
+        )) if host_message_uid_mode() != "off" and tail["store"]._host_uid_table_exists() else []
         return (rows, lineage, records, views, tail["store"].ingest_ledger_salt(),
                 copy.deepcopy(vars(self._config)), external, copy.deepcopy(tail["view"]), host_uids)
 
