@@ -811,6 +811,22 @@ class CompactionMixin:
         engine, changed = _compaction_binding_check.get()
         return engine is self and changed()
 
+    def _claim_compress_owner(self, caller: int) -> bool:
+        """Claim under the compaction gate, preserving same-thread nesting."""
+        if self._compress_owner not in (None, caller):
+            self._compress_reentry_refusals += 1
+            logger.info("LCM compression skipped: another pass owns this engine")
+            return False
+        self._compress_owner = caller
+        self._compress_owner_depth += 1
+        return True
+
+    def _release_compress_owner(self) -> None:
+        """Release one claim under the compaction gate."""
+        self._compress_owner_depth -= 1
+        if not self._compress_owner_depth:
+            self._compress_owner = None
+
     @_reports_progress
     @_counted_compaction
     def compress(self, messages: List[Dict[str, Any]],
@@ -832,20 +848,16 @@ class CompactionMixin:
                 return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
         caller = get_ident()
         with self._compaction_gate:
-            if self._compress_owner not in (None, caller):
-                self._compress_reentry_refusals += 1
-                logger.info("LCM compression skipped: another pass owns this engine")
+            if not self._claim_compress_owner(caller):
                 return _OWNER_REFUSED
-            self._compress_owner = caller
-            self._compress_owner_depth += 1
+            if not (self._compress_refusal or {}).get("refused"):
+                self._compress_refusal = None
         try:
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._compaction_gate:
-                self._compress_owner_depth -= 1
-                if not self._compress_owner_depth:
-                    self._compress_owner = None
+                self._release_compress_owner()
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *, host_pairs=()):
@@ -867,6 +879,8 @@ class CompactionMixin:
         _summary_call.error = None  # the thread-local summary failure must not outlive its pass
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         thread_context = getattr(self, "_thread_context", None)  # D5: per thread; the engine is shared with live children
+        outer_refusal = getattr(thread_context, "compress_refusal", None)
+        refusal = None
         if thread_context is not None:
             thread_context.foreground_budget = budget
         returned = None
@@ -891,7 +905,15 @@ class CompactionMixin:
             self._no_progress_candidate = False
             self._no_progress_proof_complete = False
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
+            snapshot = getattr(self, "_compress_refusal", None)
+            if snapshot and snapshot.get("refused"):
+                # This pass will ingest too. Restore while the previous call still owns the proof.
+                store = self._store
+                with store._write_lock:
+                    self._restore_refused_compaction(snapshot, store, deferred=True)
             self._compress_calls += 1  # #1116: a stub-first proof becomes durable only for the latest call
+            refusal = self._snapshot_compression_input()
+            thread_context.compress_refusal = refusal
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
                 # #684: nor held by a boundary cooldown.
@@ -1091,11 +1113,16 @@ class CompactionMixin:
                     try:
                         if returned is not None and returned is not messages:
                             self._compress_exit_write(returned, exit_capture)
+                        if returned is not None and refusal is not None and self._compress_calls == refusal["call"]:
+                            refusal["output_proof"] = self._compress_commit_proof
+                            self._compress_refusal = refusal
                         exit_written = True
                     finally:
                         self._finish_foreground_budget(budget, returned, current_tokens if (current_tokens or 0) > 0 else messages,
                                                        automatic=automatic and exit_written and not self._compaction_is_closing())
             finally:
+                if thread_context is not None:
+                    thread_context.compress_refusal = outer_refusal
                 _compaction_binding_check.reset(binding_scope)
                 _UID_COPY_SOURCES.reset(copy_sources_scope)
                 _UID_DROP_INPUT.reset(uid_drop_scope)
@@ -1731,8 +1758,8 @@ class CompactionMixin:
         """Attach engine-specific evidence before the proof's publication point."""
 
     def _write_compress_commit_proof_payload(self, proof, payload) -> None:
-        self._store.write_metadata_json(
-            [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
+        self._write_compaction_metadata(
+            self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX),
             json.dumps(payload, sort_keys=True), skip_unchanged=True,
         )
 
@@ -2119,7 +2146,7 @@ class CompactionMixin:
         after = self._survival_measure(candidate) + overhead
         if after > target or (cap is not None and count_messages_tokens(candidate) > cap):
             for key, value in zip(keys, saved):
-                self._store.write_metadata_json([key], json.dumps(value, sort_keys=True), skip_unchanged=True)
+                self._write_compaction_metadata(key, json.dumps(value, sort_keys=True), skip_unchanged=True)
             self._pending_emission_candidates = pending
             logger.warning("LCM stub-first exit: the final assembly missed the target (tokens=%d, target=%d); "
                            "taking the normal path", after, target)
@@ -2376,6 +2403,7 @@ class CompactionMixin:
             self._pre_leaf_span("ingest", span_started)
         if self._compress_binding_changed():
             return "return", messages
+        self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow

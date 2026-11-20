@@ -46,7 +46,7 @@ if __name__ == "__main__":
     sys.modules["hermes_lcm"] = package
 
 import tests.conftest  # noqa: F401
-from tests.behaviour.frontier_observer import HOLDER_NAME, legacy_frontier_fields, observed_attribute
+from tests.behaviour.frontier_observer import HOLDER_NAME, frontier_fields, observed_attribute
 from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
@@ -93,7 +93,7 @@ def engine_attributes(source: str) -> set[str]:
         if name in visited:
             continue
         visited.add(name)
-        found.update(legacy_frontier_fields(methods[name]))
+        found.update(frontier_fields(methods[name]))
         for node in ast.walk(methods[name]):
             attr = None
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'self':
