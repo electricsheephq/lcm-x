@@ -791,6 +791,24 @@ def test_dedupe_only_applies_to_the_bound_session(engine, command, role):
     assert {other, kept} <= remaining and hidden not in remaining
 
 
+def test_dedupe_keeps_rows_with_live_assertion_sources(engine):
+    _, removable, _ = seed_copies(engine)
+    conn = engine._store.connection
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS lcm_assertion_sources (source_store_id INTEGER NOT NULL, "
+        "invalidated_at REAL, invalidation_reason TEXT)"
+    )
+    with engine._store.atomic():
+        conn.execute("INSERT INTO lcm_assertion_sources(source_store_id) VALUES (?)", (removable[0],))
+        conn.execute(
+            "INSERT INTO lcm_assertion_sources(source_store_id, invalidated_at, invalidation_reason) "
+            "VALUES (?, 1.0, 'superseded')", (removable[1],))
+    text = handle_lcm_command(SCAN, engine)
+    assert "live assertion source=1" in text and "removable=10" in text
+    assert "deleted: 10" in handle_lcm_command(APPLY, engine)
+    assert removable[0] in ids(conn, "messages") and removable[1] not in ids(conn, "messages")
+
+
 def test_dedupe_keeps_entity_and_note_citations(engine):
     kept, removable, _ = seed_copies(engine)
     entities = EntityStore(engine._store.db_path, profile_key="synthetic")

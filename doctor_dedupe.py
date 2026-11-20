@@ -109,13 +109,16 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' "
         "AND name IN ('host_uid_bindings', 'message_relations', "
-        "'lcm_entity_aliases', 'lcm_entity_keys', 'lcm_memory_notes')"
+        "'lcm_entity_aliases', 'lcm_entity_keys', 'lcm_memory_notes', 'lcm_assertion_sources')"
     )}
     citations = " UNION ".join(
         f"SELECT CAST(c.value AS INTEGER) FROM {table} t, json_each(t.{column}) c"
         for table, column in _CITATIONS if table in tables
     )
     cited = f"d.store_id IN ({citations})" if citations else "0"
+    # Deleting a row invalidates the assertions extracted from it; the kept copy does not inherit them.
+    asserted = ("EXISTS (SELECT 1 FROM lcm_assertion_sources a WHERE a.source_store_id = d.store_id "
+                "AND a.invalidated_at IS NULL)" if "lcm_assertion_sources" in tables else "0")
     # A selected row only needs its original covered witness. A lost witness skips the row.
     messages_from = "messages"
     scope_ids = None
@@ -173,6 +176,7 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
                    WHEN store_id >= :newest_bound THEN :missing_reason
                    WHEN {related} THEN 'message relation'
                    WHEN {cited} THEN 'entity or note citation'
+                   WHEN {asserted} THEN 'live assertion source'
                    WHEN NOT EXISTS (
                        SELECT 1 FROM messages m WHERE m.session_id = d.session_id AND m.store_id <> d.store_id
                    ) THEN 'only row in session'
