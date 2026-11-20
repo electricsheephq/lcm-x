@@ -28,6 +28,7 @@ from .vector_store import VectorStore
 MIN_DEDUPE_CONTENT_LENGTH = 8000
 MIN_DEDUPE_AGE_SECONDS = 3600
 _HOST_PREFIX_LENGTH = 2000
+_MIN_CONTAINED_HOST_LENGTH = 256
 _UID_OFF = "unproven (host uid mode off)"
 _UID_MISSING = "unproven (no later host uid binding)"
 _HOST_UNAVAILABLE = "unproven (host list unavailable)"
@@ -46,31 +47,36 @@ def _normalize_whitespace(content):
     return " ".join(content.split())
 
 
-def _host_evidence(engine, sessions):
+def _host_evidence(engine, session_id):
     """Collect mapped ids and same-role text forms from both host views."""
+    if not session_id:
+        return None
     mapped_ids = set()
     forms_by_role = defaultdict(set)
     try:
         read = engine._host_session_db.get_messages_as_conversation
-        for session in sorted(sessions):
-            if not session:
+        for options in ({}, {"repair_alternation": True}):
+            messages = read(session_id, **options)
+            if not isinstance(messages, list):
                 return None
-            for options in ({}, {"repair_alternation": True}):
-                messages = read(session, **options)
-                if not isinstance(messages, list):
+            saved = getattr(engine, "_current_compress_placeholder_identity_counts", None)
+            try:
+                mapping = engine._get_store_id_map_for_messages(messages)
+            finally:
+                engine._current_compress_placeholder_identity_counts = saved
+            mapped_ids.update(mapping.values())
+            for message in messages:
+                role, content = message["role"], message.get("content")
+                if not isinstance(role, str):
                     return None
-                mapped_ids.update(engine._get_store_id_map_for_messages(messages).values())
-                for message in messages:
-                    role, content = message["role"], message.get("content")
-                    if not isinstance(role, str):
-                        return None
-                    if content is None:
-                        continue
-                    redacted = redact_sensitive_value(content, engine._config, parse_json_strings=False)
-                    for value in (content, redacted):
-                        text = normalize_content_value(value)
-                        forms_by_role[role].add(_normalize_whitespace(text))
-                        forms_by_role[role].add(_normalize_whitespace(_strip_volatile_host_scaffolding(text)))
+                if content is None:
+                    continue
+                redacted = redact_sensitive_value(content, engine._config, parse_json_strings=False)
+                for value in (content, redacted):
+                    text = normalize_content_value(value)
+                    for form in (text, _strip_volatile_host_scaffolding(text)):
+                        if normalized := _normalize_whitespace(form):
+                            forms_by_role[role].add(normalized)
     except Exception:  # Failed reads or mapping cannot prove absence.
         return None
     return mapped_ids, forms_by_role
@@ -79,11 +85,16 @@ def _host_evidence(engine, sessions):
 def _content_veto(content, host_forms):
     if not isinstance(content, str):
         return _NON_TEXT
-    normalized = _normalize_whitespace(content)
-    prefix = normalized[:_HOST_PREFIX_LENGTH]
-    # Containment includes equality. These comparisons can only add a veto.
-    if any(prefix == form[:_HOST_PREFIX_LENGTH] or normalized in form or form in normalized for form in host_forms):
-        return _HOST_LISTED
+    for text in (content, _strip_volatile_host_scaffolding(content)):
+        normalized = _normalize_whitespace(text)
+        prefix = normalized[:_HOST_PREFIX_LENGTH]
+        if any(
+            prefix == form[:_HOST_PREFIX_LENGTH]
+            or normalized in form
+            or (len(form) >= _MIN_CONTAINED_HOST_LENGTH and form in normalized)
+            for form in host_forms
+        ):
+            return _HOST_LISTED
     if _SENSITIVE_PLACEHOLDER_PREFIX in content or _EXTERNALIZED_PLACEHOLDER_PREFIX in content:
         return _PROTECTED_CONTENT
     return None
@@ -165,17 +176,17 @@ def _scan(engine, conn, conversation_id, session_id, *, users, selected=None):
                        SELECT 1 FROM messages m WHERE m.session_id = d.session_id AND m.store_id > d.store_id
                        LIMIT 1 OFFSET :tail_offset
                    ) THEN 'fresh tail'
+                   WHEN d.session_id IS NOT :session_id THEN 'other session (not handled)'
                END AS reason
         FROM duplicates d
         ORDER BY group_id, store_id
         """,
-        dict(conversation_id=conversation_id, minimum=MIN_DEDUPE_CONTENT_LENGTH, frontier=frontier,
+        dict(conversation_id=conversation_id, session_id=session_id, minimum=MIN_DEDUPE_CONTENT_LENGTH, frontier=frontier,
              uid_off=uid_off, off_reason=_UID_OFF, newest_bound=newest_bound, missing_reason=_UID_MISSING,
              tail=tail, tail_offset=max(0, tail - 1), scope_ids=scope_ids,
              cutoff=time.time() - MIN_DEDUPE_AGE_SECONDS),
     ).fetchall()
-    candidate_sessions = {row[2] for row in rows if row[-1] is None}
-    host = _host_evidence(engine, candidate_sessions | {session_id}) if candidate_sessions else (set(), {})
+    host = _host_evidence(engine, session_id) if any(row[-1] is None for row in rows) else (set(), {})
     mapped_ids, host_forms = host if host is not None else (set(), {})
     lines, removable = [], {}
     copies_total = unproven_total = 0

@@ -657,12 +657,14 @@ Available commands:
 - `/lcm doctor clean apply` - backup-first cleanup for safe pattern-matched
   candidates; requires `LCM_DOCTOR_CLEAN_APPLY_ENABLED=true`
 - `/lcm doctor dedupe` - read-only scan for byte-identical message copies of at
-  least 8,000 characters in the current conversation
+  least 8,000 characters in the current conversation. Candidates in other
+  sessions are listed as `other session (not handled)`.
 - `/lcm doctor dedupe apply` - backs up the store before removing eligible copies
-  stored at least one hour ago with an earlier, summary-covered twin. Apply
-  requires host UID evidence and a readable active Hermes message list with no
-  matching role and content. It protects covered and compacted rows, pins,
-  citations, message relations, and each session's fresh tail and sole row.
+  in the bound session, stored at least one hour ago with an earlier,
+  summary-covered twin. Apply requires host UID evidence and a readable active
+  Hermes message list with no matching role and content. It protects covered and
+  compacted rows, pins, citations, message relations, and the bound session's
+  fresh tail and sole row.
 - `/lcm doctor dedupe apply users` - also includes eligible user copies. Both
   apply forms require `LCM_DOCTOR_DEDUPE_APPLY_ENABLED=true`.
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics

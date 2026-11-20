@@ -153,13 +153,15 @@ def seed_chunks(store, messages):
 
 @pytest.mark.parametrize("mapped", [False, True], ids=["absent", "mapping-veto"])
 def test_scan_reports_twenty_five_copies_without_changing_store(engine, monkeypatch, mapped):
-    content = f"Lead\n\n{TODO}\n\n{CONTENT}" if mapped else CONTENT
+    steer = "[OUT-OF-BAND USER MESSAGE]Synthetic steer[/OUT-OF-BAND USER MESSAGE]"
+    content = f"Lead\n\n{steer}{CONTENT}" if mapped else CONTENT
     covered, removable, _ = seed_copies(engine, content)
     mapped_ids = []
     if mapped:
-        # Only the mapper strips the annotation from the stored side. The two texts
-        # differ before character 2,000 and neither contains the other.
-        view = [{"role": "assistant", "content": f"Lead\n\n{CONTENT}"}]
+        # The mapper strips the delivered steer block from rows with a tool call ID.
+        with engine._store.atomic():
+            engine._store.connection.execute("UPDATE messages SET tool_call_id='call' WHERE content=?", (content,))
+        view = [{"role": "assistant", "content": f"Lead\n\n{CONTENT}".rstrip(), "tool_call_id": "call"}]
         host_list(engine, lambda _, repair_alternation=False: deepcopy(view))
         engine._last_compacted_store_id = covered[-1]
         real_map = engine._get_store_id_map_for_messages
@@ -190,6 +192,15 @@ def test_scan_reports_twenty_five_copies_without_changing_store(engine, monkeypa
     assert f"removable_ids={','.join(map(str, removable))}" in result
     assert CONTENT not in result
     assert not engine.backup_dir().exists()
+
+
+def test_dedupe_scan_preserves_compress_placeholder_counts(engine):
+    seed_copies(engine)
+    previous = {("tool", "synthetic placeholder", "call", "read"): 2}
+    engine._current_compress_placeholder_identity_counts = previous.copy()
+
+    assert "removable=11" in handle_lcm_command(SCAN, engine)
+    assert engine._current_compress_placeholder_identity_counts == previous
 
 
 def test_apply_cleans_dependents_and_keeps_cold_cursor_proof(engine):
@@ -455,13 +466,53 @@ def test_dedupe_host_visible_copy_is_protected(engine, monkeypatch):
     assert candidate in ids(engine._store.connection, "messages")
 
 
-@pytest.mark.parametrize("shape", ["whitespace", "internal-whitespace", "middle-block", "host-scaffolding", "contained"])
+def test_dedupe_deletes_unlisted_copy_with_empty_and_short_host_rows(engine):
+    hidden = f"The operation returned ok. {CONTENT}"
+    kept = append(engine, hidden)
+    long_reply = "File contents follow. " * 400
+    covered_reply = append(engine, long_reply)
+    cover(engine, [kept, covered_reply])
+    candidate = append(engine, hidden)
+    listed = [
+        {"role": "user", "content": "Read the file."},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "read-1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "content": "File contents", "tool_call_id": "read-1", "tool_name": "read"},
+        {"role": "assistant", "content": long_reply},
+        {"role": "user", "content": "Thanks."},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "What did the file say?"},
+    ]
+    store = engine._store
+    listed_ids = [store.append("session", message, conversation_id="conversation") for message in listed]
+    with store.atomic():
+        store.connection.execute("UPDATE messages SET timestamp=1 WHERE content=?", (long_reply,))
+    bind(engine, listed_ids[-1])
+    host_list(engine, lambda _, repair_alternation=False: deepcopy(listed))
+
+    result = handle_lcm_command(APPLY, engine)
+
+    assert f"removable_ids={candidate}" in result and "deleted: 1" in result
+    assert "host listed=1" in result
+    assert ids(store.connection, "messages") == {kept, covered_reply, *listed_ids}
+
+
+@pytest.mark.parametrize("shape", [
+    "whitespace", "internal-whitespace", "middle-block", "host-scaffolding", "stored-scaffolding",
+    "contained", "short-contained", "reverse-contained",
+])
 def test_dedupe_transformed_host_text_is_protected(engine, shape):
     block = "\n[synthetic block stripped by the host loader]\n"
+    fragment = f"{'x' * 127} {'y' * 128}"
     if shape in {"whitespace", "internal-whitespace"}:
         stored = CONTENT
     elif shape == "middle-block":
         stored = f"{CONTENT[:2500]}{block}{CONTENT[2500:]}"
+    elif shape == "stored-scaffolding":
+        stored = f"Lead\n\n{TODO}\n\n{CONTENT}"
+    elif shape in {"contained", "short-contained"}:
+        stored = f"Lead\n\n{fragment}\n\n{CONTENT}"
     else:
         stored = f"Lead\n\n{CONTENT}"
     cover(engine, [append(engine, stored)])
@@ -476,16 +527,25 @@ def test_dedupe_transformed_host_text_is_protected(engine, shape):
             host = host.replace(block, "")
         elif shape == "host-scaffolding":
             host = f"Lead\n\n{TODO}\n\n{CONTENT}"
-        elif shape == "contained":
-            host = CONTENT[5:100].strip()
+        elif shape == "stored-scaffolding":
+            host = f"Lead\n\n{CONTENT}"
+        elif shape in {"contained", "short-contained"}:
+            host = fragment if shape == "contained" else fragment[:-1]
+            host = host.replace(" ", " \t\n " * 4)
+        elif shape == "reverse-contained":
+            host = f"Different lead\n\n{stored}\n\nTrailing text"
         # Different tool-call metadata isolates the text veto from replay identity mapping.
         return [{"role": "assistant", "content": host, "tool_call_id": "synthetic-host-call"}]
 
     host_list(engine, read)
 
     result = handle_lcm_command(APPLY, engine)
-    assert "deleted: 0" in result and "host listed=1" in result
-    assert candidate in ids(engine._store.connection, "messages")
+    remaining = ids(engine._store.connection, "messages")
+    if shape == "short-contained":
+        assert "deleted: 1" in result and candidate not in remaining
+    else:
+        assert "deleted: 0" in result and "host listed=1" in result
+        assert candidate in remaining
 
 
 def test_dedupe_redacts_raw_host_text_for_comparison(engine):
@@ -534,16 +594,17 @@ def test_dedupe_non_text_content_is_kept(engine):
 
 
 def test_dedupe_protects_merged_users_from_repaired_host_list(engine):
-    first, second = "a" * 4100, "b" * 4100
-    merged = f"{first}\n\n{second}"
+    parts = [f"Part {i}: " + "x" * 200 for i in range(40)]
+    merged = "\n\n".join(parts)
     cover(engine, [append(engine, merged, role="user")])
     candidate = append(engine, merged, role="user")
     append_tail(engine)
     reads = []
+    show_merged = True
 
     def read(_, repair_alternation=False):
         reads.append(repair_alternation)
-        texts = [merged] if repair_alternation else [first, second]
+        texts = [merged] if repair_alternation and show_merged else parts
         return [{"role": "user", "content": text} for text in texts]
 
     host_list(engine, read)
@@ -551,6 +612,10 @@ def test_dedupe_protects_merged_users_from_repaired_host_list(engine):
     assert "deleted: 0" in result and "host listed=1" in result
     assert reads == [False, True]
     assert candidate in ids(engine._store.connection, "messages")
+
+    show_merged = False
+    assert "deleted: 1" in handle_lcm_command(APPLY_USERS, engine)
+    assert candidate not in ids(engine._store.connection, "messages")
 
 
 def test_dedupe_requires_host_reader_with_alternation_repair(engine):
@@ -688,21 +753,30 @@ def test_dedupe_flag_defaults_off_and_enables_both_forms(engine, monkeypatch, en
     assert "deleted: 11" in handle_lcm_command(enabled_command, engine)
 
 
-def test_dedupe_multisession_reads_each_current_host_list(engine):
-    kept = append(engine)
+@pytest.mark.parametrize(("command", "role"), [(APPLY, "assistant"), (APPLY_USERS, "user")])
+def test_dedupe_only_applies_to_the_bound_session(engine, command, role):
+    kept = append(engine, role=role)
     cover(engine, [kept])
-    visible = append(engine, session="other-session")
+    other = append(engine, session="other-session", role=role)
     for i in range(2):
         append(engine, f"other session tail {i}", session="other-session")
     hidden_content = "separate text " * 620
     cover(engine, [append(engine, hidden_content)])
     hidden = append(engine, hidden_content)
     append_tail(engine)
-    view = {"session": [], "other-session": [{"role": "assistant", "content": CONTENT}]}
-    host_list(engine, lambda session, repair_alternation=False: view[session])
-    assert "deleted: 1" in handle_lcm_command(APPLY, engine)
+    reads = []
+
+    def read(session, repair_alternation=False):
+        reads.append(session)
+        return []
+
+    host_list(engine, read)
+    assert "other session (not handled)=1" in handle_lcm_command(SCAN, engine)
+    result = handle_lcm_command(command, engine)
+    assert "other session (not handled)=1" in result and "deleted: 1" in result
+    assert reads == ["session"] * 6
     remaining = ids(engine._store.connection, "messages")
-    assert {visible, kept} <= remaining and hidden not in remaining
+    assert {other, kept} <= remaining and hidden not in remaining
 
 
 def test_dedupe_keeps_entity_and_note_citations(engine):
