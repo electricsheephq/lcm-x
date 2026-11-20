@@ -306,7 +306,8 @@ _host_message_uid_mode_warned = False
 def host_message_uid_mode() -> str:
     """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and new bindings, and stops these binding reads:
     store-complete copy exclusion (#1124), the tail-rewind veto for a bound stored row, tool-segment replay
-    binding, the survival-fit carrier split and the alias-conflict count. It does not stop the NULL-stamp audit
+    binding, the survival-fit carrier split, the alias-conflict count and the cold-bind check that rejects a
+    full-replay cut the view's uids contradict (#2962). It does not stop the NULL-stamp audit
     proof (#1403, ``identity_anchor``): bindings left from an earlier ``shadow`` run can still prove an
     occurrence there after a switch to ``off``. ``shadow`` (default) writes bindings and never skips a row on a
     UID alone, but its bindings are read as evidence by all of the above. In every mode, an incoming
