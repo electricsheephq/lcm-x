@@ -324,6 +324,7 @@ _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across co
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_COMPACTION_REFUSAL_WAIT_SECONDS = 3.0
 _TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
@@ -2507,19 +2508,23 @@ class LCMEngine(
         Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives."""
         if self._bypasses_lcm_context_management():
             return
+        self._signal_emission_state("refused", self._session_id, require_conversation=True)
+        leaves = self._last_compress_leaves
+        progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
+        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
         caller = threading.get_ident()
-        binding_scope = (contextlib.nullcontext() if self._stable_use_owner_thread == caller
-                         else self._exclusive_lifecycle("compaction refusal"))
-        with binding_scope:
-            leaves = self._last_compress_leaves
-            progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
-            self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+        binding_scope = (contextlib.nullcontext(True) if self._stable_use_owner_thread == caller
+                         else self._exclusive_lifecycle("compaction refusal",
+                             deadline=time.monotonic() + _COMPACTION_REFUSAL_WAIT_SECONDS))
+        with binding_scope as acquired:
+            if not acquired:
+                logger.warning("LCM compaction refusal restore skipped: engine lifecycle lock timed out")
+                return
             with self._compaction_gate:
                 if self._compaction_closing or self._compress_owner is not None:
                     return
                 self._claim_compress_owner(caller)
             try:
-                self._signal_emission_state("refused", self._session_id, require_conversation=True)
                 if self._compress_refusal is not None:
                     with self._store._write_lock:
                         self._restore_refused_compaction()
@@ -2534,11 +2539,11 @@ class LCMEngine(
         # Keep ingest's writes and its cursor over the admitted input. Only the
         # evidence that would make the returned list the host's is speculative.
         if snapshot is None:
-            snapshot = dict(call=self._compress_calls, binding=self._compaction_refusal_binding(),
-                            metadata={}, uids=[], pending_uids={})
+            snapshot = dict(call=self._compress_calls, binding=self._compaction_refusal_binding())
         receipts = getattr(self, "_identity_anchor_recoveries", ())
         watch = getattr(self, "_host_rewrite_watch", {})
-        snapshot.update(cursor=self._ingest_cursor, reconcile=self._ingest_cursor_needs_reconcile,
+        snapshot.update(metadata={}, uids=[], pending_uids={},
+                        cursor=self._ingest_cursor, reconcile=self._ingest_cursor_needs_reconcile,
                         proof=self._compress_commit_proof, descriptors=self._last_emission_descriptors,
                         reason=self._compress_commit_reason, publication=self._compress_commit_publication,
                         identities=getattr(self, "_last_active_replay_source_identities", None),
@@ -2592,7 +2597,7 @@ class LCMEngine(
                         "DELETE FROM host_uid_bindings WHERE lineage_key=? AND uid=? AND created_at=? "
                         "AND store_id=0 AND kind='engine'", snapshot["uids"])
         self._ingest_cursor = snapshot["cursor"]
-        self._ingest_cursor_needs_reconcile = snapshot["reconcile"]
+        self._ingest_cursor_needs_reconcile = snapshot["reconcile"] or self._ingest_cursor_needs_reconcile
         self._frontier_holder().refused_input = snapshot["identities"]
         self._compress_commit_proof, self._last_emission_descriptors = snapshot["proof"], snapshot["descriptors"]
         self._compress_commit_reason = snapshot["reason"]
@@ -8255,6 +8260,7 @@ class LCMEngine(
                 self._frontier.cursor = pending.cursor
                 self._frontier.needs_reconcile = pending.needs_reconcile
                 self._frontier.commit_proof = pending.commit_proof
+                self._frontier.refused_input = pending.refused_input
                 # The session ingested after these ends, so their views can be older than its history. A retried tail's
                 # own view is older than those of the ends queued after it.
                 for tail in self.__dict__.get("_pending_session_tails", ()):
@@ -13399,7 +13405,7 @@ class LCMEngine(
                 finally:
                     self._stable_use_owner_thread = None
             return
-        # Only the exit hook bounds its wait; shutdown still waits for active use.
+        # Shutdown itself still waits for active use.
         if not self._stable_use_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             yield False
             return

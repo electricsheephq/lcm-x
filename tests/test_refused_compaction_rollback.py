@@ -1,10 +1,10 @@
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 import hermes_lcm.engine as lcm_engine_module
-from bench.instruments.gate_kit.audit import carrier_remainder, verified_summary_head_store_ids
 from hermes_lcm import host_uid_emit, ingest_ledger
 from hermes_lcm.engine import LCMEngine
 from tests.test_compression_boundary import _config, _drain_session_end_maintenance, _stub_summarizer, _turn
@@ -13,6 +13,14 @@ from tests.test_issue_1116_stub_first_exit_commit_proof import (
     grow_over_threshold,
     host_for,  # noqa: F401
     stub_first_result,
+)
+from tests.test_issue_1286_cleanup_rewrite_proof import (
+    SID,
+    STEER,
+    Host,
+    _commit_cleanup,
+    _stub_summarizer as _rekey_summarizer,
+    _turns,
 )
 
 
@@ -93,6 +101,120 @@ def test_refused_compaction_keeps_the_ingested_input(committed_host, restart):
         assert _compaction_records(engine) == prior
 
 
+def test_second_ingest_after_refusal_stays_warm(committed_host, monkeypatch):
+    engine, kept, _binding = committed_host
+    _rewriting_pass(engine, kept)
+    engine.record_rejected_compaction()
+    kept = kept + [_turn(20)[1]]
+    engine.ingest(kept)
+
+    def no_cold_reconcile(*args, **kwargs):
+        pytest.fail("second ingest after one refusal entered cold reconcile")
+
+    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", no_cold_reconcile)
+    before = engine._store.get_session_count("S0")
+    user = _turn(21)[0]
+    engine.ingest(kept + [user])
+    _assert_only_reply(engine, before, kept[0]["content"], user)
+    assert not engine._ingest_cursor_needs_reconcile
+    assert engine._frontier.refused_input is None
+
+
+def test_failed_ingest_after_refusal_leaves_marker_until_commit(committed_host, monkeypatch):
+    engine, kept, _binding = committed_host
+    _rewriting_pass(engine, kept)
+    engine.record_rejected_compaction()
+    marker = engine._frontier.refused_input
+    assert marker is not None
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+
+    def fail_after_prefix_check(*args, **kwargs):
+        assert engine._frontier_holder().refused_input is None
+        raise RuntimeError("injected ingest failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_capture_host_rewrites", fail_after_prefix_check)
+        with pytest.raises(RuntimeError, match="injected ingest failure"):
+            engine._ingest_messages(kept + [reply])
+    assert engine._frontier.refused_input is marker
+    assert engine._store.get_session_count("S0") == before
+
+    engine.ingest(kept + [reply])
+    _assert_only_reply(engine, before, kept[0]["content"], reply)
+    assert engine._frontier.refused_input is None
+
+
+def test_accepted_pass_after_refusal_uses_warm_output_prefix(committed_host, monkeypatch):
+    engine, kept, binding = committed_host
+    _rewriting_pass(engine, kept)
+    engine.record_rejected_compaction()
+    kept = kept + [_turn(20)[1]]
+    engine.ingest(kept)
+    kept += [row for i in range(21, 28) for row in _turn(i)][:-1]
+
+    def fail_publication(*args):
+        raise RuntimeError("injected durable proof publication failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_write_compress_commit_proof_payload", fail_publication)
+        accepted = _rewriting_pass(engine, kept)
+        _drain_session_end_maintenance(engine)
+        engine.on_session_end("S0", kept)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", **binding)
+    proof = engine._compress_commit_proof
+    assert proof["end_consumed"] and proof["durable"] is False and not proof.get("consulted")
+
+    before = engine._store.get_session_count("S0")
+    reply = _turn(27)[1]
+    engine.ingest(accepted + [reply])
+    _assert_only_reply(engine, before, accepted[0]["content"], reply)
+    assert engine._compress_commit_proof is None
+
+
+def test_refusal_keeps_proof_rekeyed_by_the_pass_ingest(tmp_path, monkeypatch):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _rekey_summarizer)
+    host = Host(tmp_path)
+    try:
+        _turns(host, None)
+        host.compact()
+        _turns(host, "reasoning")
+        _commit_cleanup(host, "reasoning")
+        host.turn()
+        host.turn()
+        engine = host.engine
+
+        def records():
+            return tuple(engine._store.read_metadata_json(f"{prefix}:{SID}")
+                         for prefix in ("compaction_commit_proof", "host_occurrence_snapshot"))
+
+        prior = records()
+        host.live.insert(len(host.live) - 2, dict(STEER))
+        rekey = engine._rekey_durable_commit_proof
+        rekeyed = []
+
+        def capture_rekey(messages):
+            rekey(messages)
+            rekeyed.append((records(), engine._cursor_from_durable_commit_proof(messages), len(messages)))
+
+        monkeypatch.setattr(engine, "_rekey_durable_commit_proof", capture_rekey)
+        assert engine.compress(host.live, force=True) != host.live
+        assert host.count(STEER["content"]) == 1
+        (rekey_records, cursor, length), = rekeyed
+        assert cursor == length and rekey_records != prior
+        assert records() != rekey_records
+
+        engine.record_rejected_compaction()
+        assert records() == rekey_records
+        before = host.rows()
+        host.restart()
+        host.engine.ingest(host.live)
+        assert host.rows() == before
+        assert host.engine._ingest_cursor == len(host.live)
+    finally:
+        host.close()
+
+
 def test_refused_cleanup_only_pass_keeps_the_ingested_input(committed_host):
     engine, kept, _binding = committed_host
     kept.insert(-1, {"role": "assistant", "content": "Another visible reply to turn 19."})
@@ -169,7 +291,7 @@ def test_refused_pass_without_ready_proof_keeps_ingested_rows(committed_host, mo
     reply = _turn(20)[1]
     engine.compress(kept + [reply], current_tokens=10_000)
     _assert_only_reply(engine, before, kept[0]["content"], reply)
-    assert resumed_cursor == (len(kept), False)
+    assert resumed_cursor == (len(kept), reason == "reconcile_pending")
 
 
 def test_refused_identity_noop_preserves_prior_descriptors(committed_host, monkeypatch):
@@ -202,6 +324,71 @@ def test_only_the_latest_compress_snapshot_can_be_restored(committed_host):
     reply = _turn(27)[1]
     engine.compress(kept + [reply], current_tokens=10_000)
     _assert_only_reply(engine, before, kept[0]["content"], reply)
+
+
+@pytest.mark.parametrize("guard", ["call", "identities", "end_consumed", "binding"])
+def test_refusal_restore_guards_reject_stale_snapshots(committed_host, guard):
+    engine, kept, _binding = committed_host
+    _rewriting_pass(engine, kept)
+    snapshot = engine._compress_refusal
+    proof = engine._compress_commit_proof
+    assert snapshot["call"] == engine._compress_calls
+    assert snapshot["binding"] == engine._compaction_refusal_binding()
+    assert snapshot["output_proof"] is proof and not proof["end_consumed"]
+    assert snapshot["identities"] is engine._last_active_replay_source_identities
+
+    # Change only the evidence this guard compares, leaving the snapshot armed.
+    if guard == "call":
+        engine._compress_calls += 1
+    elif guard == "identities":
+        engine._last_active_replay_source_identities = list(snapshot["identities"])
+    elif guard == "end_consumed":
+        proof["end_consumed"] = True
+    else:
+        engine._pressure_yield_reset_epoch += 1
+
+    records = _compaction_records(engine)
+    descriptors, cursor = engine._last_emission_descriptors, engine._ingest_cursor
+    engine.record_rejected_compaction()
+    assert engine._compress_refusal is None
+    assert engine._compress_commit_proof is proof
+    assert engine._last_emission_descriptors is descriptors and engine._ingest_cursor == cursor
+    assert _compaction_records(engine) == records
+
+
+def test_refusal_signals_emission_when_compaction_gate_is_closing(committed_host, monkeypatch):
+    engine, kept, _binding = committed_host
+    _rewriting_pass(engine, kept)
+    handle = engine._emission_handle
+    snapshot = engine._compress_refusal
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_compaction_closing", True)
+        engine.record_rejected_compaction()
+
+    assert ingest_ledger.emission_candidate(engine._store._conn, handle.lineage) == (None, "refused")
+    assert engine._compress_refusal is snapshot
+
+
+def test_refusal_signals_emission_when_lifecycle_wait_times_out(committed_host, monkeypatch, caplog):
+    engine, kept, _binding = committed_host
+    _rewriting_pass(engine, kept)
+    handle = engine._emission_handle
+    snapshot = engine._compress_refusal
+    proof, records, cursor = engine._compress_commit_proof, _compaction_records(engine), engine._ingest_cursor
+    monkeypatch.setattr(lcm_engine_module, "_COMPACTION_REFUSAL_WAIT_SECONDS", 0.01, raising=False)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with engine._stable_use_lock:
+            pool.submit(engine.record_rejected_compaction).result(timeout=1)
+
+    assert ingest_ledger.emission_candidate(engine._store._conn, handle.lineage) == (None, "refused")
+    assert engine._compress_refusal is snapshot
+    assert engine._compress_commit_proof is proof and engine._ingest_cursor == cursor
+    assert _compaction_records(engine) == records
+    assert engine._no_progress_hold[1] == "host_rejected_progress"
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING
+                and "compaction refusal" in record.getMessage() and "lifecycle" in record.getMessage()]
+    assert len(warnings) == 1
 
 
 def test_refusal_cannot_replace_a_newer_durable_proof(committed_host):
@@ -326,6 +513,8 @@ def test_ledger_uses_the_last_adopted_view_after_refusal(committed_host):
 
 @pytest.mark.parametrize("committed_host", [5], indirect=True)
 def test_repeated_refusals_store_no_verified_summary_head(committed_host):
+    from bench.instruments.gate_kit.audit import carrier_remainder, verified_summary_head_store_ids
+
     engine, kept, _binding = committed_host
     head = kept[0]["content"]
     assert engine._verified_lcm_summary_prefix_end(head) == len(head)
