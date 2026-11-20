@@ -2505,35 +2505,48 @@ class LCMEngine(
 
         #597: a host_rejected_progress hold lets at most one compaction per turn through; each such pass
         either stores >=1 leaf from a finite backlog or arms no_progress / host_rejected (600 s) as today.
-        Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives."""
+        Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives.
+
+        Restore the input cursor, commit proofs and emission bookkeeping for the host view that was kept.
+        Restore immediately if the lifecycle scope and compaction gate admit the hook; otherwise the
+        next ingest for the same binding handles it under the store write lock. A new compaction
+        applies it before advancing the call number for its own ingest. A refusal without a matching
+        snapshot skips the restore."""
         if self._bypasses_lcm_context_management():
             return
+        snapshot = getattr(self, "_compress_refusal", None)
         self._signal_emission_state("refused", self._session_id, require_conversation=True)
         leaves = self._last_compress_leaves
         progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+        if snapshot is None:
+            return
+        snapshot["refused"] = True
         caller = threading.get_ident()
         binding_scope = (contextlib.nullcontext(True) if self._stable_use_owner_thread == caller
                          else self._exclusive_lifecycle("compaction refusal",
                              deadline=time.monotonic() + _COMPACTION_REFUSAL_WAIT_SECONDS))
         with binding_scope as acquired:
             if not acquired:
-                logger.warning("LCM compaction refusal restore skipped: engine lifecycle lock timed out")
+                logger.warning("LCM compaction refusal restore deferred: engine lifecycle lock timed out")
                 return
             with self._compaction_gate:
-                if self._compaction_closing or self._compress_owner is not None:
-                    return
-                self._claim_compress_owner(caller)
+                can_restore = not self._compaction_closing and self._compress_owner is None
+                if can_restore:
+                    self._claim_compress_owner(caller)
+            if not can_restore:
+                logger.info("LCM compaction refusal restore deferred: compaction gate busy")
+                return
             try:
-                if self._compress_refusal is not None:
-                    with self._store._write_lock:
-                        self._restore_refused_compaction()
+                store = self._store
+                with store._write_lock:
+                    self._restore_refused_compaction(snapshot, store)
             finally:
                 with self._compaction_gate:
                     self._release_compress_owner()
 
     def _compaction_refusal_binding(self):
-        return self._store, self._session_id, self._conversation_id, self._pressure_yield_reset_epoch
+        return self._bound_store_unopened(), self._session_id, self._conversation_id, self._pressure_yield_reset_epoch
 
     def _snapshot_compression_input(self, snapshot=None):
         # Keep ingest's writes and its cursor over the admitted input. Only the
@@ -2568,24 +2581,26 @@ class LCMEngine(
             changes[key] = (previous, value)
         return wrote
 
-    def _restore_refused_compaction(self):
-        snapshot = self._compress_refusal
-        if (snapshot is None or snapshot["call"] != self._compress_calls
-                or snapshot["binding"] != self._compaction_refusal_binding()
+    def _restore_refused_compaction(self, snapshot, store, *, deferred=False):
+        if snapshot is not self._compress_refusal:
+            return
+        binding = snapshot["binding"]
+        if (snapshot["call"] != self._compress_calls
+                or binding[0] is not store or binding != self._compaction_refusal_binding()
                 or snapshot["output_proof"] is not self._compress_commit_proof
                 or (self._compress_commit_proof or {}).get("end_consumed")
                 or snapshot["identities"] is not getattr(self, "_last_active_replay_source_identities", None)):
             self._compress_refusal = None
             return
-        store = self._store
         if snapshot["metadata"] or snapshot["uids"]:
             with store.atomic(immediate=True):
-                proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+                proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX, binding[1])
                 proof_write = snapshot["metadata"].get(proof_key)
                 proof_replaced = proof_write is not None and store._conn.execute(
                     "SELECT value FROM metadata WHERE key=?", (proof_key,)).fetchone() != (proof_write[1],)
+                occurrence_key = self._replay_snapshot_metadata_key("host_occurrence_snapshot", binding[1])
                 for key, (previous, written) in snapshot["metadata"].items():
-                    if proof_replaced and key in (proof_key, self._replay_snapshot_metadata_key("host_occurrence_snapshot")):
+                    if proof_replaced and key in (proof_key, occurrence_key):
                         continue
                     if previous is None:
                         store._conn.execute("DELETE FROM metadata WHERE key=? AND value=?", (key, written))
@@ -2617,6 +2632,8 @@ class LCMEngine(
             else:
                 pending[uid] = previous
         self._compress_refusal = None
+        if deferred:
+            logger.info("LCM deferred compaction refusal restored")
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
@@ -4909,7 +4926,8 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
-        self._compress_refusal = None
+        if not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
+            self._compress_refusal = None
         sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
@@ -8014,8 +8032,13 @@ class LCMEngine(
                 pass  # Token counting retains its existing estimator fallback.
         # #2073: one ingest per store at a time. The attempt-local frontier holder and the other
         # per-attempt engine state below are shared by every thread that ingests through this engine.
-        with (getattr(self._store, "_write_lock", None) or contextlib.nullcontext()):
-            self._compress_refusal = None
+        store = self._store
+        with (getattr(store, "_write_lock", None) or contextlib.nullcontext()):
+            snapshot = getattr(self, "_compress_refusal", None)
+            if snapshot and snapshot.get("refused"):
+                self._restore_refused_compaction(snapshot, store, deferred=True)
+            else:
+                self._compress_refusal = None
             self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
             self._no_progress_ingest_generation = self._ingest_failure_count
             self._ingest_replay_redaction_changes = {}

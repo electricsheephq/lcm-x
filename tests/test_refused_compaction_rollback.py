@@ -165,6 +165,10 @@ def test_accepted_pass_after_refusal_uses_warm_output_prefix(committed_host, mon
     proof = engine._compress_commit_proof
     assert proof["end_consumed"] and proof["durable"] is False and not proof.get("consulted")
 
+    def no_cold_reconcile(*args, **kwargs):
+        pytest.fail("first ingest after the accepted pass entered cold reconcile")
+
+    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", no_cold_reconcile)
     before = engine._store.get_session_count("S0")
     reply = _turn(27)[1]
     engine.ingest(accepted + [reply])
@@ -326,7 +330,7 @@ def test_only_the_latest_compress_snapshot_can_be_restored(committed_host):
     _assert_only_reply(engine, before, kept[0]["content"], reply)
 
 
-@pytest.mark.parametrize("guard", ["call", "identities", "end_consumed", "binding"])
+@pytest.mark.parametrize("guard", ["call", "identities", "end_consumed", "binding", "output_proof"])
 def test_refusal_restore_guards_reject_stale_snapshots(committed_host, guard):
     engine, kept, _binding = committed_host
     _rewriting_pass(engine, kept)
@@ -344,8 +348,11 @@ def test_refusal_restore_guards_reject_stale_snapshots(committed_host, guard):
         engine._last_active_replay_source_identities = list(snapshot["identities"])
     elif guard == "end_consumed":
         proof["end_consumed"] = True
-    else:
+    elif guard == "binding":
         engine._pressure_yield_reset_epoch += 1
+    else:
+        proof = dict(proof)
+        engine._compress_commit_proof = proof
 
     records = _compaction_records(engine)
     descriptors, cursor = engine._last_emission_descriptors, engine._ingest_cursor
@@ -356,21 +363,39 @@ def test_refusal_restore_guards_reject_stale_snapshots(committed_host, guard):
     assert _compaction_records(engine) == records
 
 
-def test_refusal_signals_emission_when_compaction_gate_is_closing(committed_host, monkeypatch):
+@pytest.mark.parametrize("busy", ["closing", "owned"])
+def test_refusal_defers_restore_when_compaction_gate_is_busy(committed_host, monkeypatch, caplog, busy):
+    caplog.set_level(logging.INFO, logger=lcm_engine_module.__name__)
     engine, kept, _binding = committed_host
+    prior = _compaction_records(engine)
     _rewriting_pass(engine, kept)
     handle = engine._emission_handle
     snapshot = engine._compress_refusal
+    output = _compaction_records(engine)
     with monkeypatch.context() as patch:
-        patch.setattr(engine, "_compaction_closing", True)
+        if busy == "closing":
+            patch.setattr(engine, "_compaction_closing", True)
+        else:
+            patch.setattr(engine, "_compress_owner", object())
         engine.record_rejected_compaction()
 
     assert ingest_ledger.emission_candidate(engine._store._conn, handle.lineage) == (None, "refused")
     assert engine._compress_refusal is snapshot
+    assert _compaction_records(engine) == output
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+    engine.ingest(kept + [reply])
+    _assert_only_reply(engine, before, kept[0]["content"], reply)
+    assert _compaction_records(engine) == prior
+    assert engine._compress_refusal is None
+    assert caplog.text.count("compaction refusal restore deferred") == 1
+    assert caplog.text.count("deferred compaction refusal restored") == 1
 
 
-def test_refusal_signals_emission_when_lifecycle_wait_times_out(committed_host, monkeypatch, caplog):
-    engine, kept, _binding = committed_host
+@pytest.mark.parametrize("next_action", ["ingest", "compress", "start-then-ingest"])
+def test_refusal_defers_restore_when_lifecycle_wait_times_out(committed_host, monkeypatch, caplog, next_action):
+    engine, kept, binding = committed_host
+    prior = _compaction_records(engine)
     _rewriting_pass(engine, kept)
     handle = engine._emission_handle
     snapshot = engine._compress_refusal
@@ -389,6 +414,39 @@ def test_refusal_signals_emission_when_lifecycle_wait_times_out(committed_host, 
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING
                 and "compaction refusal" in record.getMessage() and "lifecycle" in record.getMessage()]
     assert len(warnings) == 1
+
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+    with caplog.at_level(logging.INFO):
+        if next_action == "compress":
+            engine.compress(kept + [reply], current_tokens=10_000)
+        else:
+            if next_action == "start-then-ingest":
+                engine.on_session_start("S0", **binding)
+                assert engine._compaction_refusal_binding() == snapshot["binding"]
+            engine.ingest(kept + [reply])
+    _assert_only_reply(engine, before, kept[0]["content"], reply)
+    assert _compaction_records(engine) == prior
+    assert caplog.text.count("compaction refusal restore deferred") == 1
+    assert caplog.text.count("deferred compaction refusal restored") == 1
+
+
+def test_ingest_discards_snapshot_without_a_refusal(committed_host, monkeypatch):
+    engine, kept, _binding = committed_host
+    accepted = _rewriting_pass(engine, kept)
+    assert engine._compress_refusal is not None
+    records = _compaction_records(engine)
+
+    def no_restore(*args, **kwargs):
+        pytest.fail("ingest tried to restore a snapshot without a refusal")
+
+    monkeypatch.setattr(engine, "_restore_refused_compaction", no_restore)
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+    engine.ingest(accepted + [reply])
+    _assert_only_reply(engine, before, accepted[0]["content"], reply)
+    assert engine._compress_refusal is None
+    assert _compaction_records(engine) == records
 
 
 def test_refusal_cannot_replace_a_newer_durable_proof(committed_host):

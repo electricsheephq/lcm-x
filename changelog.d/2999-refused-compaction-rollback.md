@@ -1,0 +1,1 @@
+- Fix: When Hermes refuses a compaction before session end, LCM-X restores the replay state for the conversation Hermes kept, preventing its summary head from being stored as a new user message.

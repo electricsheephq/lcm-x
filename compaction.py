@@ -808,7 +808,7 @@ class CompactionMixin:
         with self._compaction_gate:
             if self._compaction_closing or (owned and not self._claim_compress_owner(caller)):
                 return messages
-            if owned:
+            if owned and not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
                 self._compress_refusal = None
             self._compaction_inflight += 1
         try:
@@ -891,6 +891,12 @@ class CompactionMixin:
             self._no_progress_candidate = False
             self._no_progress_proof_complete = False
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
+            snapshot = getattr(self, "_compress_refusal", None)
+            if snapshot and snapshot.get("refused"):
+                # This pass will ingest too. Restore while the previous call still owns the proof.
+                store = self._store
+                with store._write_lock:
+                    self._restore_refused_compaction(snapshot, store, deferred=True)
             self._compress_calls += 1  # #1116: a stub-first proof becomes durable only for the latest call
             refusal = self._snapshot_compression_input()
             thread_context.compress_refusal = refusal
