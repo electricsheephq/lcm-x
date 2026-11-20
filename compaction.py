@@ -924,6 +924,8 @@ class CompactionMixin:
                 returned = messages
                 return messages
             self._compress_occurrences = None
+            if self._last_compression_status == "deadline_yield":
+                return caller_messages
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -1171,7 +1173,10 @@ class CompactionMixin:
 
     def _new_foreground_budget(self) -> ForegroundBudget:
         soft, hard = self._foreground_budget_seconds()
-        return ForegroundBudget(soft=soft, hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
+        idle = self._config.hermes_context_timeout_seconds
+        if idle > 0:
+            hard = min(hard, idle - max(30.0, 0.1 * idle))
+        return ForegroundBudget(soft=min(soft, hard), hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
                                 estimates=self.__dict__.setdefault("_foreground_estimates", ForegroundEstimates()))
 
     def _finish_foreground_budget(self, budget: ForegroundBudget, result, observed=None, *, automatic=False) -> None:
@@ -1231,8 +1236,8 @@ class CompactionMixin:
                         " escaped=store_id:%d,role:%s,kind:%s,n:%d" % (*escaped[0], len(escaped)) if escaped else "")
         except Exception:
             logger.debug("LCM compaction stop line failed", exc_info=True)
-        if self._bypasses_lcm_context_management():
-            return  # B5: a bypassed pass owns a local budget; the bound conversation's zero-leaf streak is never its own
+        if reason == "deadline_yield" or self._bypasses_lcm_context_management():
+            return  # A yield or a bypass adds no observation to the conversation's zero-leaf streak.
         try:  # #1162: consecutive over-threshold passes that ran a leaf selection and stored no leaf (in memory)
             streaks, key = self.__dict__.setdefault("_zero_leaf_streaks", {}), self._hold_conversation_key()
             if budget.leaves or (observed if isinstance(observed, (int, float)) else count_messages_tokens(
@@ -2352,6 +2357,42 @@ class CompactionMixin:
 
         return "next", None
 
+    def _is_host_pre_api_compression(self) -> bool:
+        # Hermes sets the seed under its compression lease, then sets the dispatch generation
+        # for the worker's call to compress(). A seed can outlive its attempt or be replaced
+        # by a retry, so require the active dispatch and its generation on this engine.
+        seed = getattr(self, "_compression_telemetry_seed", None)
+        if self._compress_owner_depth != 1 or not isinstance(seed, dict) or seed.get("trigger_source") != "pre_api":
+            return False
+        host = sys.modules.get("agent.conversation_compression")
+        dispatch = getattr(host, "_COMPRESSOR_ATTEMPT_GENERATION", None)
+        if not isinstance(dispatch, ContextVar):
+            return False
+        generation = dispatch.get(None)
+        return bool(generation and generation == getattr(self, "_compression_cancelled_check_owner", None)
+                    == getattr(self, "_compression_working_attempt_generation", None)
+                    == getattr(self, "_compression_attempt_generation", None))
+
+    def _yield_after_ingest(self, state: _CompressionState) -> bool:
+        now = time.monotonic()
+        if now < state.sweep_deadline:
+            return False
+        # Let the ordinary exit fit trim a held or over-window request.
+        if state.hold_fit_only_requested or (
+            self._config.survival_fit
+            and (ceiling := self._survival_ceiling()) is not None
+            and state.observed_prompt_tokens >= ceiling
+        ):
+            return False
+        # Post-tool unchanged output spends a host attempt. At this point no leaf or
+        # condensation has been published, so only automatic pre-API compaction can yield.
+        if not self._is_host_pre_api_compression():
+            return False
+        self._last_compression_status = "deadline_yield"
+        self._pressure_yield_invocation_verdict = "neutral"
+        logger.info("LCM compaction deadline yield: check=after_ingest elapsed=%.1fs", now - state.budget.t0)
+        return True
+
     def _ingest_compression_view(self, state: _CompressionState,
                                  messages: List[Dict[str, Any]],
                                  current_tokens: int = None,
@@ -2360,6 +2401,9 @@ class CompactionMixin:
         """Ingest the replay view and honor cleanup-only or held requests."""
         if self._compaction_is_closing():
             return "return", messages
+        # #2924: the same clock governs the post-ingest check and summary admission.
+        state.budget = self._foreground_budget or self._new_foreground_budget()
+        state.sweep_deadline = state.budget.t0 + state.budget.hard
         # Step 1: Ingest new messages into the immutable store. Work from a
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
@@ -2370,6 +2414,8 @@ class CompactionMixin:
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
         if self._compress_binding_changed():
+            return "return", messages
+        if not (force or recovery_attempt or state.force_overflow) and self._yield_after_ingest(state):
             return "return", messages
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
@@ -2528,12 +2574,9 @@ class CompactionMixin:
                 "whole_prompt_tokens_after": state.estimated_active_tokens + state.depth_load_addend,
                 "depth_target_met": False,
             }
-        # #605: one clock from compress() entry; the hard bound keeps today's step checks.
-        state.budget = self._foreground_budget or self._new_foreground_budget()
         state.budget.sweep_active = state.threshold_full_sweep_active
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
-        state.sweep_deadline = state.budget.t0 + state.budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         if configured_sweep_target > 0:
             state.sweep_target_tokens = configured_sweep_target

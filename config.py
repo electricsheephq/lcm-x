@@ -2,6 +2,7 @@
 import contextvars
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -719,6 +720,12 @@ def _lcm_absolute_threshold_tokens_with_source(
     return value, source, warning
 
 
+def _hermes_auxiliary_compression_timeout_value(cfg: dict[str, Any]) -> Any:
+    auxiliary = cfg.get("auxiliary")
+    compression = auxiliary.get("compression") if isinstance(auxiliary, dict) else None
+    return compression.get("timeout") if isinstance(compression, dict) else None
+
+
 def _hermes_auxiliary_compression_timeout_ms_with_source(
     default: int, *, env: Mapping[str, str] | None = None
 ) -> tuple[int, str]:
@@ -732,18 +739,41 @@ def _hermes_auxiliary_compression_timeout_ms_with_source(
     """
     cfg = _load_hermes_config_yaml_for_env(env)
     try:
-        auxiliary = cfg.get("auxiliary") or {}
-        if not isinstance(auxiliary, dict):
-            return default, "default"
-        compression = auxiliary.get("compression") or {}
-        if not isinstance(compression, dict):
-            return default, "default"
-        value = compression.get("timeout")
+        value = _hermes_auxiliary_compression_timeout_value(cfg)
         if value is None:
             return default, "default"
         return int(float(value) * 1000), "config_yaml:auxiliary.compression.timeout"
     except Exception:
         return default, "default"
+
+
+def _hermes_context_timeout_seconds_with_source(
+    auxiliary_timeout_ms: int, *, env: Mapping[str, str] | None = None
+) -> tuple[float, str]:
+    """Read the profile's effective host idle limit. Zero means no readable limit."""
+    cfg = _load_hermes_config_yaml_for_env(env)
+    compression = cfg.get("compression")
+    value = compression.get("context_timeout_seconds") if isinstance(compression, dict) else None
+    if value is not None and not isinstance(value, bool):
+        try:
+            seconds = float(value)
+            if math.isfinite(seconds):
+                if seconds > 0:
+                    raw_aux = _hermes_auxiliary_compression_timeout_value(cfg)
+                    # An unresolved Hermes environment reference uses the default floor.
+                    if raw_aux is None or (isinstance(raw_aux, str) and "${" in raw_aux):
+                        seconds = max(seconds, 300.0)
+                    else:
+                        try:
+                            aux_seconds = float(raw_aux)
+                        except (TypeError, ValueError, OverflowError):
+                            aux_seconds = 0.0
+                        if math.isfinite(aux_seconds) and aux_seconds > 0:
+                            seconds = max(seconds, auxiliary_timeout_ms / 1000, 300.0)
+                return seconds, "config_yaml:compression.context_timeout_seconds"
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return 0.0, "default"
 
 
 def hermes_auxiliary_compression_max_concurrency(hermes_home: str = "") -> int | None:
@@ -1339,6 +1369,7 @@ class LCMConfig:
     # cuts a call short when less time is left.
     summary_timeout_ms: int = 120_000
     expansion_timeout_ms: int = 120_000
+    hermes_context_timeout_seconds: float = 0.0  # effective host idle limit, if enabled
 
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
@@ -1870,6 +1901,10 @@ class LCMConfig:
             default_source=summary_timeout_source,
         )
         _record("summary_timeout_ms", source, warning)
+        c.hermes_context_timeout_seconds, source = _hermes_context_timeout_seconds_with_source(
+            summary_timeout_default if summary_timeout_source != "default" else 0, env=env
+        )
+        _record("hermes_context_timeout_seconds", source)
         c.summary_prompt_version, source, warning = _parse_int_env_with_source(
             "LCM_SUMMARY_PROMPT_VERSION", c.summary_prompt_version
         )
