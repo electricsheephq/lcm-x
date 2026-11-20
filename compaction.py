@@ -254,6 +254,30 @@ def select_oldest_leaf_chunk(
 
 
 class CompactionMixin:
+    def _summary_prefix_target(self) -> int:
+        configured = int(self._config.summary_prefix_target_tokens)
+        if configured > 0:
+            return configured
+        if self._config.summary_prefix_target_ratio > 0 and self.context_length > 0:
+            return max(1, int(self._config.summary_prefix_target_ratio * self.context_length))
+        target = int(self._config.leaf_chunk_tokens)
+        if self.threshold_tokens > 0:
+            # Keep the default prefix from filling the threshold on small windows.
+            target = min(target, int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE))
+        return max(1, target)
+
+    def _older_summary_limit(self, primary_tokens: int, fixed_tokens: int) -> int:
+        target = self._summary_prefix_target()
+        threshold = self.threshold_tokens
+        leaf = self._config.leaf_chunk_tokens
+        if threshold <= 0:
+            return target + leaf
+        band = min(target + min(leaf, int(threshold * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE)), threshold // 2)
+        if primary_tokens + fixed_tokens < threshold:
+            # Give the next turns headroom using the host gate's message count.
+            band = min(band, threshold * 4 // 5 - fixed_tokens)
+        return band
+
     def _warn_unattributed_leaf(self, rows) -> None:
         # #1147 r1: share the warn-once refusal across admission, rescue and publication.
         frontier = self._store_complete_frontier()
@@ -2534,17 +2558,7 @@ class CompactionMixin:
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
         state.sweep_deadline = state.budget.t0 + state.budget.hard
-        configured_sweep_target = int(self._config.summary_prefix_target_tokens)
-        if configured_sweep_target > 0:
-            state.sweep_target_tokens = configured_sweep_target
-        elif self._config.summary_prefix_target_ratio > 0 and self.context_length > 0:
-            state.sweep_target_tokens = int(self._config.summary_prefix_target_ratio * self.context_length)
-        else:
-            state.sweep_target_tokens = int(self._config.leaf_chunk_tokens)
-            if self.threshold_tokens > 0:
-                # Default to one leaf budget capped at a quarter of the threshold, so a small window's prefix cannot fill it (rc3 compacted on every 32K call).
-                state.sweep_target_tokens = min(state.sweep_target_tokens, int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE))
-        state.sweep_target_tokens = max(1, state.sweep_target_tokens)
+        state.sweep_target_tokens = self._summary_prefix_target()
         state.sweep_summary_prefix_before = (
             self._summary_frontier_tokens() if state.threshold_full_sweep_active else 0
         )

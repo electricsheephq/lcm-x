@@ -648,12 +648,13 @@ class SummaryDAG:
         return samples
 
     def get_uncondensed_at_depth(self, session_id: str, depth: int,
-                                  limit: int = 100, newest: bool = False) -> List[SummaryNode]:
+                                  limit: Optional[int] = 100, newest: bool = False) -> List[SummaryNode]:
         """Get nodes at a depth that haven't been condensed yet.
 
         A node is 'uncondensed' if it's not referenced as a source by
         any higher-depth node. ``newest`` selects the newest ``limit``
         nodes instead of the oldest (#653); both return oldest-first.
+        A ``None`` limit returns every uncondensed node at that depth.
         """
         order = "n.created_at DESC, n.node_id DESC" if newest else "n.created_at"
         with self._db_lock:
@@ -666,7 +667,7 @@ class SummaryDAG:
                        WHERE p.session_id = ? AND p.depth > ? AND p.source_type = 'nodes'
                    )
                    ORDER BY {order} LIMIT ?""",
-                (session_id, depth, session_id, depth, limit),
+                (session_id, depth, session_id, depth, -1 if limit is None else limit),
             ).fetchall()
         nodes = [self._row_to_node(r) for r in rows]
         return nodes[::-1] if newest else nodes
