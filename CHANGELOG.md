@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: When Hermes refuses a compaction before session end, LCM-X restores the replay state for the conversation Hermes kept, preventing its summary head from being stored as a new user message.
+
 ## v0.30.0 (nothing lost)
 
 - Fix: At default settings, when the payload of a saved tool result cannot be written (the payload folder cannot be created, or the file write fails), the saved-output marker is now stored as the host sent it, as in v0.29.2. A session that ends while another is active (or while the store is busy) no longer loses the rows after it, usually the final reply, and a helper agent no longer stores the result again on each model call (#2599).

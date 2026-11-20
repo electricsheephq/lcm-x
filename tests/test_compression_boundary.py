@@ -488,9 +488,9 @@ def test_host_that_keeps_the_compress_input_resumes_after_it(tmp_path, monkeypat
         engine.shutdown()
 
 
-def _refused_commit(tmp_path, monkeypatch):
-    """Cycle 1 commits in place. Cycle 2 compresses and the host runs the commit end, then its
-    would_grow guard refuses the candidate: no compression start, the host keeps `pre` + reply."""
+def _unadopted_commit(tmp_path, monkeypatch):
+    """Legacy lifecycle order: the commit end ran, the compression start never arrived,
+    and the host continued with the input list."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     engine.on_session_end("S0", pre)
     engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -532,7 +532,7 @@ def test_compress_rebinds_after_a_commit_end_the_host_did_not_adopt(tmp_path, mo
     """The commit end finalized the row and the compression start never came: the next compress
     re-binds the session at its finalized frontier instead of publishing against frontier 0."""
     caplog.set_level(logging.INFO)
-    engine, host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         assert frontier > 0
         _compress_next(engine, host)
@@ -554,7 +554,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
     """(i) a normal start binds the row (nothing left to re-bind); (ii) another conversation and (iii) a
     reset after the finalize never re-bind."""
     caplog.set_level(logging.INFO)
-    engine, host, _frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, _frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         if control == "start":
             engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -578,7 +578,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
 def test_rebind_never_advances_from_the_in_process_frontier(tmp_path, monkeypatch, caplog):
     """(iv) the in-process frontier differs from the row: warn, move nothing without a publication."""
     caplog.set_level(logging.INFO)
-    engine, _host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, _host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         engine._last_compacted_store_id = frontier + 5
         monkeypatch.setattr(engine._lifecycle, "advance_frontier", lambda *a, **k: pytest.fail("advanced"))

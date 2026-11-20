@@ -890,6 +890,7 @@ class LCMEngine(
         # and output identities, so the host's commit end call and the first
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
+        self._compress_refusal = None
         self._emission_handle = None
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
@@ -2506,10 +2507,111 @@ class LCMEngine(
         Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives."""
         if self._bypasses_lcm_context_management():
             return
-        leaves = self._last_compress_leaves
-        progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
-        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
-        self._signal_emission_state("refused", self._session_id, require_conversation=True)
+        caller = threading.get_ident()
+        binding_scope = (contextlib.nullcontext() if self._stable_use_owner_thread == caller
+                         else self._exclusive_lifecycle("compaction refusal"))
+        with binding_scope:
+            leaves = self._last_compress_leaves
+            progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
+            self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+            with self._compaction_gate:
+                if self._compaction_closing or self._compress_owner is not None:
+                    return
+                self._claim_compress_owner(caller)
+            try:
+                self._signal_emission_state("refused", self._session_id, require_conversation=True)
+                if self._compress_refusal is not None:
+                    with self._store._write_lock:
+                        self._restore_refused_compaction()
+            finally:
+                with self._compaction_gate:
+                    self._release_compress_owner()
+
+    def _compaction_refusal_binding(self):
+        return self._store, self._session_id, self._conversation_id, self._pressure_yield_reset_epoch
+
+    def _snapshot_compression_input(self, snapshot=None):
+        # Keep ingest's writes and its cursor over the admitted input. Only the
+        # evidence that would make the returned list the host's is speculative.
+        if snapshot is None:
+            snapshot = dict(call=self._compress_calls, binding=self._compaction_refusal_binding(),
+                            metadata={}, uids=[], pending_uids={})
+        receipts = getattr(self, "_identity_anchor_recoveries", ())
+        watch = getattr(self, "_host_rewrite_watch", {})
+        snapshot.update(cursor=self._ingest_cursor, reconcile=self._ingest_cursor_needs_reconcile,
+                        proof=self._compress_commit_proof, descriptors=self._last_emission_descriptors,
+                        reason=self._compress_commit_reason, publication=self._compress_commit_publication,
+                        identities=getattr(self, "_last_active_replay_source_identities", None),
+                        watch={key: (identity, content, list(objects))
+                               for key, (identity, content, objects) in watch.items()},
+                        recovery=getattr(self, "_identity_anchor_recovery", None),
+                        receipts=receipts, receipt_states=[dict(receipt) for receipt in receipts])
+        return snapshot
+
+    def _write_compaction_metadata(self, key, value, *, skip_unchanged=False):
+        store = self._store
+        snapshot = getattr(self._thread_context, "compress_refusal", None)
+        if snapshot is None or snapshot["binding"] != self._compaction_refusal_binding():
+            return store.write_metadata_json([key], value, skip_unchanged=skip_unchanged)
+        with store.atomic(immediate=True):
+            previous = store._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            wrote = store.write_metadata_json([key], value, skip_unchanged=skip_unchanged)
+        if wrote:
+            changes = snapshot["metadata"]
+            if key in changes and previous == (changes[key][1],):
+                previous = changes[key][0]
+            changes[key] = (previous, value)
+        return wrote
+
+    def _restore_refused_compaction(self):
+        snapshot = self._compress_refusal
+        if (snapshot is None or snapshot["call"] != self._compress_calls
+                or snapshot["binding"] != self._compaction_refusal_binding()
+                or snapshot["output_proof"] is not self._compress_commit_proof
+                or (self._compress_commit_proof or {}).get("end_consumed")
+                or snapshot["identities"] is not getattr(self, "_last_active_replay_source_identities", None)):
+            self._compress_refusal = None
+            return
+        store = self._store
+        if snapshot["metadata"] or snapshot["uids"]:
+            with store.atomic(immediate=True):
+                proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+                proof_write = snapshot["metadata"].get(proof_key)
+                proof_replaced = proof_write is not None and store._conn.execute(
+                    "SELECT value FROM metadata WHERE key=?", (proof_key,)).fetchone() != (proof_write[1],)
+                for key, (previous, written) in snapshot["metadata"].items():
+                    if proof_replaced and key in (proof_key, self._replay_snapshot_metadata_key("host_occurrence_snapshot")):
+                        continue
+                    if previous is None:
+                        store._conn.execute("DELETE FROM metadata WHERE key=? AND value=?", (key, written))
+                    else:
+                        store._conn.execute("UPDATE metadata SET value=? WHERE key=? AND value=?",
+                                            (previous[0], key, written))
+                if snapshot["uids"]:
+                    store._conn.executemany(
+                        "DELETE FROM host_uid_bindings WHERE lineage_key=? AND uid=? AND created_at=? "
+                        "AND store_id=0 AND kind='engine'", snapshot["uids"])
+        self._ingest_cursor = snapshot["cursor"]
+        self._ingest_cursor_needs_reconcile = snapshot["reconcile"]
+        self._frontier_holder().refused_input = snapshot["identities"]
+        self._compress_commit_proof, self._last_emission_descriptors = snapshot["proof"], snapshot["descriptors"]
+        self._compress_commit_reason = snapshot["reason"]
+        self._compress_commit_publication = snapshot["publication"]
+        self._host_rewrite_watch = snapshot["watch"]
+        self._identity_anchor_recovery = snapshot["recovery"]
+        self._identity_anchor_recoveries = snapshot["receipts"]
+        for receipt, previous in zip(snapshot["receipts"], snapshot["receipt_states"]):
+            receipt.clear()
+            receipt.update(previous)
+        recorded = self.__dict__.get("_engine_uids_recorded", set())
+        recorded.difference_update(uid for _, uid, _ in snapshot["uids"])
+        pending = self.__dict__.get("_engine_uids_pending", {})
+        for uid, previous in snapshot["pending_uids"].items():
+            if previous is None:
+                pending.pop(uid, None)
+            else:
+                pending[uid] = previous
+        self._compress_refusal = None
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
@@ -4208,7 +4310,7 @@ class LCMEngine(
     def _rebind_after_unadopted_compaction_commit(self) -> None:
         """This engine is bound to (session, conversation), but the conversation's lifecycle row is
         unbound and was last finalized by this session: an end ran with no start after it. The host
-        refused the candidate after the compaction-commit end (would_grow) and sent no start, or
+        may have refused the candidate after the compaction-commit end on an older host, or
         ANOTHER engine on the same row ended the session (R5-3a: a gateway hygiene agent's deferred
         cleanup, a background-review agent's turn end). The trigger is the row's state, so it
         covers any engine or process that unbinds it.
@@ -4802,6 +4904,7 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
+        self._compress_refusal = None
         sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
@@ -5820,6 +5923,7 @@ class LCMEngine(
         session_id: str,
         messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
+        self._compress_refusal = None
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
             reason = next((reason for reason, gate in (
@@ -7369,8 +7473,8 @@ class LCMEngine(
               self._emission_lock_record(len(proof.get("output") or ()))) as timing, (
                 store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
-            self._store.write_metadata_json(
-                [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
+            self._write_compaction_metadata(
+                self._replay_snapshot_metadata_key("host_occurrence_snapshot"),
                 json.dumps(snapshot, sort_keys=True),
             )
 
@@ -7906,6 +8010,7 @@ class LCMEngine(
         # #2073: one ingest per store at a time. The attempt-local frontier holder and the other
         # per-attempt engine state below are shared by every thread that ingests through this engine.
         with (getattr(self._store, "_write_lock", None) or contextlib.nullcontext()):
+            self._compress_refusal = None
             self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
             self._no_progress_ingest_generation = self._ingest_failure_count
             self._ingest_replay_redaction_changes = {}
@@ -9025,6 +9130,15 @@ class LCMEngine(
                 self._ingest_cursor_needs_reconcile = self._store.has_session_messages(self._session_id)
             except Exception as exc:
                 logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
+                self._ingest_cursor_needs_reconcile = True
+        holder = self._frontier_holder()
+        refused_input, holder.refused_input = holder.refused_input, None
+        if refused_input is not None and not self._ingest_cursor_needs_reconcile:
+            if len(refused_input) != self._ingest_cursor or len(messages) < len(refused_input) or any(
+                _has_lossy_redacted_identity(identity)
+                or self._message_replay_identity(row, strip_carrier=False) != identity
+                for row, identity in zip(messages, refused_input)
+            ):
                 self._ingest_cursor_needs_reconcile = True
         self._capture_host_rewrites(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         n = len(messages)
