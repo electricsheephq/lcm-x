@@ -1,6 +1,8 @@
 import json
 import logging
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 
@@ -429,6 +431,130 @@ def test_refusal_defers_restore_when_lifecycle_wait_times_out(committed_host, mo
     assert _compaction_records(engine) == prior
     assert caplog.text.count("compaction refusal restore deferred") == 1
     assert caplog.text.count("deferred compaction refusal restored") == 1
+
+
+def _defer_rewriting_pass_refusal(engine, kept, monkeypatch):
+    prior = _compaction_records(engine)
+    _rewriting_pass(engine, kept)
+    snapshot = engine._compress_refusal
+    _drain_session_end_maintenance(engine)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_compaction_closing", True)
+        engine.record_rejected_compaction()
+    assert engine._compress_refusal is snapshot and snapshot["refused"]
+    assert engine._compress_commit_proof is snapshot["output_proof"]
+    assert _compaction_records(engine) != prior
+    return snapshot, prior
+
+
+@pytest.mark.parametrize("extra_reply", [False, True], ids=["kept-input", "flush"])
+def test_session_end_restores_deferred_refusal(committed_host, monkeypatch, extra_reply):
+    engine, kept, _binding = committed_host
+    snapshot, prior = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    reply = _turn(20)[1]
+    end_view = kept + [reply] if extra_reply else kept
+    assert ([engine._proof_replay_identity(m, strip_carrier=False) for m in end_view]
+            == snapshot["output_proof"]["input"]) is (not extra_reply)
+    assert snapshot["cursor"] == len(kept)
+    span = engine._attribution_span
+    classifications = []
+
+    @contextmanager
+    def observe_classifier(name):
+        if name == "classifier":
+            assert engine._compress_refusal is None
+            assert engine._compress_commit_proof is snapshot["proof"]
+            assert engine._ingest_cursor == snapshot["cursor"]
+            assert engine._last_emission_descriptors is snapshot["descriptors"]
+            assert _compaction_records(engine) == prior
+            classifications.append(name)
+        with span(name):
+            yield
+
+    monkeypatch.setattr(engine, "_attribution_span", observe_classifier)
+    before = engine._store.get_session_count("S0")
+    engine.on_session_end("S0", end_view)
+    assert classifications == ["classifier"]
+    assert not snapshot["output_proof"]["end_consumed"]
+    assert engine._ingest_cursor == len(end_view)
+    assert engine._compress_commit_proof == snapshot["proof"]
+    assert engine._last_emission_descriptors is snapshot["descriptors"]
+    assert _compaction_records(engine) == prior
+    if extra_reply:
+        _assert_only_reply(engine, before, kept[0]["content"], reply)
+    else:
+        rows = engine._store.get_session_messages("S0", limit=10_000)
+        assert len(rows) == before
+        assert all(row["content"] != kept[0]["content"] for row in rows)
+
+    def no_cold_reconcile(*args, **kwargs):
+        pytest.fail("first ingest after session end entered cold reconcile")
+
+    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", no_cold_reconcile)
+    next_row = _turn(21)[0] if extra_reply else reply
+    engine.ingest(end_view + [next_row])
+    _assert_only_reply(engine, before + int(extra_reply), kept[0]["content"], next_row)
+    assert not engine._ingest_cursor_needs_reconcile
+
+
+def test_session_end_retries_deferred_refusal_after_store_busy(committed_host, monkeypatch):
+    engine, kept, binding = committed_host
+    snapshot, prior = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+    end_view = kept + [reply]
+    refused_records = _compaction_records(engine)
+    monkeypatch.setattr(lcm_engine_module, "_SESSION_END_BUSY_TIMEOUT_MS", 50)
+    locker = sqlite3.connect(engine._store.db_path)
+    try:
+        locker.execute("BEGIN IMMEDIATE")
+        engine.on_session_end("S0", end_view)
+        tail, = engine._pending_session_tails
+        assert tail["kind"] == "cold"
+        assert tail["store"] is engine._store
+        assert tail["session_id"] == "S0"
+        assert tail["conversation_id"] == binding["conversation_id"]
+        assert tail["view"] == end_view
+        assert engine._compress_refusal is snapshot and snapshot["refused"]
+        assert engine._compress_commit_proof is snapshot["output_proof"]
+        assert _compaction_records(engine) == refused_records
+        assert engine._store.get_session_count("S0") == before
+    finally:
+        locker.close()
+
+    engine.on_session_start("S0", **binding)
+    assert not engine._pending_session_tails
+    assert engine._compress_refusal is None
+    assert engine._compress_commit_proof is snapshot["proof"]
+    assert _compaction_records(engine) == prior
+    _assert_only_reply(engine, before, kept[0]["content"], reply)
+    engine.on_session_start("S0", **binding)
+    _assert_only_reply(engine, before, kept[0]["content"], reply)
+    rows = engine._store.get_session_messages("S0", limit=10_000)
+    assert rows[-1]["role"] == reply["role"]
+    assert not any(
+        row["role"] == "user" and engine._verified_lcm_summary_prefix_end(row["content"])
+        for row in rows
+    )
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="restart after a deferred refusal re-ingests the kept input and stores its summary head")
+def test_restart_after_deferred_refusal(committed_host, monkeypatch):
+    engine, kept, binding = committed_host
+    _, prior = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    before = engine._store.get_session_count("S0")
+    reply = _turn(20)[1]
+    config, home = engine._config, str(engine._hermes_home)
+    engine.shutdown()
+    resumed = LCMEngine(config=config, hermes_home=home)
+    try:
+        resumed.on_session_start("S0", **binding)
+        resumed.ingest(kept + [reply])
+        _assert_only_reply(resumed, before, kept[0]["content"], reply)
+        assert _compaction_records(resumed) == prior
+    finally:
+        resumed.shutdown()
 
 
 def test_ingest_discards_snapshot_without_a_refusal(committed_host, monkeypatch):

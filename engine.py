@@ -5946,7 +5946,23 @@ class LCMEngine(
         session_id: str,
         messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
-        self._compress_refusal = None
+        snapshot = getattr(self, "_compress_refusal", None)
+        if snapshot and snapshot.get("refused"):
+            store = self._store
+            try:
+                with store._write_lock, _temporary_sqlite_busy_timeout(
+                    [getattr(store, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
+                ):
+                    self._restore_refused_compaction(snapshot, store, deferred=True)
+            except Exception as exc:
+                if not _is_ingest_busy_error(exc):
+                    raise
+                self._queue_cold_session_tail(messages, session_id=session_id,
+                    conversation_id=self._conversation_id, source=self._session_platform, error=exc)
+                self._ledger_count("ledger.tail.busy_at_end")
+                return
+        else:
+            self._compress_refusal = None
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
             reason = next((reason for reason, gate in (

@@ -177,7 +177,7 @@ def test_copies_own_distinct_frontier_holders(engine: Any, mode: str) -> None:
             clone.shutdown()
 
 
-def test_holder_has_only_five_fields_and_properties_forward(engine: Any) -> None:
+def test_holder_has_five_forwarded_fields_and_refused_input(engine: Any) -> None:
     from dataclasses import fields
 
     from hermes_lcm.frontier_state import FrontierState
@@ -189,9 +189,13 @@ def test_holder_has_only_five_fields_and_properties_forward(engine: Any) -> None
         "_compress_commit_proof": "commit_proof",
         "_last_emission_descriptors": "emission_descriptors",
     }
-    assert {field.name for field in fields(FrontierState)} == set(mapping.values())
+    # Refused input travels with the per-attempt frontier and commits with it.
+    assert {field.name for field in fields(FrontierState)} == {*mapping.values(), "refused_input"}
     assert isinstance(engine._frontier, FrontierState)
     state = FrontierState()
+    assert state.refused_input is engine._frontier.refused_input is None
+    assert not hasattr(engine, "refused_input")
+    assert not hasattr(engine, "_refused_input")
     for legacy, field in mapping.items():
         assert getattr(state, field) is DEFAULTS[legacy]
         value: Any = {"identity": []} if "proof" in field or "descriptors" in field else 1234
@@ -236,7 +240,7 @@ def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
 
     instance = factory(LCMEngine)
     if seeded:
-        instance._frontier = FrontierState(17, True, 23, {"proof": []}, {"rows": []})
+        instance._frontier = FrontierState(17, True, 23, {"proof": []}, {"rows": []}, refused_input=[("user", "kept")])
     previous = vars(instance._frontier).copy() if seeded else vars(FrontierState()).copy()
     writes: list[tuple[str, Any]] = []
 
@@ -254,7 +258,7 @@ def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
             instance._compaction_request = SimpleNamespace()
             instance._pressure_yield_reset_epoch = 0
             instance._reset_session_scoped_runtime_state()
-            expected += [("commit_proof", None), ("emission_descriptors", None)]
+            expected += [("commit_proof", None), ("emission_descriptors", None), ("refused_input", None)]
         assert instance._last_ingest_reconciliation == {"action": "none", "reason": "not run"}
     else:
         fitted = [{"role": "user", "content": "kept"}]
@@ -269,7 +273,7 @@ def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
     assert writes == expected
     final = previous | dict(expected)
     assert vars(instance._frontier) == final
-    for name in ("commit_proof", "emission_descriptors"):
+    for name in ("commit_proof", "emission_descriptors", "refused_input"):
         assert getattr(instance._frontier, name) is final[name]
 
 
@@ -300,7 +304,7 @@ def test_constructor_creates_one_frontier_without_transition_calls(
 def transition_state(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any], list[str]]:
     from hermes_lcm.frontier_state import FrontierState
 
-    state = FrontierState(17, True, 23, {"proof": []}, {"rows": []})
+    state = FrontierState(17, True, 23, {"proof": []}, {"rows": []}, refused_input=[("user", "kept")])
     before = vars(state).copy()
     writes: list[str] = []
 
@@ -342,9 +346,11 @@ def test_reset_progress_keeps_proofs(transition_state: Any) -> None:
     assert_frontier_transition(transition_state, {"compacted_store_id": 0, "cursor": 0, "needs_reconcile": False})
 
 
-def test_reset_proofs_keeps_progress(transition_state: Any) -> None:
+def test_reset_proofs_clears_refused_input_and_keeps_progress(transition_state: Any) -> None:
     transition_state[0].reset_proofs()
-    assert_frontier_transition(transition_state, {"commit_proof": None, "emission_descriptors": None})
+    assert_frontier_transition(
+        transition_state, {"commit_proof": None, "emission_descriptors": None, "refused_input": None},
+    )
 
 
 @pytest.mark.parametrize("method, args, updates", [

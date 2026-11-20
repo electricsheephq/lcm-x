@@ -664,8 +664,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"d85f05a036176872c58215327a8ceaa2bce6eb409c3873e15721d7c874c00fa1\", \"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 23, \"generated_span_sha256\": \"0d35fe57079d1bb33775b03706359c7cc7d707b7b4cb9c5f53a1ad115d1c74ad\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 3, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}, {\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 1, \"of\": 3, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 3, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": null, \"timestamp\": null}, {\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"8dc098e59c03eac1d17d829b3e17222400c36f79a12e4ecd5cce2fedc0102e97\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -1499,8 +1501,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -2182,8 +2186,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 2, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"d85f05a036176872c58215327a8ceaa2bce6eb409c3873e15721d7c874c00fa1\", \"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 23, \"generated_span_sha256\": \"0d35fe57079d1bb33775b03706359c7cc7d707b7b4cb9c5f53a1ad115d1c74ad\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 4, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 4, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": null, \"timestamp\": null}, {\"identity_sha256\": \"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"message_uid\": null, \"timestamp\": 11.0}, {\"identity_sha256\": \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"message_uid\": null, \"timestamp\": 12.0}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"7e69bf1a6cfa8cd3b61242277dbd9bbc42cb008923b0ec401d9ecb2fe8ab00c2\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -3038,8 +3044,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -3425,8 +3433,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -3813,8 +3823,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -4201,8 +4213,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -4790,8 +4804,10 @@
       "SELECT COALESCE(MAX(store_id), 0) FROM messages",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"recovery\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"c80b160ce40e2173d1cba3a98b03d98aa60a1c565041a03a1d81453029e1c13f\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -4819,159 +4835,11 @@
         "timestamp": 13.0
       }
     ],
-    "cursor": 2,
-    "descriptors": {
-      "conversation_id": "conv",
-      "emissions": [
-        {
-          "generated_span_bytes": 17,
-          "generated_span_sha256": "72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17",
-          "kind": "summary",
-          "output_multiplicity": 1,
-          "output_occurrence": {
-            "index": 0,
-            "of": 2,
-            "same_identity_ordinal": 0
-          },
-          "retained_source": null,
-          "role": "user",
-          "same_prefix_ordinal": 0,
-          "scope": {
-            "conversation_id": "conv",
-            "hermes_home": "fixture-home",
-            "reset_epoch": null,
-            "session_id": "S"
-          },
-          "suffix_length": 0,
-          "suffix_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-      ],
-      "hermes_home": "fixture-home",
-      "reset_epoch": null,
-      "session_id": "S",
-      "version": 4
-    },
-    "proof": {
-      "carry_ranges": [
-        [
-          "S",
-          3,
-          4
-        ]
-      ],
-      "conversation_id": "conv",
-      "effective_sha256_v3": [
-        "2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35",
-        "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635"
-      ],
-      "emissions": [
-        {
-          "generated_span_bytes": 17,
-          "generated_span_sha256": "72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17",
-          "kind": "summary",
-          "output_multiplicity": 1,
-          "output_occurrence": {
-            "index": 0,
-            "of": 2,
-            "same_identity_ordinal": 0
-          },
-          "retained_source": null,
-          "role": "user",
-          "same_prefix_ordinal": 0,
-          "scope": {
-            "conversation_id": "conv",
-            "hermes_home": "fixture-home",
-            "reset_epoch": null,
-            "session_id": "S"
-          },
-          "suffix_length": 0,
-          "suffix_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-      ],
-      "end_consumed": false,
-      "filtered": false,
-      "hermes_home": "fixture-home",
-      "input": [
-        [
-          "user",
-          "original 0",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 1",
-          "",
-          "",
-          ""
-        ],
-        [
-          "user",
-          "original 2",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "native": false,
-      "output": [
-        [
-          "user",
-          "generated summary",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "output_effective": [
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "output_metadata": [
-        {
-          "identity_sha256": null,
-          "message_uid": "engine-fixed",
-          "timestamp": null
-        },
-        {
-          "identity_sha256": "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635",
-          "message_uid": null,
-          "timestamp": 13.0
-        }
-      ],
-      "output_sha256_v3": [
-        "2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35",
-        "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635"
-      ],
-      "published": true,
-      "recovery": false,
-      "reset_epoch": null,
-      "session_id": "S",
-      "stub_first": false,
-      "version": 4
-    },
+    "cursor": 4,
+    "descriptors": null,
+    "proof": null,
     "raised": null,
-    "reason": "ready",
+    "reason": "no_proof",
     "reconcile": false,
     "returned": [
       {
@@ -5145,14 +5013,6 @@
         [
           "ignored_active_replay_placeholder_hash_ordinals:S",
           "{}"
-        ],
-        [
-          "compaction_commit_proof:S",
-          "{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}"
-        ],
-        [
-          "host_occurrence_snapshot:S",
-          "{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}"
         ]
       ],
       "summary_node_provenance": [],
@@ -5178,9 +5038,16 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "COMMIT",
+      "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
+      "DELETE FROM metadata WHERE key='compaction_commit_proof:S' AND value='{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}'",
+      "DELETE FROM metadata WHERE key='host_occurrence_snapshot:S' AND value='{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}'",
       "COMMIT"
     ]
   },
@@ -5557,8 +5424,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT value FROM metadata WHERE key = 'native_recovery_replay_snapshot_digests:S'",
@@ -6010,8 +5879,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT value FROM metadata WHERE key = 'native_recovery_replay_snapshot_digests:S'",
@@ -6292,8 +6163,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'child')",
@@ -7706,8 +7579,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"d85f05a036176872c58215327a8ceaa2bce6eb409c3873e15721d7c874c00fa1\", \"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 23, \"generated_span_sha256\": \"0d35fe57079d1bb33775b03706359c7cc7d707b7b4cb9c5f53a1ad115d1c74ad\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 3, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}, {\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 1, \"of\": 3, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 3, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": null, \"timestamp\": null}, {\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"8dc098e59c03eac1d17d829b3e17222400c36f79a12e4ecd5cce2fedc0102e97\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -8541,8 +8416,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -9224,8 +9101,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 2, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"d85f05a036176872c58215327a8ceaa2bce6eb409c3873e15721d7c874c00fa1\", \"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 23, \"generated_span_sha256\": \"0d35fe57079d1bb33775b03706359c7cc7d707b7b4cb9c5f53a1ad115d1c74ad\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 4, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 4, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": null, \"timestamp\": null}, {\"identity_sha256\": \"33fdf89e277bb790947a3d994b1cbe1ae8b94590b812e727c4ef88ba778882eb\", \"message_uid\": null, \"timestamp\": 11.0}, {\"identity_sha256\": \"a9eb62e0e0afba86bad6b125bed136f30146fa430b6677eba8eed2ab72a71df1\", \"message_uid\": null, \"timestamp\": 12.0}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"7e69bf1a6cfa8cd3b61242277dbd9bbc42cb008923b0ec401d9ecb2fe8ab00c2\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -10080,8 +9959,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -10467,8 +10348,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -10855,8 +10738,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -11243,8 +11128,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -11832,8 +11719,10 @@
       "SELECT COALESCE(MAX(store_id), 0) FROM messages",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"recovery\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"c80b160ce40e2173d1cba3a98b03d98aa60a1c565041a03a1d81453029e1c13f\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT"
     ]
@@ -11861,159 +11750,11 @@
         "timestamp": 13.0
       }
     ],
-    "cursor": 2,
-    "descriptors": {
-      "conversation_id": "conv",
-      "emissions": [
-        {
-          "generated_span_bytes": 17,
-          "generated_span_sha256": "72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17",
-          "kind": "summary",
-          "output_multiplicity": 1,
-          "output_occurrence": {
-            "index": 0,
-            "of": 2,
-            "same_identity_ordinal": 0
-          },
-          "retained_source": null,
-          "role": "user",
-          "same_prefix_ordinal": 0,
-          "scope": {
-            "conversation_id": "conv",
-            "hermes_home": "fixture-home",
-            "reset_epoch": null,
-            "session_id": "S"
-          },
-          "suffix_length": 0,
-          "suffix_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-      ],
-      "hermes_home": "fixture-home",
-      "reset_epoch": null,
-      "session_id": "S",
-      "version": 4
-    },
-    "proof": {
-      "carry_ranges": [
-        [
-          "S",
-          3,
-          4
-        ]
-      ],
-      "conversation_id": "conv",
-      "effective_sha256_v3": [
-        "2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35",
-        "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635"
-      ],
-      "emissions": [
-        {
-          "generated_span_bytes": 17,
-          "generated_span_sha256": "72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17",
-          "kind": "summary",
-          "output_multiplicity": 1,
-          "output_occurrence": {
-            "index": 0,
-            "of": 2,
-            "same_identity_ordinal": 0
-          },
-          "retained_source": null,
-          "role": "user",
-          "same_prefix_ordinal": 0,
-          "scope": {
-            "conversation_id": "conv",
-            "hermes_home": "fixture-home",
-            "reset_epoch": null,
-            "session_id": "S"
-          },
-          "suffix_length": 0,
-          "suffix_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-      ],
-      "end_consumed": false,
-      "filtered": false,
-      "hermes_home": "fixture-home",
-      "input": [
-        [
-          "user",
-          "original 0",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 1",
-          "",
-          "",
-          ""
-        ],
-        [
-          "user",
-          "original 2",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "native": false,
-      "output": [
-        [
-          "user",
-          "generated summary",
-          "",
-          "",
-          ""
-        ],
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "output_effective": [
-        [
-          "assistant",
-          "original 3",
-          "",
-          "",
-          ""
-        ]
-      ],
-      "output_metadata": [
-        {
-          "identity_sha256": null,
-          "message_uid": "engine-fixed",
-          "timestamp": null
-        },
-        {
-          "identity_sha256": "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635",
-          "message_uid": null,
-          "timestamp": 13.0
-        }
-      ],
-      "output_sha256_v3": [
-        "2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35",
-        "d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635"
-      ],
-      "published": true,
-      "recovery": false,
-      "reset_epoch": null,
-      "session_id": "S",
-      "stub_first": false,
-      "version": 4
-    },
+    "cursor": 4,
+    "descriptors": null,
+    "proof": null,
     "raised": null,
-    "reason": "ready",
+    "reason": "no_proof",
     "reconcile": false,
     "returned": [
       {
@@ -12187,14 +11928,6 @@
         [
           "ignored_active_replay_placeholder_hash_ordinals:S",
           "{}"
-        ],
-        [
-          "compaction_commit_proof:S",
-          "{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}"
-        ],
-        [
-          "host_occurrence_snapshot:S",
-          "{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}"
         ]
       ],
       "summary_node_provenance": [],
@@ -12220,9 +11953,44 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "COMMIT",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='session_lineage:S'",
+      "PRAGMA busy_timeout",
+      "PRAGMA busy_timeout=100",
+      "BEGIN IMMEDIATE",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='session_lineage:S'",
+      "UPDATE ledger_meta SET value=CAST(value AS INTEGER)+1 WHERE key='view_seq'",
+      "SELECT value FROM ledger_meta WHERE key='view_seq'",
+      "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id,recovered_store_id) VALUES ('fixture-lineage',2,0,x'22530e56628c467f11c4ebdf016c7b7e','summary','[]','proposed',NULL,(SELECT CASE WHEN count(*)=1 THEN min(store_id) END FROM messages WHERE role='user' AND session_id=NULL AND (conversation_id IN (NULL, '') OR conversation_id IS NULL) AND observed_at=NULL AND store_id<=NULL))",
+      "INSERT INTO ingest_views VALUES ('fixture-lineage',2,'emission','proposed',x'0122530e56628c467f11c4ebdf016c7b7e060000000000000000000000000000000087cd33f0232f1428728f17e85bcdd0e60000000000000001c50eab78e12867ac8f271473bfc6c43d099a53ff3cf2cd56122c3b263757126aa3000000000000000000000000000000000000000000000000',x'334d7761efc1dd73292a559958b8fb2114b672f1c0d7d0f6ca7f9bcddff5766b')",
+      "DELETE FROM ingest_views WHERE lineage='fixture-lineage' AND kind='emission' AND view_seq NOT IN (SELECT view_seq FROM ingest_views WHERE lineage='fixture-lineage' AND kind='emission' ORDER BY view_seq DESC LIMIT 2)",
+      "COMMIT",
+      "PRAGMA busy_timeout=30000",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "PRAGMA busy_timeout",
+      "PRAGMA busy_timeout=100",
+      "BEGIN IMMEDIATE",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='digest_salt'",
+      "SELECT value FROM ledger_meta WHERE key='session_lineage:S'",
+      "UPDATE ledger_emissions SET state='refused' WHERE lineage='fixture-lineage' AND view_seq=2 AND state='proposed'",
+      "UPDATE ingest_views SET state='refused' WHERE lineage='fixture-lineage' AND view_seq=2 AND kind='emission' AND state='proposed'",
+      "COMMIT",
+      "PRAGMA busy_timeout=30000",
+      "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
+      "DELETE FROM metadata WHERE key='compaction_commit_proof:S' AND value='{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}'",
+      "DELETE FROM metadata WHERE key='host_occurrence_snapshot:S' AND value='{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}'",
       "COMMIT"
     ]
   },
@@ -12599,8 +12367,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT value FROM metadata WHERE key = 'native_recovery_replay_snapshot_digests:S'",
@@ -13052,8 +12822,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT value FROM metadata WHERE key = 'native_recovery_replay_snapshot_digests:S'",
@@ -13334,8 +13106,10 @@
       "SELECT value FROM metadata WHERE key = 'folded_tail_lineage:S'",
       "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n               FROM (\n                   SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, observed_at, observed_at_source\n                   FROM messages\n                   WHERE session_id = 'S'\n                   ORDER BY store_id DESC\n                   LIMIT 1\n               )\n               ORDER BY store_id",
       "BEGIN IMMEDIATE",
+      "SELECT value FROM metadata WHERE key='compaction_commit_proof:S'",
       "SELECT value FROM metadata WHERE key = 'compaction_commit_proof:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('compaction_commit_proof:S', '{\"carry_ranges\": [[\"S\", 3, 4]], \"conversation_id\": \"conv\", \"created_at\": 1700001000.0, \"descriptor_version\": 4, \"droppable\": [], \"effective_sha256\": [\"2e30212386d2ca313449a640d89a474f9ca9d4d053c683b2197cbcacde95ef35\", \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"effective_sha256_v4\": [\"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\"], \"emissions\": [{\"generated_span_bytes\": 17, \"generated_span_sha256\": \"72e0f388aca3af45d26ae59dad12a62f36f3f71eed4251c011b7c5a656d1bd17\", \"kind\": \"summary\", \"output_multiplicity\": 1, \"output_occurrence\": {\"index\": 0, \"of\": 2, \"same_identity_ordinal\": 0}, \"retained_source\": null, \"role\": \"user\", \"same_prefix_ordinal\": 0, \"scope\": {\"conversation_id\": \"conv\", \"hermes_home\": \"fixture-home\", \"reset_epoch\": null, \"session_id\": \"S\"}, \"suffix_length\": 0, \"suffix_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"}], \"hermes_home\": \"fixture-home\", \"last_store_id\": 4, \"native\": false, \"native_summary_index\": null, \"reset_epoch\": null, \"session_id\": \"S\", \"skip_landing\": [], \"version\": 3}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
+      "SELECT value FROM metadata WHERE key='host_occurrence_snapshot:S'",
       "\n                    INSERT INTO metadata(key, value)\n                    VALUES('host_occurrence_snapshot:S', '{\"output_length\": 2, \"output_metadata\": [{\"identity_sha256\": null, \"message_uid\": \"engine-fixed\", \"timestamp\": null}, {\"identity_sha256\": \"d9734d3e1d0ae8268f76a4aee5336d5f6bf3f9ceed9b41f4ad4a9a19b51e9635\", \"message_uid\": null, \"timestamp\": 13.0}], \"proof_sha256\": \"28c5a4ee0f7191bb826c9636485354c0eebac12b6aca0ae89f3fad832c93d5a5\"}')\n                    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n                    ",
       "COMMIT",
       "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'child')",

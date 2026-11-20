@@ -40,7 +40,7 @@ if __name__ == "__main__":
     sys.modules["hermes_lcm"] = package
 
 import tests.conftest  # noqa: E402, F401
-from tests.behaviour.frontier_observer import legacy_frontier_fields, observed_attribute  # noqa: E402
+from tests.behaviour.frontier_observer import REFUSED_INPUT, frontier_fields, observed_attribute  # noqa: E402
 from tests.behaviour.reconcile_trace_harness import (  # noqa: E402
     Canonical, LiteralPattern, NOTE, Scenario as ReplayScenario, encoded, fingerprint,
     first_difference as first_difference, install_clock as install_replay_clock, rows, seed_proof,
@@ -62,6 +62,8 @@ DIAGNOSTIC_ATTRIBUTES = frozenset({
     # #2856: read by the replay-identity wrapper only, never an ingest outcome: the live identity memo
     # (output-neutral by its own oracle and the session differential) and the storage-open flag that gates it.
     "_replay_identity_memo", "_storage_ready",
+    # Ingest restores these labels for the session-end diagnostic; the proof itself is observed.
+    "_compress_commit_publication", "_compress_commit_reason",
 })
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
@@ -69,6 +71,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_ingest_generation", "_no_progress_observed_tokens", "_ingest_replay_redaction_changes",
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
+    REFUSED_INPUT,
     "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
     "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
@@ -97,7 +100,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
     "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
     "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
-    "_compress_calls", "_emission_handle",
+    "_compress_calls", "_compress_refusal", "_emission_handle", "_pressure_yield_reset_epoch",
 }) | DIAGNOSTIC_ATTRIBUTES
 Trace = list[str]
 Message = dict[str, Any]
@@ -214,7 +217,7 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
             continue
         visited.add(name)
         method = methods[name]
-        attributes |= legacy_frontier_fields(method)
+        attributes |= frontier_fields(method)
         owner = next((key.split(".")[0] for key, value in methods.items() if "." in key and value is method), "")
         mro = [cls.__name__ for cls in engine_module.LCMEngine.__mro__]
         for node in ast.walk(method):
@@ -386,12 +389,15 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             for field in dataclasses.fields(value):
                 register(getattr(value, field.name))
-    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
+    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {
+        "_store", "_dag", "_lifecycle", "_host_rewrite_store", "_compress_refusal",
+    }):
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
                                             "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
                                             "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_compress_calls", "_emission_handle",
+                                            "_pressure_yield_reset_epoch",  # Binding check for the pending refusal.
                                             "_ledger_rollback_failures_published",
                                             "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
                                             "_identity_anchor_durable_recovery_pending",  # Read admission only; writes recheck scope.
@@ -403,6 +409,12 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         value = observed_attribute(engine, name)
         if name == "_rotation_lineage_unrecorded" and value == {"absent": True}:
             continue  # New fail-closed guard: observe it when set; preserve existing absent-state outcomes.
+        if name == REFUSED_INPUT and value is None:
+            continue  # Observe the guard only when it carries a refused input.
+        if name == "_compress_refusal":
+            if not value or value.get("refused") is not True:
+                continue
+            value = True  # Only the deferred mark is stable; the snapshot owns live objects.
         if name == "_db_path":
             continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:

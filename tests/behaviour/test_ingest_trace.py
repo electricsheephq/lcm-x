@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from tests.behaviour import ingest_trace_harness as harness
+from tests.behaviour.frontier_observer import REFUSED_INPUT
 from tests.behaviour.ingest_trace_harness import (
     GOLDEN, OBSERVED_ATTRIBUTES, SCENARIOS, TRACE_GUIDANCE, IngestCanonical,
     engine_attributes, engine_module, first_difference, observe,
@@ -56,6 +57,7 @@ def test_observer_completeness(tmp_path: Path) -> None:
     assert "_ingest_messages" in methods
     assert discovered <= OBSERVED_ATTRIBUTES, f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES)}"
     assert "_ingest_cursor" in discovered
+    assert REFUSED_INPUT in discovered
     assert "_identity_anchor_commit" in methods
     # The closure follows a future extracted phase and that phase's helper.
     (tmp_path / "engine.py").write_text(
