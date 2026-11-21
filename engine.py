@@ -7169,6 +7169,17 @@ class LCMEngine(
                     r, c = (x[0] if len(x) > 0 else None), (x[1] if len(x) > 1 else None)
                 c = c if isinstance(c, str) else str(c)
                 return "%s:%d:%s" % (r, len(c), c[:28].replace("\n", " "))
+            try:
+                _pid = self._message_replay_identity(prior, strip_carrier=False)
+                _src = self._survival_projection_source(prior, "user", span)
+                from .survival_codec import projection_mark_candidates as _pmc
+                _marks = [m.groups()[:3] for m in _pmc(span, None)]
+                logger.info("LCM C1A-DEBUG prior_identity=%s equal_to_source=%s proj_source=%s marks=%s",
+                            _brief(_pid), tuple(_pid[:2]) == tuple(cached[index][:2]),
+                            None if _src is None else (_src.get("store_id"), _src.get("role"), len(str(_src.get("content")))),
+                            _marks[:4])
+            except Exception as _e:
+                logger.info("LCM C1A-DEBUG prior_identity failed %r", _e)
             logger.info("LCM C1A-DEBUG lists source=%s", [_brief(x) for x in cached])
             logger.info("LCM C1A-DEBUG lists replay=%s", [_brief(x) for x in replay])
             logger.info("LCM C1A-DEBUG lists messages=%s", [_brief(x) for x in messages])
