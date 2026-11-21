@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
+from .config import ingest_ledger_mode
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
@@ -40,8 +41,9 @@ from .escalation import (
 from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import redact_sensitive_value
-from . import leaf_prep
+from . import ingest_ledger, leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
+from .message_analysis import _is_codex_interim
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
@@ -2199,6 +2201,66 @@ class CompactionMixin:
                 after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
 
+    @staticmethod
+    def _plain_assistant_replay_text(row):
+        content = row.get("content")
+        if (row.get("role") != "assistant" or not isinstance(content, str)
+                or row.get("tool_calls") or row.get("tool_call_id") or _is_codex_interim(row)):
+            return ""
+        text = content.strip()
+        if _contains_sensitive_redaction(text):
+            return ""
+        # The store serializes structured content as JSON.
+        if text.startswith(("[", "{")):
+            try:
+                if isinstance(json.loads(text), (list, dict)):
+                    return ""
+            except ValueError:
+                pass
+        return text
+
+    def _match_refused_assistant_replay(self, working, raw_tail, *, carrier):
+        """Match the suffix through the frontier, retaining both ids for each merged reply."""
+        self._load_host_rewrite_overrides(raw_tail)
+        upper = len(raw_tail)
+        merged_ids = set()
+        matched = []
+        for offset in range(len(working) - 1, -1, -1):
+            if upper == 0:
+                return [], set()
+            message, row = working[offset], raw_tail[upper - 1]
+            if self._replay_row_admits(message, row, carrier=carrier and offset == 0):
+                upper -= 1
+            elif upper >= 2 and self._plain_assistant_replay_text(message):
+                base = raw_tail[upper - 2]
+                left = self._plain_assistant_replay_text(base)
+                right = self._plain_assistant_replay_text(row)
+                if not (left and right and message["content"] == left + "\n" + right):
+                    return [], set()
+                merged_ids.update((int(base["store_id"]), int(row["store_id"])))
+                upper -= 2
+            else:
+                return [], set()
+            matched.append(row)
+        return matched[::-1], merged_ids
+
+    def _latest_compaction_was_refused(self):
+        # The existing emission mark survives a clean restart. It gates only
+        # this compaction fallback and never changes cold ingest's proof.
+        try:
+            if ingest_ledger_mode() == "off" or self._store.ingest_ledger_state() != "ready":
+                return False
+            conn = self._store._conn
+            lineage = ingest_ledger.persisted_lineage(conn, self._session_id, None)
+            if lineage is None:
+                resolved, _ = self._host_uid_lineage_key(self._session_id, require_complete=True)
+                lineage = ingest_ledger.lineage_key(resolved, self._session_id)
+            view = ingest_ledger.newest_view(conn, lineage, "emission")
+            return bool(view and view["state"] == "refused")
+        except Exception:
+            logger.debug("LCM refused emission proof unavailable during compaction replay", exc_info=True)
+            return False
+
     def _committed_replay_drops(
         self,
         working: List[Dict[str, Any]],
@@ -2232,8 +2294,9 @@ class CompactionMixin:
             (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
             len(working),
         )
+        merged_ids: set[int] = set()
         for collapse in (False, True):  # #535: raw rows first, then a stored merge-append pair as one row
-            rows = self._store.get_session_rows_through(self._session_id, frontier, (1 + collapse) * (end - start))
+            raw_tail = rows = self._store.get_session_rows_through(self._session_id, frontier, (1 + collapse) * (end - start))
             rows = self._collapse_merge_append_bases(rows)[-(end - start):] if collapse and end > start else rows
             if (carrier or start > scaffold) and (collapse or len(rows) != end - start):  # #526: a rotation child's run is its lineage
                 lineage = self._head_lineage_rows(working[start if carrier else start - 1], frontier, (1 + collapse) * (end - start)) or []
@@ -2246,7 +2309,18 @@ class CompactionMixin:
             ):
                 break
         else:
-            return [], ids, 0, 0
+            replay = working[start:end]
+            if len(raw_tail) <= len(replay) or int(raw_tail[-1]["store_id"]) != frontier:
+                return [], ids, 0, 0
+            has_joined_reply = any(
+                row.get("role") == "assistant" and isinstance(row.get("content"), str)
+                and "\n" in row["content"] for row in replay
+            )
+            if not has_joined_reply or not self._latest_compaction_was_refused():
+                return [], ids, 0, 0
+            rows, merged_ids = self._match_refused_assistant_replay(replay, raw_tail, carrier=carrier)
+            if not merged_ids:
+                return [], ids, 0, 0
         after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
         if [int(row["store_id"]) for row in after] != ([ids[id(working[end])]] if end < len(working) else []):
             return [], ids, 0, 0
@@ -2254,7 +2328,7 @@ class CompactionMixin:
         lineage = {store_id for _node, _tokens, store_id in leaf_sources}
         replies = {"assistant", "tool"}
         low, high = (min(lineage), max(lineage)) if lineage else (0, 0)
-        if not lineage or any(
+        if not lineage or not merged_ids <= lineage or any(
             int(row["store_id"]) > high and str(row.get("role") or "") not in replies
             for row in rows
         ):
@@ -2265,7 +2339,7 @@ class CompactionMixin:
             if int(row["store_id"]) in lineage
             or (int(row["store_id"]) > low and str(row.get("role") or "") in replies)
         }
-        dropped_ids = set(dropped.values())
+        dropped_ids = set(dropped.values()) | merged_ids
         covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}
         return [*range(scaffold, start), *sorted(dropped)], ids, sum(covering.values()), len(rows) - len(dropped)
 

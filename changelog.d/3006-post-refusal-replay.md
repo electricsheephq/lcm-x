@@ -1,0 +1,1 @@
+- Fix: After Hermes refuses a compaction, LCM-X can reuse the saved leaves for adjacent plain-text assistant replies that it had merged into one. A clean shutdown also applies a deferred refusal rollback before closing the store, preventing a duplicate summary head on restart.

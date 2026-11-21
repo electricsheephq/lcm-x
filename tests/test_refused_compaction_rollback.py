@@ -538,9 +538,7 @@ def test_session_end_retries_deferred_refusal_after_store_busy(committed_host, m
     )
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="restart after a deferred refusal re-ingests the kept input and stores its summary head")
-def test_restart_after_deferred_refusal(committed_host, monkeypatch):
+def test_clean_restart_applies_deferred_refusal_at_shutdown(committed_host, monkeypatch):
     engine, kept, binding = committed_host
     _, prior = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
     before = engine._store.get_session_count("S0")
