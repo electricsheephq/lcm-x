@@ -1,5 +1,6 @@
 """Cold-bind regressions for host-built tool results (synthetic gateway and CLI)."""
 
+from collections import Counter
 from contextlib import closing, contextmanager
 from copy import deepcopy
 import hashlib
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import store, tokens
+from hermes_lcm import engine as lcm_engine, store, tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -26,23 +27,24 @@ ZERO_BINDS = [0] * 5
 class Transcript:
     """Keep host history independent of the LCM store across engine restarts."""
 
-    def __init__(self, name_only, replay_name="tool_name"):
+    def __init__(self, name_only, replay_name="tool_name", *, name_only_exchange=60):
         self.rows = []
         self.name_only = name_only
         self.replay_name = replay_name
+        self.name_only_exchange = name_only_exchange
 
-    def history(self, gateway):
-        history = deepcopy(self.rows)
+    def history(self, gateway, *, drop_head=0):
+        history = deepcopy(self.rows[drop_head:])
         for row in history:
             row.pop("name", None)
-            if row.get("tool_call_id") == f"call_{60:012x}" and self.replay_name != "tool_name":
+            if row.get("tool_call_id") == f"call_{self.name_only_exchange:012x}" and self.replay_name != "tool_name":
                 name = row.pop("tool_name", None)
                 if self.replay_name == "name":
                     row["name"] = name
             if gateway and row["role"] != "user":
-                row.pop("timestamp")
+                row.pop("timestamp", None)
             if gateway and row["role"] == "assistant" and not row.get("tool_calls"):
-                row.pop("_db_row_snapshot")
+                row.pop("_db_row_snapshot", None)
         return history
 
     def turn(self, engine, history, exchange):
@@ -57,7 +59,7 @@ class Transcript:
             "role": "tool", "tool_call_id": call_id, "name": TOOL,
             "content": f"[t{exchange}] r" + FILL * 60,
         }
-        if self.name_only != "all" and not (self.name_only == "one" and exchange == 60):
+        if self.name_only != "all" and not (self.name_only == "one" and exchange == self.name_only_exchange):
             result["tool_name"] = TOOL
         reply = {"role": "assistant", "content": f"[r{exchange}] a" + FILL * 10, "finish_reason": "stop"}
         live = list(history) + [user]
@@ -130,6 +132,89 @@ def _bind_counts(bind, transcript, *, gateway=True, count=5):
             transcript.turn(engine, transcript.history(True) if gateway else live, exchange + 1)
             engine.on_session_end(SESSION, transcript.history(gateway))
     return counts
+
+
+def _turn_row_key(row):
+    calls = row.get("tool_calls") or ()
+    return row["role"], row["content"], row.get("tool_call_id"), tuple(call["id"] for call in calls)
+
+
+@pytest.mark.parametrize(("drop_head", "preamble"), [
+    pytest.param(40, False, id="drop-40"),
+    pytest.param(1, False, id="drop-1"),
+    pytest.param(4, False, id="drop-4-complete-exchange"),
+    pytest.param(4, True, id="drop-4-cut-call"),
+])
+def test_gateway_name_only_truncated_cold_binds(bind, drop_head, preamble):
+    transcript = Transcript("one")
+    if preamble:
+        transcript.rows = [
+            {"role": "user", "content": "preamble user", "timestamp": START - 2},
+            {"role": "assistant", "content": "preamble reply", "timestamp": START - 1,
+             "_db_row_snapshot": "preamble"},
+        ]
+    _seed(bind, transcript, gateway=True)
+    assert transcript.rows[drop_head]["role"] == ("tool" if preamble else (
+        "assistant" if drop_head == 1 else "user"
+    ))
+
+    counts = []
+    with bind() as engine:
+        original = engine._store.get_session_messages(SESSION)
+    all_writes = []
+    for exchange in range(EXCHANGES + 1, EXCHANGES + 7, 2):
+        with bind() as engine:
+            for current in (exchange, exchange + 1):
+                before = engine._store.get_session_count(SESSION)
+                transcript.turn(engine, transcript.history(True, drop_head=drop_head), current)
+                rows = engine._store.get_session_messages(SESSION)
+                writes = rows[before:]
+                if current == exchange:
+                    counts.append(len(writes) - 4)
+                all_writes.append((transcript.rows[-4:], writes))
+            engine.on_session_end(SESSION, transcript.history(True, drop_head=drop_head))
+    print(f"drop {drop_head}, cut call {preamble}: {counts}")
+    assert counts == [0, 0, 0]
+    assert rows[:len(original)] == original
+    all_counts = Counter(map(_turn_row_key, rows))
+    for expected, writes in all_writes:
+        assert list(map(_turn_row_key, expected)) == list(map(_turn_row_key, writes))
+        assert all(all_counts[_turn_row_key(row)] == 1 for row in expected)
+
+
+def test_post_compaction_name_only_cold_binds_are_part_3(bind, monkeypatch):
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation",
+                        lambda **_: ("Earlier turns.\nExpand for details about: turns", 1))
+    transcript = Transcript("one", name_only_exchange=20)
+    with bind() as engine:
+        for exchange in range(20):
+            live = transcript.turn(engine, transcript.history(True), exchange)
+        with monkeypatch.context() as compact:
+            compact.setattr(engine._config, "fresh_tail_count", 8)
+            compact.setattr(engine._config, "leaf_chunk_tokens", 400)
+            compact.setattr(engine._config, "context_threshold", 0.001)
+            view = engine.compress(list(live), current_tokens=900_000, force=True)
+        engine.note_turn_complete()
+        assert len(view) < len(live)
+        transcript.rows = deepcopy(view)
+        for index, row in enumerate(transcript.rows):
+            row.setdefault("_db_row_snapshot", f"compacted-{index}")
+            if row["role"] == "tool" and row.get("name") and not row.get("tool_name"):
+                row["tool_name"] = row["name"]
+        for exchange in range(20, 24):
+            transcript.turn(engine, transcript.history(True), exchange)
+        engine.on_session_end(SESSION, transcript.history(True))
+
+    counts = []
+    for exchange in range(24, 32, 2):
+        with bind() as engine:
+            before = engine._store.get_session_count(SESSION)
+            transcript.turn(engine, transcript.history(True), exchange)
+            counts.append(engine._store.get_session_count(SESSION) - before - 4)
+            transcript.turn(engine, transcript.history(True), exchange + 1)
+            engine.on_session_end(SESSION, transcript.history(True))
+    print(f"post-compaction copies (part 3): {counts}")
+    assert counts == [6, 0, 0, 0]
 
 
 def _clear_stored_name(tmp_path, exchange=60, name=None):
@@ -335,6 +420,59 @@ def test_full_history_tool_name_fallback_keeps_existing_guards(
             incoming[0]["timestamp"] += 1
         cursor = engine._reconcile_ingest_cursor_from_store(incoming)
     assert (cursor == len(rows)) is replayed
+
+
+def _repeated_exchange():
+    return [
+        {"role": "user", "content": "same question", "timestamp": START},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "reused", "type": "function", "function": {"name": TOOL, "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "reused", "tool_name": TOOL, "content": "same result"},
+        {"role": "assistant", "content": "same reply"},
+    ]
+
+
+@pytest.mark.parametrize("change", [None, "different-tool", "owner-cut", "restamp", "content", "call-id"])
+def test_truncated_tool_name_fallback_keeps_existing_guards(bind, change):
+    stored = [{"role": "assistant", "content": "older reply"}, *_repeated_exchange()]
+    incoming = deepcopy(stored[1:])
+    stored[3].pop("tool_name")
+    if change == "different-tool":
+        incoming[1]["tool_calls"][0]["function"]["name"] = OTHER_TOOL
+        incoming[2]["tool_name"] = OTHER_TOOL
+    elif change == "owner-cut":
+        incoming = incoming[2:]
+    elif change == "restamp":
+        incoming[0]["timestamp"] += 1
+    elif change == "content":
+        incoming[2]["content"] += " changed"
+    elif change == "call-id":
+        incoming[2]["tool_call_id"] = "different-id"
+
+    with bind() as engine:
+        engine._store.append_batch(SESSION, stored)
+    with bind() as engine:
+        cursor = engine._reconcile_ingest_cursor_from_store(incoming)
+    print(f"suffix guard {change}: cursor {cursor} of {len(incoming)}")
+    assert (cursor == len(incoming)) is (change is None)
+
+
+@pytest.mark.parametrize("repeats", [3, 5])
+@pytest.mark.parametrize("leading_nameless", [False, True], ids=["exact-leading-result", "owner-cut"])
+def test_truncated_tool_name_fallback_uses_only_the_aligned_suffix(bind, repeats, leading_nameless):
+    stored = [row for _ in range(repeats) for row in _repeated_exchange()]
+    incoming = deepcopy(stored[2:])
+    stored[-2].pop("tool_name")
+    if leading_nameless:
+        stored[2].pop("tool_name")
+
+    with bind() as engine:
+        engine._store.append_batch(SESSION, stored)
+    with bind() as engine:
+        cursor = engine._reconcile_ingest_cursor_from_store(incoming)
+    print(f"repeated groups {repeats}, leading nameless {leading_nameless}: cursor {cursor} of {len(incoming)}")
+    assert (cursor == len(incoming)) is (not leading_nameless)
 
 
 @pytest.mark.parametrize(("name_only", "gateway"), [("none", True), ("one", False)], ids=["ordinary", "cli"])
