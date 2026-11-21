@@ -7106,9 +7106,9 @@ class LCMEngine(
     def _restored_objective_index(self, messages, proof):
         """Bind the persist override to a standalone objective and its stored source.
 
-        The caller still has to prove the ordered compaction tail. The last
-        ingested view supplies the emitted bytes when a later fit left only
-        the durable proof's digests.
+        Hermes stamps the generated row when it adopts the compacted view.
+        Its finalizer replaces the content but keeps that occurrence's metadata.
+        The caller still has to prove the ordered compaction tail.
         """
         emissions = proof.get("emissions")
         if proof.get("native") or not emissions:
@@ -7126,11 +7126,16 @@ class LCMEngine(
         binding = self._emission_binding()
         if not self._emission_proof_matches_binding(proof, binding):
             return None
-        emitted = proof.get("output") or self._last_active_replay_source_identities or ()
-        if index >= len(emitted) or emitted[index][0] != "user":
+        cached = self._last_active_replay_source_identities
+        replay = self._last_active_replay_messages
+        if index >= min(len(cached), len(replay)):
             return None
-        span = emitted[index][1]
-        if not span.startswith(prefix + content):
+        prior = replay[index]
+        span = prior.get("content")
+        metadata = self._host_occurrence_metadata(row)
+        if (prior.get("role") != "user" or not isinstance(span, str) or cached[index][:2] != ("user", span)
+                or not any(value is not None for value in metadata.values())
+                or metadata != self._host_occurrence_metadata(prior) or not span.startswith(prefix + content)):
             return None
         suffix = span[len(prefix) + len(content):]
         if suffix and (not suffix.startswith("\n\n---\n\n")
@@ -7145,8 +7150,8 @@ class LCMEngine(
             and e.get("output_multiplicity") == 1 and e.get("generated_span_bytes") == len(data)
             and e.get("generated_span_sha256") == digest
         ), None)
-        uid = row.get("message_uid")
-        if descriptor is None or (uid is not None and uid != descriptor.get("engine_uid")):
+        if descriptor is None or (descriptor.get("engine_uid") is not None
+                                  and descriptor["engine_uid"] != metadata["message_uid"]):
             return None
         frontier = int(self._last_compacted_store_id or 0)
         sources = self._store.find_session_rows_by_content(self._session_id, "user", content, frontier, limit=2)
@@ -7154,7 +7159,7 @@ class LCMEngine(
             return None
         source = sources[0]
         identity = self._message_replay_identity(row, strip_carrier=False)
-        if (not _has_lossy_redacted_identity(identity) and self._survival_stamp_matches(row, source)
+        if (not _has_lossy_redacted_identity(identity)
                 and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
             return index
         return None
@@ -7170,8 +7175,7 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        projection, identities = self._occurrence_replay_identities(
-            messages, proof, restore_objective=bool(proof.get("end_consumed")))
+        projection, identities = self._occurrence_replay_identities(messages, proof, restore_objective=True)
         for index, identity in enumerate(identities):
             if len(effective) == len(target):
                 if identity is None and projection.entries[index].kind == "recovery":
@@ -7673,8 +7677,7 @@ class LCMEngine(
         if not target:
             return {}
         result, matched = {}, 0
-        projection, identities = self._occurrence_replay_identities(
-            messages[:cursor], proof, restore_objective=bool(proof.get("end_consumed") or not proof.get("output")))
+        projection, identities = self._occurrence_replay_identities(messages[:cursor], proof, restore_objective=True)
         for index, identity in enumerate(identities):
             if identity is None:
                 continue
