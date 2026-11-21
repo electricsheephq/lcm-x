@@ -9189,15 +9189,20 @@ class LCMEngine(
 
         def freeze_trip_witness():
             keys = Counter()
-            for message in messages:
-                try:
-                    if self._matches_ignore_message_patterns(message):
-                        continue
-                except Exception:
-                    continue
+            patterns = bool(getattr(self, "_compiled_ignore_message_patterns", None))
+            for idx, message in enumerate(messages):
                 key = _trip_key(message)
-                if key is not None:
-                    keys[key] += 1
+                if key is None:
+                    continue  # text rows never witness, so they never reach the pattern check
+                # Patterns run on the tail this ingest classified only (the scan-only-new-tail contract);
+                # earlier rows were classified by earlier ingests, and the trip never credits an ignored view row.
+                if patterns and idx >= scan_start:
+                    try:
+                        if self._matches_ignore_message_patterns(message):
+                            continue  # an ignored row is never stored, so it never witnesses (F4)
+                    except Exception:
+                        continue
+                keys[key] += 1
             self._trip_witness = (self._session_id, keys)
 
         def remember(active):
