@@ -56,6 +56,7 @@ def fixed_saving(eng, save_chars):
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "_host_has_post_tool_reanchor", lambda: True)
     force_char_estimate(monkeypatch)
     home = tmp_path / "hermes-home"
     home.mkdir()
