@@ -105,6 +105,9 @@ def test_trip_discriminator_stores_only_fresh_rows(tmp_path, monkeypatch):
         u0, a0 = _u("T0 user turn", 1000), _a("reply to T0", 1001)
         u1 = _u("T1 user turn", 1002)
         call1, result1 = _call("call_d1", 1003), _result("call_d1", "result d1", 1004)
+        # Unstamped tool rows: the stamp pre-match cannot prove them, so on a trip only the witness credits them.
+        call1.pop("timestamp", None)
+        result1.pop("timestamp", None)
         unstamped = {"role": "assistant", "content": "an unstamped reply" + PAD}
         u2, a2 = _u("T2 user turn", 1006), _a("reply to T2", 1007)
         stored_view = [u0, a0, u1, call1, result1, unstamped, u2, a2]
@@ -114,10 +117,16 @@ def test_trip_discriminator_stores_only_fresh_rows(tmp_path, monkeypatch):
         u3 = _u("T3 user turn", 2000)
         call2, result2 = _call("call_d2", 2001), _result("call_d2", "result d2", 2002)
         a3 = _a("reply to T3", 2003)
+        # A fresh pair below the cursor makes the presence scan need its window, so it trips; the stored pair beside
+        # it is then credited only by the witness of the previous ingest.
+        fresh_call, fresh_result = _call("call_d1f", 1005), _result("call_d1f", "fresh d1f", 1005.5)
         monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
-        engine.ingest([u0, a0, edited, call1, result1, unstamped, u2, a2, u3, call2, result2, a3])
+        seen = _spy_unaccounted(monkeypatch, engine)
+        engine.ingest([u0, a0, edited, call1, result1, unstamped, fresh_call, fresh_result, u2, a2,
+                       u3, call2, result2, a3])
+        assert seen and seen[0][1] is None, "setup: the presence scan must trip"
         added = _counts(engine) - before
-        assert added == Counter(_key(row) for row in (edited, u3, call2, result2, a3)), added
+        assert added == Counter(_key(row) for row in (edited, fresh_call, fresh_result, u3, call2, result2, a3)), added
     finally:
         engine.shutdown()
 
