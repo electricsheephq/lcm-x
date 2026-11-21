@@ -169,7 +169,10 @@
   "access_context/**",
   "access_policy/**",
   "teams/**",
-  "skills/**"
+  "skills/**",
+  "bench/specs/test-impact-map.json",
+  "bench/specs/test-impact-map.md",
+  "scripts/release/suite_impact.py"
  ],
  "ignored_paths": [
   ".agents/**",
@@ -763,7 +766,8 @@
    ],
    "inputs": [
     "hermes-host",
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release L1, after the tag",
    "note": "Exports the whole plugin tree, so any product file is an input.",
@@ -789,7 +793,8 @@
    ],
    "inputs": [
     "hermes-host",
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release, before the tag",
    "note": "Same instrument and inputs as C1a.",
@@ -822,7 +827,8 @@
     "M17",
     "M12",
     "M13",
-    "M19"
+    "M19",
+    "M10"
    ],
    "paths": [],
    "inputs": [
@@ -844,7 +850,8 @@
    ],
    "paths": [],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release L1",
    "note": "",
@@ -865,7 +872,8 @@
     "bench/tools/d8_guard.py"
    ],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release L1",
    "note": "",
@@ -905,7 +913,8 @@
     "tests/test_issue_10_persisted_output_spillover.py"
    ],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release L1",
    "note": "",
@@ -922,7 +931,8 @@
    "paths": [],
    "inputs": [
     "provider-route",
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release L1",
    "note": "",
@@ -942,7 +952,8 @@
    "paths": [],
    "inputs": [
     "provider-route",
-    "instrument-pin"
+    "instrument-pin",
+    "baseline"
    ],
    "when": "Release L1",
    "note": "",
@@ -976,6 +987,7 @@
    "paths": [
     "@product",
     "@tests_read",
+    ".github/release-notes/**",
     "tests/**",
     ".github/workflows/host-suite.yml",
     ".github/actions/**",
@@ -1035,7 +1047,8 @@
    "paths": [],
    "inputs": [
     "hermes-host",
-    "provider-route"
+    "provider-route",
+    "instrument-pin"
    ],
    "when": "Release L2",
    "note": "",
@@ -1055,7 +1068,8 @@
    "paths": [],
    "inputs": [
     "provider-route",
-    "instrument-pin"
+    "instrument-pin",
+    "baseline"
    ],
    "when": "Release L2",
    "note": "",
@@ -1138,7 +1152,8 @@
    ],
    "paths": [],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release gate sheet",
    "note": "",
@@ -1389,7 +1404,8 @@
     "tests/test_catalog_scanner_on.py",
     "tests/test_issue_1186_host_dependencies.py",
     "tests/conftest.py",
-    ".github/workflows/real-host.yml"
+    ".github/workflows/real-host.yml",
+    "bench/instruments/reliability/ci.py"
    ],
    "inputs": [
     "hermes-host"
@@ -1488,6 +1504,8 @@
     "adapters/claude-code/**",
     "scripts/build_claude_code_unit.py",
     "scripts/claude_code_*",
+    "scripts/lcm_x_capture.py",
+    "scripts/lcm_x_mcp.py",
     ".github/workflows/claude-code-release.yml"
    ],
    "inputs": [],
@@ -1512,7 +1530,8 @@
    ],
    "inputs": [
     "provider-route",
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release, first rc",
    "note": "",
@@ -1534,7 +1553,8 @@
     "bench/tools/v1m-rebank/**"
    ],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release rc",
    "note": "",
@@ -1554,7 +1574,8 @@
    "paths": [],
    "inputs": [
     "provider-route",
-    "instrument-pin"
+    "instrument-pin",
+    "baseline"
    ],
    "when": "Release rc",
    "note": "",

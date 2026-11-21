@@ -35,7 +35,7 @@ def test_fail_closed_path():
 def test_notes_only():
     result = decide(REAL, [".github/release-notes/v9.9.9.md"])
     # These are the notes checks.
-    notes_checks = {"c5", "release-yml", "ci-tests"}
+    notes_checks = {"c5", "release-yml", "ci-tests", "host-suite"}
     assert selected(result, "RUN") == notes_checks
     assert selected(result, "MANUAL") == MANUAL
     assert {sid: reason for sid, verdict, reason in result.verdicts if verdict == "SKIP"} == {
@@ -172,10 +172,10 @@ RELIABILITY_FILES = ["README.md", "ci.py", "test_ci_compare.py"] + [
       "compaction.py", "engine.py", "reconcile.py", "tests/invariants/test_issue_1221_objective_duplicate_after_2914.py",
       "tests/invariants/test_issue_2863_post_tool_reanchor.py", "tests/test_issue_2863_host_contract.py",
       "tests/test_issue_2863_landing.py"], 45, {"busy-bar"}, set()),
-    ([".github/release-notes/v0.30.1-rc4.md"], 3, {"c5", "release-yml", "ci-tests"}, set()),
+    ([".github/release-notes/v0.30.1-rc4.md"], 4, {"c5", "release-yml", "ci-tests", "host-suite"}, set()),
     ([".github/workflows/reliability-nightly.yml", "changelog.d/reliability-nightly-compare.md",
       "tests/test_reliability_workflow_artifacts.py",
-      *["bench/instruments/reliability/" + file for file in RELIABILITY_FILES]], 11, set(), set()),
+      *["bench/instruments/reliability/" + file for file in RELIABILITY_FILES]], 12, {"real-host"}, set()),
 ])
 def test_proof_paths(paths, count, run, skip):
     result = decide(REAL, paths)
