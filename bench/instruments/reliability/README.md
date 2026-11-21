@@ -438,7 +438,7 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
-`bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. The workflow
+`bench/instruments/reliability/**` and the workflow file. This is an advisory GitHub check. The workflow
 names its hosts in its own matrix (adding a `hosts.ci.json` entry alone adds no nightly coverage); each named host is
 pinned in `hosts.ci.json`: ref-0.21.5, floor-0.21.3, r34.4-0.21.5 and r34.10-0.21.5 on Python 3.11, r34.15-0.21.5
 (the fleet runtime candidate) on 3.12, upstream-main and upstream-uid on 3.14. floor-0.21.3 is upstream v2026.9.14 (345cd2b0), the oldest host the plugin declares (`requires_hermes: ">=0.21.3"`).
@@ -458,6 +458,22 @@ plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-e
 A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars, and a
 target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
 G-REL-1 diagnostics list uncovered bars, targets and open targets.
+
+The scheduled comparison reads all three rounds, including default-window R1, against the latest completed scheduled run
+on the same branch that published `reliability-tables`. A new failing cell, a baseline cell missing from tonight's
+tables, unreadable baseline or candidate tables, or a missing baseline makes the comparison red. A readable
+bootstrap night publishes tables while red. Later nights publish after a clean comparison or a red comparison
+whose alarm job succeeded. A fresh failure that passes one retry is FLAKE. The comparison retries at most 20
+fresh failures within 60 minutes. A second FLAKE for the same host, round and cell in seven comparable nights is NEW.
+The open `nightly-regression` issue records NEW cells and their run links, and a tracked cell stays NEW while it fails.
+A clean comparison leaves a comment on an open alarm. Review the recorded verdicts and failed bars, link the fix or accepted
+disposition, and close the alarm after every tracked cell is dispositioned. For a release respin, dispatch
+`gh workflow run reliability-nightly.yml --ref <candidate-ref> -f baseline_run=<GA run id>`.
+The dispatch reads the open alarm's tracked cells, compares with the named run, and uploads its tables for another
+dispatch. A cell tracked on main counts as NEW in the respin table while it fails.
+Omit `baseline_run` to use the scheduled baseline selection for the candidate ref. To compare downloaded runs locally, use
+`python -m bench.instruments.reliability.ci compare --mode respin --candidate <candidate-tables> --baseline <ga-tables>`
+with the candidate and previous GA runs.
 The exact-cell additions in `ci.CELL_GATE` are: R2 `continuity/forced-compaction-then-turn/{in-place,rotation}`
 on every pinned host at B1/B2/B3/B4/B8/F4, plus B9 on `upstream-uid`; R1 `native-on-off/{v0.23.3,v0.24.3}/in-place`
 at B3/B4/B8; and R1 `overflow-recovery-restart/{in-place,rotation}` and `upgrade-crash-after-rotation/rotation`
