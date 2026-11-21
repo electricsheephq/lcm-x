@@ -20,29 +20,60 @@ class MapError(Exception):
     pass
 
 
+def string_list(value):
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def validate_rows(rows, label, text_fields, list_fields):
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise MapError(f"{label} rows must be a list of objects")
+    for row in rows:
+        for field in text_fields:
+            if not isinstance(row.get(field), str):
+                raise MapError(f"{label} {row.get('id')!r}: {field} must be a string")
+        for field in list_fields:
+            if not string_list(row.get(field)):
+                raise MapError(f"{label} {row['id']!r}: {field} must be a list of strings")
+    if len({row["id"] for row in rows}) != len(rows):
+        raise MapError(f"duplicate {label} id")
+
+
 def load_map(path):
     try:
         m = json.loads(Path(path).read_text(encoding="utf-8"))
-        if missing := set(KEYS) - m.keys():
-            raise MapError(f"missing keys: {', '.join(sorted(missing))}")
-        mechanism_ids = {row["id"] for row in m["mechanisms"]}
-        if len(mechanism_ids) != len(m["mechanisms"]) or len({row["id"] for row in m["suites"]}) != len(m["suites"]):
-            raise MapError("duplicate mechanism or suite id")
-        path_lists = [m["fail_closed_paths"], m["ignored_paths"], *m["path_sets"].values()]
-        path_lists.extend(row["paths"] for row in m["mechanisms"] + m["suites"])
-        if any(not isinstance(paths, list) or not all(isinstance(p, str) for p in paths) for paths in path_lists):
-            raise MapError("paths must be lists of strings")
-        for suite in m["suites"]:
-            suite_id, kind = suite["id"], suite["kind"]
-            mechanisms, paths, inputs = (suite[key] for key in ("mechanisms", "paths", "inputs"))
-            if kind not in ("mapped", "manual") or (kind == "mapped" and not (mechanisms or paths or inputs)):
-                raise MapError(f"{suite_id}: invalid kind {kind!r} or missing mapped suite triggers")
-            unknown = ((set(mechanisms) - mechanism_ids) | (set(inputs) - m["inputs"].keys())
-                       | {p for p in paths if p.startswith("@") and p[1:] not in m["path_sets"]})
-            if unknown:
-                raise MapError(f"{suite_id}: unknown references {', '.join(sorted(unknown))}")
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise MapError(str(exc)) from exc
+    if not isinstance(m, dict):
+        raise MapError("map must be an object")
+    if missing := set(KEYS) - m.keys():
+        raise MapError(f"missing keys: {', '.join(sorted(missing))}")
+    if type(m["version"]) is not int or m["version"] != 1:
+        raise MapError("map version must be 1")
+    if not isinstance(m["glob_rules"], str):
+        raise MapError("glob_rules must be a string")
+    if not isinstance(m["inputs"], dict) or not all(isinstance(value, str) for value in m["inputs"].values()):
+        raise MapError("inputs must be an object with string values")
+    if not isinstance(m["path_sets"], dict):
+        raise MapError("path_sets must be an object")
+    for name, paths in m["path_sets"].items():
+        if not string_list(paths) or not paths:
+            raise MapError(f"path set {name!r} must be a non-empty list of strings")
+    if not all(string_list(m[key]) for key in ("fail_closed_paths", "ignored_paths")):
+        raise MapError("fail_closed_paths and ignored_paths must be lists of strings")
+    validate_rows(m["mechanisms"], "mechanism", ("id", "name"), ("paths",))
+    validate_rows(m["suites"], "suite", ("id", "name", "kind", "when", "note"), ("mechanisms", "paths", "inputs"))
+    if not m["suites"]:
+        raise MapError("suites must not be empty")
+    mechanism_ids = {row["id"] for row in m["mechanisms"]}
+    for suite in m["suites"]:
+        suite_id, kind = suite["id"], suite["kind"]
+        mechanisms, paths, inputs = (suite[key] for key in ("mechanisms", "paths", "inputs"))
+        if kind not in ("mapped", "manual") or (kind == "mapped" and not (mechanisms or paths or inputs)):
+            raise MapError(f"{suite_id}: invalid kind {kind!r} or missing mapped suite triggers")
+        unknown = ((set(mechanisms) - mechanism_ids) | (set(inputs) - m["inputs"].keys())
+                   | {p for p in paths if p.startswith("@") and p[1:] not in m["path_sets"]})
+        if unknown:
+            raise MapError(f"{suite_id}: unknown references {', '.join(sorted(unknown))}")
     return m
 
 
@@ -96,10 +127,16 @@ def main():
     parser.add_argument("--map", type=Path, default=MAP)
     try:
         args = parser.parse_args()
+        if not args.base.strip() or not args.head.strip():
+            parser.error("base and head revisions must not be empty")
         revision = f"{args.base}..{args.head}"
         m = load_map(args.map)
         git = ["git", "diff", "--no-renames", "--name-only", "-z", "--end-of-options", revision, "--"]
         paths = os.fsdecode(subprocess.check_output(git, cwd=ROOT)).split("\0")[:-1]
+        for path in paths:
+            if "\n" in path or "\r" in path:
+                print(f"REFUSED {path!r}: path contains a line break; no run/skip list printed", file=sys.stderr)
+                return 1
         decision = decide(m, paths, args.input)
     except MapError as exc:
         print(f"BAD MAP: {exc}", file=sys.stderr)
