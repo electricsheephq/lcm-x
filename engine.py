@@ -6757,7 +6757,12 @@ class LCMEngine(
         Hermes stamps the generated row when it adopts the compacted view.
         Its finalizer replaces the content but keeps that occurrence's metadata.
         The caller still has to prove the ordered compaction tail.
+        Each decline counts its reason in the ingest ledger (#3013).
         """
+        def decline(reason):
+            self._ledger_count("objective_restore.declined." + reason)
+            return None
+
         emissions = proof.get("emissions")
         if proof.get("native") or not emissions:
             return None
@@ -6773,22 +6778,30 @@ class LCMEngine(
             return None
         binding = self._emission_binding()
         if not self._emission_proof_matches_binding(proof, binding):
-            return None
+            return decline("binding")
         cached = self._last_active_replay_source_identities
         replay = self._last_active_replay_messages
         if index >= min(len(cached), len(replay)):
-            return None
+            return decline("no_cached_occurrence")
         prior = replay[index]
         span = prior.get("content")
         metadata = self._host_occurrence_metadata(row)
-        if (prior.get("role") != "user" or not isinstance(span, str) or cached[index][:2] != ("user", span)
-                or not any(value is not None for value in metadata.values())
-                or metadata != self._host_occurrence_metadata(prior) or not span.startswith(prefix + content)):
-            return None
+        # The host's own witness: the source identity it sent at this index is the generated span's.
+        # The source cache holds replay identities, which can differ from the raw span (#3013: on the
+        # durable path a head quoting externalized output), so compare it with the prior's identity too.
+        if (prior.get("role") != "user" or not isinstance(span, str)
+                or (cached[index][:2] != ("user", span)
+                    and cached[index][:2] != self._message_replay_identity(prior, strip_carrier=False)[:2])):
+            return decline("cached_occurrence")
+        if (not any(value is not None for value in metadata.values())
+                or metadata != self._host_occurrence_metadata(prior)):
+            return decline("occurrence_metadata")
+        if not span.startswith(prefix + content):
+            return decline("span_prefix")
         suffix = span[len(prefix) + len(content):]
         if suffix and (not suffix.startswith("\n\n---\n\n")
                        or self._verified_lcm_summary_prefix_end(suffix[7:]) != len(suffix) - 7):
-            return None
+            return decline("summary_suffix")
         data = span.encode("utf-8")
         digest = hashlib.sha256(data).hexdigest()
         descriptor = next((
@@ -6798,19 +6811,27 @@ class LCMEngine(
             and e.get("output_multiplicity") == 1 and e.get("generated_span_bytes") == len(data)
             and e.get("generated_span_sha256") == digest
         ), None)
-        if descriptor is None or (descriptor.get("engine_uid") is not None
-                                  and descriptor["engine_uid"] != metadata["message_uid"]):
-            return None
+        if descriptor is None:
+            return decline("descriptor")
+        if descriptor.get("engine_uid") is not None and descriptor["engine_uid"] != metadata["message_uid"]:
+            return decline("engine_uid")
         frontier = int(self._last_compacted_store_id or 0)
-        sources = self._store.find_session_rows_by_content(self._session_id, "user", content, frontier, limit=2)
-        if len(sources) != 1 or sources[0].get("conversation_id") != self._conversation_id:
-            return None
+        sources = []  # #3013: a rotated host's source sits in a recorded compression predecessor
+        for session in (self._session_id, *self._rotation_predecessor_session_ids(str(self._session_id))):
+            sources += self._store.find_session_rows_by_content(session, "user", content, frontier, limit=2)
+            if len(sources) > 1:
+                break
+        if len(sources) != 1:
+            return decline("source_count_%d" % len(sources))
+        if sources[0].get("conversation_id") != self._conversation_id:
+            return decline("source_conversation")
         source = sources[0]
         identity = self._message_replay_identity(row, strip_carrier=False)
         if (not _has_lossy_redacted_identity(identity)
                 and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
+            self._ledger_count("objective_restore.matched")
             return index
-        return None
+        return decline("source_identity")
 
     def _remap_cursor_through_host_merge(self, messages, proof) -> Optional[int]:
         """Re-index the post-compress cursor after the host merged scaffold rows.
