@@ -7103,6 +7103,62 @@ class LCMEngine(
                 return current
         return None
 
+    def _restored_objective_index(self, messages, proof):
+        """Bind the persist override to a standalone objective and its stored source.
+
+        The caller still has to prove the ordered compaction tail. The last
+        ingested view supplies the emitted bytes when a later fit left only
+        the durable proof's digests.
+        """
+        emissions = proof.get("emissions")
+        if proof.get("native") or not emissions:
+            return None
+        index = next((i for i, row in enumerate(messages) if row.get("role") != "system"), None)
+        if index is None or index + 2 >= len(messages) or messages[index + 2].get("role") != "tool":
+            return None
+        row = messages[index]
+        content = row.get("content")
+        prefix = _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"
+        if (row.get("role") != "user" or not isinstance(content, str) or row.get("tool_calls")
+                or not content or content.startswith(prefix) or row.get("tool_call_id")
+                or messages[index + 1].get("role") != "assistant" or not messages[index + 1].get("tool_calls")):
+            return None
+        binding = self._emission_binding()
+        if not self._emission_proof_matches_binding(proof, binding):
+            return None
+        emitted = proof.get("output") or self._last_active_replay_source_identities or ()
+        if index >= len(emitted) or emitted[index][0] != "user":
+            return None
+        span = emitted[index][1]
+        if not span.startswith(prefix + content):
+            return None
+        suffix = span[len(prefix) + len(content):]
+        if suffix and (not suffix.startswith("\n\n---\n\n")
+                       or self._verified_lcm_summary_prefix_end(suffix[7:]) != len(suffix) - 7):
+            return None
+        data = span.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        descriptor = next((
+            e for e in emissions
+            if e.get("kind") == "objective" and e.get("role") == "user" and e.get("scope") == binding
+            and e.get("retained_source") is None and e.get("output_occurrence", {}).get("index") == index
+            and e.get("output_multiplicity") == 1 and e.get("generated_span_bytes") == len(data)
+            and e.get("generated_span_sha256") == digest
+        ), None)
+        uid = row.get("message_uid")
+        if descriptor is None or (uid is not None and uid != descriptor.get("engine_uid")):
+            return None
+        frontier = int(self._last_compacted_store_id or 0)
+        sources = self._store.find_session_rows_by_content(self._session_id, "user", content, frontier, limit=2)
+        if len(sources) != 1 or sources[0].get("conversation_id") != self._conversation_id:
+            return None
+        source = sources[0]
+        identity = self._message_replay_identity(row, strip_carrier=False)
+        if (not _has_lossy_redacted_identity(identity) and self._survival_stamp_matches(row, source)
+                and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
+            return index
+        return None
+
     def _remap_cursor_through_host_merge(self, messages, proof) -> Optional[int]:
         """Re-index the post-compress cursor after the host merged scaffold rows.
 
@@ -7114,7 +7170,8 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        projection, identities = self._occurrence_replay_identities(messages, proof)
+        projection, identities = self._occurrence_replay_identities(
+            messages, proof, restore_objective=bool(proof.get("end_consumed")))
         for index, identity in enumerate(identities):
             if len(effective) == len(target):
                 if identity is None and projection.entries[index].kind == "recovery":
@@ -7616,7 +7673,8 @@ class LCMEngine(
         if not target:
             return {}
         result, matched = {}, 0
-        projection, identities = self._occurrence_replay_identities(messages[:cursor], proof)
+        projection, identities = self._occurrence_replay_identities(
+            messages[:cursor], proof, restore_objective=bool(proof.get("end_consumed") or not proof.get("output")))
         for index, identity in enumerate(identities):
             if identity is None:
                 continue
