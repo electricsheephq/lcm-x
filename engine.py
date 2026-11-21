@@ -7143,6 +7143,19 @@ class LCMEngine(
         span = prior.get("content")
         metadata = self._host_occurrence_metadata(row)
         if prior.get("role") != "user" or not isinstance(span, str) or cached[index][:2] != ("user", span):
+            import sys as _sys
+            _ci = cached[index]
+            logger.info("LCM C1A-DEBUG cached_occurrence caller=%s/%s index=%s prior_role=%s span_type=%s span_len=%s "
+                        "span_prefixed=%s cached_role=%s cached_type=%s cached_len=%s cached_prefixed=%s cached_eq=%s "
+                        "row_len=%s prior_meta=%s row_meta=%s cache_len=%s replay_len=%s n=%s",
+                        _sys._getframe(1).f_code.co_name, _sys._getframe(2).f_code.co_name, index, prior.get("role"),
+                        type(span).__name__, len(span) if isinstance(span, str) else None,
+                        isinstance(span, str) and span.startswith(prefix + content), _ci[0] if _ci else None,
+                        type(_ci[1]).__name__ if len(_ci) > 1 else None,
+                        len(_ci[1]) if len(_ci) > 1 and isinstance(_ci[1], str) else None,
+                        len(_ci) > 1 and isinstance(_ci[1], str) and _ci[1].startswith(prefix + content),
+                        len(_ci) > 1 and _ci[1] == span, len(content), self._host_occurrence_metadata(prior),
+                        metadata, len(cached), len(replay), len(messages))
             return decline("cached_occurrence")
         if not span.startswith(prefix + content):
             return decline("span_prefix")
