@@ -31,6 +31,7 @@ from .db_bootstrap import (
 
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
+from .message_content import canonical_text
 from .search_query import (
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
@@ -306,7 +307,7 @@ class SummaryDAG:
                     (
                         node.session_id,
                         node.depth,
-                        node.summary,
+                        canonical_text(node.summary),
                         node.token_count,
                         node.source_token_count,
                         json.dumps(node.source_ids),
@@ -314,7 +315,7 @@ class SummaryDAG:
                         node.created_at or time.time(),
                         node.earliest_at,
                         node.latest_at,
-                        node.expand_hint,
+                        canonical_text(node.expand_hint) if node.expand_hint is not None else None,
                     ),
                 )
                 if cur.lastrowid is None:

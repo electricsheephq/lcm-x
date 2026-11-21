@@ -9,11 +9,72 @@ use deliberate normalization.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 _IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
 _MULTIMODAL_IMAGE_PART_TYPES = {"image", "image_url"}
+_SURROGATES = re.compile(r"[\ud800-\udfff]")
+
+
+def canonical_text(text: str) -> str:
+    """Match Hermes' one-for-one replacement of surrogate code points."""
+    if not text.isascii():
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return _SURROGATES.sub("\ufffd", text)
+    return text
+
+
+def canonical_value(value: Any) -> Any:
+    """Canonicalize JSON-shaped values, copying only containers that change."""
+    if isinstance(value, str):
+        return canonical_text(value)
+    if isinstance(value, list):
+        result = None
+        for index, item in enumerate(value):
+            clean = canonical_value(item)
+            if clean is not item:
+                result = value.copy() if result is None else result
+                result[index] = clean
+        return value if result is None else result
+    if isinstance(value, dict):
+        result = None
+        renamed = None
+        for key, item in value.items():
+            clean_key = canonical_text(key) if isinstance(key, str) else key
+            clean = canonical_value(item)
+            if clean_key is not key or clean is not item:
+                result = value.copy() if result is None else result
+                result[key] = clean
+                if clean_key is not key:
+                    renamed = {} if renamed is None else renamed
+                    renamed[key] = clean_key
+        if renamed:
+            for key, base in sorted(renamed.items()):
+                clean_key, suffix = base, 2
+                while clean_key in result:
+                    clean_key = f"{base}~{suffix}"
+                    suffix += 1
+                result[clean_key] = result.pop(key)
+        return value if result is None else result
+    return value
+
+
+def canonical_message(message: dict) -> dict:
+    return canonical_value(message)
+
+
+def count_surrogates(value: Any) -> int:
+    if isinstance(value, str):
+        return len(_SURROGATES.findall(value))
+    if isinstance(value, dict):
+        return sum(count_surrogates(key) + count_surrogates(item) for key, item in value.items())
+    if isinstance(value, list):
+        return sum(map(count_surrogates, value))
+    return 0
 
 
 def _extract_text_part_value(value: Any) -> str | None:
@@ -33,18 +94,18 @@ def normalize_content_value(content: Any) -> str | None:
     """Return a stable text representation for message content.
 
     ``None`` remains ``None`` so callers that distinguish SQL NULL from an empty
-    string can preserve that behavior. Strings are returned unchanged. Structured
+    string can preserve that behavior. Strings use the host's surrogate policy. Structured
     content is serialized deterministically so storage, source-id matching, and
     token accounting all see the same value.
     """
     if content is None:
         return None
     if isinstance(content, str):
-        return content
+        return canonical_text(content)
     try:
-        return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        return canonical_text(json.dumps(content, ensure_ascii=False, sort_keys=True))
     except (TypeError, ValueError):
-        return str(content)
+        return canonical_text(str(content))
 
 
 def _part_type(part: Any) -> str | None:

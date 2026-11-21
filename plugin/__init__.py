@@ -315,6 +315,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
     if mode == "off" or not context_engine_enabled:
         return None
     try:
+        from .message_content import canonical_value
+        payload = canonical_value(payload)
         question = str(payload.get("user_message") or "").strip()
         if not question:
             return None

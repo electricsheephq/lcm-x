@@ -29,6 +29,7 @@ import os
 import logging
 import sqlite3
 from collections import Counter, defaultdict
+from contextlib import suppress
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
@@ -45,9 +46,9 @@ from .recognition_matching import (
     _reserve_shown as _reserve_shown,
     _reroute_for_null as _reroute_for_null,
 )
-from .config import identity_anchor_enabled
+from .config import identity_anchor_enabled, uid_recognition_enabled
 from .fresh_tail import tool_group_safe_end
-from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
 from .tokens import count_messages_tokens
 
@@ -686,7 +687,7 @@ class IdentityAnchorMixin:
             value = msg.get("tool_calls") or ()
             if isinstance(value, str):
                 try:
-                    value = json.loads(value)
+                    value = canonical_value(json.loads(value))
                 except ValueError:
                     return _UNREADABLE_CALLS  # unreadable: equal to nothing, so never proof of a copy
             if not stored and isinstance(value, list) and any(
@@ -816,7 +817,7 @@ class IdentityAnchorMixin:
             def canonical(arguments):
                 if isinstance(arguments, str):
                     try:
-                        arguments = json.loads(arguments)
+                        arguments = canonical_value(json.loads(arguments))
                     except ValueError:
                         return arguments.strip()
                 return json.dumps(arguments, sort_keys=True, separators=(",", ":"), default=str)
@@ -824,7 +825,8 @@ class IdentityAnchorMixin:
             def shape(msg, parse=False):
                 value = msg.get("tool_calls") or ()
                 if isinstance(value, str):
-                    value = json.loads(value)
+                    with suppress(ValueError, TypeError):
+                        value = canonical_value(json.loads(value))
                 parts = []
                 for c in value if isinstance(value, list) else ():
                     function = (c.get("function") or {}) if isinstance(c, dict) else {}
@@ -1611,7 +1613,7 @@ class IdentityAnchorMixin:
             return []
         saved = getattr(self, "_current_compress_placeholder_identity_counts", None)
         try:
-            mapping = self._get_store_id_map_for_messages(messages[:cursor])
+            mapping = self._get_store_id_map_for_messages(messages[:cursor], uid_first=False)
         finally:
             self._current_compress_placeholder_identity_counts = saved
         rows = self._store.get_batch(sorted({mapping[id(messages[i])] for i, _s in pairs if id(messages[i]) in mapping}))
@@ -1724,10 +1726,13 @@ class IdentityAnchorMixin:
         if bound is not None and any(store_id > bound for store_id in claimed):
             claims = {key: [store_id for store_id in ids if store_id < bound] for key, ids in claims.items()}
             claimed = {store_id for ids in claims.values() for store_id in ids}
-        if budget is None:
-            budget = count_messages_tokens(chunk)
+        charged_chunk = chunk
+        if uid_recognition_enabled(self):
+            charged_chunk = [row if (remainder := self._generated_context_carrier_remainder(row)) is None
+                             else {**row, "content": remainder} for row in chunk]
+        floor = count_messages_tokens(charged_chunk)
         return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
-                                          max(budget, count_messages_tokens(chunk)), accounted_ids,
+                                          floor if budget is None else max(budget, floor), accounted_ids,
                                           copy_lookup=copy_lookup, allow_retained_escape=self._retained_escape_enabled)
 
     def _retained_escape_memo(self) -> dict:

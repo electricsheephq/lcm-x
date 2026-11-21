@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 from .config import hermes_auxiliary_compression_max_concurrency
 from .db_bootstrap import select_conversation_range
 from .fresh_tail import resolve_fresh_tail_boundary
-from .message_content import text_content_for_pattern_matching
+from .message_content import canonical_value, text_content_for_pattern_matching
 from .ingest_protection import (
     quarantine_suspicious_assistant_messages,
     redact_sensitive_value,
@@ -789,7 +789,7 @@ def enqueue_after_turn(engine, history) -> bool:
         return False
     db_path = str(engine._store.db_path)
     config = copy.copy(engine._config)
-    recent = engine._redact_active_replay_messages(list(history or [])[-64:])
+    recent = engine._redact_active_replay_messages(canonical_value(list(history or [])[-64:]))
     job = _Job(
         db_path=db_path,
         hermes_home=str(engine._hermes_home or ""),

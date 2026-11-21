@@ -21,7 +21,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -34,7 +34,10 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import (
+    LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled,
+    ingest_ledger_mode, lcm_env_get, profile_bound, uid_recognition_enabled,
+)
 from .dag import SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
@@ -151,15 +154,19 @@ from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin,
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
-from .compaction import CompactionMixin
+from . import compaction
+from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
 from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
-from .host_uid import HostUidShadowMixin, _valid_uid
+from .host_uid import HostUidShadowMixin, _uid_recognition_pass, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
-from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
+from .host_uid_emit import (
+    ADDRESS_KEYS, IDENTITY_KEYS, carry_identity, identity_emit_enabled, record_absorbed_message,
+    sync_cached_host_metadata,
+)
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
 from .db_bootstrap import refresh_legacy_conversation_ids
@@ -168,6 +175,8 @@ from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
+    canonical_text,
+    canonical_value,
     normalize_content_value,
     stored_text_content_for_pattern_matching,
     text_content_for_pattern_matching,
@@ -317,6 +326,7 @@ _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across co
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_COMPACTION_REFUSAL_WAIT_SECONDS = 3.0
 _TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
@@ -330,6 +340,9 @@ def _condensation_source_text(nodes) -> str:
 
 
 _SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+_LCM_SUMMARY_PART_HEADER_RE = re.compile(
+    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
+)
 
 
 def _summary_part_text(node) -> str:
@@ -752,6 +765,9 @@ class LCMEngine(
     # store, and prepared leaves (#787) publish inside compress(). A class attribute and the bool singleton, so the
     # fresh type(self)(...) that clone_for_agent() builds carries it too.
     compacts_outside_compress = False
+    # #2872: the host's built-in default (agent/context_compressor.py 3b421578:2801); the host's idle compaction reads it
+    # (turn_context_compaction.py 3b421578:171).
+    summary_target_ratio = 0.20
 
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
@@ -784,6 +800,9 @@ class LCMEngine(
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         self._compaction_gate = threading.Condition()
+        self._compress_owner: int | None = None
+        self._compress_owner_depth = 0
+        self._compress_reentry_refusals = 0
         self._compaction_inflight = 0
         self._compaction_closing = False
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
@@ -873,6 +892,7 @@ class LCMEngine(
         # and output identities, so the host's commit end call and the first
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
+        self._compress_refusal = None
         self._emission_handle = None
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
@@ -951,6 +971,7 @@ class LCMEngine(
         # Distinguishes this reset-scoped process counter from overlapping or
         # previous runtimes that write the same conversation telemetry row.
         self._compaction_telemetry_counter_epoch = uuid.uuid4().hex
+        self._compaction_telemetry_skips = 0
         self._compaction_telemetry_counter_rebaseline_pending = True
         self._compaction_telemetry_turn_reset_pending = False
         # Wall-clock of the last leaf compaction (ms); surfaced via telemetry only.
@@ -1024,6 +1045,8 @@ class LCMEngine(
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
+        if compaction._host_has_post_tool_reanchor():
+            self._last_compression_made_progress = False  # #2863: read by the host after each compress()
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -1429,6 +1452,7 @@ class LCMEngine(
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
+        self.__dict__.pop("_retained_stop_backoffs", None)  # #2815: retained-stop holds never cross homes
         self.emit_automatic_compaction_status = False
         adaptive = self.__dict__.get("_adaptive_retrieval")
         if adaptive is not None:
@@ -1916,6 +1940,16 @@ class LCMEngine(
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
         self._record_turn_compaction_telemetry()
+        # #2863: any response on the main path ends the host's post-compaction wait, with or without a count, as the
+        # host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host reads the verify flag
+        # before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume the wait when a provider
+        # omits usage (turn_usage.py 3b421578:87-91). The host gives each agent its own engine copy (agent_init.py
+        # 3b421578:1779-1785), so a response seen here is its bound session's own, ignored or stateless ones included.
+        # Known limit: on a host that shares one engine across agents, a side channel's response clears these flags
+        # for the foreground too.
+        if compaction._host_has_post_tool_reanchor():
+            self._verify_compaction_cleared_threshold = False
+            self.awaiting_real_usage_after_compression = False
 
     @property
     def cache_read_ratio(self) -> float:
@@ -2084,11 +2118,13 @@ class LCMEngine(
                 record["last_cache_hit_at"] = time.time()
             # Even zero-delta snapshots use the transactional updater so an
             # overlapping snapshot cannot overwrite a newly incremented total.
-            self._store.increment_compaction_telemetry(
-                conversation_id,
-                compaction_delta,
-                record,
-            )
+            try_increment = getattr(self._store, "try_increment_compaction_telemetry", None)
+            if try_increment is None:
+                self._store.increment_compaction_telemetry(conversation_id, compaction_delta, record)
+            elif try_increment(conversation_id, compaction_delta, record) is None:
+                self._compaction_telemetry_skips += 1
+                logger.debug("LCM skipped turn compaction telemetry")
+                return
             self._compaction_telemetry_counter_rebaseline_pending = False
             self._compaction_telemetry_turn_reset_pending = False
         except Exception:
@@ -2112,9 +2148,9 @@ class LCMEngine(
         hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
         self._sweep_budget_hold_until = time.monotonic() + hold
         self._sweep_budget_hold_conversation = self._hold_conversation_key()  # #618
-        if turn_paced and not self._sweep_budget_hold_turn_paced:
-            logger.info("LCM hung summary hold armed until turn end (cap %.0fs): %s",
-                        hold, self._hung_summary_strike[1])
+        if (turn_paced and not self._sweep_budget_hold_turn_paced
+                and (strike := self._hung_summary_strike) is not None):
+            logger.info("LCM hung summary hold armed until turn end (cap %.0fs): %s", hold, strike[1])
         self._sweep_budget_hold_turn_paced = turn_paced
 
     def _hold_conversation_key(self) -> str:
@@ -2196,6 +2232,34 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
+    def _record_retained_stop(self, signature) -> None:
+        """Refs #2815: successful automatic passes only; no durable pacing state."""
+        states, key = self.__dict__.setdefault("_retained_stop_backoffs", {}), self._hold_conversation_key()
+        if signature is None:
+            states.pop(key, None)
+            return
+        previous = states.get(key)
+        count = previous[1] + 1 if previous and previous[0] == signature else 1
+        wait = min(600 * 2 ** min(count - 2, 3), 3600) if count >= 2 else 0
+        states[key] = (signature, count, time.monotonic() + wait)
+        if wait:
+            logger.info("LCM retained-stop back-off: frontier_store_id=%d blocked_store_id=%d "
+                        "hole_store_id=%s wait=%ds", *signature, wait)
+
+    def _retained_stop_hold_active(self) -> bool:
+        states, key = self.__dict__.get("_retained_stop_backoffs", {}), self._hold_conversation_key()
+        state = states.get(key)
+        if self._compaction_is_closing() or state is None or state[1] < 2 or time.monotonic() >= state[2]:
+            return False
+        try:
+            frontier = self._store_complete_frontier()
+        except Exception:
+            return False
+        if state[0][0] != frontier:
+            states.pop(key, None)
+            return False
+        return True
+
     def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
         (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
@@ -2217,19 +2281,20 @@ class LCMEngine(
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
-        if (self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress"
+        hold = self._no_progress_hold
+        if (hold is not None and hold[1] == "no_progress"
                 and getattr(self, "_no_progress_local_hold", None) is not None
                 and self._hold_conversation_key() != getattr(self, "_no_progress_local_hold_conversation", None)):
-            self._no_progress_hold = None
+            self._no_progress_hold = hold = None
             self._no_progress_local_hold = None
             self._no_progress_local_hold_conversation = None
-        if self._no_progress_hold is None or (
-                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
-                and self._no_progress_hold is not getattr(self, "_no_progress_local_hold", None)):
+        if hold is None or (
+                hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
+                and hold is not getattr(self, "_no_progress_local_hold", None)):
             return self._persisted_no_progress_hold_active(managed_scope=True)
-        if time.monotonic() < self._no_progress_hold[0]:
+        if time.monotonic() < hold[0]:
             return True
-        persisted = self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
+        persisted = hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)
         self._no_progress_hold = None
         if persisted:
             return self._persisted_no_progress_hold_active(managed_scope=True)
@@ -2420,7 +2485,10 @@ class LCMEngine(
             hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False))
         if not self._no_progress_hold_active(managed_scope=local_only):
             return None
-        until, reason = self._no_progress_hold
+        hold = self._no_progress_hold
+        if hold is None:
+            return None
+        until, reason = hold
         return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
 
     def _zero_leaf_streak_status(self) -> Optional[dict]:
@@ -2435,13 +2503,135 @@ class LCMEngine(
 
         #597: a host_rejected_progress hold lets at most one compaction per turn through; each such pass
         either stores >=1 leaf from a finite backlog or arms no_progress / host_rejected (600 s) as today.
-        Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives."""
+        Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives.
+
+        Restore the input cursor, commit proofs and emission bookkeeping for the host view that was kept.
+        Restore immediately if the lifecycle scope and compaction gate admit the hook; otherwise the
+        next ingest for the same binding handles it under the store write lock. A new compaction
+        applies it before advancing the call number for its own ingest. A refusal without a matching
+        snapshot skips the restore."""
         if self._bypasses_lcm_context_management():
             return
+        snapshot = getattr(self, "_compress_refusal", None)
+        self._signal_emission_state("refused", self._session_id, require_conversation=True)
         leaves = self._last_compress_leaves
         progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
-        self._signal_emission_state("refused", self._session_id, require_conversation=True)
+        if snapshot is None:
+            return
+        snapshot["refused"] = True
+        caller = threading.get_ident()
+        binding_scope = (contextlib.nullcontext(True) if self._stable_use_owner_thread == caller
+                         else self._exclusive_lifecycle("compaction refusal",
+                             deadline=time.monotonic() + _COMPACTION_REFUSAL_WAIT_SECONDS))
+        with binding_scope as acquired:
+            if not acquired:
+                logger.warning("LCM compaction refusal restore deferred: engine lifecycle lock timed out")
+                return
+            with self._compaction_gate:
+                can_restore = not self._compaction_closing and self._compress_owner is None
+                if can_restore:
+                    self._claim_compress_owner(caller)
+            if not can_restore:
+                logger.info("LCM compaction refusal restore deferred: compaction gate busy")
+                return
+            try:
+                store = self._store
+                with store._write_lock:
+                    self._restore_refused_compaction(snapshot, store)
+            finally:
+                with self._compaction_gate:
+                    self._release_compress_owner()
+
+    def _compaction_refusal_binding(self):
+        return self._bound_store_unopened(), self._session_id, self._conversation_id, self._pressure_yield_reset_epoch
+
+    def _snapshot_compression_input(self, snapshot=None):
+        # Keep ingest's writes and its cursor over the admitted input. Only the
+        # evidence that would make the returned list the host's is speculative.
+        if snapshot is None:
+            snapshot = dict(call=self._compress_calls, binding=self._compaction_refusal_binding())
+        receipts = getattr(self, "_identity_anchor_recoveries", ())
+        watch = getattr(self, "_host_rewrite_watch", {})
+        snapshot.update(metadata={}, uids=[], pending_uids={},
+                        cursor=self._ingest_cursor, reconcile=self._ingest_cursor_needs_reconcile,
+                        proof=self._compress_commit_proof, descriptors=self._last_emission_descriptors,
+                        reason=self._compress_commit_reason, publication=self._compress_commit_publication,
+                        identities=getattr(self, "_last_active_replay_source_identities", None),
+                        watch={key: (identity, content, list(objects))
+                               for key, (identity, content, objects) in watch.items()},
+                        recovery=getattr(self, "_identity_anchor_recovery", None),
+                        receipts=receipts, receipt_states=[dict(receipt) for receipt in receipts])
+        return snapshot
+
+    def _write_compaction_metadata(self, key, value, *, skip_unchanged=False):
+        store = self._store
+        snapshot = getattr(self._thread_context, "compress_refusal", None)
+        if snapshot is None or snapshot["binding"] != self._compaction_refusal_binding():
+            return store.write_metadata_json([key], value, skip_unchanged=skip_unchanged)
+        with store.atomic(immediate=True):
+            previous = store._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            wrote = store.write_metadata_json([key], value, skip_unchanged=skip_unchanged)
+        if wrote:
+            changes = snapshot["metadata"]
+            if key in changes and previous == (changes[key][1],):
+                previous = changes[key][0]
+            changes[key] = (previous, value)
+        return wrote
+
+    def _restore_refused_compaction(self, snapshot, store, *, deferred=False):
+        if snapshot is not self._compress_refusal:
+            return
+        binding = snapshot["binding"]
+        if (snapshot["call"] != self._compress_calls
+                or binding[0] is not store or binding != self._compaction_refusal_binding()
+                or snapshot["output_proof"] is not self._compress_commit_proof
+                or (self._compress_commit_proof or {}).get("end_consumed")
+                or snapshot["identities"] is not getattr(self, "_last_active_replay_source_identities", None)):
+            self._compress_refusal = None
+            return
+        if snapshot["metadata"] or snapshot["uids"]:
+            with store.atomic(immediate=True):
+                proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX, binding[1])
+                proof_write = snapshot["metadata"].get(proof_key)
+                proof_replaced = proof_write is not None and store._conn.execute(
+                    "SELECT value FROM metadata WHERE key=?", (proof_key,)).fetchone() != (proof_write[1],)
+                occurrence_key = self._replay_snapshot_metadata_key("host_occurrence_snapshot", binding[1])
+                for key, (previous, written) in snapshot["metadata"].items():
+                    if proof_replaced and key in (proof_key, occurrence_key):
+                        continue
+                    if previous is None:
+                        store._conn.execute("DELETE FROM metadata WHERE key=? AND value=?", (key, written))
+                    else:
+                        store._conn.execute("UPDATE metadata SET value=? WHERE key=? AND value=?",
+                                            (previous[0], key, written))
+                if snapshot["uids"]:
+                    store._conn.executemany(
+                        "DELETE FROM host_uid_bindings WHERE lineage_key=? AND uid=? AND created_at=? "
+                        "AND store_id=0 AND kind='engine'", snapshot["uids"])
+        self._ingest_cursor = snapshot["cursor"]
+        self._ingest_cursor_needs_reconcile = snapshot["reconcile"] or self._ingest_cursor_needs_reconcile
+        self._frontier_holder().refused_input = snapshot["identities"]
+        self._compress_commit_proof, self._last_emission_descriptors = snapshot["proof"], snapshot["descriptors"]
+        self._compress_commit_reason = snapshot["reason"]
+        self._compress_commit_publication = snapshot["publication"]
+        self._host_rewrite_watch = snapshot["watch"]
+        self._identity_anchor_recovery = snapshot["recovery"]
+        self._identity_anchor_recoveries = snapshot["receipts"]
+        for receipt, previous in zip(snapshot["receipts"], snapshot["receipt_states"]):
+            receipt.clear()
+            receipt.update(previous)
+        recorded = self.__dict__.get("_engine_uids_recorded", set())
+        recorded.difference_update(uid for _, uid, _ in snapshot["uids"])
+        pending = self.__dict__.get("_engine_uids_pending", {})
+        for uid, previous in snapshot["pending_uids"].items():
+            if previous is None:
+                pending.pop(uid, None)
+            else:
+                pending[uid] = previous
+        self._compress_refusal = None
+        if deferred:
+            logger.info("LCM deferred compaction refusal restored")
 
     def _discard_prepared_leaves(self) -> None:
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
@@ -2462,12 +2652,12 @@ class LCMEngine(
         """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
-            if (self._sweep_budget_hold_turn_paced and self._hung_summary_strike is not None
-                    and self._hung_summary_strike[0] == self._hold_conversation_key()
+            if (self._sweep_budget_hold_turn_paced and (strike := self._hung_summary_strike) is not None
+                    and strike[0] == self._hold_conversation_key()
                     and self._sweep_budget_hold_conversation == self._hold_conversation_key()
                     and self._sweep_budget_hold_active()
                     and not self._bypasses_lcm_context_management()):
-                route = self._hung_summary_strike[1]
+                route = strike[1]
                 self._sweep_budget_hold_until, self._sweep_budget_hold_turn_paced = 0.0, False
                 self._summary_circuit_breaker.release_hang(route)
                 logger.info("LCM hung summary hold released at turn end: %s", route)
@@ -2479,11 +2669,18 @@ class LCMEngine(
         except Exception:
             pass  # a notification must never break a completed turn
 
+    def _compression_owned_by_another_thread(self) -> bool:
+        owner = self._compress_owner
+        return owner not in (None, threading.get_ident()) and not self._bypasses_lcm_context_management()
+
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
-        """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
-        (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
-        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session.
-        #625: the #608 sweep hold blocks the same way."""
+        """Defer while another thread owns a pass, including on host recovery attempts.
+
+        The #651 and #625 holds exempt recovery, cleanup-only, forced overflow, the survival ceiling
+        and bypassed sessions."""
+        self._thread_context.compression_busy = self._compression_owned_by_another_thread()
+        if self._thread_context.compression_busy:
+            return True
         if ignore_cooldown or self._compaction_request.below_threshold_cleanup_only:
             return False
         tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
@@ -2495,7 +2692,7 @@ class LCMEngine(
         if self._bypasses_lcm_context_management():
             return False
         self._no_progress_observed_tokens = int(tokens or 0)
-        if not self._no_progress_hold_active(managed_scope=True):
+        if not self._no_progress_hold_active(managed_scope=True) and not self._retained_stop_hold_active():
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
@@ -2512,6 +2709,13 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if getattr(self._thread_context, "compression_busy", False):
+            self._thread_context.compression_busy = False
+            return "cooldown:lcm_compaction_in_progress"
+        if self._compression_owned_by_another_thread():
+            return "cooldown:lcm_compaction_in_progress"
+        if self._retained_stop_hold_active():
+            return "cooldown:lcm_retained_stop"
         status = self._no_progress_hold_status()
         if status:
             return f"cooldown:lcm_{status['reason']}"
@@ -2543,7 +2747,8 @@ class LCMEngine(
         if not managed_scope and self._bypasses_lcm_context_management():
             return False
         self._no_progress_observed_tokens = None if tokens is None else int(tokens)
-        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
+        if (not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True)
+                and not self._retained_stop_hold_active()):
             return False
         ceiling = self._survival_ceiling()
         if ceiling is None or tokens is None:
@@ -2799,6 +3004,7 @@ class LCMEngine(
             # turns may still fire it; meta has no final-response/hook-fired bit.
             if not meta.get("interrupted"):
                 return
+            messages, host_view = self._canonical_host_view(messages)
             binding = (self._session_id, self._conversation_id)
 
             def ingest_stopped(active_engine):
@@ -2820,7 +3026,7 @@ class LCMEngine(
                     logger.debug("LCM stopped user tail still mutable; defer to completed-turn catch-up")
                     return
                 try:
-                    active_engine.ingest(messages)
+                    active_engine.ingest(messages, **host_view)
                 finally:
                     active_engine.note_turn_complete()
 
@@ -2830,7 +3036,31 @@ class LCMEngine(
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
-    def ingest(self, messages: List[Dict[str, Any]]) -> None:
+    @wraps(CompactionMixin.compress)
+    def compress(self, messages, *args, **kwargs):
+        # All compaction routes converge here, with the original host list still available.
+        result = super().compress(messages, *args, **kwargs)
+        if result is messages or not isinstance(result, list):
+            return result
+        with_api = {id(row): row for row in result if isinstance(row, dict) and "api_content" in row}
+        if not with_api:
+            return result
+
+        input_pairs = [(row.get("content"), row["api_content"]) for row in messages
+                       if isinstance(row, dict) and "api_content" in row]
+        input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
+        # Index ordinary text pairs, and compare structured values by equality.
+        text_pairs = {(content, api) for content, api in input_pairs
+                      if isinstance(content, str) and isinstance(api, str)}
+        for row in with_api.values():
+            content, api = row.get("content"), row["api_content"]
+            matches = text_pairs if isinstance(content, str) and isinstance(api, str) else input_pairs
+            if (content, api) not in matches:
+                # A caller-owned row necessarily matched its own pair above.
+                row.pop("api_content")
+        return result
+
+    def ingest(self, messages: List[Dict[str, Any]], *, host_pairs=()) -> None:
         """Persist messages to the durable store every turn.
 
         Called by the post_llm_call plugin hook so messages land in LCM
@@ -2843,30 +3073,29 @@ class LCMEngine(
         compression runs later the same turn, already-ingested messages
         are skipped (no duplicates).
         """
-        if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._bypasses_lcm_context_management():
-            self._log_bypassed_ingest()
-            self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            return
-        if self._session_id and messages:
-            try:
+        try:
+            if not host_pairs:
+                messages, host_view = self._canonical_host_view(messages)
+                host_pairs = host_view.get("host_pairs", ())
+            if (self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest()
+                    or self._bypasses_lcm_context_management()):
+                self._log_bypassed_ingest()
+                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+            elif self._session_id and messages:
                 self._remember_lcm_normal_message_prefix(
                     self._session_id,
                     messages,
                     conversation_id=self._conversation_id,
                 )
-                self._ingest_messages(messages)
+                self._ingest_messages(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
                 self._record_ingest_success()
                 self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 logger.debug(
                     "Per-turn ingest OK: session=%s msgs=%d cursor=%d",
                     self._session_id, len(messages), self._ingest_cursor,
                 )
-            except Exception as e:
-                self._record_ingest_failure("per-turn ingest()", e)
+        except Exception as e:
+            self._record_ingest_failure("per-turn ingest()", e)
 
     def _is_retry_worthy_leaf_summary_error(self, exc: Exception) -> bool:
         return _is_retry_worthy_leaf_summary_error(exc)
@@ -2877,8 +3106,9 @@ class LCMEngine(
         current_source_tokens: int,
         final: bool = False,
     ) -> List[Dict[str, Any]]:
+        # #2901: the plain charge; the rescue's rows are the summariser input, carriers already read as their remainder.
         return _next_leaf_rescue_chunk_for(
-            self._config, self._select_oldest_leaf_chunk, current_chunk, current_source_tokens, final=final)
+            self._config, select_oldest_leaf_chunk, current_chunk, current_source_tokens, final=final)
 
     def _leaf_target_tokens(self, source_tokens: int) -> int:
         """Leaf summary target (#614); defaults give a fixed 2,000-token target: min(2000, max(2000, 20%))."""
@@ -2918,9 +3148,10 @@ class LCMEngine(
             deadline=deadline,
             admit_rescue=getattr(self, "_leaf_rescue_admit", None),
         )
-        self._last_leaf_summary_model = result.model
-        self._last_leaf_content_filter_error = result.content_filter_error
-        self._last_leaf_level_3_verbatim = result.level_3_verbatim
+        if not self._compress_binding_changed():
+            self._last_leaf_summary_model = result.model
+            self._last_leaf_content_filter_error = result.content_filter_error
+            self._last_leaf_level_3_verbatim = result.level_3_verbatim
         return result.chunk, result.source_tokens, result.summary, result.level, result.attempts
 
     # -- ContextEngine optional methods ------------------------------------
@@ -3368,7 +3599,7 @@ class LCMEngine(
         )
 
     @contextlib.contextmanager
-    def _fresh_tail_pressure_yield_invocation(self):
+    def _fresh_tail_pressure_yield_invocation(self, binding_changed=None):
         """Invocation scope for the transient pressure-yield tail bound.
 
         Entered by every public compaction entry point (``compress`` and
@@ -3408,17 +3639,18 @@ class LCMEngine(
             completed = True
         finally:
             self._pressure_yield_scope_depth -= 1
-            if completed and self._pressure_yield_scope_depth == 0:
+            same_binding = binding_changed is None or not binding_changed()
+            if same_binding and completed and self._pressure_yield_scope_depth == 0:
                 if self._pressure_yield_invocation_verdict not in ("blocked", "neutral"):
                     self._pressure_yield_blocked_streak = 0
-            if self._pressure_yield_reset_epoch == entry_epoch:
+            if same_binding and self._pressure_yield_reset_epoch == entry_epoch:
                 self._pressure_yield_tail_token_limit = saved_limit
                 self._pressure_yield_streak_counted = saved_counted
                 self._pressure_yield_invocation_verdict = saved_verdict
                 self._pressure_yield_preflight_candidate = saved_preflight_candidate
                 if self._pressure_yield_scope_depth > 0:
                     self._pressure_yield_blocked_streak = saved_streak
-            else:
+            elif same_binding:
                 self._pressure_yield_tail_token_limit = 0
                 self._pressure_yield_blocked_streak = 0
                 self._pressure_yield_streak_counted = False
@@ -4098,7 +4330,7 @@ class LCMEngine(
     def _rebind_after_unadopted_compaction_commit(self) -> None:
         """This engine is bound to (session, conversation), but the conversation's lifecycle row is
         unbound and was last finalized by this session: an end ran with no start after it. The host
-        refused the candidate after the compaction-commit end (would_grow) and sent no start, or
+        may have refused the candidate after the compaction-commit end on an older host, or
         ANOTHER engine on the same row ended the session (R5-3a: a gateway hygiene agent's deferred
         cleanup, a background-review agent's turn end). The trigger is the row's state, so it
         covers any engine or process that unbinds it.
@@ -4692,6 +4924,8 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
+        if not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
+            self._compress_refusal = None
         sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
@@ -5073,14 +5307,18 @@ class LCMEngine(
                 self._frozen_tail_reached = False
                 self._retry_session_end_tails()
                 try:
-                    self._on_session_end_unlocked(session_id, messages)
+                    messages, host_view = self._canonical_host_view(messages)
+                except Exception as exc:
+                    self._record_ingest_failure("session-end ingest", exc)
+                else:
+                    self._on_session_end_unlocked(session_id, messages, **host_view)
                 finally:
                     self._session_end_flush_active = False
 
     def _on_session_end_unlocked(
         self,
         session_id: str,
-        messages: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
@@ -5391,7 +5629,8 @@ class LCMEngine(
         # Only this path ends the foreground binding. Same-id bypass callbacks
         # above can leave it serving, so session-id equality alone is insufficient.
         try:
-            self._finalize_foreground_session_end_unlocked(session_id, messages)
+            self._finalize_foreground_session_end_unlocked(
+                session_id, messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._attribution_span("retire"):
                 self._retire_embedding_maintenance(wait=False)
@@ -5399,8 +5638,25 @@ class LCMEngine(
     def _finalize_foreground_session_end_unlocked(
         self,
         session_id: str,
-        messages: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]], *, host_pairs=(),
     ) -> None:
+        snapshot = getattr(self, "_compress_refusal", None)
+        if snapshot and snapshot.get("refused"):
+            store = self._store
+            try:
+                with store._write_lock, _temporary_sqlite_busy_timeout(
+                    [getattr(store, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
+                ):
+                    self._restore_refused_compaction(snapshot, store, deferred=True)
+            except Exception as exc:
+                if not _is_ingest_busy_error(exc):
+                    raise
+                self._queue_cold_session_tail(messages, session_id=session_id,
+                    conversation_id=self._conversation_id, source=self._session_platform, error=exc)
+                self._ledger_count("ledger.tail.busy_at_end")
+                return
+        else:
+            self._compress_refusal = None
         with self._attribution_span("classifier"):
             proof = getattr(self, "_compress_commit_proof", None)
             reason = next((reason for reason, gate in (
@@ -5462,6 +5718,7 @@ class LCMEngine(
                         self._ingest_messages(
                             messages,
                             allow_session_end_replay_proof=is_current_session_full_history_end,
+                            **({"host_pairs": host_pairs} if host_pairs else {}),
                         )
                     self._session_end_flush_active = False
                     ingest_finished = True
@@ -5825,25 +6082,24 @@ class LCMEngine(
         messages = kwargs.get("messages")
 
         if name != "lcm_inspect" and messages and self._session_id:
-            if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
-                self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
-            elif not (
-                self._session_ignored or self._session_stateless or self._thread_context_stateless()
-            ):
-                try:
-                    self._ingest_messages(messages)
+            try:
+                messages, host_view = self._canonical_host_view(messages)
+                if self._maybe_reclassify_current_session_as_auxiliary_before_message_ingest():
+                    self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
+                elif not (self._session_ignored or self._session_stateless or self._thread_context_stateless()):
+                    self._ingest_messages(messages, **host_view)
                     self._record_ingest_success()
                     self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-                except Exception as e:
-                    self._record_ingest_failure("tool-call ingest", e)
+            except Exception as e:
+                self._record_ingest_failure("tool-call ingest", e)
 
         handlers = {
             spec.name: getattr(lcm_tools, spec.handler_name) for spec in TOOL_REGISTRY
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self,
-                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries"}})
+            return canonical_text(handler(canonical_value(args), engine=self,
+                           **{k: v for k, v in kwargs.items() if k in {"delivery_unit", "delivery_order", "adjacent_reply", "summary_event_time", "snippet_window_hits", "extra_entries"}}))
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -6435,15 +6691,41 @@ class LCMEngine(
         ]
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
+            generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
+            # UID and address fields still use the host-UID mode and placeholder rules.
+            # Timestamp belongs to the cached occurrence established at ingest.
+            excluded = {
+                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
+                *IDENTITY_KEYS, *ADDRESS_KEYS,
+            }
+            for host, row in zip(host_messages, current):
+                if row is host or id(row) in generated_ids:
+                    continue
+                # Preflight can see a row before Hermes stamps its host fields, and the host
+                # can later drop one. The engine writes only excluded keys on a kept row.
+                for key in [key for key in row if key not in excluded and key not in host]:
+                    del row[key]
+                row.update((key, value) for key, value in host.items() if key not in excluded)
+                if not normalize_content_value(host.get("content")) and not normalize_content_value(row.get("content")):
+                    # The replay identity reads "", None and no content as the same: keep the host's form.
+                    if "content" in host:
+                        row["content"] = host["content"]
+                    else:
+                        row.pop("content", None)
+                if "api_content" in host and row.get("content") == host.get("content"):
+                    row["api_content"] = host["api_content"]
+                else:
+                    row.pop("api_content", None)
             sync_cached_host_metadata(
-                host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
+                host_messages, current, generated_ids,
             )
+        # The copy loop captured the old fields. Hash the refreshed view on this pass
+        # so the next identical replay does not appear to change.
         for row in current:
-            if id(row) not in self._no_progress_public_rows:
-                self._no_progress_public_rows[id(row)] = {
-                    key: value for key, value in row.items()
-                    if key != "timestamp" and not str(key).startswith("_")
-                }
+            self._no_progress_public_rows[id(row)] = {
+                key: value for key, value in row.items()
+                if key != "timestamp" and not str(key).startswith("_")
+            }
         return current
 
     def _cached_active_replay_messages(
@@ -6469,6 +6751,67 @@ class LCMEngine(
                 return current
         return None
 
+    def _restored_objective_index(self, messages, proof):
+        """Bind the persist override to a standalone objective and its stored source.
+
+        Hermes stamps the generated row when it adopts the compacted view.
+        Its finalizer replaces the content but keeps that occurrence's metadata.
+        The caller still has to prove the ordered compaction tail.
+        """
+        emissions = proof.get("emissions")
+        if proof.get("native") or not emissions:
+            return None
+        index = next((i for i, row in enumerate(messages) if row.get("role") != "system"), None)
+        if index is None or index + 2 >= len(messages) or messages[index + 2].get("role") != "tool":
+            return None
+        row = messages[index]
+        content = row.get("content")
+        prefix = _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"
+        if (row.get("role") != "user" or not isinstance(content, str) or row.get("tool_calls")
+                or not content or content.startswith(prefix) or row.get("tool_call_id")
+                or messages[index + 1].get("role") != "assistant" or not messages[index + 1].get("tool_calls")):
+            return None
+        binding = self._emission_binding()
+        if not self._emission_proof_matches_binding(proof, binding):
+            return None
+        cached = self._last_active_replay_source_identities
+        replay = self._last_active_replay_messages
+        if index >= min(len(cached), len(replay)):
+            return None
+        prior = replay[index]
+        span = prior.get("content")
+        metadata = self._host_occurrence_metadata(row)
+        if (prior.get("role") != "user" or not isinstance(span, str) or cached[index][:2] != ("user", span)
+                or not any(value is not None for value in metadata.values())
+                or metadata != self._host_occurrence_metadata(prior) or not span.startswith(prefix + content)):
+            return None
+        suffix = span[len(prefix) + len(content):]
+        if suffix and (not suffix.startswith("\n\n---\n\n")
+                       or self._verified_lcm_summary_prefix_end(suffix[7:]) != len(suffix) - 7):
+            return None
+        data = span.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        descriptor = next((
+            e for e in emissions
+            if e.get("kind") == "objective" and e.get("role") == "user" and e.get("scope") == binding
+            and e.get("retained_source") is None and e.get("output_occurrence", {}).get("index") == index
+            and e.get("output_multiplicity") == 1 and e.get("generated_span_bytes") == len(data)
+            and e.get("generated_span_sha256") == digest
+        ), None)
+        if descriptor is None or (descriptor.get("engine_uid") is not None
+                                  and descriptor["engine_uid"] != metadata["message_uid"]):
+            return None
+        frontier = int(self._last_compacted_store_id or 0)
+        sources = self._store.find_session_rows_by_content(self._session_id, "user", content, frontier, limit=2)
+        if len(sources) != 1 or sources[0].get("conversation_id") != self._conversation_id:
+            return None
+        source = sources[0]
+        identity = self._message_replay_identity(row, strip_carrier=False)
+        if (not _has_lossy_redacted_identity(identity)
+                and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
+            return index
+        return None
+
     def _remap_cursor_through_host_merge(self, messages, proof) -> Optional[int]:
         """Re-index the post-compress cursor after the host merged scaffold rows.
 
@@ -6480,7 +6823,7 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        projection, identities = self._occurrence_replay_identities(messages, proof)
+        projection, identities = self._occurrence_replay_identities(messages, proof, restore_objective=True)
         for index, identity in enumerate(identities):
             if len(effective) == len(target):
                 if identity is None and projection.entries[index].kind == "recovery":
@@ -6541,9 +6884,7 @@ class LCMEngine(
         )
         return len(messages) if exact or safe_trailing_skip else None
 
-    _LCM_SUMMARY_PART_HEADER_RE = re.compile(
-        r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
-    )
+    _LCM_SUMMARY_PART_HEADER_RE = _LCM_SUMMARY_PART_HEADER_RE
 
     @staticmethod
     def _lcm_generated_marker(message) -> Optional[str]:
@@ -6880,8 +7221,8 @@ class LCMEngine(
               self._emission_lock_record(len(proof.get("output") or ()))) as timing, (
                 store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
-            self._store.write_metadata_json(
-                [self._replay_snapshot_metadata_key("host_occurrence_snapshot")],
+            self._write_compaction_metadata(
+                self._replay_snapshot_metadata_key("host_occurrence_snapshot"),
                 json.dumps(snapshot, sort_keys=True),
             )
 
@@ -6984,7 +7325,7 @@ class LCMEngine(
         if not target:
             return {}
         result, matched = {}, 0
-        projection, identities = self._occurrence_replay_identities(messages[:cursor], proof)
+        projection, identities = self._occurrence_replay_identities(messages[:cursor], proof, restore_objective=True)
         for index, identity in enumerate(identities):
             if identity is None:
                 continue
@@ -7357,6 +7698,7 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
 
+    @_uid_recognition_pass
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -7364,6 +7706,7 @@ class LCMEngine(
         allow_session_end_replay_proof: bool = False,
         no_view: bool = False,
         retried_tail: Dict[str, Any] | None = None,
+        host_pairs=(),
     ) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
@@ -7388,7 +7731,13 @@ class LCMEngine(
                 pass  # Token counting retains its existing estimator fallback.
         # #2073: one ingest per store at a time. The attempt-local frontier holder and the other
         # per-attempt engine state below are shared by every thread that ingests through this engine.
-        with (getattr(self._store, "_write_lock", None) or contextlib.nullcontext()):
+        store = self._store
+        with (getattr(store, "_write_lock", None) or contextlib.nullcontext()):
+            snapshot = getattr(self, "_compress_refusal", None)
+            if snapshot and snapshot.get("refused"):
+                self._restore_refused_compaction(snapshot, store, deferred=True)
+            else:
+                self._compress_refusal = None
             self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
             self._no_progress_ingest_generation = self._ingest_failure_count
             self._ingest_replay_redaction_changes = {}
@@ -7473,7 +7822,7 @@ class LCMEngine(
                         active, finish = self._ingest_messages_transaction(
                             messages, after_commit, attribution,
                             prepared=prepared, telemetry=record,
-                            allow_session_end_replay_proof=allow_session_end_replay_proof)
+                            allow_session_end_replay_proof=allow_session_end_replay_proof, host_pairs=host_pairs)
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
@@ -7525,7 +7874,7 @@ class LCMEngine(
                             self._identity_anchor_observe_recovery()
                             self._frozen_ledger_prepared = ledger_prepared
                             frozen_replay, _finish = self._ingest_messages_transaction(messages, [], attribution,
-                                allow_session_end_replay_proof=allow_session_end_replay_proof)
+                                allow_session_end_replay_proof=allow_session_end_replay_proof, host_pairs=host_pairs)
                         except Exception as error:
                             frozen_error = error
                         finally:
@@ -7559,6 +7908,7 @@ class LCMEngine(
                 self._frontier.cursor = pending.cursor
                 self._frontier.needs_reconcile = pending.needs_reconcile
                 self._frontier.commit_proof = pending.commit_proof
+                self._frontier.refused_input = pending.refused_input
                 # The session ingested after these ends, so their views can be older than its history. A retried tail's
                 # own view is older than those of the ends queued after it.
                 for tail in self.__dict__.get("_pending_session_tails", ()):
@@ -8161,6 +8511,8 @@ class LCMEngine(
                     else:
                         maximum = conn.execute("SELECT max(ordinal) FROM occurrence_bindings WHERE lineage=?", (lineage,)).fetchone()[0]
                         existing = sorted({v for v in [maximum, *(p.left for p in placements)] if v is not None})
+                        if len(existing) > ingest_ledger._RESPACE_WINDOW_LIMIT:  # the whole-lineage re-space needs every label
+                            existing = ingest_ledger.lineage_ordinals(conn, lineage)
                     try:
                         ordinals, respace = ingest_ledger.plan_ordinals(existing, placements)
                     except ingest_ledger.LedgerError as exc:
@@ -8401,7 +8753,7 @@ class LCMEngine(
                 self._ingest_ledger_observations = collector
 
     def _ingest_messages_transaction(self, messages, after_commit, attribution, *,
-                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None):
+                                     allow_session_end_replay_proof=False, prepared=None, telemetry=None, host_pairs=()):
         """Today's classifier and evidence; caller owns COMMIT and retry.
 
         Store-dependent protection/token counts are part of lock_hold_ms, and
@@ -8415,7 +8767,16 @@ class LCMEngine(
             except Exception as exc:
                 logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
                 self._ingest_cursor_needs_reconcile = True
-        self._capture_host_rewrites(messages)
+        holder = self._frontier_holder()
+        refused_input, holder.refused_input = holder.refused_input, None
+        if refused_input is not None and not self._ingest_cursor_needs_reconcile:
+            if len(refused_input) != self._ingest_cursor or len(messages) < len(refused_input) or any(
+                _has_lossy_redacted_identity(identity)
+                or self._message_replay_identity(row, strip_carrier=False) != identity
+                for row, identity in zip(messages, refused_input)
+            ):
+                self._ingest_cursor_needs_reconcile = True
+        self._capture_host_rewrites(messages, **({"host_pairs": host_pairs} if host_pairs else {}))
         n = len(messages)
         cursor = entry_cursor = min(max(self._ingest_cursor, 0), n)
         restamp_metadata, recovery_fallback = {}, False
@@ -8551,13 +8912,15 @@ class LCMEngine(
                 rows_classified=n - scan_start))
         reconcile_messages = replay_messages
         bind_session_counts: list = []
+        uid_recognition = uid_recognition_enabled(self)
+        uid_fetched = {} if uid_recognition else None
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
-                session_counts=bind_session_counts,
+                session_counts=bind_session_counts, uid_fetched=uid_fetched,
             )
             today = self._ingest_cursor
             ledger_run = self._ledger_cold_cursor(
@@ -8685,6 +9048,17 @@ class LCMEngine(
                     accepted.update(ledger_pairs=ledger_run["pairs"], ledger_today=today)
                 with self._ingest_evidence(classification=True):
                     anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
+                if uid_recognition and anchor_plan["cursor"] < n:
+                    matched = anchor_plan.setdefault("matched", {})
+                    other_claims = {int(row["store_id"]) for rows in matched.values() for row in rows}
+                    for idx, row in self._host_uid_resolve(
+                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims).items():
+                        if (idx >= anchor_plan["cursor"] and idx not in matched and idx not in anchor_plan["remainders"]
+                                and (row is None or row["store_id"] not in other_claims)):
+                            if row is not None:
+                                matched[idx] = [row]
+                            anchor_plan["replayed"].add(idx)
+                            anchor_plan.setdefault("explained", set()).add(idx)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
@@ -8801,6 +9175,8 @@ class LCMEngine(
         host_uids = self._host_uid_capture(messages, reconcile_messages, 0 if reconciled_existing_session
                                            else min(scan_start, cursor), cursor, anchor_plan,
                                            replayed_tool_segment_indexes)
+        if host_uids and uid_recognition:
+            host_uids["fetched"] = uid_fetched
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
@@ -8920,7 +9296,7 @@ class LCMEngine(
             self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
                    if idx in anchor_remainders and sid}))
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
-        after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids)))
+        after_commit.append(lambda: self._watch_stored_user_rows(zip(originals, protected_messages, store_ids), host_pairs))
         stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
         if prepared is not None:
             prepared["stored_at"] = stored_at
@@ -9781,6 +10157,11 @@ class LCMEngine(
 
     # -- Internal: tool-pair sanitization ------------------------------------
 
+    @staticmethod
+    def _is_api_only_assistant_message(row: Dict[str, Any]) -> bool:
+        api_content = row.get("api_content")
+        return isinstance(api_content, str) and bool(api_content) and _clean_active_assistant_message(row) is None
+
     def _sanitize_active_context_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -9813,8 +10194,33 @@ class LCMEngine(
             if msg.get("role") == "assistant":
                 cleaned_msg = _clean_active_assistant_message(msg)
                 if cleaned_msg is None:
-                    dropped_assistant_messages += 1
-                    continue
+                    if not isinstance(msg.get("api_content"), str) or not msg["api_content"]:
+                        dropped_assistant_messages += 1
+                        continue
+                    cleaned_msg = msg
+                    if merge_adjacent_assistants:
+                        # Repair all tool pairs first, then merge within runs between API-only rows.
+                        paired = self._sanitize_active_context_messages(
+                            messages, insert_missing_tool_stubs=insert_missing_tool_stubs,
+                            merge_adjacent_assistants=False, generated_rows=generated_rows,
+                        )
+                        merged, merged_generated, start = [], [], 0
+                        for index, row in enumerate([*paired, None]):
+                            if row is not None and not self._is_api_only_assistant_message(row):
+                                continue
+                            generated_run = list(generated_rows or ())
+                            merged.extend(_merge_adjacent_assistant_messages(
+                                paired[start:index], generated_rows=generated_run,
+                            ))
+                            merged_generated.extend(generated_run)
+                            if row is not None:
+                                merged.append(row)
+                                if id(row) in generated_ids:
+                                    merged_generated.append(row)
+                            start = index + 1
+                        if generated_rows is not None:
+                            generated_rows[:] = merged_generated
+                        return merged
                 if cleaned_msg is not msg:
                     stripped_assistant_messages += 1
                 cleaned.append(cleaned_msg)
@@ -10089,14 +10495,16 @@ class LCMEngine(
 
         Raw store and DAG history remain lossless. This guardrail only sanitizes
         the active context emitted back to providers, where assistant tool calls
-        must be followed immediately by their contiguous tool results. Late,
-        duplicate, out-of-order, and orphan tool results are dropped; missing
-        direct results get synthetic stubs.
+        must be followed immediately by their contiguous tool results. Results
+        that arrive out of order within a call's group are emitted in call
+        order; late, surplus-duplicate and orphan tool results are dropped;
+        missing direct results get synthetic stubs.
         """
         sanitized, dropped_tool_results, inserted_stub_results = repair_tool_pairs(
             messages,
             stub=self._missing_tool_result_stub,
             insert_missing_tool_stubs=insert_missing_tool_stubs,
+            is_api_only=self._is_api_only_assistant_message,
         )
 
         if dropped_tool_results:
@@ -10271,7 +10679,7 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
-        if self._compaction_is_closing():
+        if self._compress_binding_changed() or self._compaction_is_closing():
             return None
         # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
@@ -10407,7 +10815,8 @@ class LCMEngine(
             passes += 1
             self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
             self._clear_persisted_no_progress_hold()
-            if self._no_progress_hold is not None and self._no_progress_hold[1] == "no_progress":
+            hold = self._no_progress_hold
+            if hold is not None and hold[1] == "no_progress":
                 self._no_progress_hold = None
                 self._no_progress_local_hold = None
                 self._no_progress_local_hold_conversation = None
@@ -10818,6 +11227,7 @@ class LCMEngine(
         stub_over_cap_tool_results: bool = False,
         persist: bool = True,
         _reply_rejected: tuple = (),
+        _prepared_tail: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
         trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
@@ -10866,8 +11276,9 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages, write=persist)
-        tail_selected = assembly_tail_messages
+        assembly_tail_messages = (_prepared_tail if _prepared_tail is not None else
+                                  self._stub_large_tool_results_for_active_replay(tail_messages, write=persist))
+        tail_for_selection = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
@@ -10876,8 +11287,6 @@ class LCMEngine(
         summary_budget = None
         kept_reply = None
         if assembly_cap is not None:
-            used = count_messages_tokens(result)
-            tail_token_total = 0
             tail_for_selection = self._sanitize_active_context_messages(
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
@@ -10887,6 +11296,19 @@ class LCMEngine(
                 # it. The final assembled result is merged downstream.
                 merge_adjacent_assistants=False,
             )
+        # Charge only the carried user row to the tail. The new summary has its own budget (#2895).
+        unwrapped = None
+        source_id = None
+        if _prepared_tail is None and retained_user_msg is None and tail_for_selection:
+            incoming_carrier = tail_for_selection[0]
+            source_id = self._incoming_carrier_source_id(incoming_carrier, tail_for_selection)
+            first = self._unwrap_incoming_carrier(incoming_carrier, source_id)
+            if first is not incoming_carrier:
+                unwrapped = first
+                tail_for_selection = [first, *tail_for_selection[1:]]
+        tail_selected = tail_for_selection
+        if assembly_cap is not None:
+            used = count_messages_tokens(result)
             if not stub_over_cap_tool_results:
                 selection = select_tail(
                     tail_for_selection, assembly_cap, used, count_message_tokens,
@@ -10903,7 +11325,9 @@ class LCMEngine(
             tail_selected, summary_budget, kept_reply = self._keep_newest_reply(
                 tail_messages, anchor_source, tail_for_selection, tail_selected, summary_budget, _reply_rejected)
         if anchor_source is not None:
-            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, tail_selected)
+            anchor_tail = ([incoming_carrier if row is unwrapped else row for row in tail_selected]
+                           if unwrapped is not None else tail_selected)
+            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, anchor_tail)
             anchor_part = anchor_candidates[0] if anchor_candidates else None
 
         # Collect DAG summaries — highest depth first for context hierarchy
@@ -10980,6 +11404,12 @@ class LCMEngine(
                     }
                     emission_candidates.append(summary_candidate)
 
+        if unwrapped is not None and summary_message is None:
+            # Without a replacement prefix, rerun selection with the original carrier intact.
+            return self._assemble_context(
+                system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
+                stub_over_cap_tool_results, persist, _reply_rejected, _prepared_tail=assembly_tail_messages)
+
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
         # cache-stable summaries and above the volatile fresh tail — so the
@@ -11010,6 +11440,7 @@ class LCMEngine(
 
         carried_tail, tail_selected = self._emit_summary_carrier(
             summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+            source_id if tail_selected and tail_selected[0] is unwrapped else None,
         )
         self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
                                          proactive_msg, generated_context_row, tail_selected)
@@ -11038,7 +11469,8 @@ class LCMEngine(
                                                                      is not None else []) + list(anchor_source))):
             return self._assemble_context(  # #1162 E: the next step, or the base output with the residual log
                 system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
-                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"))
+                stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"),
+                _prepared_tail=_prepared_tail)
 
         if not persist:
             _stamp_generated_model_only(result, generated_rows)
@@ -11188,7 +11620,7 @@ class LCMEngine(
                 tail_selected
                 and tail_selected[0].get("role") == summary_role
             ):
-                source_ids = self._get_store_id_map_for_messages(tail_selected)
+                source_ids = self._get_store_id_map_for_messages(tail_selected, uid_first=False)
                 folded_source_store_id = int(
                     source_ids.get(id(tail_selected[0])) or 0
                 )
@@ -11229,7 +11661,7 @@ class LCMEngine(
                 folded_result_index, folded_original_tail, tail_selected)
 
     def _emit_summary_carrier(
-        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail,
+        self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail, source_id=None,
     ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
         # Fresh tail. A user-role summary directly ahead of a historical user
         # row is emitted as the carrier a host's alternation repair would build
@@ -11254,7 +11686,8 @@ class LCMEngine(
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
             if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
-                source_ids = self._get_store_ids_for_messages([tail_selected[0]])
+                source_ids = ([source_id] if source_id and self._bound_user_text(source_id) == tail_selected[0]["content"]
+                              else self._get_store_ids_for_messages([tail_selected[0]]))
                 result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:
                     summary_candidate.update({
@@ -11266,6 +11699,25 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
+
+    def _incoming_carrier_source_id(self, row, tail):
+        if self._generated_context_carrier_remainder(row) is None:
+            return None
+        return (self._compress_run.store_ids_by_message_id.get(id(row))
+                or self._get_store_id_map_for_messages(tail).get(id(row)))
+
+    def _unwrap_incoming_carrier(self, row: Dict[str, Any], store_id=None) -> Dict[str, Any]:
+        """``row``, or the real row behind it when it is a verified carrier at any nesting depth. As the
+        survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
+        single proven host uid; the carrier's API-side content is not the row's either."""
+        remainder = self._carried_user_text(row, store_id)
+        if remainder is None:
+            return row
+        unwrapped = {key: value for key, value in row.items() if key != "api_content"}
+        unwrapped["content"] = remainder
+        if identity_emit_enabled():
+            self._carrier_user_row_identity(row, unwrapped)
+        return unwrapped
 
     def _trim_preserved_objective_last_resort(
         self, result, generated_rows, assembly_cap, kept_reply,
@@ -11357,7 +11809,9 @@ class LCMEngine(
         text = next((t for m in reversed(tail_messages) if (t := _visible_reply_text(m))), "")
         if a is None or not kept or a >= start or _visible_reply_text(selection[a]) != text:
             return kept, room, None
-        ids = self._get_store_id_map_for_messages(selection)
+        held = getattr(self._compress_run.store_ids_by_message_id, "held", {})
+        ids = self._get_store_id_map_for_messages(
+            selection, uid_first=False, **({"exclude_store_ids": held} if held else {}))
         reply_id = int(ids.get(id(selection[a])) or 0)
         if reply_id <= int(self._last_compacted_store_id or 0):
             return kept, room, None
@@ -11397,7 +11851,7 @@ class LCMEngine(
         host_result, host_before = _host_estimate(result), _host_estimate(host_input)
         if host_result is not None and host_before is not None and host_result > host_before:
             return "growth"
-        ids = self._get_store_id_map_for_messages(result)
+        ids = self._get_store_id_map_for_messages(result, uid_first=False)
         if twin is None or any(int(ids.get(id(m)) or 0) > reply["store_id"] for m in result[:twin]):
             return "postcondition"
         return ""
@@ -12568,7 +13022,7 @@ class LCMEngine(
                 finally:
                     self._stable_use_owner_thread = None
             return
-        # Only the exit hook bounds its wait; shutdown still waits for active use.
+        # Shutdown itself still waits for active use.
         if not self._stable_use_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             yield False
             return
@@ -12639,6 +13093,23 @@ class LCMEngine(
                 self._stable_use_closed = True
 
     def _shutdown_unlocked(self, *, deadline: float):
+        snapshot = getattr(self, "_compress_refusal", None)
+        if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
+            try:
+                now = time.monotonic()
+                restore_deadline = min(deadline, now + _SESSION_END_BUSY_TIMEOUT_MS / 1000)
+                remaining = max(0.0, restore_deadline - now)
+                if not store._write_lock.acquire(timeout=remaining):
+                    logger.warning("LCM shutdown: deferred compaction refusal restore skipped; store lock busy")
+                else:
+                    try:
+                        timeout_ms = max(0, int((restore_deadline - time.monotonic()) * 1000))
+                        with _temporary_sqlite_busy_timeout([store._conn], timeout_ms):
+                            self._restore_refused_compaction(snapshot, store, deferred=True)
+                    finally:
+                        store._write_lock.release()
+            except Exception:
+                logger.warning("LCM shutdown: deferred compaction refusal restore failed", exc_info=True)
         self._retry_pending_session_tails(
             deadline=deadline, exiting=True,
         )

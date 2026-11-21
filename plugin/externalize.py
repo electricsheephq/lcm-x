@@ -24,8 +24,10 @@ from typing import Any, BinaryIO, Dict
 
 try:
     from .config import containment_base_dir
+    from .message_content import canonical_text
 except ImportError:  # Standalone reliability scorer / older bench imports.
     from config import containment_base_dir
+    from message_content import canonical_text
 
 DEFAULT_LARGE_OUTPUT_DIRNAME = "lcm-large-outputs"
 _EXTERNALIZED_REF_RE = re.compile(
@@ -109,7 +111,7 @@ def _safe_stub(value: str, fallback: str) -> str:
 
 
 def _content_digest_prefix(content: str) -> str:
-    return hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(canonical_text(content or "").encode("utf-8")).hexdigest()[:12]
 
 
 # Every payload filename this module mints -- ``externalize_ingest_payload`` and both
@@ -241,7 +243,7 @@ def _unlink_partial_payload(path: Path) -> None:
 
 
 def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
-    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    data = canonical_text(json.dumps(payload, ensure_ascii=False, indent=2))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1402,6 +1404,7 @@ def externalize_ingest_payload(
 ) -> Dict[str, Any] | None:
     if not content:
         return None
+    content = canonical_text(content)
     try:
         storage_dir = resolve_large_output_storage_dir(config, hermes_home=hermes_home)
     except OSError as exc:
@@ -1501,6 +1504,7 @@ def maybe_externalize_payload(
     threshold = max(1, int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0))
     if not content or (len(content) <= threshold and not force):
         return None
+    content = canonical_text(content)
 
     try:
         storage_dir = (

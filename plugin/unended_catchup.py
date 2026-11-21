@@ -16,6 +16,7 @@ from .host_uid import _is_fork_child
 from .ingest_protection import protect_messages_for_ingest
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
+from .message_content import canonical_value
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 from .tokens import count_message_tokens
 
@@ -148,7 +149,7 @@ def _catch_up(engine_cls, config, home, db_path, state_path, bound, platform, wi
                         _count(reason)
                         continue
                     f1 = _fingerprint(host, sid, archived, revision)
-                    messages = handle.get_messages_as_conversation(sid)
+                    messages = canonical_value(handle.get_messages_as_conversation(sid))
                     if any(m.get('role') in ('session_meta', 'system') for m in messages):
                         _count('non_turn_role')
                     elif (f1 != _fingerprint(host, sid, archived, revision) or f1[3] or f1[2] != row['boundary_id']
