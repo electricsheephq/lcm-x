@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+import pytest
+
 from hermes_lcm import identity_anchor
 from tests.test_anchor_unstored_before_cursor import (  # noqa: F401 (autouse fixture)
     PAD, _a, _engine, _fresh_presence_notices, _key, _result, _stored, _u,
@@ -108,5 +110,55 @@ def test_trip_discriminator_stores_only_fresh_rows(tmp_path, monkeypatch):
         engine.ingest([u0, a0, edited, call1, result1, unstamped, u2, a2, u3, call2, result2, a3])
         added = _counts(engine) - before
         assert added == Counter(_key(row) for row in (edited, u3, call2, result2, a3)), added
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("window", [1, None], ids=["trip", "no-trip"])
+def test_a_stored_calls_unstored_result_slid_below_the_cursor_is_stored(tmp_path, monkeypatch, window):
+    """RM probe: the call and only its first result are stored; a host merge then slides the second result below
+    the cursor. Expected before any run: the second result is stored exactly once (a new result of a stored call)."""
+    engine = _engine(tmp_path)
+    try:
+        history = [_u("T0 user turn", 1000), _a("reply to T0", 1001)]
+        prompt_a, prompt_b = _u("A: first part", 2000), _u("B: second part", 2001)
+        m1 = {"role": "assistant", "content": "Reading two files.", "timestamp": 2002.0, "tool_calls": [
+            {"id": "call_p_a", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}},
+            {"id": "call_p_b", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "b"}'}}]}
+        r_a, r_b = _result("call_p_a", "result a", 2003), _result("call_p_b", "result b", 2004)
+        engine.ingest([*history, prompt_a, prompt_b, m1, r_a])  # the call and only its first result are stored
+        original_a = prompt_a["content"]
+        prompt_a["content"] = original_a + "\n\n" + prompt_b["content"]
+        prompt_a["_merged_turn_prefix"] = original_a
+        m2 = _a("answer", 2005)
+        if window is not None:
+            monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", window, raising=False)
+        engine.ingest([*history, prompt_a, m1, r_a, r_b, m2])  # r_b now sits below the old cursor
+        stored = _counts(engine)
+        assert stored[_key(r_b)] == 1, "the stored call's second result must be stored once"
+        for row in (*history, m1, r_a, m2):
+            assert stored[_key(row)] == 1
+    finally:
+        engine.shutdown()
+
+
+def test_trip_never_stores_an_orphan_result_of_an_ignored_call(tmp_path, monkeypatch):
+    """I7: an ignored fresh call and its non-ignored result below the cursor: groups stay whole on a trip."""
+    engine = _engine(tmp_path, ignore_message_patterns=[r"IGNORE-ME"])
+    try:
+        u0, a0 = _u("T0 user turn", 1000), _a("reply to T0", 1001)
+        u1, a1 = _u("T1 user turn", 1002), _a("reply to T1", 1003)
+        engine.ingest([u0, a0, u1, a1])
+        ignored_call = {**_call("call_ign", 1500), "content": "IGNORE-ME"}
+        its_result = _result("call_ign", "result of the ignored call", 1501)
+        edited = _u("T1 user turn, edited by the host", 1002)
+        reply = _a("a new reply", 1600)
+        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
+        engine.ingest([u0, ignored_call, its_result, edited, reply])
+        stored = _counts(engine)
+        assert stored[_key(its_result)] == 0, "a result is never stored without its call"
+        assert stored[_key(ignored_call)] == 0
+        for row in (u0, a0, u1, a1):
+            assert stored[_key(row)] == 1
     finally:
         engine.shutdown()
