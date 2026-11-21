@@ -929,7 +929,8 @@
     "M13"
    ],
    "paths": [
-    "benchmarks/qa-harness/**"
+    "benchmarks/qa-harness/**",
+    "benchmarking/longmemeval.py"
    ],
    "inputs": [
     "provider-route",
@@ -1062,6 +1063,7 @@
    "kind": "mapped",
    "mechanisms": [
     "M03",
+    "M04",
     "M05",
     "M06",
     "M08",
@@ -1276,11 +1278,13 @@
    "kind": "mapped",
    "mechanisms": [],
    "paths": [
-    "bench/**"
+    "@product",
+    "bench/**",
+    ".github/workflows/ci.yml"
    ],
    "inputs": [],
    "when": "Every pull request",
-   "note": "",
+   "note": "Instrument tests call real product handlers, so the whole product tree is an input.",
    "catch_log": []
   },
   {
@@ -1294,7 +1298,8 @@
    "paths": [
     "@product",
     "tests/fixtures/session_end_attribution_cost/**",
-    "tests/conftest.py"
+    "tests/conftest.py",
+    ".github/workflows/ci.yml"
    ],
    "inputs": [],
    "when": "Every pull request",
@@ -1574,6 +1579,7 @@
    "kind": "mapped",
    "mechanisms": [
     "M03",
+    "M04",
     "M05",
     "M06",
     "M08",
@@ -1600,7 +1606,8 @@
     "M13"
    ],
    "paths": [
-    "benchmarks/qa-harness/**"
+    "benchmarks/qa-harness/**",
+    "benchmarking/longmemeval.py"
    ],
    "inputs": [
     "provider-route",
@@ -1643,7 +1650,8 @@
     "M13"
    ],
    "paths": [
-    "bench/fmp/**"
+    "bench/fmp/**",
+    "benchmarking/longmemeval.py"
    ],
    "inputs": [
     "provider-route"
