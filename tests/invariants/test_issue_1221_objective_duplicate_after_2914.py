@@ -1,5 +1,6 @@
 """I1: the ACP turn-finalizer replay in reliability cell default-window/objective-1221."""
 
+import hashlib
 import json
 
 import pytest
@@ -52,16 +53,21 @@ def row_key(engine, row):
     return row["role"], content, row.get("tool_call_id"), row.get("tool_calls") or []
 
 
-@pytest.mark.parametrize(("uids", "final_attempt", "restamp", "tight_fit_host"), [
-    pytest.param(False, True, False, None, id="ref-0.21.5"),
-    pytest.param(True, True, False, None, id="upstream-uid"),
-    pytest.param(False, False, False, None, id="boundary-only"),
-    pytest.param(False, True, True, None, id="new-occurrence"),
-    pytest.param(False, True, False, "r34.15-0.21.5", id="r34.15-0.21.5"),
-    pytest.param(False, True, False, "upstream-main", id="upstream-main"),
+@pytest.mark.parametrize(("uids", "final_attempt", "restamp", "tight_fit_host", "head_identity"), [
+    pytest.param(False, True, False, None, False, id="ref-0.21.5"),
+    pytest.param(True, True, False, None, False, id="upstream-uid"),
+    pytest.param(False, False, False, None, False, id="boundary-only"),
+    pytest.param(False, True, True, None, False, id="new-occurrence"),
+    pytest.param(False, True, False, "r34.15-0.21.5", False, id="r34.15-0.21.5"),
+    pytest.param(False, True, False, "upstream-main", False, id="upstream-main"),
+    # #3013 (C1a): the replay identity of the generated head is not its raw span.
+    pytest.param(False, True, False, None, True, id="head-identity"),
+    pytest.param(True, True, False, None, True, id="head-identity-uid"),
+    pytest.param(False, False, False, None, True, id="head-identity-boundary-only"),
+    pytest.param(False, True, True, None, True, id="head-identity-new-occurrence"),
 ])
 def test_objective_is_stored_once_after_in_place_compaction(
-    tmp_path, monkeypatch, uids, final_attempt, restamp, tight_fit_host,
+    tmp_path, monkeypatch, uids, final_attempt, restamp, tight_fit_host, head_identity,
 ):
     monkeypatch.setattr(compaction, "_host_has_post_tool_reanchor", lambda: True, raising=False)
     force_char_estimate(monkeypatch)
@@ -81,6 +87,20 @@ def test_objective_is_stored_once_after_in_place_compaction(
         return chunk, count_messages_tokens(chunk), text, 1, 1
 
     monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", stub_summary)
+    if head_identity:
+        # The sole-user cell's live log (#3013): the source cache's identity for the generated head
+        # differs from its raw span, so the guard must compare identities computed the same way.
+        replay_identity = engine._message_replay_identity
+
+        def diverging_identity(message, **kwargs):
+            identity = replay_identity(message, **kwargs)
+            content = message.get("content") if isinstance(message, dict) else None
+            if (not kwargs.get("stored_row") and message.get("role") == "user" and isinstance(content, str)
+                    and content.startswith(PRESERVED)):
+                return ("user", "head:" + hashlib.sha256(content.encode()).hexdigest(), *identity[2:])
+            return identity
+
+        monkeypatch.setattr(engine, "_message_replay_identity", diverging_identity)
     ordinal = 0
 
     def stamp(rows):
