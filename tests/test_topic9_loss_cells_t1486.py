@@ -128,3 +128,40 @@ def test_cell4_a_rewrite_below_a_fresh_call_keeps_the_fresh_call(tmp_path, monke
         assert stored[_key(u1)] == 1
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("cause", ["window", "read_failure"])
+def test_trip_forced_on_an_unchanged_list_adds_only_the_new_rows(tmp_path, monkeypatch, cause):
+    """Trip-forced differential: every call and result row the previous ingest held is witnessed, so a forced trip
+    on an unchanged list stores zero copies and only the new reply."""
+    engine = _engine(tmp_path)
+    try:
+        rows = [_u("T0 user turn", 1000), _a("reply to T0", 1001)]
+        for n in range(3):
+            rows += [_u(f"T{n + 1} user turn", 1010 + 10 * n), _call(f"call_d{n}", 1011 + 10 * n),
+                     _result(f"call_d{n}", f"result d{n}", 1012 + 10 * n), _a(f"reply d{n}", 1013 + 10 * n)]
+        for row in rows:  # unstamped tool rows: the stamp pre-match cannot prove them, only the witness can
+            if row["role"] == "tool" or row.get("tool_calls"):
+                row.pop("timestamp", None)
+        engine.ingest(list(rows))
+        before = _counts(engine)
+        if cause == "window":
+            _trip(monkeypatch)
+        else:
+            def boom(*_a, **_k):
+                raise OSError("injected presence read failure")
+            monkeypatch.setattr(engine, "_rotation_predecessor_session_ids", boom)
+        # The host drops two stored text rows and a fresh pair takes their slots, so every stored pair stays below
+        # the cursor; the fresh pair needs the presence window, so the scan trips beside three stored pairs.
+        fresh_call, fresh_result = _call("call_dfresh", 1003), _result("call_dfresh", "fresh", 1004)
+        reply = _a("a new reply", 1600)
+        trips, real = [], engine._identity_anchor_trip_unproven
+        monkeypatch.setattr(engine, "_identity_anchor_trip_unproven",
+                            lambda *a, **k: trips.append(real(*a, **k)) or trips[-1])
+        engine.ingest([rows[0], fresh_call, fresh_result, *rows[3:], reply])
+        assert len(trips) == 1, "setup: the presence check tripped"
+        added = _counts(engine) - before
+        assert added == Counter({_key(fresh_call): 1, _key(fresh_result): 1, _key(reply): 1}), added
+        assert not before - _counts(engine), "the dropped rows stay stored"
+    finally:
+        engine.shutdown()
