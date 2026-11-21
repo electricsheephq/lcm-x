@@ -3013,6 +3013,7 @@ class ReconcileMixin:
         try:
             payload = self._durable_commit_proof_payload()
             if payload is None:
+                logger.info("LCM C1A-DEBUG durable reject R1 line=%d index=%s matched=%s target=%s n=%s", 13, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                 return None
 
             def proof_identity(message, **kwargs):
@@ -3030,6 +3031,7 @@ class ReconcileMixin:
             if keys is not None:  # #1013: an ignored-row cleanup proof also binds each row's host key
                 observed = [_host_row_key(m) for m, identity in zip(messages, occurrences) if identity is not None]
                 if None in keys or len(keys) != len(target) or observed[:len(keys)] != [list(k) for k in keys]:
+                    logger.info("LCM C1A-DEBUG durable reject R2 line=%d index=%s matched=%s target=%s n=%s", 30, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                     return None
             droppable = list(payload.get("droppable") or [])
             skip_landing = list(payload.get("skip_landing") or [])
@@ -3044,6 +3046,7 @@ class ReconcileMixin:
                 # the emitted scaffold rows, in order (#484 items 11k, 11l).
                 scaffold = list(payload.get("scaffold_sha256") or [])
                 if not scaffold or n < len(scaffold):
+                    logger.info("LCM C1A-DEBUG durable reject R3 line=%d index=%s matched=%s target=%s n=%s", 44, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                     return None
                 for message, digest, entry in zip(messages, scaffold, projection.entries):
                     span = entry.generated_span  # legacy proof: an objective head with a merged row (F3')
@@ -3052,6 +3055,7 @@ class ReconcileMixin:
                     if (occurrences[index] is not None and span is None) or (
                         _commit_proof_identity_digest(proof_identity(emitted)) != digest
                     ):
+                        logger.info("LCM C1A-DEBUG durable reject R4 line=%d index=%s matched=%s target=%s n=%s", 52, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                         return None
                     if occurrences[index] is not None:
                         composite = index + 1  # the host merged a new row into it (#499): stored whole, matched below
@@ -3066,6 +3070,7 @@ class ReconcileMixin:
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
+                    logger.info("LCM C1A-DEBUG durable reject R5 line=%d index=%s matched=%s target=%s n=%s", 66, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                     return None
                 digest = _commit_proof_identity_digest(identity)
                 if digest != target[matched] and matched == len(target) - 1 and _merge_append_cut(
@@ -3080,7 +3085,9 @@ class ReconcileMixin:
                     index -= 1  # #519: the host may have replaced the last carried user row (checked below)
                     break
                 if digest != target[matched]:
+                    logger.info("LCM C1A-DEBUG durable target-miss index=%s matched=%s identity=%s/%d/%r", index - 1, matched, identity[0], len(str(identity[1])), str(identity[1])[:40])
                     if not native:
+                        logger.info("LCM C1A-DEBUG durable reject R6 line=%d index=%s matched=%s target=%s n=%s", 81, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                         return None
                     try:
                         next_match = target.index(digest, matched + 1)
@@ -3098,6 +3105,7 @@ class ReconcileMixin:
                         matched = next_match + 1
                         continue
                     if matched <= int(summary_index):
+                        logger.info("LCM C1A-DEBUG durable reject R7 line=%d index=%s matched=%s target=%s n=%s", 98, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                         return None
                     index -= 1
                     matched = len(target)
@@ -3119,6 +3127,7 @@ class ReconcileMixin:
                 and all(droppable[matched:])
             )
             if matched != len(target) and not safe_trailing_skip:
+                logger.info("LCM C1A-DEBUG durable reject R8 line=%d index=%s matched=%s target=%s n=%s", 119, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                 return None
             while index < n and occurrences[index] is None and projection.entries[index].kind == "recovery":
                 index += 1
@@ -3133,21 +3142,28 @@ class ReconcileMixin:
                 self._load_host_rewrite_overrides(page)
                 for row in page:
                     if index >= n:
+                        logger.info("LCM C1A-DEBUG durable reject R9 line=%d index=%s matched=%s target=%s n=%s", 133, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                         return None
                     identity = proof_identity(
                         messages[index], stored_row=index + 1 == composite,
                         allow_pruned_tool_alias=index not in recent_tools)
+                    _sid = [proof_identity(row, stored_row=True, with_host_rewrite=True, allow_pruned_tool_alias=a) for a in (False, True)]
+                    logger.info("LCM C1A-DEBUG durable tail index=%s row=%s/%s msg=%s/%d/%r stored=%s", index, row.get("store_id"), row.get("role"),
+                                identity[0], len(str(identity[1])), str(identity[1])[:40], [(x[0], len(str(x[1])), str(x[1])[:40], x[2:]==identity[2:]) for x in _sid])
                     if _has_lossy_redacted_identity(identity) or not any(
                         identity == proof_identity(row, stored_row=True, with_host_rewrite=True,
                                                    allow_pruned_tool_alias=alias)
                         for alias in (False, True)
                     ):
+                        logger.info("LCM C1A-DEBUG durable reject R10 line=%d index=%s matched=%s target=%s n=%s", 142, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
             return index
         except Exception:
+            logger.info("LCM C1A-DEBUG durable reject EXC", exc_info=True)
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
+            logger.info("LCM C1A-DEBUG durable reject R11 line=%d index=%s matched=%s target=%s n=%s", 148, locals().get("index"), locals().get("matched"), len(locals().get("target") or ()), locals().get("n"))
             return None
 
     def _replaced_carry_tail(self, payload, digest_of) -> Optional[tuple]:
