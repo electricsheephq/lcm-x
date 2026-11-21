@@ -7151,12 +7151,13 @@ class LCMEngine(
         emitted_span = output[index][1] if index < len(output) and len(output[index]) > 1 else None
         if metadata != self._host_occurrence_metadata(prior):
             # #3013: the cache can predate this emission (the host never sent the adopted view
-            # back before its finalizer), so its stamp cannot witness the row. Then the proof's
-            # own output occurrence decides, with no known stamp or uid conflict.
+            # back before its finalizer), so its stamp cannot witness the row. Then only the uid
+            # the engine gave the emitted occurrence can: a fresh stamp alone may be a new row.
             if (emitted_span == span or not isinstance(emitted_span, str)
-                    or not emitted_span.startswith(prefix + content) or index >= len(emitted)
-                    or self._host_occurrence_changed(row, emitted[index])):
+                    or not emitted_span.startswith(prefix + content) or index >= len(emitted)):
                 return decline("occurrence_metadata")
+            if not _valid_uid(metadata["message_uid"]) or emitted[index].get("message_uid") != metadata["message_uid"]:
+                return decline("stale_occurrence_unwitnessed")
             span = emitted_span
         suffix = span[len(prefix) + len(content):]
         if suffix and (not suffix.startswith("\n\n---\n\n")
