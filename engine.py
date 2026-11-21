@@ -13032,12 +13032,14 @@ class LCMEngine(
         snapshot = getattr(self, "_compress_refusal", None)
         if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
             try:
-                remaining = max(0.0, deadline - time.monotonic())
+                now = time.monotonic()
+                restore_deadline = min(deadline, now + _SESSION_END_BUSY_TIMEOUT_MS / 1000)
+                remaining = max(0.0, restore_deadline - now)
                 if not store._write_lock.acquire(timeout=remaining):
                     logger.warning("LCM shutdown: deferred compaction refusal restore skipped; store lock busy")
                 else:
                     try:
-                        timeout_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                        timeout_ms = max(0, int((restore_deadline - time.monotonic()) * 1000))
                         with _temporary_sqlite_busy_timeout([store._conn], timeout_ms):
                             self._restore_refused_compaction(snapshot, store, deferred=True)
                     finally:

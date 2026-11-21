@@ -2212,7 +2212,7 @@ class CompactionMixin:
         return proofs
 
     @staticmethod
-    def _plain_assistant_replay_text(row):
+    def _plain_assistant_replay_text(row, *, stored_row=False):
         content = row.get("content")
         if (row.get("role") != "assistant" or not isinstance(content, str)
                 or row.get("tool_calls") or row.get("tool_call_id") or _is_codex_interim(row)):
@@ -2221,12 +2221,14 @@ class CompactionMixin:
         if _contains_sensitive_redaction(text):
             return ""
         # The store serializes structured content as JSON.
-        if text.startswith(("[", "{")):
+        if stored_row and text.startswith(("[", "{")):
             try:
                 if isinstance(json.loads(text), (list, dict)):
                     return ""
-            except ValueError:
+            except json.JSONDecodeError:
                 pass
+            except (ValueError, RecursionError):
+                return ""
         return text
 
     def _match_refused_assistant_replay(self, working, raw_tail, *, carrier):
@@ -2239,12 +2241,16 @@ class CompactionMixin:
             if upper == 0:
                 return [], set()
             message, row = working[offset], raw_tail[upper - 1]
-            if self._replay_row_admits(message, row, carrier=carrier and offset == 0):
+            try:
+                exact = self._replay_row_admits(message, row, carrier=carrier and offset == 0)
+            except RecursionError:
+                return [], set()
+            if exact:
                 upper -= 1
             elif upper >= 2 and self._plain_assistant_replay_text(message):
                 base = raw_tail[upper - 2]
-                left = self._plain_assistant_replay_text(base)
-                right = self._plain_assistant_replay_text(row)
+                left = self._plain_assistant_replay_text(base, stored_row=True)
+                right = self._plain_assistant_replay_text(row, stored_row=True)
                 if not (left and right and message["content"] == left + "\n" + right):
                     return [], set()
                 merged_ids.update((int(base["store_id"]), int(row["store_id"])))
@@ -2318,11 +2324,17 @@ class CompactionMixin:
                 merged = self._collapse_merge_append_bases(lineage) if collapse else lineage  # collapsed only when a pair is
                 rows = merged if merged and (not collapse or len(merged) < len(lineage)) else rows
             self._load_host_rewrite_overrides(rows)
-            if rows and len(rows) == end - start and int(rows[-1]["store_id"]) == frontier and all(
-                self._replay_row_admits(message, row, carrier=carrier and not offset)
-                for offset, (message, row) in enumerate(zip(working[start:end], rows))
-            ):
-                break
+            if not rows or len(rows) != end - start or int(rows[-1]["store_id"]) != frontier:
+                continue
+            try:
+                if all(
+                    self._replay_row_admits(message, row, carrier=carrier and not offset)
+                    for offset, (message, row) in enumerate(zip(working[start:end], rows))
+                ):
+                    break
+            except RecursionError:
+                # Exact comparison can also decode stored JSON to recover payload identities.
+                return [], ids, 0, 0
         else:
             replay = working[start:end]
             if len(raw_tail) <= len(replay) or int(raw_tail[-1]["store_id"]) != frontier:

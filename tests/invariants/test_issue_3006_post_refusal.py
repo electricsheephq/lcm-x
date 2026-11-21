@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from contextlib import ExitStack, closing
 from itertools import count
@@ -363,7 +364,10 @@ def test_r4_automatic_refusal_recovery(
             if added != len(new_rows):
                 problems.append(f"turn {turn}: ingest stored {added} rows for {len(new_rows)} new rows")
             returned, record = _r3_threshold_pass(engine, live, caplog, summarizer, monkeypatch)
-            reject = second_refusal and second_refusal_turn is None and turn > 1 and returned != live
+            reject = (
+                second_refusal and second_refusal_turn is None and turn > 1 and returned != live
+                and record["leaves"] > 0 and record["frontier_out"] > record["frontier_in"]
+            )
             if reject:
                 _drain_session_end_maintenance(engine)
                 engine.record_rejected_compaction()
@@ -437,10 +441,51 @@ def test_shutdown_closes_store_after_busy_refusal_restore(committed_host, monkey
     assert "deferred compaction refusal restore failed" in caplog.text
 
 
+def test_shutdown_flushes_pending_tails_after_busy_refusal_restore(
+    committed_host, monkeypatch, caplog,  # noqa: F811
+):
+    engine, kept, _ = committed_host
+    _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    monkeypatch.setattr(engine_module.maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 200)
+    now = 1.0
+    clock = Mock(wraps=engine_module.time)
+    clock.monotonic.side_effect = lambda: now
+    monkeypatch.setattr(engine_module, "time", clock)
+    store = engine._store
+    restore = engine._restore_refused_compaction
+    expected = [("ended-1", "First pending tail"), ("ended-2", "Second pending tail")]
+    with closing(sqlite3.connect(store.db_path)) as locker:
+        locker.execute("BEGIN IMMEDIATE")
+        for session_id, content in expected:
+            engine._queue_cold_session_tail(
+                [{"role": "user", "content": content}], session_id=session_id,
+                conversation_id=session_id, source="acp", error=sqlite3.OperationalError("database is locked"),
+            )
+
+        def restore_while_busy(*args, **kwargs):
+            nonlocal now
+            (timeout_ms,) = store._conn.execute("PRAGMA busy_timeout").fetchone()
+            try:
+                return restore(*args, **kwargs)
+            finally:
+                # Account for the SQLite wait and clock granularity, then let the tails write.
+                now += (timeout_ms + 2) / 1000
+                locker.rollback()
+
+        monkeypatch.setattr(engine, "_restore_refused_compaction", restore_while_busy)
+        engine.shutdown()
+        rows = locker.execute(
+            "SELECT session_id, content FROM messages WHERE session_id IN ('ended-1', 'ended-2') ORDER BY store_id"
+        ).fetchall()
+
+    assert "deferred compaction refusal restore failed" in caplog.text
+    assert rows == expected
+
+
 @pytest.mark.parametrize("uid_mode", ["off", "on"])
 @pytest.mark.parametrize("case", [
-    "covered", "no-refusal", "one-uncovered", "straddles-frontier", "missing-frontier",
-    "different-join", "tool-calls", "structured",
+    "covered", "json-join", "no-refusal", "one-uncovered", "straddles-frontier", "missing-frontier",
+    "different-join", "tool-calls", "structured", "deeply-nested-left", "deeply-nested-right",
 ])
 def test_merged_replay_requires_exact_covered_pair(tmp_path, monkeypatch, uid_mode, case):
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
@@ -453,7 +498,13 @@ def test_merged_replay_requires_exact_covered_pair(tmp_path, monkeypatch, uid_mo
         frontier = {"straddles-frontier": 11, "missing-frontier": 13}.get(case, 12)
         if case == "structured":
             left["content"] = '[{"text": "First reply.", "type": "text"}]'
-        if case == "tool-calls":
+        elif case == "json-join":
+            left["content"], right["content"] = "[1,", "2]"
+        elif case.startswith("deeply-nested-"):
+            depth = max(10_000, sys.getrecursionlimit() + 1)
+            nested = left if case == "deeply-nested-left" else right
+            nested["content"] = "[" * depth + "0" + "]" * depth
+        elif case == "tool-calls":
             right["tool_calls"] = [{"id": "synthetic-call", "type": "function"}]
         joined = left["content"].strip() + ("\n\n" if case == "different-join" else "\n") + right["content"]
         messages = [{"role": "assistant", "content": joined}, successor]
@@ -474,6 +525,6 @@ def test_merged_replay_requires_exact_covered_pair(tmp_path, monkeypatch, uid_mo
         monkeypatch.setattr(engine._dag, "get_leaf_sources_through", lambda *_: sources)
 
         drops, _, tokens, kept = engine._committed_replay_drops(messages, 0)
-        assert (drops, tokens, kept) == (([0], 12, 0) if case == "covered" else ([], 0, 0))
+        assert (drops, tokens, kept) == (([0], 12, 0) if case in ("covered", "json-join") else ([], 0, 0))
     finally:
         engine.shutdown()
