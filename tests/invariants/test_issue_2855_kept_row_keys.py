@@ -9,6 +9,8 @@ from hermes_lcm import engine as engine_module, host_uid_emit
 from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 from hermes_lcm.tokens import count_messages_tokens
 from tests.harness.engine import engine_context, stored_rows
+from tests.invariants.test_issue_2815_c8 import _alter_guard_input, _output_sources, _set_frontier
+from tests.test_host_uid_shadow import _state_db
 
 REWRITTEN_FIELDS = {"role", "content", "tool_calls", "tool_call_id"}
 
@@ -18,12 +20,23 @@ def uid_mode(request, monkeypatch):
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
     if request.param is not None:
         monkeypatch.setenv("LCM_HOST_MESSAGE_UID", request.param)
+    return request.param
 
 
 @pytest.fixture
 def open_engine(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: ("Synthetic leaf summary.", 1))
-    return lambda: engine_context(tmp_path, window=200_000, fresh_tail_count=6, leaf_chunk_tokens=400)
+    return lambda **kwargs: engine_context(
+        tmp_path, window=200_000, fresh_tail_count=6, leaf_chunk_tokens=400, **kwargs,
+    )
+
+
+@pytest.fixture
+def open_seeded_engine(tmp_path, open_engine):
+    host_home = tmp_path / "home"
+    host_home.mkdir()
+    _state_db(host_home, [("S", None, None)])
+    return lambda: open_engine(conversation_id="conv")
 
 
 def _row(role, content):
@@ -280,3 +293,132 @@ def test_host_held_stub_is_skipped_by_key_refresh(open_engine):
         returned, = engine._keep_host_held_stubs([host], cached, [host])
 
     assert returned is host
+
+
+@pytest.mark.parametrize("uid_mode", ["on"], ids=["uid-on"], indirect=True)
+def test_ingest_binds_host_uid(open_seeded_engine, uid_mode):
+    user = _row("user", "Synthetic bound user")
+    _stamp(user, 1)
+    with open_seeded_engine() as engine:
+        engine.ingest([user])
+        lineage = engine._host_uid_lineage_key()[0]
+        assert lineage is not None
+        stored, = stored_rows(engine)
+        assert engine._store.host_uid_bindings_for(lineage, [user["message_uid"]]) == {
+            user["message_uid"]: [(stored["store_id"], "canonical")],
+        }
+
+
+@pytest.mark.parametrize("uid_mode", ["on"], ids=["uid-on"], indirect=True)
+@pytest.mark.parametrize("restore", ["missing-header", "no-leaf"])
+def test_uid_trim_restores_late_api_content(open_seeded_engine, uid_mode, monkeypatch, restore):
+    publish_leaf = restore == "missing-header"
+    history = _history() if publish_leaf else _history()[:8]
+    if publish_leaf:
+        # Sanitizing the restored view must reduce its token count, so the
+        # hidden-only fallback does not substitute the original host list.
+        history[-1]["content"] += "<think>Synthetic reasoning to strip.</think>"
+    for i, row in enumerate(history, 1):
+        _stamp(row, i)
+    kept = history[-2]
+    api_text = kept.pop("api_content")
+    covered_uid = history[0]["message_uid"]
+    with open_seeded_engine() as engine:
+        engine.ingest(history)
+        ids = [row["store_id"] for row in stored_rows(engine)]
+        _set_frontier(engine, ids[:1] if publish_leaf else ids[:2])
+        nodes_before = engine._dag.get_session_nodes("S")
+
+        kept["api_content"] = api_text
+        assert engine._host_uid_resolve([kept])[0]["store_id"] == ids[-2]
+        drop = engine._drop_uid_covered_live_rows
+        trimmed = []
+
+        def record_trim(rows):
+            result = drop(rows)
+            trimmed.append({row["message_uid"] for row in rows} - {row["message_uid"] for row in result})
+            return result
+
+        monkeypatch.setattr(engine, "_drop_uid_covered_live_rows", record_trim)
+        if publish_leaf:
+            def remove_header(result, _patch):
+                assert all(row.get("message_uid") != covered_uid for row in result)
+                assert ids[0] in _output_sources(engine, result)
+                return [row for row in result if ids[0] not in _output_sources(engine, [row])]
+
+            _alter_guard_input(engine, monkeypatch, remove_header)
+
+        output = engine.compress(history, current_tokens=count_messages_tokens(history), force=publish_leaf)
+        assert len(trimmed) == 1 and covered_uid in trimmed[0]
+        assert len(engine._dag.get_session_nodes("S")) == len(nodes_before) + int(publish_leaf)
+        assert (engine._last_compress_leaves or (None, 0))[1] == int(publish_leaf)
+        assert any(row.get("message_uid") == covered_uid for row in output)
+        if publish_leaf:
+            assert output[-1]["content"] == history[-1]["content"].split("<think>")[0]
+        returned, = [row for row in output if row.get("message_uid") == kept["message_uid"]]
+        assert returned.get("api_content") == api_text
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "shadow", "on"], ids=["uid-off", "uid-shadow", "uid-on"], indirect=True)
+def test_lone_surrogate_in_uid_stamped_rows_commits_a_pass_in_every_uid_mode(open_seeded_engine, uid_mode):
+    # Hotfix tree (port 7, #2783): uid-stamped rows hold a lone surrogate, one covered by the leaf, one kept.
+    history = _history()
+    for i, row in enumerate(history, 1):
+        _stamp(row, i)
+    history[0]["content"] += " \udc00"
+    kept = history[-2]
+    assert kept["role"] == "user"
+    kept["content"] += " \udc01"
+    kept["api_content"] += " \udc01"
+    given = copy.deepcopy(history)
+    with open_seeded_engine() as engine:
+        engine.ingest(history)
+        lineage = engine._host_uid_lineage_key()[0]
+        assert lineage is not None
+        surrogate_uids = [history[0]["message_uid"], kept["message_uid"]]
+        stored = stored_rows(engine)
+        bindings = engine._store.host_uid_bindings_for(lineage, surrogate_uids)
+        expected = {uid: [(row["store_id"], "canonical")]
+                    for uid, row in zip(surrogate_uids, (stored[0], stored[-2]))}
+        assert bindings == ({} if uid_mode == "off" else expected)
+        if uid_mode == "on":
+            assert engine._host_uid_resolve(history)[0]["store_id"] == stored[0]["store_id"]
+
+        result = _call(engine, history, leaves=1)
+        assert engine._ingest_failure_count == 0
+        assert stored_rows(engine) == stored
+        texts = [row["content"] for row in stored]
+        assert not any("\udc00" in text or "\udc01" in text for text in texts)
+        assert sum("\ufffd" in text for text in texts) == 2
+        output, = [row for row in result if row.get("message_uid") == kept["message_uid"]]
+        assert output["content"] == kept["content"].replace("\udc01", "\ufffd")
+        assert output["api_content"] == kept["api_content"].replace("\udc01", "\ufffd")
+        _assert_host_keys([(dict(kept, api_content=output["api_content"]), output)])  # api_content checked above
+        engine.ingest(copy.deepcopy(history))
+        assert len(stored) == len(history)
+        assert stored_rows(engine) == stored
+        assert not {name: count for name, count in (getattr(engine, "_host_uid_counters", None) or {}).items()
+                    if "disagree" in name and count}
+        assert engine._ingest_failure_count == 0
+    assert history == given  # host objects are never mutated
+
+
+def test_compress_first_watches_raw_surrogate_row_for_in_place_strip(open_seeded_engine):
+    user = _row("user", "  Synthetic question \udc00 \n")
+    history = [user, _row("assistant", "Synthetic answer")]
+    with open_seeded_engine() as engine:
+        engine.compress(history, current_tokens=count_messages_tokens(history))
+        before = stored_rows(engine)
+        assert len(before) == len(history)
+
+        user["content"] = user["content"].strip()
+        new = _row("user", "Next synthetic question")
+        engine.ingest([*history, new])
+
+        key = f"host_rewrite_identity:{before[0]['store_id']}"
+        override = engine._store.read_metadata_json_many([key])
+        assert key in override
+        assert override[key]["content"] == user["content"].replace("\udc00", "\ufffd")
+        *prefix, appended = stored_rows(engine)
+        assert prefix == before
+        assert appended["content"] == new["content"]

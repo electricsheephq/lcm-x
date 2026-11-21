@@ -9,13 +9,23 @@ from hermes_lcm.compaction import CompactionMixin
 from hermes_lcm.engine import _model_only_display_metadata_keys
 from tests.behaviour.test_child_isolation_lifecycle import native as native
 from tests.harness import engine_context
-from tests.test_issue_1201_summary_model_only import _compress, _history, _host, _summary_rows
+from tests.test_issue_1201_summary_model_only import _compress, _history, _host, _set_replay_path, _summary_rows
 from tests.test_issue_1201_summary_model_only import engine as engine
 from tests.test_issue_1201_summary_model_only import host as host
 
 
-@pytest.mark.parametrize("project", [True, False], ids=["projected", "unprojected"])
-def test_second_compress_preserves_input_identity(engine, monkeypatch, project):
+@pytest.mark.parametrize(("replay_path", "project"), [
+    pytest.param("shortcut", True, id="shortcut-projected"),
+    pytest.param("shortcut", False, id="shortcut-unprojected"),
+    pytest.param("shortcut-off", True, id="shortcut-off-projected"),
+    pytest.param("shortcut-off", False, id="shortcut-off-unprojected"),
+    pytest.param("uid-on", True, id="uid-on-projected", marks=pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="UID replay of the projected host list fails to restore host_model_only on the inner summary",
+    )),
+    pytest.param("uid-on", False, id="uid-on-unprojected"),
+])
+def test_second_compress_preserves_input_identity(engine, monkeypatch, project, replay_path):
     _host(monkeypatch, "host_model_only")
     history = _history()
     # Hermes keeps the summary separate from a user row with structured content.
@@ -26,6 +36,7 @@ def test_second_compress_preserves_input_identity(engine, monkeypatch, project):
     history[-2] = {"role": "tool", "tool_call_id": "call-1", "content": "Synthetic lookup result."}
     for i, row in enumerate(history[-3:]):
         row["timestamp"] = 1_760_000_000 + i
+    _set_replay_path(engine, monkeypatch, history, replay_path)
     output = _compress(engine, history)
     [summary] = _summary_rows(output)
     assert summary["display_metadata"] == {"host_model_only": True}
@@ -46,19 +57,32 @@ def test_second_compress_preserves_input_identity(engine, monkeypatch, project):
 
     before = deepcopy(output)
     candidates = []
+    recognition = []
     compress_impl = engine._compress_impl
 
-    def capture(*args, **kwargs):
-        candidate = compress_impl(*args, **kwargs)
+    def capture(messages, *args, **kwargs):
+        recognition.append(engine._uid_recognition_enabled() and any(row.get("message_uid") for row in messages))
+        candidate = compress_impl(messages, *args, **kwargs)
         candidates.append(candidate)
         return candidate
 
     monkeypatch.setattr(engine, "_compress_impl", capture)
     second = _compress(engine, output)
+    if recognition != [replay_path == "uid-on"]:
+        pytest.fail(f"unexpected UID recognition at compress: {recognition}")
     [candidate] = candidates
-    assert candidate is output
     assert second is output
     assert output == before
+    if replay_path == "shortcut":
+        assert candidate is output
+    else:
+        assert candidate is not output
+        candidate_public = [engine._public_compression_row(row) for row in candidate]
+        [rebuilt_summary] = _summary_rows(candidate_public)
+        assert rebuilt_summary.get("display_metadata") == {"host_model_only": True}
+        if project:
+            del rebuilt_summary["display_metadata"]
+        assert candidate_public == [engine._public_compression_row(row) for row in before]
 
 
 @pytest.mark.parametrize(

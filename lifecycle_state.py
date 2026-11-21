@@ -984,6 +984,7 @@ class LifecycleStateStore:
         filter_exclusion_proofs: dict[int, Any] | None = None,
         carried_ranges: list[tuple[str, int, int]] | None = None,
         copy_exclusion_proofs: dict[int, int] | None = None,
+        copy_matches=None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1076,8 +1077,9 @@ class LifecycleStateStore:
                 (str(twin_ids),),
             ).fetchall()}
             for copy, twin in copy_proofs.items():
-                if (twin >= copy or tuple(snapshot_by_id[copy][3:]) != tuple(snapshot_by_id[twin][3:])
-                        or twin not in node_covered):
+                same = tuple(snapshot_by_id[copy][3:]) == tuple(snapshot_by_id[twin][3:])
+                if (twin >= copy or twin not in node_covered or not (
+                        same or copy_matches and copy_matches(conn, snapshot_by_id[copy], snapshot_by_id[twin]))):
                     raise LifecyclePublicationConflictError("Compaction publication copy exclusion changed")
         owned_ranges = [(session_id, expected_frontier, covered_end)]
         owned_ranges.extend(

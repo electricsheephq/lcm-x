@@ -347,7 +347,7 @@ class PlaceholderLedgerMixin:
         generated_hashes = self._load_generated_ignored_placeholder_hashes()
         if not generated_hashes or not active_replay_messages:
             return {}
-        stored_message_ids = set(self._get_store_id_map_for_messages(active_replay_messages))
+        stored_message_ids = set(self._get_store_id_map_for_messages(active_replay_messages, uid_first=False))
         occurrence_by_digest: dict[str, int] = {}
         ordinals: dict[str, set[int]] = {}
         for msg in active_replay_messages:
@@ -368,7 +368,7 @@ class PlaceholderLedgerMixin:
         generated_hashes = self._load_generated_ignored_placeholder_hashes()
         if not generated_hashes or not active_replay_messages:
             return {}
-        stored_message_ids = set(self._get_store_id_map_for_messages(active_replay_messages))
+        stored_message_ids = set(self._get_store_id_map_for_messages(active_replay_messages, uid_first=False))
         budget: dict[str, int] = {}
         for msg in active_replay_messages:
             if id(msg) in stored_message_ids:
