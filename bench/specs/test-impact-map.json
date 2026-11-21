@@ -16,6 +16,27 @@
   "python": [
    "**/*.py"
   ],
+  "tests_read": [
+   "*",
+   ".agents/**",
+   ".github/*",
+   ".github/actions/**",
+   ".github/workflows/**",
+   ".github/ISSUE_TEMPLATE/**",
+   "access_context/**",
+   "access_policy/**",
+   "adapters/**",
+   "bench/**",
+   "benchmarking/**",
+   "benchmarks/**",
+   "companions/**",
+   "docs/**",
+   "release/**",
+   "scripts/**",
+   "skills/**",
+   "teams/**",
+   "tests/**"
+  ],
   "product": [
    "*.py",
    "access_context/**",
@@ -944,6 +965,7 @@
    "mechanisms": [],
    "paths": [
     "@product",
+    "@tests_read",
     "tests/**",
     ".github/workflows/host-suite.yml",
     ".github/actions/**",
@@ -1186,7 +1208,7 @@
    "kind": "mapped",
    "mechanisms": [],
    "paths": [
-    "@product",
+    "@any",
     "tests/**",
     "scripts/**",
     ".github/workflows/ci.yml",
@@ -1196,7 +1218,7 @@
    ],
    "inputs": [],
    "when": "Every pull request",
-   "note": "Branch protection runs it on every pull request whatever the map says.",
+   "note": "Tests read files across the repo, one release-notes file included, so any change is an input. Branch protection runs it on every pull request whatever the map says.",
    "catch_log": []
   },
   {
@@ -1325,13 +1347,14 @@
     "M16"
    ],
    "paths": [
+    "@tests_read",
     "tests/**",
     "pytest.ini",
     ".github/actions/**"
    ],
    "inputs": [],
    "when": "Nightly",
-   "note": "Any test file can carry the latency marker, so all of tests/ is an input.",
+   "note": "Any test file can carry the latency marker, and tests read files across the repo.",
    "catch_log": []
   },
   {
@@ -1449,7 +1472,9 @@
    "mechanisms": [],
    "paths": [
     "@product",
-    "claude_code_*.py",
+    "claude_code_audit.py",
+    "claude_code_capture.py",
+    "claude_code_store.py",
     "adapters/claude-code/**",
     "scripts/build_claude_code_unit.py",
     "scripts/claude_code_*",
