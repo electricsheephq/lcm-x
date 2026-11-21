@@ -7784,6 +7784,7 @@ class LCMEngine(
                     "_generated_ignored_active_replay_placeholder_hash_ordinals",
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
                     "_pending_session_tails",
+                    "_trip_witness",  # topic 9: a rolled-back attempt restores the witness for its retry
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -9190,10 +9191,15 @@ class LCMEngine(
         def freeze_trip_witness():
             keys = Counter()
             patterns = bool(getattr(self, "_compiled_ignore_message_patterns", None))
-            for idx, message in enumerate(messages):
+            # Only rows below the published cursor count: a cursor short of the list (a budget or a compaction
+            # output) leaves the rest unwitnessed, so they fail toward storing.
+            for idx, message in enumerate(messages[:max(0, min(len(messages), int(self._ingest_cursor or 0)))]):
                 key = _trip_key(message)
                 if key is None:
                     continue  # text rows never witness, so they never reach the pattern check
+                content = message.get("content")
+                if isinstance(content, str) and content.lstrip().startswith("[LCM active replay placeholder:"):
+                    continue  # a generated placeholder is never stored, so it never witnesses (F4)
                 # Patterns run on the tail this ingest classified only (the scan-only-new-tail contract);
                 # earlier rows were classified by earlier ingests, and the trip never credits an ignored view row.
                 if patterns and idx >= scan_start:

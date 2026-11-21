@@ -680,8 +680,8 @@ class IdentityAnchorMixin:
         this session's previous completed ingest never held (F8: the witness frozen when it finished, F3: as
         immutable keys; ignored rows are never witnesses, F4). A witnessed row keeps today's credit; one witness key
         credits one view row. An id that is ambiguous in the view or the witness keeps main's result (F6). A result
-        joins only with its call: added now, fresh at or past the cursor, or a non-ignored view row that is proven
-        or witnessed (F1). A result whose call is ignored or absent keeps main's result (no orphan, I7)."""
+        joins only with its call: added now, fresh at or past the cursor, in the accepted prefix before ``start``,
+        or a non-ignored view row that is proven or witnessed (F1). A result whose call is ignored or absent keeps main's result (no orphan, I7)."""
         witness = Counter(getattr(self, "_trip_witness_for_audit", None) or ())
         keys = {idx: _trip_key(message) for idx, message in enumerate(messages)}
         call_ids = Counter(call_id for key in keys.values() if key and key[0] == "call" for call_id in key[1])
@@ -723,7 +723,9 @@ class IdentityAnchorMixin:
             call = call_at.get(keys[idx][1])
             if call is None or ignored(call):
                 continue  # an absent or ignored call: main's result, never an orphan result
-            if call in added_calls or call >= cursor or call in witnessed or proven(call):
+            # Its call is stored or written now: added here, fresh at or past the cursor, in the accepted prefix
+            # before ``start``, or a proven or witnessed view row (F1).
+            if call in added_calls or call >= cursor or call < start or call in witnessed or proven(call):
                 added.append(idx)
         return sorted(added)
 
