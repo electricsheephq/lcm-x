@@ -157,7 +157,7 @@ from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
+from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder, _trip_key
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
@@ -9232,6 +9232,13 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
+        # Topic 9 (F8): the trip witness counts only when this session's previous completed ingest froze it. It is
+        # taken once here and cleared, so a failed or read-only pass never leaves a stale witness behind.
+        witness = getattr(self, "_trip_witness", None)
+        self._trip_witness_for_audit = (Counter(witness[1]) if isinstance(witness, tuple) and len(witness) == 2
+                                        and witness[0] == self._session_id else Counter())
+        if getattr(self, "_ingest_read_only", None) is None:
+            self._trip_witness = None
         # This guard belongs to #2042's catch-up and runs only when host_row_recovery_enabled is on.
         # The eager write lock serializes the probe and writes if another writer filled an empty-store bind.
         if getattr(getattr(self, "_config", None), "host_row_recovery_enabled", False) and self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
@@ -9638,7 +9645,21 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
+        def freeze_trip_witness():
+            keys = Counter()
+            for message in messages:
+                try:
+                    if self._matches_ignore_message_patterns(message):
+                        continue
+                except Exception:
+                    continue
+                key = _trip_key(message)
+                if key is not None:
+                    keys[key] += 1
+            self._trip_witness = (self._session_id, keys)
+
         def remember(active):
+            freeze_trip_witness()
             previous_replay = getattr(self, "_last_active_replay_messages", ())
             previous_generated_ids = (
                 self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
@@ -9666,6 +9687,7 @@ class LCMEngine(
                 self._persist_ingest_replay_evidence(replay_messages)
 
             def finish_no_new():
+                freeze_trip_witness()
                 cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
                 return cached_replay if cached_replay is not None else remember(replay_messages)
 
