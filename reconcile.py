@@ -913,7 +913,7 @@ class ReconcileMixin:
         self._retired_durable_proof = payload["created_at"]
         return True
 
-    def _occurrence_replay_identities(self, messages, proof, projection=None):
+    def _occurrence_replay_identities(self, messages, proof, projection=None, *, restore_objective=False):
         """#488: per occurrence of the COMPLETE list, from its one projection: None for a proven
         emitted scaffold, the remainder of a proven emitted prefix, else FULL identity. Legacy,
         unmatched or ambiguous descriptors project nothing, so those rows keep full identity."""
@@ -929,8 +929,12 @@ class ReconcileMixin:
                 else self._message_replay_identity(m, allow_pruned_tool_alias=i not in recent_tools)
                 for i, m in enumerate(messages)
             ]
+        restored = self._restored_objective_index(messages, proof) if restore_objective else None
         identities = []
         for index, (message, entry) in enumerate(zip(messages, projection.entries)):
+            if index == restored:
+                identities.append(None)
+                continue
             content = None if entry.generated_span is None else entry.effective_identity[1]
             if content is not None and entry.retained_source is None and entry.kind != "carrier":
                 # A standalone summary/objective occurrence sits where it was returned or, merged by
@@ -3018,7 +3022,7 @@ class ReconcileMixin:
                 # rc3 (version 2) hashed exact identities.
                 return _proof_user_identity(identity) if payload.get("version") != 2 else identity
 
-            projection, occurrences = self._occurrence_replay_identities(messages, payload)
+            projection, occurrences = self._occurrence_replay_identities(messages, payload, restore_objective=True)
             recent_tools = _hermes_salvage_protected_positions(messages)
 
             target = list(payload.get("effective_sha256") or [])

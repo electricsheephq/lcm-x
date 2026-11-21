@@ -23,7 +23,8 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import partial, wraps
+from functools import lru_cache, partial, wraps
+from inspect import signature
 from threading import get_ident
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -111,6 +112,17 @@ def _made_progress(before, returned) -> bool:
         return False
 
 
+@lru_cache(maxsize=1)
+def _host_has_post_tool_reanchor() -> bool:
+    """Hermes threads a new turn boundary back to request assembly through this parameter."""
+    try:
+        from agent.turn_preflight import compress_after_tool_results
+
+        return "current_turn_user_idx" in signature(compress_after_tool_results).parameters
+    except Exception:
+        return False
+
+
 def _reports_progress(operation):
     """#2863: the host arms its compaction-cleared re-check only when the engine reports progress
     (agent/conversation_compression.py 3b421578:4115-4117, 3420-3427); every exit reports, a raise as False. A call the
@@ -118,6 +130,8 @@ def _reports_progress(operation):
     so with overlapping calls on one engine it can be wrong once per overlap (one extra or one missing re-check, no data)."""
     @wraps(operation)
     def reporting(self, messages, *args, **kwargs):
+        if not _host_has_post_tool_reanchor():
+            return operation(self, messages, *args, **kwargs)
         refusals = self._compress_reentry_refusals
         if self._compress_owner in (None, get_ident()):  # another owner means this call is likely refused
             self._last_compression_made_progress = False
