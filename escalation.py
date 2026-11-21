@@ -17,7 +17,7 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from . import tokens as _token_module
@@ -66,6 +66,10 @@ _DEFAULT_ROUTE_KEY = "<task-default>"
 
 # #608: a threshold sweep does not start a summariser call with less time than this left.
 _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+# Design B: after progress, above the mark, a call the base refuses may start if it ends by t0 + this - reserve.
+_CATCHUP_HARD_SECONDS = 210.0  # provisional until bench numbers
+_CATCHUP_TIMEOUT_SHARE = 0.85
+_CATCHUP_MIN_RESERVE_SECONDS = 20.0  # an extension-only admit's finalize reserve (a cold pass has a 5 s reserve)
 
 _summary_call = threading.local()  # #682: the last summary call's error and host route, per thread
 _route_info_support: dict[int, tuple[object, bool]] = {}
@@ -149,15 +153,44 @@ class ForegroundBudget:
         self.selected = False  # #1162: this compaction selected a leaf chunk (its zero-leaf pass counts)
         self.summary_failure = ""  # #1162: sticky across every summary call/route in this pass
 
+    # Design B: the catch-up admit is open (after progress, above the mark); ``extended`` marks an admit only it made.
+    catchup = extended = catchup_ended = False  # class defaults: only an engaged pass sets them
+    catchup_frontier: Optional[int] = None  # the summary frontier the condensation loop last measured
+
     @property
     def usable_deadline(self) -> float:
+        if self.extended:  # design B: an extension-only call ends by the catch-up bound
+            return self.catchup_deadline() - self.leaf_reserve
         return self.t0 + self.hard - self.reserve - self.leaf_reserve
+
+    def catchup_deadline(self) -> float:
+        return self.t0 + _CATCHUP_HARD_SECONDS - max(self.reserve, _CATCHUP_MIN_RESERVE_SECONDS)
+
+    def catchup_timeout(self) -> float:  # design B: under the hang share of the window the outcome reads
+        return _CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, self.usable_deadline - self.t0)
 
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
 
     def admit(self, route_key: str) -> float:
         """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
+        stop_reason = self.stop_reason
+        if self.extended:
+            self.extended = False
+        try:
+            return self._admit_base(route_key)
+        except SweepBudgetExhausted:
+            if not (self.catchup and self.progress):
+                raise
+            self.extended = True  # design B: the base refused; the estimate may still fit by the catch-up bound
+            usable_left = self.usable_deadline - time.monotonic()
+            if self.estimate(route_key) > usable_left:
+                self.extended = False
+                raise
+            self.stop_reason = stop_reason
+            return usable_left
+
+    def _admit_base(self, route_key: str) -> float:
         now = time.monotonic()
         estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
         if not self.progress:  # the progress call (an over-target condensation, else the first leaf): no estimate
@@ -176,7 +209,8 @@ class ForegroundBudget:
         return SweepBudgetExhausted(message, reason=reason)
 
     def record_call(self, route_key: str, started: float, ended: float) -> None:
-        self.estimates.record_call(route_key, ended - started)
+        if not self.extended:  # design B: an extension-only call's wall stays out of the shared estimates
+            self.estimates.record_call(route_key, ended - started)
         if self.first_call_started is None:
             self.first_call_started = started
         self.last_call_ended = ended
@@ -781,6 +815,9 @@ def _invoke_summary_attempt(
     _summary_call.route, _summary_call.error = {}, None  # #682: filled by _call_llm_for_summary
     _summary_call.contract = ""
     _summary_call.stream_deadline = budget.usable_deadline if budget is not None else None
+    if getattr(budget, "extended", False) and timeout is not None:  # design B: the capped timeout bounds the host too
+        budget.call_deadline = min(_summary_call.stream_deadline, time.monotonic() + timeout)
+        _summary_call.stream_deadline = budget.call_deadline
     deadline_installed = budget is not None and _host_stream_deadline_seam()
     started = time.monotonic()
     try:
@@ -1108,10 +1145,14 @@ def _invoke_summary_llm_routes(
             )
             continue
         call_timeout, budget_bound = timeout, False
+        extended = False
         if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
             usable_left = budget.admit(route_key)
             budget_bound = timeout is None or usable_left < timeout
             call_timeout = usable_left if budget_bound else timeout
+            extended = bool(getattr(budget, "extended", False))
+            if extended:  # design B: a cut is a budget cut, never a hang
+                call_timeout, budget_bound = min(usable_left, budget.catchup_timeout()), True
         elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
             if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
@@ -1135,7 +1176,7 @@ def _invoke_summary_llm_routes(
         )
         result, route, error = attempt.text, attempt.route, attempt.error
         started, ended = attempt.timing.started, attempt.timing.ended
-        if error is not None:
+        if error is not None and not extended:
             note_error(error)
         if budget is not None:
             budget.record_call(route_key, started, ended)
@@ -1152,7 +1193,9 @@ def _invoke_summary_llm_routes(
             hard=budget.hard if budget is not None else 0.0,
             reserve=budget.reserve if budget is not None else 0.0,
             leaf_reserve=budget.leaf_reserve if budget is not None else 0.0,
-            usable_deadline=budget.usable_deadline if budget is not None else 0.0,
+            # design B: an extension-only call is classified against the stream deadline it installed
+            usable_deadline=(budget.call_deadline if extended else budget.usable_deadline)
+            if budget is not None else 0.0,
             now=time.monotonic() if budget is not None and result is None and error is not None else 0.0,
             breaker_present=circuit_breaker is not None,
             accepts_result=accepted,
@@ -1162,6 +1205,10 @@ def _invoke_summary_llm_routes(
                            and source_tokens is not None else 0),
             context_length_rescue=context_length_rescue,
         ))
+        if extended and outcome.hang:  # design B: an extension-only call is never classed a hang
+            outcome = replace(outcome, hang=False, record_hang=False)
+        if extended and error is not None and outcome.kind is not SummaryOutcomeKind.FAILURE:
+            note_error(error)  # design B: the chain end covers a FAILURE only; other kinds keep the base handling
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)
@@ -1207,6 +1254,10 @@ def _invoke_summary_llm_routes(
             note_error(None)
             if provenance is not None:  # #751: the chunk is too large for this route; the caller shrinks it
                 provenance["context_length_error"] = True
+        elif extended and outcome.kind is SummaryOutcomeKind.FAILURE:  # design B: no strike, no fallback call
+            budget.catchup, budget.catchup_ended, budget.extended = False, True, False
+            budget._admit_base(route_key)  # the base refuses the chain's next call, with its own stop reason
+            raise budget.stop()
         elif circuit_breaker is not None:
             if outcome.kind is SummaryOutcomeKind.FAILURE:
                 circuit_breaker.record_failure(route_key)
