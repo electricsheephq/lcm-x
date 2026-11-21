@@ -33,6 +33,10 @@ input name, 1 on a usage or git error.
    mechanisms' paths, one of its own paths, or one of its path sets, or when one of its other inputs changed.
    Every other mapped suite is skipped. The release notes carry each skip as
    `suite X skipped: nothing it measures changed`, printed by the script.
+   **Precedence until the release spec adopts this map.** The release readiness spec still decides the release
+   rows. A row it requires on every release candidate (for example the L1 checks) runs even when the script prints
+   SKIP for it. That SKIP line then records that the row's inputs did not change; it does not permit leaving the
+   row out. The release manager amends the readiness spec separately.
 2. **Fail closed.** A changed path that no row covers is UNMAPPED, and every mapped suite runs. A change to a
    path in `fail_closed_paths` (a shared hub, or a product module that no mechanism or suite row lists yet) also
    runs every mapped suite. Renames are read as a delete plus an add (`--no-renames`). The old path hits its row, and a new path
