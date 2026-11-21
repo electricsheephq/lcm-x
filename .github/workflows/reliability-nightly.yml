@@ -21,8 +21,8 @@ permissions:
   issues: read
 
 concurrency:
-  group: reliability-${{ github.ref }}
-  cancel-in-progress: true
+  group: reliability-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   matrix:

@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -83,10 +84,10 @@ def test_known_new_keeps_second_night_red(recorded, tmp_path):
     ]
 
 
-def planted(root, verdict=None, *, flake=False):
-    folder = root / "reliability-ref-0.21.5" / "default-window-r1"
+def planted(root, verdict=None, *, flake=False, host=HOST):
+    folder = root / f"reliability-{host}" / "default-window-r1"
     folder.mkdir(parents=True)
-    host, sha = BUILD.split("@")
+    sha = BUILD.split("@")[1]
     rows = [dict(cell=cid, host=host, host_sha=sha, verdict=v)
             for cid, v in (("default-window/stable", "PASS"), (CELL, verdict)) if v]
     (folder / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -119,6 +120,28 @@ def test_baseline_cell_absent_from_candidate_is_missing(tmp_path):
     baseline = planted(tmp_path / "baseline", "PASS")
     candidate = planted(tmp_path / "candidate")
     assert (f"{HOST}/default-window-r1/{CELL}", "PASS", "—", "MISSING") in table(invoke(candidate, baseline), 1)
+
+
+@pytest.mark.parametrize(("before", "status", "kind"), [("FAIL", 0, "MATCHED"), ("PASS", 1, "NEW")])
+def test_nightly_reuses_newest_verdict_for_returning_host(tmp_path, before, status, kind):
+    host = "returning-host"
+    older = planted(tmp_path / "100", "PASS" if before == "FAIL" else "FAIL", host=host)
+    planted(older, "FAIL", host="history-only-host")
+    first = planted(tmp_path / "101", "PASS")
+    planted(first, before, host=host)
+    second = planted(tmp_path / "102", "PASS")
+    third = planted(tmp_path / "103", "PASS")
+    planted(third, "FAIL", host=host)
+    key = f"{host}/default-window-r1/{CELL}"
+    assert (key, before, "—", "MISSING") in table(invoke(second, first), 1)
+
+    history = ("--history", tmp_path / "unreadable", "--history", first, "--history", older)
+    rows = table(invoke(third, second, *history), status)
+    assert (key, f"{before} (run 101)", "FAIL", kind) in rows
+    assert [row[0] for row in rows if row[-1] == "NEW"] == ([key] if status else [])
+    assert all(not row[0].startswith("history-only-host/") for row in rows)
+    assert (key, "—", "FAIL", "NEW") in table(invoke(third, second), 1)
+    assert (key, "—", "FAIL", "NEW") in table(invoke(third, second, *history, mode="respin"), 1)
 
 
 def test_respin_matches_the_same_cells_after_host_pin_bump(recorded):
@@ -311,6 +334,18 @@ def test_retry_budget_leaves_unretried_cells_new(tmp_path, monkeypatch, capsys, 
             json.dumps(dict(cell=cell, host=host, host_sha=sha, verdict="PASS")) + "\n" for cell in selected
         ))
 
+    if timed_out:
+        class RetryDirectory(tempfile.TemporaryDirectory):
+            def __init__(self, *, ignore_cleanup_errors=False, **kwargs):
+                super().__init__(ignore_cleanup_errors=ignore_cleanup_errors, **kwargs)
+                self.ignore_cleanup_errors = ignore_cleanup_errors
+
+            def __exit__(self, *exc):
+                super().__exit__(*exc)
+                if not self.ignore_cleanup_errors:
+                    raise OSError("retry directory is still in use")
+
+        monkeypatch.setattr(ci.tempfile, "TemporaryDirectory", RetryDirectory)
     monkeypatch.setattr(ci, "_run_retry", runner, raising=False)
     monkeypatch.setattr(ci, "prep", prepare)
     monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: runner(command, None))
@@ -321,3 +356,22 @@ def test_retry_budget_leaves_unretried_cells_new(tmp_path, monkeypatch, capsys, 
     assert len(deadlines) == 1
     assert output.count("| NEW |") == (23 if timed_out else 3)
     assert f"{20 if timed_out else 3} ({reason})" in output
+
+
+def test_unexpected_retry_runner_error_keeps_the_comparison_and_new_cells(tmp_path, monkeypatch, capsys):
+    baseline = planted(tmp_path / "baseline", "PASS")
+    candidate = planted(tmp_path / "candidate", "FAIL")
+    alarm = tmp_path / "alarm.json"
+
+    def runner(command, deadline):
+        raise ValueError("unexpected runner failure")
+
+    monkeypatch.setattr(ci, "_run_retry", runner)
+    assert ci.main(["compare", "--mode", "nightly", "--candidate", str(candidate), "--baseline", str(baseline),
+                    "--retry-scratch", str(tmp_path), "--alarm-result", str(alarm)]) == 1
+    captured = capsys.readouterr()
+    key = f"{HOST}/default-window-r1/{CELL}"
+    assert f"| `{key}` | PASS | FAIL | NEW |" in captured.out
+    assert "1 (retry unavailable)" in captured.out
+    assert "retries unavailable" in captured.err and "ValueError" in captured.err
+    assert json.loads(alarm.read_text())["new"] == [[key, "PASS", "FAIL", "NEW"]]

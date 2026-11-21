@@ -337,14 +337,13 @@ def _run_retry(command: list[str], deadline: float) -> None:
             raise subprocess.CalledProcessError(status, command)
 
 
-def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: Path) -> dict[str, int]:
+def retry_new(candidate: Path, current: tuple[dict, set], baseline: tuple[dict, set],
+              known: set, scratch: Path) -> dict[str, int]:
     """Retry fresh failures within one shared budget on the original pins and transports."""
-    current = load_side("candidate", candidate)
     fresh = [key for key, _, _, kind in compare(current, baseline, known, set(), nightly=True)
              if kind == "NEW" and key not in known]
     if not fresh:
         return {}
-    deadline = time.monotonic() + RETRY_MINUTES * 60
     selected = fresh[:RETRY_CELL_CAP]
     skipped = defaultdict(int)
     if len(fresh) > len(selected):
@@ -356,72 +355,74 @@ def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: 
     remaining = len(selected)
     time_limit = f"{RETRY_MINUTES}-minute limit"
     try:
+        deadline = time.monotonic() + RETRY_MINUTES * 60
         _run_retry([sys.executable, "-m", "pip", "install", "uv==0.11.26"], deadline)
-    except subprocess.TimeoutExpired:
-        skipped[time_limit] = remaining
-        return skipped
-    except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"cell retries unavailable ({type(exc).__name__})", file=sys.stderr)
-        skipped["retry unavailable"] = remaining
-        return skipped
-    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
-        scratch = Path(tmp)
-        host_files = {}
-        for (host, sha, round_name), cells in groups.items():
-            try:
-                if host not in host_files:
-                    hosts_file = scratch / f"{host}.json"
+        with tempfile.TemporaryDirectory(dir=scratch, ignore_cleanup_errors=True) as tmp:
+            scratch = Path(tmp)
+            host_files = {}
+            for (host, sha, round_name), cells in groups.items():
+                try:
+                    if host not in host_files:
+                        hosts_file = scratch / f"{host}.json"
+                        _run_retry(
+                            [sys.executable, "-m", "bench.instruments.reliability.ci", "prep",
+                             "--host", host, "--root", str(scratch / "hosts"), "--out", str(hosts_file)],
+                            deadline,
+                        )
+                        spec = json.loads(hosts_file.read_text())
+                        host_files[host] = (hosts_file, spec["hosts"][host]["sha"])
+                    hosts_file, prepared_sha = host_files[host]
+                    if sha != prepared_sha:
+                        raise ValueError("retry requires the original pinned host SHA")
+                    results = scratch / f"reliability-{host}" / round_name
+                    transport = ["--transport", "acp-process"] if round_name == "r2" else []
                     _run_retry(
-                        [sys.executable, "-m", "bench.instruments.reliability.ci", "prep",
-                         "--host", host, "--root", str(scratch / "hosts"), "--out", str(hosts_file)],
+                        [sys.executable, "-m", "bench.instruments.reliability.run_matrix", *transport,
+                         "--hosts-file", str(hosts_file), "--hosts", host, "--plugin-ref", "HEAD",
+                         "--cells", ",".join(cells), "--jobs", "4", "--out", str(results)],
                         deadline,
                     )
-                    spec = json.loads(hosts_file.read_text())
-                    host_files[host] = (hosts_file, spec["hosts"][host]["sha"])
-                hosts_file, prepared_sha = host_files[host]
-                if sha != prepared_sha:
-                    raise ValueError("retry requires the original pinned host SHA")
-                results = scratch / f"reliability-{host}" / round_name
-                transport = ["--transport", "acp-process"] if round_name == "r2" else []
-                _run_retry(
-                    [sys.executable, "-m", "bench.instruments.reliability.run_matrix", *transport,
-                     "--hosts-file", str(hosts_file), "--hosts", host, "--plugin-ref", "HEAD",
-                     "--cells", ",".join(cells), "--jobs", "4", "--out", str(results)],
-                    deadline,
-                )
-                retried, _ = load_tables(results.parent)
-                complete = {cell: retried[f"{host}/{round_name}/{cell}"] for cell in cells
-                            if f"{host}/{round_name}/{cell}" in retried}
-                passed = [cell for cell, row in complete.items() if row == CellResult("PASS", sha)]
-                if passed:
-                    metadata = candidate / f"reliability-{host}" / round_name / "run.json"
-                    run = json.loads(metadata.read_text())
-                    run["comparison_flakes"] = passed
-                    pending = metadata.with_name(".run.json.pending")
-                    pending.write_text(json.dumps(run, indent=1) + "\n")
-                    pending.replace(metadata)
-                unavailable = len(cells) - sum(row.host_sha == sha for row in complete.values())
-            except subprocess.TimeoutExpired:
-                skipped[time_limit] = remaining
-                break
-            except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
-                print(f"retry unavailable for {host}/{round_name} ({type(exc).__name__})", file=sys.stderr)
-                unavailable = len(cells)
-            if unavailable:
-                skipped["retry unavailable"] += unavailable
-            remaining -= len(cells)
+                    retried, _ = load_tables(results.parent)
+                    complete = {cell: retried[f"{host}/{round_name}/{cell}"] for cell in cells
+                                if f"{host}/{round_name}/{cell}" in retried}
+                    passed = [cell for cell, row in complete.items() if row == CellResult("PASS", sha)]
+                    if passed:
+                        metadata = candidate / f"reliability-{host}" / round_name / "run.json"
+                        run = json.loads(metadata.read_text())
+                        run["comparison_flakes"] = sorted(set(run.get("comparison_flakes", [])) | set(passed))
+                        pending = metadata.with_name(".run.json.pending")
+                        pending.write_text(json.dumps(run, indent=1) + "\n")
+                        pending.replace(metadata)
+                        current[1].update(f"{host}/{round_name}/{cell}" for cell in passed)
+                    unavailable = len(cells) - sum(row.host_sha == sha for row in complete.values())
+                except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+                    print(f"retry unavailable for {host}/{round_name} ({type(exc).__name__})", file=sys.stderr)
+                    unavailable = len(cells)
+                if unavailable:
+                    skipped["retry unavailable"] += unavailable
+                remaining -= len(cells)
+    except subprocess.TimeoutExpired:
+        skipped[time_limit] = remaining
+    except Exception as exc:
+        print(f"cell retries unavailable ({type(exc).__name__})", file=sys.stderr)
+        if remaining:
+            skipped["retry unavailable"] += remaining
     return skipped
 
 
 def compare_command(args) -> int:
     nightly = args.mode == "nightly"
     skipped = {}
+    history_sources = {}
     try:
         baseline = load_side("baseline", args.baseline)
         known = read_known(json.loads(args.known_new.read_text())) if args.known_new else set()
+        candidate = load_side("candidate", args.candidate)
         # The current night, baseline and five older comparable nights make seven.
-        past_flakes = baseline[1].copy()
+        previous, previous_flakes = baseline
+        past_flakes = previous_flakes.copy()
         if nightly:
+            unseen = candidate[0].keys() - previous.keys()
             included = {args.candidate.resolve(), args.baseline.resolve()}
             older_nights = set()
             for position, path in enumerate(args.history, start=1):
@@ -432,16 +433,27 @@ def compare_command(args) -> int:
                     if older in included or older in older_nights:
                         continue
                     older_nights.add(older)
-                    past_flakes.update(load_side("history", older)[1])
+                    older_rows, older_flakes = load_side("history", older)
                 except (OSError, ValueError, RuntimeError):
                     print(f"warning: skipping unreadable history entry {position}", file=sys.stderr)
+                    continue
+                past_flakes.update(older_flakes)
+                found = unseen & older_rows.keys()
+                source = f"run {older.name}" if re.fullmatch(r"[0-9]+", older.name) else f"older night {position}"
+                for key in found:
+                    previous[key] = older_rows[key]
+                    history_sources[key] = source
+                previous_flakes.update(found & older_flakes)
+                unseen.difference_update(found)
             if args.retry_scratch:
-                skipped = retry_new(args.candidate, baseline, known, args.retry_scratch)
-        candidate = load_side("candidate", args.candidate)
+                skipped = retry_new(args.candidate, candidate, baseline, known, args.retry_scratch)
     except (OSError, ValueError) as exc:
         print(f"compare: {exc}", file=sys.stderr)
         return 2
-    rows = compare(candidate, baseline, known, past_flakes, nightly=nightly)
+    rows = [
+        (key, f"{before} ({history_sources[key]})" if key in history_sources else before, after, kind)
+        for key, before, after, kind in compare(candidate, baseline, known, past_flakes, nightly=nightly)
+    ]
     print(TABLE_HEADER, *table_lines(rows), sep="\n")
     if skipped:
         reasons = ", ".join(f"{count} ({reason})" for reason, count in skipped.items())

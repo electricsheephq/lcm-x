@@ -64,6 +64,13 @@ def test_dispatch_accepts_a_named_baseline_and_stages_tables():
     assert re.search(r"(?ms)name: Upload dispatch tables.*?if: .*?workflow_dispatch.*?name: reliability-tables\n", compare)
 
 
+def test_workflow_concurrency_is_separate_by_event_and_only_prs_cancel():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    concurrency = re.search(r"(?ms)^concurrency:\n(.*?)(?=^\w+:)", workflow).group(1)
+    assert "  group: reliability-${{ github.ref }}-${{ github.event_name }}\n" in concurrency
+    assert "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n" in concurrency
+
+
 def test_alarm_is_schedule_only_and_uses_the_compare_python():
     workflow = WORKFLOW.read_text(encoding="utf-8")
     alarm = job(workflow, "alarm")

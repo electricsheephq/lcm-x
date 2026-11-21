@@ -469,7 +469,8 @@ The open `nightly-regression` issue records NEW cells and their run links, and a
 A clean comparison leaves a comment on an open alarm. Review the recorded verdicts and failed bars, link the fix or accepted
 disposition, and close the alarm after every tracked cell is dispositioned. For a release respin, dispatch
 `gh workflow run reliability-nightly.yml --ref <candidate-ref> -f baseline_run=<GA run id>`.
-The dispatch reads the alarm, compares with the named run, and uploads its tables for another dispatch.
+The dispatch reads the open alarm's tracked cells, compares with the named run, and uploads its tables for another
+dispatch. A cell tracked on main counts as NEW in the respin table while it fails.
 Omit `baseline_run` to use the scheduled baseline selection for the candidate ref. To compare downloaded runs locally, use
 `python -m bench.instruments.reliability.ci compare --mode respin --candidate <candidate-tables> --baseline <ga-tables>`
 with the candidate and previous GA runs.
