@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scripts.release.test_impact import MAP, ROOT, MapError, compile_glob, decide, literal_globs, load_map
+from scripts.release.suite_impact import MAP, ROOT, MapError, compile_glob, decide, literal_globs, load_map
 
 REAL = load_map(MAP)
 MAPPED = {s["id"] for s in REAL["suites"] if s["kind"] == "mapped"}
@@ -90,7 +90,7 @@ def test_bad_input():
 
 
 def test_cli(tmp_path):
-    command = [sys.executable, str(ROOT / "scripts/release/test_impact.py"), "HEAD", "HEAD"]
+    command = [sys.executable, str(ROOT / "scripts/release/suite_impact.py"), "HEAD", "HEAD"]
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     expected = f"counts: run=0 skip={len(MAPPED)} manual={len(MANUAL)} unmapped_paths=0"
     assert result.returncode == 0 and result.stdout.splitlines()[-1] == expected

@@ -6,12 +6,12 @@ behaviour. A release, or a scheduled run, runs only the suites whose inputs chan
 skipped, with the reason.
 
 `bench/specs/test-impact-map.json` is the machine-readable copy. The tables below are the same data;
-`tests/test_test_impact.py` fails when the doc and the JSON disagree.
+`tests/test_suite_impact.py` fails when the doc and the JSON disagree.
 
 ## How to use it
 
 ```
-python3 scripts/release/test_impact.py <base> <head> [--input NAME ...]
+python3 scripts/release/suite_impact.py <base> <head> [--input NAME ...]
 ```
 
 The script reads `git diff --no-renames --name-only <base>..<head>` and prints one line per suite:
