@@ -32,8 +32,8 @@ input name, 1 on a usage or git error.
    Every other mapped suite is skipped. The release notes carry each skip as
    `suite X skipped: nothing it measures changed`, printed by the script.
 2. **Fail closed.** A changed path that no row covers is UNMAPPED, and every mapped suite runs. A change to a
-   product module that no mechanism lists, or to a shared hub (see `fail_closed_paths`), also runs every mapped
-   suite. Renames are read as a delete plus an add (`--no-renames`). The old path hits its row, and a new path
+   path in `fail_closed_paths` (a shared hub, or a product module that no mechanism or suite row lists yet) also
+   runs every mapped suite. Renames are read as a delete plus an add (`--no-renames`). The old path hits its row, and a new path
    that no glob covers is UNMAPPED until the map grows a row for it.
 3. **Manual suites are not decided here.** Their product reach is not mapped (the unmapped list below). Run them
    by hand when someone judges they are needed. Never record them as "skipped: nothing it measures changed".
@@ -104,7 +104,7 @@ or more whole directories, any other `**` matches anything including `/`, and `*
 | `@product` | `*.py`, `access_context/**`, `access_policy/**`, `adapters/**`, `companions/**`, `skills/**`, `teams/**`, `plugin.yaml`, `requirements-semantic.txt` |
 | `@turn_path` | `__init__.py`, `assembly_plan.py`, `aux_session.py`, `bypass.py`, `codex_routing.py`, `compaction.py`, `compaction_policy.py`, `compaction_request.py`, `compress_run.py`, `config.py`, `dag.py`, `db_bootstrap.py`, `diagnostics.py`, `emission_projection.py`, `engine.py`, `engine_registry.py`, `escalation.py`, `expand_tools.py`, `externalize.py`, `extraction.py`, `frontier_state.py`, `fresh_tail.py`, `host_rewrite.py`, `host_row_recovery.py`, `host_uid.py`, `host_uid_emit.py`, `identity_anchor.py`, `ingest_content.py`, `ingest_integrity.py`, `ingest_ledger.py`, `ingest_pem_model.py`, `ingest_pem_scan.py`, `ingest_persisted.py`, `ingest_policy.py`, `ingest_protection.py`, `leaf_prep.py`, `lifecycle_state.py`, `maintenance_scheduler.py`, `message_analysis.py`, `message_content.py`, `message_patterns.py`, `model_routing.py`, `placeholder_ledger.py`, `plugin_identity.py`, `prefix_matching.py`, `recognition_matching.py`, `reconcile.py`, `reset_state.py`, `retrieval_core.py`, `rollup_builder.py`, `rollup_periods.py`, `rollup_store.py`, `sender_capture.py`, `sanitize.py`, `schemas.py`, `search_query.py`, `session_patterns.py`, `sqlite_util.py`, `store.py`, `store_complete.py`, `summary_attempt.py`, `summary_input_clip.py`, `summary_outcome.py`, `survival_codec.py`, `survival_fit.py`, `tokens.py`, `tool_pairs.py`, `tool_registry.py`, `tools.py`, `unended_catchup.py` |
 | `fail_closed_paths` | `message_content.py`, `message_analysis.py`, `sanitize.py`, `session_patterns.py`, `answer_contract.py`, `assertion_*.py`, `cloud_*.py`, `codex_routing.py`, `command_auth.py`, `command_router.py`, `command_status.py`, `cpu_capacity.py`, `engine_registry.py`, `entity_*.py`, `evidence_compiler.py`, `evidence_pack.py`, `expansion_evidence.py`, `inactive_record.py`, `ingest_classifier.py`, `maintenance.py`, `mcp_reader.py`, `model_routing.py`, `occurrence_time.py`, `presets.py`, `query_view_store.py`, `readonly_store.py`, `reasoning.py`, `recorder.py`, `recorder_read.py`, `requirements_compiler.py`, `scope_storage.py`, `selective_compiler.py`, `sender_capture.py`, `trajectory_store.py`, `access_context/**`, `access_policy/**`, `teams/**`, `skills/**` |
-| `ignored_paths` | `.agents/**`, `.github/ISSUE_TEMPLATE/**`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/CODEOWNERS`, `.github/dependabot.yml`, `.gitignore`, `LICENSE` |
+| `ignored_paths` | `.agents/**`, `.github/ISSUE_TEMPLATE/**`, `.github/PULL_REQUEST_TEMPLATE.md`, `.github/CODEOWNERS`, `.github/dependabot.yml`, `.gitignore` |
 
 ## Mechanisms
 
