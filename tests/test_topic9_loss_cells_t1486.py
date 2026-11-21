@@ -127,7 +127,7 @@ def test_f6_an_ambiguous_id_keeps_mains_result(tmp_path, monkeypatch):
     either occurrence (main's result), and the fresh unambiguous pair is still stored."""
     engine = _engine(tmp_path)
     try:
-        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
+        u0, u1 = _u("T0 user turn", 1000), _u("T1 user turn", 1002)
         old_call = _unstamped(_call("call_x", 1003))
         a1 = _a("reply to T1", 1005)
         engine.ingest([u0, old_call, u1, a1])
