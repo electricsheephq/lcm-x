@@ -7120,17 +7120,17 @@ class LCMEngine(
 
         emissions = proof.get("emissions")
         if proof.get("native") or not emissions:
-            return decline("no_emissions")
+            return None
         index = next((i for i, row in enumerate(messages) if row.get("role") != "system"), None)
         if index is None or index + 2 >= len(messages) or messages[index + 2].get("role") != "tool":
-            return decline("no_tool_round")
+            return None
         row = messages[index]
         content = row.get("content")
         prefix = _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"
         if (row.get("role") != "user" or not isinstance(content, str) or row.get("tool_calls")
                 or not content or content.startswith(prefix) or row.get("tool_call_id")
                 or messages[index + 1].get("role") != "assistant" or not messages[index + 1].get("tool_calls")):
-            return decline("row_shape")
+            return None
         binding = self._emission_binding()
         if not self._emission_proof_matches_binding(proof, binding):
             return decline("binding")
@@ -7141,24 +7141,18 @@ class LCMEngine(
         prior = replay[index]
         span = prior.get("content")
         metadata = self._host_occurrence_metadata(row)
-        if prior.get("role") != "user" or not isinstance(span, str) or cached[index][:2] != ("user", span):
+        # The host's own witness: the source identity it sent at this index is the generated span's.
+        # The source cache holds replay identities, which can differ from the raw span (#3013: on the
+        # durable path a head quoting externalized output), so compare it with the prior's identity too.
+        if (prior.get("role") != "user" or not isinstance(span, str)
+                or (cached[index][:2] != ("user", span)
+                    and cached[index][:2] != self._message_replay_identity(prior, strip_carrier=False)[:2])):
             return decline("cached_occurrence")
+        if (not any(value is not None for value in metadata.values())
+                or metadata != self._host_occurrence_metadata(prior)):
+            return decline("occurrence_metadata")
         if not span.startswith(prefix + content):
             return decline("span_prefix")
-        if not any(value is not None for value in metadata.values()):
-            return decline("occurrence_metadata")
-        output, emitted = proof.get("output") or (), proof.get("output_metadata") or ()
-        emitted_span = output[index][1] if index < len(output) and len(output[index]) > 1 else None
-        if metadata != self._host_occurrence_metadata(prior):
-            # #3013: the cache can predate this emission (the host never sent the adopted view
-            # back before its finalizer), so its stamp cannot witness the row. Then only the uid
-            # the engine gave the emitted occurrence can: a fresh stamp alone may be a new row.
-            if (emitted_span == span or not isinstance(emitted_span, str)
-                    or not emitted_span.startswith(prefix + content) or index >= len(emitted)):
-                return decline("occurrence_metadata")
-            if not _valid_uid(metadata["message_uid"]) or emitted[index].get("message_uid") != metadata["message_uid"]:
-                return decline("stale_occurrence_unwitnessed")
-            span = emitted_span
         suffix = span[len(prefix) + len(content):]
         if suffix and (not suffix.startswith("\n\n---\n\n")
                        or self._verified_lcm_summary_prefix_end(suffix[7:]) != len(suffix) - 7):
