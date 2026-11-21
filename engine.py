@@ -7116,6 +7116,8 @@ class LCMEngine(
         """
         def decline(reason):
             self._ledger_count("objective_restore.declined." + reason)
+            import sys as _sys
+            logger.info("LCM C1A-DEBUG restore declined reason=%s caller=%s", reason, _sys._getframe(2).f_code.co_name)
             return None
 
         emissions = proof.get("emissions")
@@ -7177,6 +7179,7 @@ class LCMEngine(
             if len(sources) > 1:
                 break
         if len(sources) != 1:
+            logger.info("LCM C1A-DEBUG sources=%s frontier=%s session=%s chain=%s", [(r.get("store_id"), r.get("session_id")) for r in sources], frontier, self._session_id, self._rotation_predecessor_session_ids(str(self._session_id)))
             return decline("source_count_%d" % len(sources))
         if sources[0].get("conversation_id") != self._conversation_id:
             return decline("source_conversation")
@@ -7185,6 +7188,8 @@ class LCMEngine(
         if (not _has_lossy_redacted_identity(identity)
                 and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
             self._ledger_count("objective_restore.matched")
+            import sys as _sys
+            logger.info("LCM C1A-DEBUG restore matched index=%s caller=%s", index, _sys._getframe(2).f_code.co_name)
             return index
         return decline("source_identity")
 
