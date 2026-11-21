@@ -97,6 +97,9 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
     "_ingest_attempt_index",
+    # Topic 9: the trip witness is a pure function of the previous completed ingest's host list, session and ignore
+    # patterns (all observed); the audit's copy is taken and cleared at ingest entry.
+    "_trip_witness", "_trip_witness_for_audit",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
     "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
     "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
@@ -403,6 +406,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
                                             "_identity_anchor_durable_recovery_pending",  # Read admission only; writes recheck scope.
                                             "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
                                             "_ingest_attempt_index",  # #1815: this ingest's attempt number; reset every ingest.
+                                            # Topic 9: derived from observed inputs; the audit copy is per ingest.
+                                            "_trip_witness", "_trip_witness_for_audit",
                                             "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
                                             # P1h lock-hold telemetry; no ingest decision reads it.
                                             "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):

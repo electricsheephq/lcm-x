@@ -143,9 +143,8 @@ def _presence_read_fails(monkeypatch, engine):
     monkeypatch.setattr(engine, "_rotation_predecessor_session_ids", boom)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="#2468: when a call row was not stored at its turn (past the presence window or "
-                   "after a failed presence read), a later full-history ingest stores the call and a second, unlinked "
-                   "copy of its tool result")
+# #2468's precondition (a call row left unstored at its turn past the presence window or after a failed presence
+# read) was the topic-9 loss; the fix stores the call at its turn, so the later ingest has nothing to re-store.
 @pytest.mark.parametrize("cause", ["window", "read_failure"])
 def test_2468_a_late_call_does_not_store_an_unlinked_second_result(tmp_path, cause, monkeypatch, caplog):
     history, turn_start, turn_end, longer, (call, result, reply) = _views()
@@ -156,12 +155,11 @@ def test_2468_a_late_call_does_not_store_an_unlinked_second_result(tmp_path, cau
         with monkeypatch.context() as patch:
             (_presence_window_exceeded if cause == "window" else _presence_read_fails)(patch, engine)
             engine.ingest(turn_end)
-        if _stored(engine)[_key(call)] != 0:
-            pytest.fail("setup: the call row must stay unstored at the drop turn")
+        assert _stored(engine)[_key(call)] == 1, "topic 9: the call row is stored at the drop turn"
         engine.shutdown()
         engine = _engine(tmp_path)
         engine.ingest(longer)
-        assert _stored(engine)[_key(call)] == 1, "setup: the later ingest stores the call once"
+        assert _stored(engine)[_key(call)] == 1, "the later ingest stores no second copy of the call"
         ids = [r["store_id"] for r in engine._store.get_session_messages(SESSION) if _key(r) == _key(result)]
         linked = {int(a) for a, in engine._store._conn.execute(
             "SELECT store_id FROM message_relations WHERE kind = 'possible_replay_of' AND related_store_id = ?",

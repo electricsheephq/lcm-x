@@ -666,9 +666,13 @@ class IdentityAnchorMixin:
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed
                                   and idx not in rewritten and idx not in plan["remainders"]}
             plan["replayed"].update(plan["positional"])
-            logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
-                           "stored nor compaction outputs; storing them (presence %s): session=%s",
-                           len(missed), min(missed), "tripped" if tripped else "complete", self._session_id)
+            if tripped:  # the presence check tripped (logged there): the same line main logs
+                logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
+                            "session=%s", len(missed), min(missed), self._session_id)
+            else:
+                logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are "
+                               "neither stored nor compaction outputs; storing them: session=%s",
+                               len(missed), min(missed), self._session_id)
 
     def _identity_anchor_trip_unproven(self, messages, start, cursor, plan, matched, excluded, missed,
                                        rewritten) -> list[int]:

@@ -8,7 +8,6 @@ Expectations are fixed before any run (red-first):
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 
 import pytest
