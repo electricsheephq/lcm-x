@@ -7156,6 +7156,12 @@ class LCMEngine(
                         len(_ci) > 1 and isinstance(_ci[1], str) and _ci[1].startswith(prefix + content),
                         len(_ci) > 1 and _ci[1] == span, len(content), self._host_occurrence_metadata(prior),
                         metadata, len(cached), len(replay), len(messages))
+            if len(_ci) > 1 and isinstance(_ci[1], str):
+                _c = _ci[1]
+                logger.info("LCM C1A-DEBUG cached_source head=%r tail=%r seps=%s has_objective=%s objective_at=%s "
+                            "span_in_source=%s span_at=%s prior_keys=%s",
+                            _c[:160], _c[-160:], _c.count("\n\n---\n\n"), content in _c, _c.find(content),
+                            span in _c, _c.find(span), sorted(prior.keys()))
             return decline("cached_occurrence")
         if not span.startswith(prefix + content):
             return decline("span_prefix")
