@@ -13649,3 +13649,31 @@ class LCMEngine(
     def _bound_store_unopened(self):
         """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""
         return self.__dict__.get("_store")
+
+
+# C1A-DEBUG (temporary): durable cursor result and ingest cursor movement.
+_c1a_durable = LCMEngine._cursor_from_durable_commit_proof
+
+
+def _c1a_debug_durable(self, messages, *args, **kwargs):
+    out = _c1a_durable(self, messages, *args, **kwargs)
+    logger.info("LCM C1A-DEBUG durable_cursor=%r n=%d args=%r", out, len(messages or ()), args)
+    return out
+
+
+LCMEngine._cursor_from_durable_commit_proof = _c1a_debug_durable
+_c1a_ingest_orig = LCMEngine.ingest
+
+
+def _c1a_debug_ingest2(self, messages, *args, **kwargs):
+    before = self._store._conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+    out = _c1a_ingest_orig(self, messages, *args, **kwargs)
+    rows = self._store._conn.execute("SELECT store_id, role, length(content), substr(content, 1, 24) FROM messages "
+                                     "ORDER BY store_id DESC LIMIT ?", (self._store._conn.execute(
+                                         "SELECT count(*) FROM messages").fetchone()[0] - before,)).fetchall()
+    logger.info("LCM C1A-DEBUG ingest n=%d stored=%r cursor=%s reconcile=%s", len(messages or ()), rows[::-1],
+                self._ingest_cursor, self._ingest_cursor_needs_reconcile)
+    return out
+
+
+LCMEngine.ingest = _c1a_debug_ingest2
