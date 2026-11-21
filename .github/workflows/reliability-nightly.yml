@@ -30,7 +30,6 @@ jobs:
         host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, r34.15-0.21.5, upstream-main, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
-      DEFAULT_WINDOW_REPORT_ONLY: "true"  # One switch for command failures; verdict promotion needs qualification.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -61,11 +60,9 @@ jobs:
           gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-issues.txt"
           python -m bench.instruments.reliability.ci gate "$OUT/r1/results.jsonl" "$OUT/r2/results.jsonl" --open-issues "$RUNNER_TEMP/open-issues.txt"
 
-      # Explicit opt-in cells, after the gate step so they cannot hold up its verdict; R1 only (process_cell.unsupported() rejects
-      # default-window/* under R2). Skipped on cancellation; after a failed gate they add one short report-only step (cells take ~15 s).
-      - name: Default-window R1 in-process (report-only)
+      # R1 only. Collect these rows even after a failed absolute gate so the nightly can compare all rounds.
+      - name: Default-window R1 in-process
         if: ${{ !cancelled() }}
-        continue-on-error: ${{ env.DEFAULT_WINDOW_REPORT_ONLY == 'true' }}
         timeout-minutes: 30
         run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
 
@@ -100,6 +97,143 @@ jobs:
             !reliability-out/*/cells/*/*/*/files/**
           if-no-files-found: warn
 
+      # Artifacts cannot be appended to from multiple matrix jobs. Stage these table shards for fan-in.
+      - name: Stage tables for the scheduled comparison
+        if: ${{ !cancelled() && github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-table-shard-${{ matrix.host }}
+          path: |
+            reliability-out/*/results.jsonl
+            reliability-out/*/MATRIX.md
+            reliability-out/*/run.json
+          if-no-files-found: warn
+          retention-days: 2
+          overwrite: true
+
+  compare:
+    needs: matrix
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    outputs:
+      alarm: ${{ steps.compare.outputs.alarm }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # retries of native-on-off cells export older tags
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Collect current table shards
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: reliability-table-shard-*
+          path: ${{ runner.temp }}/shards
+
+      - name: Assemble nightly tables
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/current"
+          shopt -s nullglob
+          for shard in "$RUNNER_TEMP/shards"/reliability-table-shard-*; do
+            host=${shard##*reliability-table-shard-}
+            mv "$shard" "$RUNNER_TEMP/current/reliability-$host"
+          done
+
+      - name: Download comparable nights
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python -m bench.instruments.reliability.ci baselines > "$RUNNER_TEMP/baselines.txt"
+          mapfile -t runs < "$RUNNER_TEMP/baselines.txt"
+          if (( ${#runs[@]} == 0 )); then
+            echo "::error::baseline missing (no completed scheduled run on this branch has reliability-tables)"
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for run in "${runs[@]}"; do
+            gh run download "$run" --name reliability-tables --dir "$RUNNER_TEMP/prior/$run"
+          done
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+
+      - name: Read tracked regression cells
+        if: steps.baseline.outputs.status == 'ready'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m bench.instruments.reliability.ci alarm --read "$RUNNER_TEMP/known-new.json"
+
+      - name: Compare every round with the previous comparable night
+        id: compare
+        if: steps.baseline.outputs.status == 'ready'
+        timeout-minutes: 170
+        shell: bash
+        run: |
+          mapfile -t runs < "$RUNNER_TEMP/baselines.txt"
+          history=()
+          for run in "${runs[@]:1}"; do
+            history+=(--history "$RUNNER_TEMP/prior/$run")
+          done
+          status=0
+          python -m bench.instruments.reliability.ci compare --mode nightly \
+            --candidate "$RUNNER_TEMP/current" --baseline "$RUNNER_TEMP/prior/${runs[0]}" \
+            --known-new "$RUNNER_TEMP/known-new.json" "${history[@]}" --retry-scratch "$RUNNER_TEMP" \
+            --alarm-result "$RUNNER_TEMP/alarm.json" > "$RUNNER_TEMP/comparison.md" || status=$?
+          cat "$RUNNER_TEMP/comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          if (( status < 2 )); then
+            payload=$(gzip -n -c "$RUNNER_TEMP/alarm.json" | base64 -w0)
+            printf 'alarm=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Upload nightly tables
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-tables
+          path: ${{ runner.temp }}/current/
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Enforce the comparison
+        if: ${{ !cancelled() }}
+        env:
+          BASELINE_STATUS: ${{ steps.baseline.outputs.status }}
+          COMPARE_STATUS: ${{ steps.compare.outputs.status }}
+        run: test "$BASELINE_STATUS" = ready && test "$COMPARE_STATUS" = 0
+
+  alarm:
+    needs: compare
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.compare.outputs.alarm != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: reliability-regression-alarm
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Update the nightly regression issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALARM_RESULT: ${{ needs.compare.outputs.alarm }}
+        shell: bash
+        run: |
+          printf '%s' "$ALARM_RESULT" | base64 -d | gzip -d > "$RUNNER_TEMP/alarm.json"
+          python -m bench.instruments.reliability.ci alarm --post "$RUNNER_TEMP/alarm.json" --scratch "$RUNNER_TEMP"
 
   latency:
     runs-on: ubuntu-latest

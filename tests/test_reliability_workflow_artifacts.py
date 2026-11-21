@@ -32,3 +32,14 @@ def test_upload_keeps_whole_cells_without_caches_or_tool_files():
     # home wrappers must remain: release_scratch keeps externalized rows there.
     assert not [path for path in paths if re.search(r"/cells/.*\.[a-z]+$", path)]
     assert not any("hermes-home" in path for path in paths)
+
+
+def test_default_window_has_no_report_only_switch():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "DEFAULT_WINDOW_REPORT_ONLY" not in workflow
+
+
+def test_default_window_command_failure_is_not_ignored():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    step = re.search(r"(?m)^      - name: Default-window[^\n]*\n((?:^[^\S\n]{8}.*\n)+)", workflow)
+    assert step and "continue-on-error" not in step.group()

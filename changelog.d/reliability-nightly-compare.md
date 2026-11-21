@@ -1,0 +1,1 @@
+- Fix: Compare all scheduled reliability rounds with the previous comparable night, fail on new regressions, and track them in one issue.
