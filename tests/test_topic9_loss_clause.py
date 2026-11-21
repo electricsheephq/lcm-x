@@ -8,6 +8,7 @@ Expectations are fixed before any run (red-first):
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 import pytest
@@ -21,6 +22,14 @@ from tests.test_anchor_unstored_before_cursor import (  # noqa: F401 (autouse fi
 def _call(call_id, ts) -> dict:
     return {"role": "assistant", "content": "", "timestamp": float(ts), "tool_calls": [
         {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": '{"path": "x.txt"}'}}]}
+
+
+class _IgnoreMe:
+    """A timeout-aware ignore pattern (the optional `regex` package is not a test dependency)."""
+    pattern = "IGNORE-ME"
+
+    def search(self, text, timeout=None):
+        return "IGNORE-ME" in text or None
 
 
 def _spy_unaccounted(monkeypatch, engine):
@@ -144,7 +153,8 @@ def test_a_stored_calls_unstored_result_slid_below_the_cursor_is_stored(tmp_path
 
 def test_trip_never_stores_an_orphan_result_of_an_ignored_call(tmp_path, monkeypatch):
     """I7: an ignored fresh call and its non-ignored result below the cursor: groups stay whole on a trip."""
-    engine = _engine(tmp_path, ignore_message_patterns=[r"IGNORE-ME"])
+    engine = _engine(tmp_path)
+    engine._compiled_ignore_message_patterns = [_IgnoreMe()]  # as tests/test_ingest_protection.py does
     try:
         u0, a0 = _u("T0 user turn", 1000), _a("reply to T0", 1001)
         u1, a1 = _u("T1 user turn", 1002), _a("reply to T1", 1003)
@@ -158,6 +168,7 @@ def test_trip_never_stores_an_orphan_result_of_an_ignored_call(tmp_path, monkeyp
         stored = _counts(engine)
         assert stored[_key(its_result)] == 0, "a result is never stored without its call"
         assert stored[_key(ignored_call)] == 0
+        assert stored[_key(edited)] == 1
         for row in (u0, a0, u1, a1):
             assert stored[_key(row)] == 1
     finally:
