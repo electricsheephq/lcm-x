@@ -1246,10 +1246,8 @@ class LCMConfig:
     # Durable redaction is opt-in. When enabled, named patterns redact matching
     # secrets before LCM storage, FTS indexing, summarization, or externalization.
     sensitive_patterns_enabled: bool = False
-    # Provider-bound embedding copies have an independent privacy posture.
-    # None means automatic: enabled for recognized cloud providers and skipped
-    # for local providers. False is an explicit cloud-privacy opt-out whose
-    # distinguished revision keeps vector identities posture-bound.
+    # Experimental filter for cloud provider input. Only explicit True enables
+    # it. None (including unset) and False use the privacy:off vector revision.
     embedding_privacy_enabled: bool | None = None
     # Named catalog entries shared by durable redaction and provider-copy privacy.
     sensitive_patterns: list[str] = field(

@@ -433,7 +433,10 @@ def _paste(n, *, head="", tail=""):
 
 
 def _cloud_config(tmp_path):
-    return _deployed_config(tmp_path, embeddings_enabled=True, embedding_provider="voyage", embedding_model="voyage-3")
+    return _deployed_config(
+        tmp_path, embeddings_enabled=True, embedding_provider="voyage", embedding_model="voyage-3",
+        embedding_privacy_enabled=True,
+    )
 
 
 def _provider_texts(engine, tmp_path):

@@ -283,7 +283,7 @@ A fresh, isolated hermes+LCM clone (fresh HOME-style env, fresh DB, HERMES_LCM_R
 at the rc tag) — never a developer working tree. Two configurations, both driven LIVE:
 
 - **cloud-default posture**: real cloud embedding provider (small corpus — spend is cents),
-  durable sensitive patterns off (lossless store) and embedding privacy auto-on.
+  durable sensitive patterns off (lossless store) and the embedding privacy filter off.
 - **local posture**: fastembed/local provider, patterns off.
 
 Matrix: EVERY registered `lcm_*` tool (enumerate from the tool registry at run time — currently
@@ -293,18 +293,22 @@ lcm_compile_evidence, lcm_evidence_pack — the runner FAILS if it finds a regis
 matrix row, so new tools cannot ship untested) × both postures. Each row asserts a real
 post-condition (hits returned, status fields present, doctor clean), never just "no exception".
 
-Privacy batteries (behind the cloud key gate): the planted-secret battery proves the shipped
-default keeps every planted secret raw in durable rows and recall while provider dispatches are
-transformed, canonical, residual-free, and revision-validated. A fail-closed refusal is a valid
+Privacy batteries (behind the cloud key gate) use separate engines. The planted-secret battery
+opts into the embedding privacy filter and keeps every planted secret raw in durable rows and recall
+while provider dispatches are transformed, canonical, residual-free, and revision-validated. A fail-closed refusal is a valid
 no-leak outcome for the chunk corpus: the chunk splitter can cut a dense planted fixture
 mid-key, and the residual backstops then withhold that chunk while dispatching the protected
 remainder (report `status: partial`, `privacy_blocked >= 1`, `selected >= 1`) — the battery
 accepts that partial shape with a real dispatch (any error still fails), and the raw-secret sweep covers everything
 that did dispatch. Opt-out proves `privacy:off`
-preserves byte-identical provider input. Durable-redaction preserves those same redaction and
-placeholder checks as an opt-in posture. Misconfiguration uses an invalid pattern catalog to
-prove lcm_recall raises, the proactive counter increments, status exposes privacy_policy_errors,
-and assembly never breaks; its negative control proves the shipped default recall succeeds.
+preserves byte-identical provider input. Durable-redaction enables both durable sensitive patterns
+and the opt-in embedding privacy filter for its redaction and placeholder checks. Misconfiguration uses an
+invalid pattern catalog to prove lcm_recall raises, the proactive counter increments, status exposes
+privacy_policy_errors, and assembly never breaks. Its negative control checks recall on the cloud-default matrix engine.
+
+On 2026-11-19 the release manager ruled that Phase A uses the shipped v0.30.1 filter-off default for
+the cloud matrix and recall control (#2977), with the filter enabled on separate engines for the planted-secret
+and durable-redaction batteries.
 
 ## Phase B — P0/P1 adversarial sweep (ultracode)
 

@@ -4,6 +4,7 @@ Uses tiktoken when available, falls back to char-based estimate.
 """
 
 import logging
+import re
 import threading
 from functools import lru_cache
 from typing import Any, Dict, List
@@ -13,6 +14,13 @@ from .message_content import normalize_content_value, split_image_parts
 logger = logging.getLogger(__name__)
 
 _CHARS_PER_TOKEN = 4
+# #2863: without a tokenizer, long hex payloads (trace dumps, hex-encoded blobs) size at 2 chars/token. Only runs of
+# 65+ hex characters holding both a letter a-f and a digit count denser, so digests (64 hex), git SHAs and LCM's own
+# pointer names keep the legacy estimate.
+_HEX_RUN = re.compile(r"[0-9a-fA-F]{65,}")
+_HEX_LETTER = re.compile(r"[a-fA-F]")
+_DIGIT = re.compile(r"[0-9]")
+_HEX_CHARS_PER_TOKEN = 2.0
 # Host default per-image price (agent.image_token_cost.DEFAULT_IMAGE_TOKEN_COST).
 _DEFAULT_IMAGE_TOKEN_COST = 1500
 _encoder = None
@@ -126,12 +134,16 @@ def _fallback_token_estimate(text: str) -> int:
     # tokenize far denser (~1-2 tokens/char). A flat len//4 undercounts them
     # ~3-4x, so preflight under-triggers and assembly can overflow the real
     # budget. ASCII-only text is overwhelmingly common and can use the cheap
-    # legacy estimate without scanning every character.
+    # legacy estimate after one regex pass for long hex runs (#2863).
     length = len(text)
     if length == 0:
         return 0
     if text.isascii():
-        return length // _CHARS_PER_TOKEN + 1
+        hex_chars = sum(m.end() - m.start() for m in _HEX_RUN.finditer(text)
+                        if _HEX_LETTER.search(m.group(0)) and _DIGIT.search(m.group(0)))
+        if not hex_chars:
+            return length // _CHARS_PER_TOKEN + 1
+        return int(hex_chars / _HEX_CHARS_PER_TOKEN + (length - hex_chars) / _CHARS_PER_TOKEN) + 1
     non_ascii = sum(1 for ch in text if ord(ch) > 127)
     ratio = non_ascii / length
     if ratio >= 0.5:

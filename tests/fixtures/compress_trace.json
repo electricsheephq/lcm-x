@@ -9980,7 +9980,7 @@
 "leaf probes {\"captures\":1,\"models\":1,\"summaries\":1} hook=None",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 59476aea4a34/1496",
+"message user a70a3c00d60f/1382",
 "message assistant cd7981c3a42c/1267",
 "message user 6138ac67cd33/1268",
 "message assistant c030c2e545d5/1267",
@@ -10030,7 +10030,7 @@
 "attr _last_leaf_summary_model=\"\"",
 "attr _lifecycle=sha12/len=9a6ffdd79ba2/392",
 "attr _no_progress_observed_tokens=3000",
-"attr _pending_emission_candidates=sha12/len=e70dd831980c/3269",
+"attr _pending_emission_candidates=sha12/len=d43d64233963/3031",
 "attr _store_complete_blocked=null",
 "attr _store_complete_copy_exclusion_proofs={}",
 "attr _store_complete_cut=true",
@@ -10041,7 +10041,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=7e0a45f2454981dd7bcd673b9afe20e9bc54ef26368dbe05a0b31228d7eb0ca7"
+"attrs count=146 sha256=bfab5e91d4fc6ea12f47ab05df0301e7cdf9a79c64a44c6e3a632461578cb673"
 ],
 "leaf-phase-rescue-loses": [
 "compress attempt=1",
@@ -11099,7 +11099,7 @@
 "return sha12/len=9af85640f7a3/15781",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 4009495f6e2d/1495",
+"message user 9dfe6bdf2dc5/1381",
 "message assistant 5112d3181a5e/1266",
 "message user 4915f154ddd8/1267",
 "message assistant 55698fcd55cb/1266",
@@ -11129,7 +11129,7 @@
 "attr _no_progress_ingest_generation=0",
 "attr _no_progress_observed_tokens=3000",
 "attr _no_progress_public_rows=sha12/len=1888ae9f3932/21000",
-"attr _pending_emission_candidates=sha12/len=42f2adfeabdf/3266",
+"attr _pending_emission_candidates=sha12/len=1b2ba598a73b/3028",
 "attr _store=sha12/len=92494579972b/25224",
 "attr _store_complete_blocked=null",
 "attr _store_complete_copy_exclusion_proofs={}",
@@ -11141,7 +11141,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=1",
-"attrs count=146 sha256=9cc30556e651ccbe7a27e10be5ea41e9516a81129e1e02763337a4ae942c2661"
+"attrs count=146 sha256=faaeef749c0525bdd0dfd0b790ec9647729ce46324b4cd1c194109aaf0a312f0"
 ],
 "objective-anchor": [
 "compress attempt=1",
@@ -14936,7 +14936,7 @@
 "resumed prefix: no new leaf; durable rows unchanged; remaining tail survives",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 394bd8a3846c/1475",
+"message user 50dcb24fd896/1371",
 "message assistant 5112d3181a5e/1266",
 "message user 4915f154ddd8/1267",
 "message assistant 55698fcd55cb/1266",
@@ -14959,9 +14959,9 @@
 "attr _no_progress_observed_tokens=3000",
 "attr _no_progress_proof_complete=false",
 "attr _no_progress_proof_fingerprint=null",
-"attr _pending_emission_candidates=sha12/len=80ce4269865e/3211",
+"attr _pending_emission_candidates=sha12/len=5e3b75194375/2995",
 "attr _survival_pass_observed=true",
-"attrs count=146 sha256=c75f00ff8dfb6713d4bb2d75084848e1a785447994c6fa6561b0e396d068888c"
+"attrs count=146 sha256=ee050473dfe99fc38617f78ba92b3325b0167a142f13fc9e19866341c0b76894"
 ],
 "resume-unadopted-commit": [
 "compress attempt=1",
@@ -15379,7 +15379,7 @@
 "return sha12/len=42982ac2ba3d/18394",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 4009495f6e2d/1495",
+"message user 9dfe6bdf2dc5/1381",
 "message assistant 5112d3181a5e/1266",
 "message user 4915f154ddd8/1267",
 "message assistant 55698fcd55cb/1266",
@@ -15447,7 +15447,7 @@
 "return sha12/len=0d0116001133/13294",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 7403e148889c/1733",
+"message user dd1195ef1e86/1500",
 "message assistant 63393eb669ff/1266",
 "message user d403af208259/1267",
 "message assistant 23e7a56837ee/1266",
@@ -15474,7 +15474,7 @@
 "attr _lifecycle=sha12/len=ad7a839340c4/391",
 "attr _no_progress_observed_tokens=3000",
 "attr _no_progress_public_rows=sha12/len=43639987ef45/21000",
-"attr _pending_emission_candidates=sha12/len=960a2e34e8da/3896",
+"attr _pending_emission_candidates=sha12/len=91a25c3c5979/3406",
 "attr _store=sha12/len=847b0f21ed3a/26793",
 "attr _store_complete_blocked=null",
 "attr _store_complete_copy_exclusion_proofs={}",
@@ -15486,7 +15486,7 @@
 "attr _store_complete_order={}",
 "attr _survival_pass_observed=true",
 "attr compression_count=2",
-"attrs count=146 sha256=584576ee92da5042fb3b8deda4f888d9ccf14d6ab814af44e49d1c5202e75557"
+"attrs count=146 sha256=b21925cb43b91861045a35c9628301cf19924a68a6bda1ac8f491ef889d4c9ed"
 ],
 "route-unavailable": [
 "compress attempt=1",
@@ -19197,7 +19197,7 @@
 "wrapper fit_cause [\"\"]",
 "leaf_prep after {\"chain\":[],\"counters\":{}}",
 "assemble",
-"message user 4009495f6e2d/1495",
+"message user 9dfe6bdf2dc5/1381",
 "message assistant 5112d3181a5e/1266",
 "message user 4915f154ddd8/1267",
 "message assistant 55698fcd55cb/1266",
