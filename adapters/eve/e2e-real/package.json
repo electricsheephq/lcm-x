@@ -1,0 +1,16 @@
+{
+  "name": "lcmx-eve-e2e-real",
+  "private": true,
+  "type": "module",
+  "description": "Eve rc.6 test agent with a real OpenAI model and OpenAI embeddings for the LCM-X adapter. Needs OPENAI_API_KEY.",
+  "scripts": {
+    "session-a": "eve eval session-a --verbose --timeout 600000",
+    "session-b": "eve eval session-b --verbose --timeout 600000"
+  },
+  "dependencies": {
+    "lcmx-eve": "file:..",
+    "eve": "1.0.0-rc.6",
+    "ai": "7.0.166",
+    "zod": "4.5.4"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "lcmx-eve-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Test Eve rc.6 agent for the LCM-X adapter: mock model, forced compaction, a tool call and recall.",
+  "scripts": {
+    "eval": "eve eval --verbose --timeout 300000"
+  },
+  "dependencies": {
+    "lcmx-eve": "file:..",
+    "eve": "1.0.0-rc.6",
+    "ai": "7.0.166",
+    "zod": "4.5.4"
+  }
+}
