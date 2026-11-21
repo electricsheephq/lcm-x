@@ -737,6 +737,7 @@ class SurvivalFitMixin:
         already fits it; no hard cap retains the legacy/recovery behaviour.
         """
         out = list(turn)
+        earlier_tool_projection = None
         order = sorted(range(len(out)), key=lambda i: (out[i].get("role") != "tool", -count_message_tokens(out[i])))
         for index in order:
             if self._survival_measure(out) <= limit:
@@ -748,9 +749,22 @@ class SurvivalFitMixin:
             row = self._store.get(store_ids[id(source)])
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
+            if (hard_cap is not None and index == len(out) - 1 and message.get("role") == "tool"
+                    and earlier_tool_projection is not None):
+                # A slightly shorter earlier excerpt can keep the just-issued result in full.
+                earlier_index, earlier_row, earlier_tokens = earlier_tool_projection
+                trial = out.copy()
+                trial[earlier_index] = project_message(
+                    out[earlier_index], earlier_row, earlier_tokens, tail=_TAIL // 2,
+                )
+                if self._survival_measure(trial) <= limit:
+                    out = trial
+                    break
             projected = project_message(message, row, tokens)
             if count_message_tokens(projected) < tokens:
                 out[index] = projected
+                if message.get("role") == "tool":
+                    earlier_tool_projection = (index, row, tokens)
         for roles in (("tool", "assistant"), ("user",)):
             if self._survival_measure(out) <= limit:
                 break

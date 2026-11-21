@@ -60,13 +60,13 @@ def bounded_call(call: Any, marker: str, head: int = _HEAD) -> Any:
     return {**call, "function": {**function, "arguments": json.dumps({"lcm_survival_fit": notice})}}
 
 
-def project_message(message: Dict[str, Any], row: Dict[str, Any], tokens: int) -> Dict[str, Any]:
+def project_message(message: Dict[str, Any], row: Dict[str, Any], tokens: int, *, tail: int = _TAIL) -> Dict[str, Any]:
     """Build the head/tail candidate while preserving the live message's structured content."""
-    fields = projected_fields(row, tokens, _HEAD, _TAIL)
+    fields = projected_fields(row, tokens, _HEAD, tail)
     marked = _PROJECTED_PREFIX in (normalize_content_value(message.get("content")) or "")
     if fields["tool_calls"] != (message.get("tool_calls") or None) or (fields["tool_calls"] and marked):
         # A storage-only call projection keeps a mark when it is projected again.
-        fields = projected_fields(row, tokens, _HEAD, _TAIL, mark_calls=True)
+        fields = projected_fields(row, tokens, _HEAD, tail, mark_calls=True)
     stored_text = normalize_content_value(row.get("content")) or ""
     if (fields["content"] == stored_text and len(stored_text) <= _HEAD
             and normalize_content_value(message.get("content")) == stored_text):
