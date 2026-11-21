@@ -7116,6 +7116,7 @@ class LCMEngine(
         """
         def decline(reason):
             self._ledger_count("objective_restore.declined." + reason)
+            logger.info("LCM C1A-DEBUG restore declined reason=%s", reason)
             return None
 
         emissions = proof.get("emissions")
@@ -7191,6 +7192,7 @@ class LCMEngine(
         if (not _has_lossy_redacted_identity(identity)
                 and identity == self._message_replay_identity(source, stored_row=True, strip_carrier=False)):
             self._ledger_count("objective_restore.matched")
+            logger.info("LCM C1A-DEBUG restore matched index=%s", index)
             return index
         return decline("source_identity")
 
@@ -13650,3 +13652,34 @@ class LCMEngine(
     def _bound_store_unopened(self):
         """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""
         return self.__dict__.get("_store")
+
+
+# C1A-DEBUG (temporary, CI-only branch; never for review): each compress and ingest call's outcome.
+def _c1a_state(engine):
+    proof = getattr(engine, "_compress_commit_proof", None)
+    return ("proof=%s end_consumed=%s native=%s cursor=%s reconcile=%s frontier=%s session=%s" % (
+        proof is not None, (proof or {}).get("end_consumed"), (proof or {}).get("native"),
+        getattr(engine, "_ingest_cursor", None), getattr(engine, "_ingest_cursor_needs_reconcile", None),
+        getattr(engine, "_last_compacted_store_id", None), str(getattr(engine, "_session_id", ""))[:8]))
+
+
+_c1a_compress, _c1a_ingest = LCMEngine.compress, LCMEngine.ingest
+
+
+def _c1a_debug_compress(self, messages, *args, **kwargs):
+    before, state = self.compression_count, _c1a_state(self)
+    out = _c1a_compress(self, messages, *args, **kwargs)
+    logger.info("LCM C1A-DEBUG compress n=%d out=%d same=%s count=%d->%d before[%s] after[%s]",
+                len(messages or ()), len(out or ()), out is messages or out == messages, before,
+                self.compression_count, state, _c1a_state(self))
+    return out
+
+
+def _c1a_debug_ingest(self, messages, *args, **kwargs):
+    state = _c1a_state(self)
+    out = _c1a_ingest(self, messages, *args, **kwargs)
+    logger.info("LCM C1A-DEBUG ingest n=%d before[%s] after[%s]", len(messages or ()), state, _c1a_state(self))
+    return out
+
+
+LCMEngine.compress, LCMEngine.ingest = _c1a_debug_compress, _c1a_debug_ingest

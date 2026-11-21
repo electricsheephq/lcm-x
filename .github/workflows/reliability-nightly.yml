@@ -32,7 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep r34.4 alongside r34.10 for one release to retain comparison coverage. r34.15 is the fleet runtime candidate (Python 3.12).
-        host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, r34.15-0.21.5, upstream-main, upstream-uid]
+        host: [ref-0.21.5, r34.15-0.21.5, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
     steps:
@@ -52,24 +52,8 @@ jobs:
       - name: Prepare the pinned Hermes tree for ${{ matrix.host }}
         run: python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
 
-      - name: R1 in-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r1" --keep-dbs fail
-
       - name: R2 acp-process, all cells
-        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells all --jobs 4 --out "$OUT/r2" --keep-dbs fail
-
-      - name: Gate (ERROR, or a G-REL-1 FAIL without an open targeted issue)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-issues.txt"
-          python -m bench.instruments.reliability.ci gate "$OUT/r1/results.jsonl" "$OUT/r2/results.jsonl" --open-issues "$RUNNER_TEMP/open-issues.txt"
-
-      # R1 only. Collect these rows even after a failed absolute gate so the nightly can compare all rounds.
-      - name: Default-window R1 in-process
-        if: ${{ !cancelled() }}
-        timeout-minutes: 30
-        run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
+        run: python bench/instruments/reliability/run_matrix.py --transport acp-process --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'continuity/sole-user-tool-loop/*' --jobs 2 --out "$OUT/r2" --keep-dbs all
 
       - name: Job summary
         if: always()
