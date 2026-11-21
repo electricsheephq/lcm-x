@@ -46,21 +46,30 @@ input name, 1 on a usage or git error.
    three cases: when a recall or summary mechanism changes (M06, M07, M12, M13); before any claim of a board gain
    (`--input board-claim`); and once a month for drift (`--input monthly-drift`). Boards are targets, not
    release gates.
-6. **Pull-request CI keeps its own triggers.** Branch protection runs the required CI checks on every pull
-   request whatever this map says. The map decides the release-time, scheduled and by-hand runs. It records
+6. **Pull-request CI and tag workflows keep their own triggers.** Branch protection runs the required CI checks
+   on every pull request, and GitHub runs `release.yml` and `plugin-payload.yml` at every tag, whatever this map
+   says. The map decides the release-time, scheduled and by-hand runs. It records
    whether a CI suite's inputs changed, so a release note can say so.
 7. **Catch log.** Each suite keeps a catch log: the last time its result changed a release decision (date, pull
    request or tag, and what changed). A heavy suite with no catch in a quarter is proposed for retirement, and the
    owner decides. The column starts empty: no catch is recorded before this map.
-8. **Change the map with the code.** A pull request that adds a module, moves a behaviour or adds a suite updates
+8. **Interim skip claim, until the symbol tier lands.** The script matches files, so it can mark a suite RUN
+   when the changed functions are outside that suite's mechanisms. The release manager may skip such a suite only
+   by writing, in the release note, the changed functions and why none of them is in, or called by, that suite's
+   mechanism. The second reviewer checks that claim against the diff. A claim is never allowed for a MANUAL suite,
+   for any suite when an UNMAPPED or fail-closed path changed, or for a careful-lane mechanism test that the
+   change's own lane requires. The backstop is the scheduled full run: a regression it finds gets its own fix and
+   never gates an unrelated hotfix.
+9. **Change the map with the code.** A pull request that adds a module, moves a behaviour or adds a suite updates
    the JSON and these tables in the same change. The agreement test fails if they drift. The script fails
    closed on paths the map has not learned yet.
 
 **What the map does not prove.** The rows come from what each suite's bars judge, plus the files each suite or
 workflow reads. Call reach has not been traced. So the map does not prove that every suite's inputs are fully
 listed. File-level matching can only over-run: `engine.py` and `compaction.py` sit in almost every mechanism,
-so a change to them runs nearly every suite. The `Key symbols` column is for a reader, and the script does not
-read it yet.
+so a change to them runs nearly every suite. The `Key symbols` column is for a reader and for rule 8's skip
+claims; the script does not read it yet. A symbol tier is planned as a separate change: it maps changed hunks to
+their enclosing functions and closes each mechanism's symbols over the in-repo call graph.
 
 ## Other inputs
 
