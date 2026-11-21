@@ -172,10 +172,14 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   owner's `pull_request` bypass is for a recorded emergency only, noted on the PR.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
-- Enqueue deterministically with the pinned head (a dequeue after failed merge-group CI is a stop):
+- Enqueue deterministically with the pinned head through the merge queue's `enqueuePullRequest`
+  mutation (a dequeue after failed merge-group CI is a stop). Do not use `gh pr merge`: on a pull
+  request whose merge state is UNSTABLE it requests auto-merge, which is forbidden here.
 
 ```bash
-gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
+PR_ID=$(gh pr view <PR> --json id --jq .id)
+gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h}){mergeQueueEntry{position state}}}' \
+  -f id="$PR_ID" -f h=<HEAD_SHA>
 ```
 
 - After merging, verify the merge commit, linked issue state, final `main` SHA, and required
