@@ -7162,6 +7162,16 @@ class LCMEngine(
                             "span_in_source=%s span_at=%s prior_keys=%s",
                             _c[:160], _c[-160:], _c.count("\n\n---\n\n"), content in _c, _c.find(content),
                             span in _c, _c.find(span), sorted(prior.keys()))
+            def _brief(x):
+                if isinstance(x, dict):
+                    c = x.get("content"); r = x.get("role")
+                else:
+                    r, c = (x[0] if len(x) > 0 else None), (x[1] if len(x) > 1 else None)
+                c = c if isinstance(c, str) else str(c)
+                return "%s:%d:%s" % (r, len(c), c[:28].replace("\n", " "))
+            logger.info("LCM C1A-DEBUG lists source=%s", [_brief(x) for x in cached])
+            logger.info("LCM C1A-DEBUG lists replay=%s", [_brief(x) for x in replay])
+            logger.info("LCM C1A-DEBUG lists messages=%s", [_brief(x) for x in messages])
             return decline("cached_occurrence")
         if not span.startswith(prefix + content):
             return decline("span_prefix")
