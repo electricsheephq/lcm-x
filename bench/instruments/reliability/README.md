@@ -459,13 +459,18 @@ A FAIL with empty or missing `failed_bars` always gates; an open target absent f
 target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
 G-REL-1 diagnostics list uncovered bars, targets and open targets.
 
-The scheduled comparison reads all three rounds, including default-window R1, against the latest completed
-scheduled run on the same branch with a `reliability-tables` artifact. A new failing cell, a baseline cell missing
-from tonight's tables, unreadable tables, or a missing baseline makes the comparison red. A fresh failure that passes one retry
-is FLAKE. A second FLAKE for the same host build, round and cell in seven comparable nights is NEW. The open
-`nightly-regression` issue records NEW cells and their run links, and a tracked cell stays NEW while it fails.
-A clean comparison leaves a comment. Review the recorded verdicts and failed bars, link the fix or accepted
-disposition, and close the alarm after every tracked cell is dispositioned. For a release respin, run
+The scheduled comparison reads all three rounds, including default-window R1, against the latest completed scheduled run
+on the same branch that published `reliability-tables`. A new failing cell, a baseline cell missing from tonight's
+tables, unreadable baseline or candidate tables, or a missing baseline makes the comparison red. A readable
+bootstrap night publishes tables while red. Later nights publish after a clean comparison or a red comparison
+whose alarm job succeeded. A fresh failure that passes one retry is FLAKE. The comparison retries at most 20
+fresh failures within 60 minutes. A second FLAKE for the same host, round and cell in seven comparable nights is NEW.
+The open `nightly-regression` issue records NEW cells and their run links, and a tracked cell stays NEW while it fails.
+A clean comparison leaves a comment on an open alarm. Review the recorded verdicts and failed bars, link the fix or accepted
+disposition, and close the alarm after every tracked cell is dispositioned. For a release respin, dispatch
+`gh workflow run reliability-nightly.yml --ref <candidate-ref> -f baseline_run=<GA run id>`.
+The dispatch reads the alarm, compares with the named run, and uploads its tables for another dispatch.
+Omit `baseline_run` to use the scheduled baseline selection for the candidate ref. To compare downloaded runs locally, use
 `python -m bench.instruments.reliability.ci compare --mode respin --candidate <candidate-tables> --baseline <ga-tables>`
 with the candidate and previous GA runs.
 The exact-cell additions in `ci.CELL_GATE` are: R2 `continuity/forced-compaction-then-turn/{in-place,rotation}`

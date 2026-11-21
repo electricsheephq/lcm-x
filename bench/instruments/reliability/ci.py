@@ -14,12 +14,15 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 from bench.instruments.reliability import report
 
@@ -198,15 +201,28 @@ def prep(name: str, root: Path, out: Path) -> dict:
 ROUNDS = ("r1", "r2", "default-window-r1")
 FAILING = {"FAIL", "ERROR", "INCONCLUSIVE"}
 FLAKE_WINDOW = 7
+RETRY_CELL_CAP = 20
+RETRY_MINUTES = 60
 TABLE_HEADER = "| Cell | Baseline verdict | Candidate verdict | Class |\n|---|---|---|---|"
-KEY_PATTERN = re.compile(r"[a-zA-Z0-9_.-]+@[0-9a-f]{40}/(?:r1|r2|default-window-r1)/[a-zA-Z0-9_./-]+")
+HOST_PATTERN = r"[a-zA-Z0-9_.-]+"
+SHA_PATTERN = r"[0-9a-f]{40}"
+CELL_SUFFIX_PATTERN = r"/(?:r1|r2|default-window-r1)/[a-zA-Z0-9_./-]+"
+KEY_PATTERN = re.compile(HOST_PATTERN + CELL_SUFFIX_PATTERN)
+LEGACY_KEY_PATTERN = re.compile(rf"({HOST_PATTERN})@{SHA_PATTERN}({CELL_SUFFIX_PATTERN})")
 ALARM_LABEL = "nightly-regression"
 ALARM_TITLE = "Reliability nightly regression"
 ALARM_MARKER = "### Tracked cells\n\n```json\n"
 TABLES_ARTIFACT = "reliability-tables"
+PENDING_TABLES_ARTIFACT = "reliability-tables-pending"
+WORKFLOW = "reliability-nightly.yml"
 
 
-def load_tables(root: Path) -> tuple[dict, set]:
+class CellResult(NamedTuple):
+    verdict: str
+    host_sha: str
+
+
+def load_tables(root: Path) -> tuple[dict[str, CellResult], set[str]]:
     rows, flakes = {}, set()
     for file in sorted(root.rglob("results.jsonl")):
         round_name = file.parent.name
@@ -218,17 +234,18 @@ def load_tables(root: Path) -> tuple[dict, set]:
                 continue
             row = json.loads(line)
             cell = row["cell"]
-            key = f"{row['host']}@{row['host_sha']}/{round_name}/{cell}"
-            if not KEY_PATTERN.fullmatch(key) or row["verdict"] not in report.VERDICTS:
+            key = f"{row['host']}/{round_name}/{cell}"
+            if (not KEY_PATTERN.fullmatch(key) or not re.fullmatch(SHA_PATTERN, row["host_sha"])
+                    or row["verdict"] not in report.VERDICTS):
                 raise ValueError(f"invalid cell record in {file}")
             if key in rows:
                 raise ValueError(f"duplicate cell {key} in {file}")
-            rows[key] = row["verdict"]
+            rows[key] = CellResult(row["verdict"], row["host_sha"])
             keys[cell] = key
         metadata = file.with_name("run.json")
         if metadata.is_file():
             for cell in json.loads(metadata.read_text()).get("comparison_flakes", []):
-                if cell not in keys or rows[keys[cell]] not in FAILING:
+                if cell not in keys or rows[keys[cell]].verdict not in FAILING:
                     raise ValueError(f"invalid retry record in {metadata}")
                 flakes.add(keys[cell])
     if not rows:
@@ -236,7 +253,7 @@ def load_tables(root: Path) -> tuple[dict, set]:
     return rows, flakes
 
 
-def load_side(name: str, root: Path) -> tuple[dict, set]:
+def load_side(name: str, root: Path) -> tuple[dict[str, CellResult], set[str]]:
     try:
         return load_tables(root)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -249,16 +266,20 @@ def compare(candidate: tuple[dict, set], baseline: tuple[dict, set], known: set,
     previous, previous_flakes = baseline
     rows = []
     for key in sorted(current.keys() | previous.keys()):
-        before, after = previous.get(key, "—"), current.get(key, "—")
+        old, new = previous.get(key, CellResult("—", "")), current.get(key, CellResult("—", ""))
+        before, after = old.verdict, new.verdict
         kind = "MATCHED"
-        if key not in current:
+        if key not in current or (before == "PASS" and after == "UNSUPPORTED"):
             kind = "MISSING"
         elif after in FAILING and (key in known or before not in FAILING or (nightly and key in previous_flakes)):
             kind = "NEW"
             if nightly and key in current_flakes and key not in known and key not in past_flakes:
                 kind = "FLAKE"
-        elif before in FAILING and after not in FAILING:
+        elif before in FAILING and after == "PASS":
             kind = "FIXED"
+        if old.host_sha and new.host_sha and old.host_sha != new.host_sha:
+            before = f"{before} (`{old.host_sha}`)"
+            after = f"{after} (`{new.host_sha}`)"
         rows.append((key, before, after, kind))
     return rows
 
@@ -280,9 +301,14 @@ def read_known(data: list) -> set:
             keys.update(f"{prefix}/{cell}" for cell in cells)
         else:
             raise ValueError("invalid known-new entry")
-    if any(not KEY_PATTERN.fullmatch(key) for key in keys):
-        raise ValueError("invalid known-new cell key")
-    return keys
+    normalized = set()
+    for key in keys:
+        if legacy := LEGACY_KEY_PATTERN.fullmatch(key):
+            key = "".join(legacy.groups())
+        if not KEY_PATTERN.fullmatch(key):
+            raise ValueError("invalid known-new cell key")
+        normalized.add(key)
+    return normalized
 
 
 def pack_known(keys: set) -> list:
@@ -293,22 +319,51 @@ def pack_known(keys: set) -> list:
     return list(groups.items())
 
 
-def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: Path) -> None:
-    """Retry each fresh failing cell once on the same pinned host and transport."""
+def _run_retry(command: list[str], deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(command, 0)
+    # A timed-out matrix or host setup may have spawned its own children.
+    with subprocess.Popen(command, start_new_session=True, stdout=sys.stderr) as process:
+        try:
+            status = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise
+        if status:
+            raise subprocess.CalledProcessError(status, command)
+
+
+def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: Path) -> dict[str, int]:
+    """Retry fresh failures within one shared budget on the original pins and transports."""
     current = load_side("candidate", candidate)
+    fresh = [key for key, _, _, kind in compare(current, baseline, known, set(), nightly=True)
+             if kind == "NEW" and key not in known]
+    if not fresh:
+        return {}
+    deadline = time.monotonic() + RETRY_MINUTES * 60
+    selected = fresh[:RETRY_CELL_CAP]
+    skipped = defaultdict(int)
+    if len(fresh) > len(selected):
+        skipped[f"{RETRY_CELL_CAP}-cell cap"] = len(fresh) - len(selected)
     groups = defaultdict(list)
-    for key, _, _, kind in compare(current, baseline, known, set(), nightly=True):
-        if kind == "NEW" and key not in known:
-            build, round_name, cell = key.split("/", 2)
-            host, sha = build.split("@")
-            groups[(host, sha, round_name)].append(cell)
-    if not groups:
-        return
+    for key in selected:
+        host, round_name, cell = key.split("/", 2)
+        groups[(host, current[0][key].host_sha, round_name)].append(cell)
+    remaining = len(selected)
+    time_limit = f"{RETRY_MINUTES}-minute limit"
     try:
-        subprocess.run([sys.executable, "-m", "pip", "install", "uv==0.11.26"], check=True, stdout=sys.stderr)
+        _run_retry([sys.executable, "-m", "pip", "install", "uv==0.11.26"], deadline)
+    except subprocess.TimeoutExpired:
+        skipped[time_limit] = remaining
+        return skipped
     except (OSError, subprocess.CalledProcessError) as exc:
-        print(f"cell retries unavailable: {exc}", file=sys.stderr)
-        return
+        print(f"cell retries unavailable ({type(exc).__name__})", file=sys.stderr)
+        skipped["retry unavailable"] = remaining
+        return skipped
     with tempfile.TemporaryDirectory(dir=scratch) as tmp:
         scratch = Path(tmp)
         host_files = {}
@@ -316,22 +371,28 @@ def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: 
             try:
                 if host not in host_files:
                     hosts_file = scratch / f"{host}.json"
-                    spec = prep(host, scratch / "hosts", hosts_file)
+                    _run_retry(
+                        [sys.executable, "-m", "bench.instruments.reliability.ci", "prep",
+                         "--host", host, "--root", str(scratch / "hosts"), "--out", str(hosts_file)],
+                        deadline,
+                    )
+                    spec = json.loads(hosts_file.read_text())
                     host_files[host] = (hosts_file, spec["hosts"][host]["sha"])
                 hosts_file, prepared_sha = host_files[host]
                 if sha != prepared_sha:
                     raise ValueError("retry requires the original pinned host SHA")
                 results = scratch / f"reliability-{host}" / round_name
                 transport = ["--transport", "acp-process"] if round_name == "r2" else []
-                subprocess.run(
+                _run_retry(
                     [sys.executable, "-m", "bench.instruments.reliability.run_matrix", *transport,
                      "--hosts-file", str(hosts_file), "--hosts", host, "--plugin-ref", "HEAD",
                      "--cells", ",".join(cells), "--jobs", "4", "--out", str(results)],
-                    check=True, stdout=sys.stderr,
+                    deadline,
                 )
                 retried, _ = load_tables(results.parent)
-                build = f"{host}@{sha}/{round_name}"
-                passed = [cell for cell in cells if retried.get(f"{build}/{cell}") == "PASS"]
+                complete = {cell: retried[f"{host}/{round_name}/{cell}"] for cell in cells
+                            if f"{host}/{round_name}/{cell}" in retried}
+                passed = [cell for cell, row in complete.items() if row == CellResult("PASS", sha)]
                 if passed:
                     metadata = candidate / f"reliability-{host}" / round_name / "run.json"
                     run = json.loads(metadata.read_text())
@@ -339,12 +400,22 @@ def retry_new(candidate: Path, baseline: tuple[dict, set], known: set, scratch: 
                     pending = metadata.with_name(".run.json.pending")
                     pending.write_text(json.dumps(run, indent=1) + "\n")
                     pending.replace(metadata)
-            except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
-                print(f"retry unavailable for {host}/{round_name}: {exc}", file=sys.stderr)
+                unavailable = len(cells) - sum(row.host_sha == sha for row in complete.values())
+            except subprocess.TimeoutExpired:
+                skipped[time_limit] = remaining
+                break
+            except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+                print(f"retry unavailable for {host}/{round_name} ({type(exc).__name__})", file=sys.stderr)
+                unavailable = len(cells)
+            if unavailable:
+                skipped["retry unavailable"] += unavailable
+            remaining -= len(cells)
+    return skipped
 
 
 def compare_command(args) -> int:
     nightly = args.mode == "nightly"
+    skipped = {}
     try:
         baseline = load_side("baseline", args.baseline)
         known = read_known(json.loads(args.known_new.read_text())) if args.known_new else set()
@@ -352,22 +423,35 @@ def compare_command(args) -> int:
         past_flakes = baseline[1].copy()
         if nightly:
             included = {args.candidate.resolve(), args.baseline.resolve()}
-            history = dict.fromkeys(path.resolve() for path in args.history)
-            older_nights = [path for path in history if path not in included]
-            for older in older_nights[:FLAKE_WINDOW - 2]:
-                past_flakes.update(load_side("history", older)[1])
+            older_nights = set()
+            for position, path in enumerate(args.history, start=1):
+                if len(older_nights) >= FLAKE_WINDOW - 2:
+                    break
+                try:
+                    older = path.resolve()
+                    if older in included or older in older_nights:
+                        continue
+                    older_nights.add(older)
+                    past_flakes.update(load_side("history", older)[1])
+                except (OSError, ValueError, RuntimeError):
+                    print(f"warning: skipping unreadable history entry {position}", file=sys.stderr)
             if args.retry_scratch:
-                retry_new(args.candidate, baseline, known, args.retry_scratch)
+                skipped = retry_new(args.candidate, baseline, known, args.retry_scratch)
         candidate = load_side("candidate", args.candidate)
     except (OSError, ValueError) as exc:
         print(f"compare: {exc}", file=sys.stderr)
         return 2
     rows = compare(candidate, baseline, known, past_flakes, nightly=nightly)
     print(TABLE_HEADER, *table_lines(rows), sep="\n")
+    if skipped:
+        reasons = ", ".join(f"{count} ({reason})" for reason, count in skipped.items())
+        print(f"\nFresh failing cells without a completed retry: {sum(skipped.values())}. {reasons}.")
     new = [row for row in rows if row[-1] == "NEW"]
     missing = any(row[-1] == "MISSING" for row in rows)
     if args.alarm_result:
-        tracked = {row[0] for row in new} | (known - candidate[0].keys())
+        tracked = {row[0] for row in new} | {
+            key for key in known if key not in candidate[0] or candidate[0][key].verdict == "UNSUPPORTED"
+        }
         result = {"new": new, "missing": missing, "known": pack_known(tracked)}
         args.alarm_result.write_text(json.dumps(result, separators=(",", ":")) + "\n")
     return int(bool(new or missing))
@@ -387,11 +471,80 @@ def baseline_ids() -> list[str]:
     if not available:
         return []
     runs = gh(
-        "api", "--method", "GET", "--paginate", f"repos/{repo}/actions/workflows/reliability-nightly.yml/runs",
+        "api", "--method", "GET", f"repos/{repo}/actions/workflows/{WORKFLOW}/runs",
         "-f", f"branch={os.environ['GITHUB_REF_NAME']}", "-f", "event=schedule", "-f", "status=completed",
         "-f", "per_page=100", "--jq", ".workflow_runs[] | select(.conclusion != \"cancelled\") | .id",
     ).splitlines()
-    return [run for run in runs if run in available and run != os.environ["GITHUB_RUN_ID"]][:FLAKE_WINDOW - 1]
+    judged = []
+    for run in runs:
+        if run not in available or run == os.environ["GITHUB_RUN_ID"]:
+            continue
+        # Legacy runs could upload the same artifact before judgment.
+        published = gh(
+            "api", f"repos/{repo}/actions/runs/{run}/jobs?filter=latest&per_page=100",
+            "--jq", '.jobs[] | select(.name == "publish" and .conclusion == "success") | .id',
+        ).strip()
+        if published:
+            judged.append(run)
+        if len(judged) == FLAKE_WINDOW - 1:
+            break
+    return judged
+
+
+def download_artifact(run_id: str, name: str, folder: Path) -> None:
+    gh("run", "download", run_id, "--name", name, "--dir", str(folder))
+
+
+def download_named_baseline(run_id: str, prior: Path) -> None:
+    if not re.fullmatch(r"[0-9]+", run_id):
+        raise ValueError("baseline_run must contain only ASCII digits")
+    if run_id.lstrip("0") == os.environ["GITHUB_RUN_ID"].lstrip("0"):
+        raise ValueError("baseline_run must differ from the current run id")
+    repo = os.environ["GITHUB_REPOSITORY"]
+    endpoint = f"repos/{repo}/actions/runs/{run_id}"
+    workflow = gh("api", endpoint, "--jq", ".path").strip().split("@", 1)[0]
+    if workflow != f".github/workflows/{WORKFLOW}":
+        raise ValueError(f"baseline_run must identify a run of {WORKFLOW}")
+    names = gh(
+        "api", "--paginate", f"{endpoint}/artifacts?per_page=100",
+        "--jq", ".artifacts[] | select(.expired == false) | .name",
+    ).splitlines()
+    destination = prior / run_id
+    if TABLES_ARTIFACT in names:
+        download_artifact(run_id, TABLES_ARTIFACT, destination)
+        return
+    hosts = [name for name in names if re.fullmatch("reliability-" + HOST_PATTERN, name)
+             and name != PENDING_TABLES_ARTIFACT and not name.startswith("reliability-table-shard-")]
+    if not hosts:
+        raise ValueError("baseline_run has no usable reliability artifacts")
+    prior.mkdir(parents=True, exist_ok=True)
+    for name in hosts:
+        with tempfile.TemporaryDirectory(dir=prior) as tmp:
+            download_artifact(run_id, name, Path(tmp))
+            for round_name in ROUNDS:
+                for filename in ("results.jsonl", "MATRIX.md", "run.json"):
+                    table = Path(tmp) / round_name / filename
+                    if table.is_file():
+                        target = destination / name / round_name / filename
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        table.replace(target)
+
+
+def download_baselines(prior: Path, named_run: str) -> list[str]:
+    if named_run:
+        download_named_baseline(named_run, prior)
+        return [named_run]
+    downloaded = []
+    for run_id in baseline_ids():
+        try:
+            download_artifact(run_id, TABLES_ARTIFACT, prior / run_id)
+        except subprocess.CalledProcessError:
+            if not downloaded:
+                raise
+            print(f"warning: skipping unreadable history from run {run_id}", file=sys.stderr)
+        else:
+            downloaded.append(run_id)
+    return downloaded
 
 
 def open_alarm() -> dict | None:
@@ -417,8 +570,11 @@ def alarm_state() -> set:
         "--jq", '.[] | select(.user.login == "github-actions[bot]") | .body | @json',
     ).splitlines()
     for body in [*(json.loads(comment) for comment in reversed(comments)), issue["body"]]:
-        if ALARM_MARKER in body:
-            return read_known(json.loads(body.split(ALARM_MARKER, 1)[1].split("\n```", 1)[0]))
+        if ALARM_MARKER in (body or ""):
+            block, closing_fence, _ = body.split(ALARM_MARKER, 1)[1].partition("\n```")
+            if closing_fence:
+                return read_known(json.loads(block))
+            raise ValueError("open nightly alarm has no closing fence for its tracked cells block")
     raise ValueError("open nightly alarm has no tracked cells block")
 
 
@@ -489,7 +645,11 @@ def main(argv=None) -> int:
     c.add_argument("--history", type=Path, action="append", default=[], help="older comparable nights, newest first")
     c.add_argument("--retry-scratch", type=Path, help="in CI, retry fresh failures under this scratch directory")
     c.add_argument("--alarm-result", type=Path, help="write the nightly issue payload as JSON")
-    sub.add_parser("baselines", help="list up to six completed scheduled runs with table artifacts")
+    baselines = sub.add_parser("baselines", help="list or download published tables from comparable runs")
+    baselines.add_argument("--prior", type=Path, help="download tables into one directory per run id")
+    baselines.add_argument("--run", default="", help="use this run id as the only baseline")
+    validate = sub.add_parser("validate-tables", help="check that a bootstrap candidate is readable")
+    validate.add_argument("candidate", type=Path)
     alarm = sub.add_parser("alarm", help="read or post the scheduled nightly alarm")
     operations = alarm.add_mutually_exclusive_group(required=True)
     operations.add_argument("--read", type=Path)
@@ -502,8 +662,25 @@ def main(argv=None) -> int:
     if a.cmd == "compare":
         return compare_command(a)
     if a.cmd == "baselines":
-        for run in baseline_ids():
+        if a.run and a.prior is None:
+            baselines.error("--run requires --prior")
+        try:
+            runs = download_baselines(a.prior, a.run) if a.prior else baseline_ids()
+        except ValueError as exc:
+            print(f"baselines: {exc}", file=sys.stderr)
+            return 2
+        except (OSError, subprocess.CalledProcessError):
+            print("baselines: could not retrieve reliability tables", file=sys.stderr)
+            return 2
+        for run in runs:
             print(run)
+        return 0
+    if a.cmd == "validate-tables":
+        try:
+            load_side("candidate", a.candidate)
+        except ValueError:
+            print("validate-tables: unreadable bootstrap candidate tables", file=sys.stderr)
+            return 2
         return 0
     if a.cmd == "alarm":
         if a.read:
