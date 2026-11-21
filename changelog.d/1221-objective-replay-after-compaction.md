@@ -1,0 +1,1 @@
+- Fix: At a small context window, LCM-X recognises a preserved objective that Hermes restores to its original text at turn end, when the objective's published occurrence and the retained tool history prove replay.
