@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from hermes_lcm import host_uid_emit, survival_fit
+from hermes_lcm import compaction, host_uid_emit, survival_fit
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import extract_externalized_refs, load_externalized_payload
@@ -16,9 +16,15 @@ WINDOW = 32_768
 SESSION = "S0"
 OBJECTIVE = "[T02] user turn 2: Keep the following objective verbatim.\n" + "plan " * 9600 + " end."
 PRESERVED = "[Current user objective preserved from compacted history]\n"
+TIGHT_FIT_PRESSURES = {
+    # The seventh round sets the peak overhead. Calibrate it to the stub summary and host counter
+    # so four normal excerpts plus the full latest result sit just above the survival budget.
+    "r34.15-0.21.5": {2: (26_329,), 3: (28_372, 30_272), 7: (25_554, 26_451), 11: (25_479, 26_148)},
+    "upstream-main": {2: (26_339,), 3: (28_387, 30_282), 7: (25_579, 26_451), 11: (25_504, 26_148)},
+}
 
 
-def read_file_rows(step, size, *, uids):
+def read_file_rows(step, size, *, reports_not_found):
     call_id = f"call_T02_{step - 1}_0"
     text = "".join(f"Record {i:04d}: datum for task step {step:02d}.\n" for i in range(size // 30 + 1))[:size]
     lines = text.splitlines()
@@ -26,7 +32,7 @@ def read_file_rows(step, size, *, uids):
         "content": "\n".join(f"{i}|{line}" for i, line in enumerate(lines, 1)),
         "total_lines": len(lines), "file_size": size, "truncated": False, "is_binary": False, "is_image": False,
     }
-    if uids:
+    if reports_not_found:
         payload["not_found"] = False
     return [
         {"role": "assistant", "content": "", "tool_calls": [
@@ -46,13 +52,18 @@ def row_key(engine, row):
     return row["role"], content, row.get("tool_call_id"), row.get("tool_calls") or []
 
 
-@pytest.mark.parametrize(("uids", "final_attempt", "restamp"), [
-    pytest.param(False, True, False, id="ref-0.21.5"),
-    pytest.param(True, True, False, id="upstream-uid"),
-    pytest.param(False, False, False, id="boundary-only"),
-    pytest.param(False, True, True, id="new-occurrence"),
+@pytest.mark.parametrize(("uids", "final_attempt", "restamp", "tight_fit_host"), [
+    pytest.param(False, True, False, None, id="ref-0.21.5"),
+    pytest.param(True, True, False, None, id="upstream-uid"),
+    pytest.param(False, False, False, None, id="boundary-only"),
+    pytest.param(False, True, True, None, id="new-occurrence"),
+    pytest.param(False, True, False, "r34.15-0.21.5", id="r34.15-0.21.5"),
+    pytest.param(False, True, False, "upstream-main", id="upstream-main"),
 ])
-def test_objective_is_stored_once_after_in_place_compaction(tmp_path, monkeypatch, uids, final_attempt, restamp):
+def test_objective_is_stored_once_after_in_place_compaction(
+    tmp_path, monkeypatch, uids, final_attempt, restamp, tight_fit_host,
+):
+    monkeypatch.setattr(compaction, "_host_has_post_tool_reanchor", lambda: True, raising=False)
     force_char_estimate(monkeypatch)
     monkeypatch.setattr(survival_fit, "_host_estimate", host_rough)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", uids)
@@ -88,6 +99,9 @@ def test_objective_is_stored_once_after_in_place_compaction(tmp_path, monkeypatc
     # The system prompt contributes to pressure and is outside every engine list.
     pressures = {2: (26_314,), 3: (28_356, 30_256), 7: (25_538, 26_377),
                  11: (25_464, 27_781) if final_attempt else (25_464,)}
+    if tight_fit_host:
+        pressures = TIGHT_FIT_PRESSURES[tight_fit_host]
+    reports_not_found = uids or tight_fit_host == "upstream-main"
     try:
         setup = stamp([{"role": "user", "content": "[T01] user turn 1: Earlier request. end."},
                        {"role": "assistant", "content": "reply to T01: noted item 1."}])
@@ -100,7 +114,7 @@ def test_objective_is_stored_once_after_in_place_compaction(tmp_path, monkeypatc
         for step, size in enumerate([24_000, 16_000] + [7_400] * 9, 1):
             engine.update_from_response({"prompt_tokens": sum(len(row["content"]) for row in live) // 4 + 2_700,
                                          "completion_tokens": 20})
-            delta = stamp(read_file_rows(step, size, uids=uids))
+            delta = stamp(read_file_rows(step, size, reports_not_found=reports_not_found))
             expected.extend(delta)
             live.extend(delta)
             for pressure in pressures.get(step, ()):
@@ -123,8 +137,9 @@ def test_objective_is_stored_once_after_in_place_compaction(tmp_path, monkeypatc
             assert engine._compress_commit_proof is None
         durable = engine._durable_commit_proof_payload()
         assert durable["last_store_id"] == 17
-        assert [len(row["content"]) for row in live] == [48_368, 0, 1961, 0, 1961, 0, 1961, 0, 1961, 0,
-                                                        8423 if uids else 8403]
+        if not tight_fit_host:
+            assert [len(row["content"]) for row in live] == [48_368, 0, 1961, 0, 1961, 0, 1961, 0, 1961, 0,
+                                                            8423 if uids else 8403]
         assert live[0]["content"].startswith(PRESERVED + OBJECTIVE)
         assert live[0]["timestamp"] != objective["timestamp"]
         if uids:
@@ -149,6 +164,12 @@ def test_objective_is_stored_once_after_in_place_compaction(tmp_path, monkeypatc
         objective_ids = [row["store_id"] for row in rows if row["role"] == "user" and row["content"] == OBJECTIVE]
         assert objective_ids == ([3, 26] if restamp else [3])
         assert [row_key(engine, row) for row in rows] == [row_key(engine, row) for row in [*expected, reply]]
+        if tight_fit_host:
+            # B2 compares the next request's result to the durable dispatch. The latest result
+            # still fits in full if the fit spends a little less of its budget on older excerpts.
+            assert final[-2]["content"] == expected[-1]["content"], (
+                f"{final[-2]['tool_call_id']} reached the wire with {len(final[-2]['content'])} characters"
+            )
 
         # Byte-identical text sent again after the reply is a separate user turn.
         engine.ingest([*final, *stamp([{"role": "user", "content": OBJECTIVE}])])
