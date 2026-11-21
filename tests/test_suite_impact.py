@@ -165,7 +165,7 @@ RELIABILITY_FILES = ["README.md", "ci.py", "test_ci_compare.py"] + [
 
 @pytest.mark.parametrize("paths, count, run, skip", [
     (["survival_codec.py", "survival_fit.py", "tests/invariants/test_issue_1221_objective_duplicate_after_2914.py"],
-     24, {"c1a", "respin", "nightly-matrix", "real-host", "m3", "d7"}, {"c4", "c2", "busy-bar"}),
+     25, {"c1a", "respin", "nightly-matrix", "real-host", "m3", "d7", "invariants"}, {"c4", "c2", "busy-bar"}),
     (["changelog.d/3006-post-refusal-replay.md", "compaction.py", "engine.py",
       "tests/invariants/test_issue_3006_post_refusal.py", "tests/test_refused_compaction_rollback.py"], 43, set(), set()),
     (["changelog.d/1221-objective-replay-after-compaction.md", "changelog.d/2863-post-tool-reanchor.md",

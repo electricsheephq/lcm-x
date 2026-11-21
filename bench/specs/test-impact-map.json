@@ -928,7 +928,9 @@
     "M12",
     "M13"
    ],
-   "paths": [],
+   "paths": [
+    "benchmarks/qa-harness/**"
+   ],
    "inputs": [
     "provider-route",
     "baseline",
@@ -1290,11 +1292,13 @@
     "M02"
    ],
    "paths": [
-    "tests/fixtures/session_end_attribution_cost/**"
+    "@product",
+    "tests/fixtures/session_end_attribution_cost/**",
+    "tests/conftest.py"
    ],
    "inputs": [],
    "when": "Every pull request",
-   "note": "",
+   "note": "Its measurement program imports tests/conftest.py, which registers the product modules.",
    "catch_log": []
   },
   {
@@ -1405,7 +1409,7 @@
     "tests/test_issue_1186_host_dependencies.py",
     "tests/conftest.py",
     ".github/workflows/real-host.yml",
-    "bench/instruments/reliability/ci.py"
+    "bench/instruments/reliability/**"
    ],
    "inputs": [
     "hermes-host"
@@ -1440,16 +1444,19 @@
    "kind": "mapped",
    "mechanisms": [
     "M01",
-    "M05"
+    "M05",
+    "M08"
    ],
    "paths": [
+    "@product",
     "tests/invariants/**",
+    "tests/conftest.py",
     ".github/workflows/invariants-nightly.yml",
     ".github/actions/**"
    ],
    "inputs": [],
    "when": "Nightly",
-   "note": "",
+   "note": "Runs every property test under tests/invariants/, and those import product modules freely.",
    "catch_log": []
   },
   {
@@ -1554,6 +1561,7 @@
    ],
    "inputs": [
     "baseline",
+    "provider-route",
     "instrument-pin"
    ],
    "when": "Release rc",
@@ -1591,7 +1599,9 @@
     "M12",
     "M13"
    ],
-   "paths": [],
+   "paths": [
+    "benchmarks/qa-harness/**"
+   ],
    "inputs": [
     "provider-route",
     "board-claim",
