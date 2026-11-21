@@ -13,6 +13,9 @@ HELP = """LCM command help
 - /lcm doctor clean apply: backup-first cleanup for safe pattern-matched candidates only
 - /lcm doctor clean lifecycle: read-only scan for lifecycle rows with zero messages/nodes
 - /lcm doctor clean lifecycle apply: backup-first cleanup of empty lifecycle rows only
+- /lcm doctor dedupe: read-only scan for byte-identical copies of at least 8,000 characters
+- /lcm doctor dedupe apply: backup-first deletion of eligible non-user copies with an earlier summary-covered copy
+- /lcm doctor dedupe apply users: also include eligible user copies. Both apply forms require LCM_DOCTOR_DEDUPE_APPLY_ENABLED=true
 - /lcm doctor repair: read-only scan for SQLite/FTS index repair needs
 - /lcm doctor repair apply: backup-first repair/rebuild of message and summary FTS indexes
 - /lcm doctor repair level3: read-only scan for level 3 truncation fragments and the condensed nodes built on them
@@ -38,7 +41,7 @@ DOCTOR_ERROR = (
     "`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, "
     "`clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, "
     "`repair schema-stamp apply`, `source`, `source apply`, and `retention` as "
-    "extra subcommands, plus `repair level3` and `repair level3 apply`."
+    "extra subcommands, plus `repair level3`, `repair level3 apply`, `dedupe`, `dedupe apply`, and `dedupe apply users`."
 )
 ERRORS = {
     "status": "`/lcm status` does not accept extra arguments.",
@@ -62,6 +65,9 @@ HANDLER_CASES = (
     ("doctor clean apply", "_doctor_clean_apply_text", None),
     ("doctor clean lifecycle", "_doctor_clean_lifecycle_text", None),
     ("doctor clean lifecycle apply", "_doctor_clean_lifecycle_apply_text", None),
+    ("doctor dedupe", "_doctor_dedupe_text", None),
+    ("doctor dedupe apply", "_doctor_dedupe_apply_text", None),
+    ("doctor dedupe apply users", "_doctor_dedupe_apply_users_text", None),
     ("doctor repair apply", "_doctor_repair_apply_text", None),
     ("doctor repair level3", "_doctor_repair_level3_text", None),
     ("doctor repair level3 apply", "_doctor_repair_level3_apply_text", None),

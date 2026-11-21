@@ -370,6 +370,7 @@ without changing its behavior until removal.
 | `LCM_EMBEDDING_QUERY_SPEND_BACKOFF_SECONDS` | `float` | `60.0` | — | — |
 | `LCM_NEW_SESSION_RETAIN_DEPTH` | `int` | `2` | — | — |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `bool` | `false` | — | — |
+| `LCM_DOCTOR_DEDUPE_APPLY_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `bool` | `true` | — | — |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `int` | `200` | — | — |
 | `LCM_TEMPORAL_ROLLUPS_ENABLED` | `bool` | `true` | — | — |

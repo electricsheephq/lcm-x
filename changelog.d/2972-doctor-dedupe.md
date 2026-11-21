@@ -1,0 +1,1 @@
+- New: `/lcm doctor dedupe` scans for large identical messages. The opt-in, backup-first `apply` and `apply users` forms remove eligible assistant and user text copies absent from the active Hermes message lists, while preserving tool-call groups and at least one row in the bound session (#2972).

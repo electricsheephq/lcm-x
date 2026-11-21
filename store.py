@@ -423,10 +423,17 @@ def delete_ingest_ledger_rows(conn: sqlite3.Connection, rows_sql: str, args: tup
     Bindings are kept forever except explicit forget/purge of user data.
     Marks stay: a lower actual maximum must never be mistaken for rollback.
     """
+    _delete_ingest_ledger_message_refs(conn, rows_sql, args, drop_views=True)
+
+
+def delete_ingest_ledger_message_refs(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    """Remove references to proven hidden duplicates while preserving ingest views."""
+    _delete_ingest_ledger_message_refs(conn, rows_sql, args, drop_views=False)
+
+
+def _delete_ingest_ledger_message_refs(conn, rows_sql, args, *, drop_views):
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='occurrence_bindings'").fetchone():
         return
-    lineages = {row[0] for row in conn.execute(
-        f"SELECT DISTINCT lineage FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)}
     emission_match = (
         "(json_valid(source_store_ids) AND EXISTS (SELECT 1 FROM json_each("
         "CASE WHEN json_valid(source_store_ids) THEN source_store_ids ELSE '[]' END) "
@@ -434,13 +441,17 @@ def delete_ingest_ledger_rows(conn: sqlite3.Connection, rows_sql: str, args: tup
         f"next_occ_id IN (SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql})) OR "
         f"recovered_store_id IN ({rows_sql})"
     )
-    lineages.update(row[0] for row in conn.execute(
-        f"SELECT DISTINCT lineage FROM ledger_emissions WHERE {emission_match}", args * 3))
+    if drop_views:
+        lineages = {row[0] for row in conn.execute(
+            f"SELECT DISTINCT lineage FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)}
+        lineages.update(row[0] for row in conn.execute(
+            f"SELECT DISTINCT lineage FROM ledger_emissions WHERE {emission_match}", args * 3))
     conn.execute(f"DELETE FROM ledger_emissions WHERE {emission_match}", args * 3)
     conn.execute("DELETE FROM stamp_observations WHERE occ_id IN "
                  f"(SELECT occ_id FROM occurrence_bindings WHERE store_id IN ({rows_sql}))", args)
     conn.execute(f"DELETE FROM occurrence_bindings WHERE store_id IN ({rows_sql})", args)
-    conn.executemany("DELETE FROM ingest_views WHERE lineage=?", ((lineage,) for lineage in lineages))
+    if drop_views:
+        conn.executemany("DELETE FROM ingest_views WHERE lineage=?", ((lineage,) for lineage in lineages))
 
 
 def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:

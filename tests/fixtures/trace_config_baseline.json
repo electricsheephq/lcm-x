@@ -25,6 +25,7 @@
     "deferred_maintenance_max_passes": 4,
     "depth_target_ratio": 0.0,
     "doctor_clean_apply_enabled": false,
+    "doctor_dedupe_apply_enabled": false,
     "dynamic_leaf_chunk_enabled": false,
     "dynamic_leaf_chunk_max": 40000,
     "embedding_api_key_env": "LCM_EMBEDDING_API_KEY",
