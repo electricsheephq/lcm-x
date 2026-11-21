@@ -586,7 +586,7 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
     lineage = persisted_lineage(conn, session_id, attempt["lineage"])
     counts = Counter()
     ingest = newest_view(conn, lineage, "ingest")
-    emission, reason = emission_candidate(conn, lineage)
+    emission, reason = emission_candidate(conn, lineage, adopted_fallback=True)
     if reason != "usable":
         counts["emission_withheld." + reason] += 1
     if reason == "below_floor" and not conn.execute(
@@ -711,8 +711,8 @@ def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
     return winner, counts
 
 
-def emission_candidate(conn, lineage):
-    """Return (newest usable live emission view, reason), without registry reads.
+def emission_candidate(conn, lineage, *, adopted_fallback=False):
+    """Return the live emission view and reason, without registry reads.
 
     One SQL statement reads the view, state, recovered mark and provenance floor
     in a consistent snapshot when no transaction is open. Inside the caller's
@@ -732,6 +732,12 @@ def emission_candidate(conn, lineage):
         return None, "none"
     view = rows[0]
     recovered, floor = view.pop("recovered"), view.pop("floor")
+    if adopted_fallback and view["state"] == "refused":
+        accepted = _rows(conn.execute(
+            "SELECT * FROM ingest_views WHERE lineage=? AND kind='emission' AND state='adopted' "
+            "AND view_seq<? ORDER BY view_seq DESC LIMIT 1", (lineage, view["view_seq"])))
+        if accepted:
+            view = accepted[0]
     if view["state"] not in ("proposed", "adopted"):
         return None, "refused"
     if recovered is not None and view["view_seq"] <= recovered:

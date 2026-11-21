@@ -26,8 +26,12 @@ import struct
 import sys
 import zlib
 
-CONTRACT_VERSION = 1  # docs/store-contract.md
-CONTRACT_DIGEST = "sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9"
+CONTRACT_VERSION = 2  # docs/store-contract.md
+CONTRACT_DIGEST = "sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0"
+CONTRACT_DIGESTS = {
+    1: "sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9",
+    CONTRACT_VERSION: CONTRACT_DIGEST,
+}
 LAYOUT, OWNER_KEY, STAMP_KEY = 1, "capture:owner", "import:origin"  # claude_code_store.OWNER_KEY
 # The contract's generated table: each table's columns in a fresh store's order; ":N" is the primary-key position.
 _TABLES = {
@@ -535,8 +539,9 @@ def stamp_check(conn, manifest, owner_file):
     for field in ("copy_id", "generation", "created_at"):
         if not same(stamp.get(field), manifest.get(field)):
             failures.append({"code": "stamp_field", "field": field})
-    if not same(stamp.get("format"), 1) or not same(stamp.get("contract"), {"version": CONTRACT_VERSION,
-                                                                              "digest": CONTRACT_DIGEST}):
+    known_contract = any(same(stamp.get("contract"), {"version": version, "digest": digest})
+                         for version, digest in CONTRACT_DIGESTS.items())
+    if not same(stamp.get("format"), 1) or not known_contract:
         failures.append({"code": "stamp_format"})
     try:
         owner = loads(meta(conn, OWNER_KEY) or b"null")

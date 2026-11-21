@@ -531,7 +531,7 @@ def test_26_newer_head(fixture):
         if key == 'layout':
             m['layout'] = 2
         else:
-            m['stamp']['contract']['version'] = 2
+            m['stamp']['contract']['version'] = cp.CONTRACT_VERSION + 1
         path.write_text(json.dumps(m))
         fixture[1].calls.clear()
         with pytest.raises(cp.Refused) as caught:
@@ -1233,7 +1233,7 @@ def test_r3_head_check_order(fixture, field, code):
     if field == 'layout':
         m['layout'] = 2
     else:
-        m['stamp']['contract']['version'] = 2
+        m['stamp']['contract']['version'] = cp.CONTRACT_VERSION + 1
     path.write_text(json.dumps(m))
     before = keys(fixture)
     fixture[1].calls.clear()

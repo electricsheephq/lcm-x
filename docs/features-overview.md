@@ -120,11 +120,10 @@ A stale or missing cloud embedding identity also degrades to full-text, with an
 policies remain deterministic configuration faults, so `lcm_recall` raises instead of degrading, and
 proactive recall counts it in `privacy_policy_errors` rather than injecting nothing quietly (#370).
 
-Known cloud providers protect provider-bound input by default
-(`embedding_privacy_enabled` auto-resolves ON for cloud; an explicit
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` opt-out sends raw text under the
-`privacy:off` revision). Durable redaction (`sensitive_patterns_enabled`)
-is a separate, opt-in choice — the durable store is lossless by default.
+Known cloud providers receive unfiltered input by default under the
+`privacy:off` revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to
+the experimental provider-input filter. Durable redaction
+(`sensitive_patterns_enabled`) is a separate opt-in.
 Provider input is transformed without
 rewriting durable messages, summaries, FTS rows, or payloads, and the effective
 privacy policy is part of vector identity. This is pattern-based protection,
@@ -156,15 +155,15 @@ flowchart LR
 | Cost | Provider pricing | Endpoint-dependent | Local compute | Endpoint-dependent |
 | Setup | API key | Ollama service + model | Optional `fastembed` install; model download at warmup | Base URL, model ID, and configured API-key environment |
 | Quality | Model-dependent frontier service | Model-dependent | Small local baseline | Endpoint/model-dependent |
-| Privacy | Provider copies protected by default (`privacy:off` opt-out available) | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Conservatively treated as cloud: provider copies protected by default under the shipped provider identity |
+| Privacy | Unfiltered by default. Experimental filter requires explicit opt-in | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Treated as cloud. Experimental filter requires explicit opt-in |
 
 LCM embeds bounded summaries by default rather than raw transcripts. Dry-run a
 backfill to measure the selected corpus and verify current provider pricing
 immediately before any paid execution.
 `lcm_recall` can optionally rerank a bounded fused candidate window with Voyage. Reranking
-remains default-off; when it runs on a cloud provider its query and snippets are protected
-by the same embedding-privacy resolution before transport (#371), and the explicit
-`privacy:off` opt-out sends them raw by choice. #336 tracks the remaining payload contract. `lcm_grep` hybrid mode remains RRF-only.
+is off by default. When reranking runs on a cloud provider, its query and snippets
+follow the same opt-in filter setting (#371). #336 tracks the remaining payload
+contract. `lcm_grep` hybrid mode remains RRF-only.
 
 Provider accounts and quotas may be shared with other tools, but LCM-X does not
 assume that another tool's model, endpoint, privacy policy, or billing contract

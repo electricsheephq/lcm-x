@@ -177,7 +177,7 @@ export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite      # cheapest tier, $0.02/M after free
 export VOYAGE_API_KEY=...                     # supply through your secret manager
 
-# Provider-bound cloud copies are protected automatically; durable storage stays raw.
+# The experimental cloud embedding filter defaults to off.
 export LCM_SENSITIVE_PATTERNS=api_key,bearer_token,password_assignment,private_key
 
 # Interactive queries: hard per-call wall-clock budget (default 3s)
@@ -192,11 +192,10 @@ Always dry-run `/lcm embed backfill` first: it reports document counts and
 token estimates with the same eligibility rules apply-mode uses, so the
 estimate is a gross-list-price planning estimate, not a billing guarantee.
 Account-specific free tokens and other billing adjustments are not included.
-The cloud embedding privacy transform changes provider input only and never
-rewrites existing durable messages, summaries, FTS rows, or payloads. It is on
-automatically for known cloud providers. Set `LCM_EMBEDDING_PRIVACY_ENABLED=false`
-only to explicitly opt out and send raw copies under the `privacy:off` vector
-revision. Separately, `LCM_SENSITIVE_PATTERNS_ENABLED=true` redacts configured
+The experimental cloud embedding filter changes provider input only and
+defaults to off. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in for known
+cloud providers. The default sends unfiltered copies under the `privacy:off`
+vector revision. Separately, `LCM_SENSITIVE_PATTERNS_ENABLED=true` redacts configured
 matches from ordinary future ingest before they reach SQLite messages, FTS,
 summaries, active replay, or ordinary externalized ingest payloads; those matched values
 are intentionally not recoverable from those LCM surfaces. One exception is
@@ -214,7 +213,7 @@ export LCM_EMBEDDING_PROVIDER=openai-compatible
 export LCM_EMBEDDING_MODEL=BAAI/bge-m3
 export LCM_EMBEDDING_BASE_URL=https://embedding-service.example/v1
 export LCM_EMBEDDING_API_KEY=...              # supply through your secret manager
-# Conservatively treated as cloud: provider-bound copies are protected automatically.
+# Treated as cloud. The experimental embedding filter defaults to off.
 export LCM_SENSITIVE_PATTERNS=api_key,bearer_token,password_assignment,private_key
 ```
 

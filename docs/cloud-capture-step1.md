@@ -44,7 +44,7 @@ These need no money and no privacy ruling on a bucket we operate. Each is one li
 | D2 | The host stores files and runs none of our code. Recall reads local replicas. | No service to build or secure. The recall wait does not depend on the network. Any S3-compatible store works. |
 | D3 | Step 1 covers Claude Code capture stores. Grok Build stores join once Grok capture ships and its own restore proof and copy checker pass. Hermes stores are out. | Grok capture is hard off (docs/claude-code-adapter.md:467-468). A Hermes store has no origin stamp: only capture writes `capture:owner` (claude_code_store.py:50). |
 | D4 | Step 1 code never writes a live capture store, its payload folder or its spool, and never takes `capture.lock`. | A held lock tells hooks and workers that a holder will rescan the spool (adapters/claude-code/bin/lcmx_hook.py:348-357; scripts/lcm_x_capture.py:82-83). An uploader that held it would inherit that duty. |
-| D5 | The cloud code is a consumer of store contract v1 and changes nothing in it. | The contract already gives the read rule, the tables and the reader API it needs (docs/store-contract.md:8, :14-28, :38-59). |
+| D5 | The cloud code consumes the versioned store contract. | The contract already gives the read rule, the tables and the reader API it needs (docs/store-contract.md:8, :14-28, :38-59). |
 | D6 | A snapshot is a page-for-page copy taken with SQLite's online backup over a `mode=ro` connection, not `MessageStore.backup`. | `MessageStore.backup` is not a contracted callable (docs/store-contract.md:38-59) and runs on a live `MessageStore` connection (store.py:3427), which the cloud code never opens. |
 | D7 | The publish guard is product code. The 0-lost and 0-duplicate measurement is a separate, independent checker. | The outside-in checker is the precedent: it shares no code with what it checks (scripts/capture_outside_in.py:2-6). The worker must not judge itself. |
 | D8 | A deliberate delete reaches the hosted copy at the next upload. The opt-in says so, with the limits stated in 5.1. | Decision in force. The forgotten marker makes it cheap (claude_code_store.py:100-108). |
@@ -60,7 +60,7 @@ These need no money and no privacy ruling on a bucket we operate. Each is one li
 | D18 | Amend ROADMAP.md:125 when step 1 ships (4.6). | The merged endpoint serves more than "one profile's store" (ROADMAP.md:125). The Grok Build rows (ROADMAP.md:22, :126, :201) already carry section 7's condition. |
 | D19 | Forgetting on a replica is done where the replica is materialized: a reader opens a view built without the removed sessions (4.7). A row that links a kept session to a removed one leaves with the removed one; a kept session's own rows stay byte-identical. The merger holds no forget logic per argument. | Fifteen rounds of per-argument patches did not converge (#2796). A session that is not in the file cannot answer. |
 
-## 3. The hosted copy on contract v1
+## 3. The hosted copy
 
 **The hosted copy is a byte copy of the origin store plus a manifest. Everything that inspects it reads only
 contracted tables, by column name, over `mode=ro`, plus SQLite's own `sqlite_sequence`, read-only, for the id
@@ -1622,7 +1622,7 @@ this object (`sort_keys=True`, separators `(",", ":")`, `ensure_ascii=False`). T
 | `origin_harness` | string | `host` in the `capture:owner` row |
 | `generation` | int | this generation |
 | `parent` | null or object | `{"generation": int, "manifest_sha256": sha256 of that manifest's stored bytes}` |
-| `contract` | object | `{"version": 1, "digest": "sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9"}` (docs/store-contract.md:3-4) |
+| `contract` | object | `{"version": 2, "digest": "sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0"}` (docs/store-contract.md:3-4) |
 | `schema_version` | int | the store's own `metadata` value for key `schema_version`, as an integer; 0 when the row is absent |
 | `projection_versions` | list of strings | distinct `capture_events.projection_version`, sorted; `[]` when the table is absent |
 | `unit` | object | `{"version": string or null, "core_commit": string or null, "core_version": string or null}` |

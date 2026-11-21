@@ -34,14 +34,14 @@ note only if that row does not already contain the LCM phrase.
 
 ## Cloud embedding privacy boundary
 
-Known cloud embedding paths transform provider input without rewriting durable source. That
-protection resolves ON automatically for recognized cloud providers and is independent of
-durable redaction: `LCM_SENSITIVE_PATTERNS_ENABLED` (default off) governs the durable store
-only, and the durable store is lossless by default. While provider-copy privacy is on, LCM
+The experimental provider-input filter is off by default. Set
+`LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in for known cloud providers.
+`LCM_SENSITIVE_PATTERNS_ENABLED` (default off) separately governs durable
+redaction. While the provider-input filter is on, LCM
 requires a nonempty recognized `LCM_SENSITIVE_PATTERNS` catalog; canonicalizes existing
 placeholders; replaces matches with pattern-only placeholders; scans for residual matches;
-and fails closed before transport on any invalid state. `LCM_EMBEDDING_PRIVACY_ENABLED=false`
-is an explicit opt-out that dispatches raw input under the `privacy:off` revision. Optional
+and fails closed before transport on any invalid state. The default
+dispatches unfiltered input under the `privacy:off` revision. Optional
 Voyage reranking is covered by the same resolution. A privacy-policy error on the
 `lcm_recall` path (an invalid catalog, a residual match, dispatch-time drift) raises; it is
 never a silent degrade to full-text. A stale vector identity is different: when no active

@@ -35,7 +35,7 @@ import pytest
 # The plugin is directory-loaded by Hermes, not installed as a Python package.
 # Reuse the suite's registration when invoked with python -m outside pytest.
 import tests.conftest  # noqa: F401
-from tests.behaviour.frontier_observer import observed_attribute
+from tests.behaviour.frontier_observer import REFUSED_INPUT, observed_attribute
 from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
@@ -401,6 +401,8 @@ class LiteralPattern:
 # fields added on the R3 train and the leaf preparation/refusal state are also
 # read/written by compaction, as is the #2815 gap diagnostic. Update deliberately
 # when changing this list, never derive the runtime observer from source.
+# The ingest observer also inventories the thread-local container without freezing its internals.
+THREAD_LOCAL_ATTRIBUTES = frozenset({"_thread_context"})
 OBSERVED_ATTRIBUTES = (
     "_active_replay_placeholder_digest",
     "_assemble_committed_compaction_context",
@@ -434,6 +436,7 @@ OBSERVED_ATTRIBUTES = (
     "_foreground_budget",
     "_fresh_tail_start",
     "_frontier",
+    REFUSED_INPUT,
     "_generated_context_carrier_remainder",
     "_generated_placeholder_digest_budget_for_active_replay",
     "_generated_placeholder_digest_ordinals_for_active_replay",
@@ -540,6 +543,7 @@ OBSERVED_ATTRIBUTES = (
     "_sweep_budget_hold_turn_paced",
     "_sweep_budget_hold_until",
     "_take_leaf_summary_model",
+    "_thread_context",
     "_thread_context_session_id",
     "_unattributed_leaf_warned",
     "_working_leaf_chunk_tokens",
@@ -861,7 +865,11 @@ def prepared_state(engine: Any, canonical: Canonical) -> Any:
 def state(engine: Any, canonical: Canonical) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in OBSERVED_ATTRIBUTES:
+        if name in THREAD_LOCAL_ATTRIBUTES:
+            continue
         value = observed_attribute(engine, name)
+        if name == REFUSED_INPUT and value is None:
+            continue
         if name == "_store":
             value = engine._store.get_session_messages(engine._session_id, limit=10000)
         elif name == "_dag":

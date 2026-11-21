@@ -1,10 +1,12 @@
 """Packet 5 Part A: synthetic directory-bucket restore proofs."""
 import ast
+from contextlib import closing
 import copy
 import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -58,6 +60,28 @@ def test_A1_rebuild(fixture, tmp_path):
             r['name'] for r in manifest['payloads'])
         assert sorted(p.name for p in target.iterdir()) == ['lcm-large-outputs', 'lcm.db', 'manifest.json']
         assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_v2_restores_v1_replica(fixture, tmp_path, monkeypatch):
+    with closing(sqlite3.connect(fixture[0] / 'lcm.db')) as conn, conn:
+        conn.execute('DROP INDEX idx_msg_session_tool_call')
+    with monkeypatch.context() as old:
+        old.setattr(cp, 'CONTRACT_VERSION', 1)
+        old.setattr(cp, 'CONTRACT_DIGEST', 'sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9')
+        manifest = pub(fixture)
+    assert manifest['stamp']['contract']['version'] == 1 and cp.CONTRACT_VERSION == 2
+    target = tmp_path / 'restored-v1'
+    result = restore(fixture, target, transcripts=[f's1={fixture[2]}'])
+    assert result['code'] == 'done' and result['check3'] == 'done'
+    assert (target / 'lcm.db').read_bytes() == checked(fixture).read_bytes()
+
+
+def test_v1_refuses_v2_replica(fixture, tmp_path, monkeypatch):
+    assert pub(fixture)['stamp']['contract']['version'] == 2
+    monkeypatch.setattr(cp, 'CONTRACT_VERSION', 1)
+    fixture[1].calls.clear()
+    refusal('replica_newer_contract', lambda: cr.restore(fixture[1], PREFIX, COPY, 1, tmp_path / 'refused-v2'))
+    assert fixture[1].calls == [('get', f'{PREFIX}/gen/1.json')]
 
 
 @pytest.mark.parametrize('fault,code', [

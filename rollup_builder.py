@@ -311,6 +311,24 @@ def _summarize_capped(
         previous_tokens = summary_tokens
 
 
+def _publish_rollup(
+    store: RollupStore,
+    token: RollupBuildToken,
+    summary: str,
+    token_count: int,
+    source_ids: Sequence[int],
+    fingerprint: str,
+) -> bool:
+    try:
+        return store.mark_ready(token, summary, token_count, source_ids, fingerprint)
+    except Exception as exc:
+        logger.warning(
+            "LCM temporal rollup publication failed for rollup %d (%s)",
+            token.rollup_id, type(exc).__name__,
+        )
+        raise
+
+
 def _mark_failed(
     store: RollupStore, token: "RollupBuildToken | None", exc: Exception
 ) -> None:
@@ -375,7 +393,7 @@ def build_day(
             circuit_breaker=circuit_breaker,
             spend_guard=spend_guard,
         )
-        published = store.mark_ready(token, summary, token_count, source_ids, fingerprint)
+        published = _publish_rollup(store, token, summary, token_count, source_ids, fingerprint)
         if published:
             # A (re)built daily makes any already-published week/month that
             # covered the previous daily outdated: stale them so they rebuild
@@ -657,7 +675,7 @@ def _build_aggregate(
             circuit_breaker=circuit_breaker,
             spend_guard=spend_guard,
         )
-        store.mark_ready(token, summary, token_count, source_ids, fingerprint)
+        _publish_rollup(store, token, summary, token_count, source_ids, fingerprint)
         return store.get_rollup(period_kind, start.isoformat(), scope)
     except RollupLevel3NotStored as exc:
         _defer_level3(store, token, period_kind, exc)

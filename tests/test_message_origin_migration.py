@@ -20,14 +20,15 @@ SHAPES = ("no-origin", "no-source", "column", "nullable", "indexed")
 # Hashes cover every sqlite_master SQL definition, including unrelated schema objects.
 # Captured on the pre-refactor tree, with the same assertions and fixtures below.
 # S0 DECLARE: regenerated for two nullable sender TEXT columns, schema_version still 5.
+# #2975 adds the partial tool-call index to each shape with schema_version still 5.
 SCHEMA_HASHES = {
-    "no-origin": "7c713ed3172754452fea7db661980ecf2ae50d7ed74f44ec7277ecc3dcf3fa36",
-    "no-source": "b404228fe3f62e0041044f5f86a95a5755164859f28fa1760ccc5c6d0d77a038",
-    "column": "3f636eca7f43e14dbf1f02448cc1235b8baf1ca02c45fcbdc2697ed120982501",
-    "nullable": "201149f63107323c870dbb84e0e548b24a5c7b198896d2ebea7b25d1cce5de28",
-    "indexed": "3f636eca7f43e14dbf1f02448cc1235b8baf1ca02c45fcbdc2697ed120982501",
-    "fresh": "60f0c61283050a49c4e26b5729dc6618dcaa72e461337a20d73a75f74977d4da",
-    "v0.26.2": "8b774fdbd65aa2fcaf3420f2b54c4eb5480d0ff3d38269d329fbb6a8f095c74f",
+    "no-origin": "dc037c7f2854a383bcaff04d50fb5d2d5811c85be536120d4e7f1d1d5c586ff7",
+    "no-source": "419c574e10176e446d4103ef61510043cb85ea3eba64ff3b0f46055f158df7a2",
+    "column": "9e567342b5046453e8e55e5a7e31449d6ac292825e5a4fff5e9794b33a7d3ce2",
+    "nullable": "23188b61ab9fff1cbbb0df7871d979dc5f1dde7daea99214c99652688cf6d2e4",
+    "indexed": "9e567342b5046453e8e55e5a7e31449d6ac292825e5a4fff5e9794b33a7d3ce2",
+    "fresh": "3b8263221412a023c8778460dbcc56078750e50e553890f0964cd44e2b2a48a1",
+    "v0.26.2": "4fea092e3bb53b3702ce90c06aa2dac665405407c2ef40fa2dc6003548f565fb",
 }
 
 

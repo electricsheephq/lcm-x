@@ -245,6 +245,9 @@ class RollupStore:
         """
         unique_source_ids = list(dict.fromkeys(int(node_id) for node_id in source_node_ids))
         with self._write_transaction():
+            # Reserve the main database writer before source validation opens a
+            # read snapshot. A deferred read-to-write upgrade can skip the busy timeout.
+            self._conn.execute("BEGIN IMMEDIATE")
             owned = self._conn.execute(
                 """
                 SELECT period_kind, period_start, scope FROM lcm_rollups

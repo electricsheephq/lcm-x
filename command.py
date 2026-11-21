@@ -3637,6 +3637,35 @@ def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int 
         logging.getLogger(__name__).debug("Could not record embedding catch-up state", exc_info=True)
 
 
+def _summary_backfill_privacy_migration(
+    config, profile: sqlite3.Row, *, retry_uncertain: bool,
+) -> EmbeddingIdentity | None:
+    """Plan the replacement identity for an ordinary backfill of filtered summaries."""
+    if retry_uncertain or getattr(config, "embedding_privacy_enabled", None) is True:
+        return None
+    revision, suffix = split_prefix_revision(str(profile["revision"] or ""))
+    if not revision.startswith("privacy:v"):
+        return None
+
+    provider_name = str(profile["provider"])
+    configured_provider = config_choices.normalize_embedding_provider(config.embedding_provider)
+    model = str(profile["model_name"])
+    dtype = str(profile["dtype"] or "float32")
+    if (
+        provider_name != embedding_provider_id(configured_provider)
+        or not embedding_provider_requires_privacy(provider_name)
+        or model != effective_embedding_model(configured_provider, config.embedding_model)
+        or suffix != embedding_prefix_suffix(config, provider_name)
+        or dtype != _resolve_storage_dtype(config)
+    ):
+        return None
+
+    return EmbeddingIdentity.canonical(
+        provider_name, model, "privacy:off" + suffix, profile["dim"], dtype,
+        profile["byteorder"], "summary+prefix" if suffix else "summary",
+    )
+
+
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
@@ -3699,6 +3728,10 @@ def _embedding_backfill_summary_run(
             if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
                 return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
+            replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+            if replacement is not None:
+                identity = replacement.identity_hash
+                profile_revision, _ = split_prefix_revision(replacement.revision)
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)
     except sqlite3.Error as exc:
         return "\n".join([
@@ -3799,6 +3832,17 @@ def _embedding_backfill_summary_run(
                 "status: refused",
                 "error: another embedding backfill holds the lease; retry after it exits or after the lease TTL expires",
             ]), reason="lease_held")
+        # Register the default-off summary identity alongside the old vectors.
+        # Ordinary backfill discovers the summaries as pending under it.
+        replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+        if replacement is not None:
+            with store._write_transaction():
+                if _embedding_current_profile(conn) == profile and lease.renew(force=True):
+                    profile_revision, _ = split_prefix_revision(replacement.revision)
+                    identity = store.register_profile(
+                        replacement.model_name, replacement.provider, replacement.dim, revision=profile_revision,
+                        revision_suffix=profile_suffix, dtype=replacement.dtype, byteorder=replacement.byteorder,
+                    )
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)
         if captured_identity.identity_hash != identity:
@@ -5494,14 +5538,29 @@ def _chunk_backfill_run(
     # acknowledgment before sending that to a CLOUD provider; local providers
     # (fastembed/ollama) keep the text on this machine and are exempt (F1).
     if not _is_local_embedding_provider(provider_name) and not confirm_raw_text:
+        try:
+            consent_privacy_revision = embedding_privacy_revision(config)
+        except EmbeddingPrivacyPolicyError as exc:
+            return _refused(str(exc))
+        if consent_privacy_revision == "privacy:off":
+            # The filter is off by default (#2977): say plainly that nothing is removed.
+            privacy_note = (
+                "No provider-input privacy filter is applied, so the text is sent as stored. "
+                "The filter is on only when LCM_EMBEDDING_PRIVACY_ENABLED is set to true. "
+                "Re-run with `--confirm-raw-text` to acknowledge sending it, "
+            )
+        else:
+            privacy_note = (
+                "The v0.23.1 provider-input privacy transform removes configured "
+                "detector matches but cannot classify every possible sensitive fact. "
+                "Re-run with `--confirm-raw-text` to acknowledge the residual content boundary, "
+            )
         return _refused(
             f"the chunk corpus derives provider input from RAW, VERBATIM message text — including "
             f"tool-result and error/traceback content that the summary corpus "
             f"never exposes — to the '{provider_name}' cloud embedding provider. "
-            f"The v0.23.1 provider-input privacy transform removes configured "
-            f"detector matches but cannot classify every possible sensitive fact. "
-            f"Re-run with `--confirm-raw-text` to acknowledge the residual content "
-            f"boundary, or switch to a local provider (fastembed/ollama)."
+            f"{privacy_note}"
+            f"or switch to a local provider (fastembed/ollama)."
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()

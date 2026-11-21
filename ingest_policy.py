@@ -35,7 +35,7 @@ _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
 # "openai"/"siliconflow" to the openai-compatible cloud provider): the
 # privacy predicate must hold for every spelling a CALLER might pass, not
 # just the canonical id the resolved provider object carries — a config
-# string alias must never bypass cloud privacy (#370 review).
+# string alias must never bypass opted-in cloud privacy (#370 review).
 _EMBEDDING_PRIVACY_CLOUD_PROVIDERS = frozenset(
     {"voyage", "voyageai", "openai-compatible", "openai", "siliconflow"}
 )
@@ -85,7 +85,7 @@ def sensitive_pattern_status(config: Any) -> dict[str, Any]:
     privacy_setting = getattr(config, "embedding_privacy_enabled", None)
     privacy_provider = str(getattr(config, "embedding_provider", "") or "")
     privacy_required = embedding_provider_requires_privacy(privacy_provider)
-    privacy_enabled = privacy_required and privacy_setting is not False
+    privacy_enabled = privacy_required and privacy_setting is True
     return {
         "sensitive_patterns_enabled": enabled,
         "enabled": enabled,
@@ -94,9 +94,7 @@ def sensitive_pattern_status(config: Any) -> dict[str, Any]:
         "active_patterns": active if enabled else [],
         "unknown_patterns": unknown,
         "source": getattr(config, "sensitive_patterns_source", "default"),
-        "embedding_privacy_setting": (
-            "auto" if privacy_setting is None else "on" if privacy_setting else "off"
-        ),
+        "embedding_privacy_setting": "on" if privacy_setting is True else "off",
         "embedding_privacy_enabled": privacy_enabled,
         "embedding_privacy_provider_requires_privacy": privacy_required,
         "embedding_privacy_revision": (
@@ -155,10 +153,10 @@ def embedding_privacy_revision(config: Any) -> str:
     """Return the canonical identity revision for cloud embedding input.
 
     The active revision contains only a transform version and a digest of sorted
-    pattern *names*. Explicit opt-out returns ``privacy:off``. Neither posture
+    pattern *names*. The default returns ``privacy:off``. Neither posture
     depends on matched text or secret bytes.
     """
-    if getattr(config, "embedding_privacy_enabled", None) is False:
+    if getattr(config, "embedding_privacy_enabled", None) is not True:
         return "privacy:off"
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     if not configured or not active:

@@ -1,5 +1,5 @@
 {
-  "digest": "0e699b69b3e6e61ba9d5654e2c737330c4ff04827acb0d4c5b3f97aba230335e",
+  "digest": "010db8c10f19b4c466867d9d182e09177e31260f9630facfcc141f56c8551285",
   "objects": {
     "idx_lcm_chunk_meta_identity_embedded_at": {
       "digest": "c8877e89d3f3d13676f5d3f9f635d01429723b2248b05975a93868e1f107f512",
@@ -38,6 +38,11 @@
     },
     "idx_msg_session": {
       "digest": "021ec85e67cdc6a851fe19c604d3534bca9b6b4a1507120f7e0b390e5072ad8c",
+      "table": "messages",
+      "type": "index"
+    },
+    "idx_msg_session_tool_call": {
+      "digest": "04af3893ca8ffcc5d6a0acd01a2dd2c9e8d8936ab3f2f4c7519664e6e050c724",
       "table": "messages",
       "type": "index"
     },

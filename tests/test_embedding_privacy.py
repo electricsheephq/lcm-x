@@ -40,7 +40,7 @@ class CaptureProvider:
         return [[1.0, 0.0] for _ in current]
 
 
-def _config(tmp_path, *, enabled=True, privacy_enabled=None, patterns=None):
+def _config(tmp_path, *, enabled=True, privacy_enabled=True, patterns=None):
     return LCMConfig(
         database_path=str(tmp_path / "privacy.db"),
         embeddings_enabled=True,
@@ -100,7 +100,7 @@ def test_cloud_privacy_is_independent_of_durable_redaction_and_validates_catalog
         )
 
 
-def test_default_cloud_posture_keeps_durable_text_raw_and_protects_provider_copy(tmp_path):
+def test_opt_in_cloud_privacy_keeps_durable_text_raw_and_protects_provider_copy(tmp_path):
     secret = "abcdefghijklmnop"
     raw = f"api_key={secret}"
     config = _config(tmp_path, enabled=False)
@@ -118,7 +118,7 @@ def test_default_cloud_posture_keeps_durable_text_raw_and_protects_provider_copy
     validate_embedding_privacy_dispatch([protected], config, expected_revision=revision)
     status = ingest_protection_mod.sensitive_pattern_status(config)
     assert status["sensitive_patterns_enabled"] is False
-    assert status["embedding_privacy_setting"] == "auto"
+    assert status["embedding_privacy_setting"] == "on"
     assert status["embedding_privacy_enabled"] is True
 
 
