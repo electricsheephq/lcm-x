@@ -175,7 +175,7 @@ RELIABILITY_FILES = ["README.md", "ci.py", "test_ci_compare.py"] + [
     ([".github/release-notes/v0.30.1-rc4.md"], 4, {"c5", "release-yml", "ci-tests", "host-suite"}, set()),
     ([".github/workflows/reliability-nightly.yml", "changelog.d/reliability-nightly-compare.md",
       "tests/test_reliability_workflow_artifacts.py",
-      *["bench/instruments/reliability/" + file for file in RELIABILITY_FILES]], 12, {"real-host"}, set()),
+      *["bench/instruments/reliability/" + file for file in RELIABILITY_FILES]], 15, {"real-host", "invariants"}, set()),
 ])
 def test_proof_paths(paths, count, run, skip):
     result = decide(REAL, paths)
