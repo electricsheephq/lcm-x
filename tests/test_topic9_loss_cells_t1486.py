@@ -46,26 +46,28 @@ def _trips(monkeypatch, engine) -> list:
 
 
 def test_f2_an_unexplained_rewrite_past_the_trip_cursor_is_stored(tmp_path, monkeypatch):
-    """F2: a fresh call at 1, an in-place user rewrite at 4, the first stamped miss at 6, then a trip."""
+    """F2: a fresh call at 1, an in-place rewrite at 4 of an unstamped user row (a steer note: the audit skips it, so
+    only the R6 rewind can save it), the first stamped miss at 6, then a trip."""
     engine = _engine(tmp_path)
     try:
+        reply_row = {"role": "user", "content": "a steer note" + PAD}
         rows = [_u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002), _a("reply to T1", 1003),
-                _u("T2 user turn", 1004), _a("reply to T2", 1005), _u("T3 user turn", 1006), _a("reply to T3", 1007)]
+                reply_row, _a("reply to T2", 1005), _u("T3 user turn", 1006), _a("reply to T3", 1007)]
         engine.ingest(list(rows))
-        u0, _a0, _u1, a1, u2, a2, _u3, a3 = rows
-        call_new, result_new = _call("call_f2", 1500), _result("call_f2", "fresh f2 result", 1501)
-        original_u2 = u2["content"]
-        u2["content"] = "T2 user turn, rewritten in place by the host" + PAD  # the same dict object: an R6 rewrite
+        u0, _a0, _u1, a1, _r, a2, _u3, a3 = rows
+        call_new, result_new = _call("call_f2", 1001), _result("call_f2", "fresh f2 result", 1002)
+        original = reply_row["content"]
+        reply_row["content"] = "continue with the plan" + PAD  # the same host object, rewritten in place: R6
         u3_edited = _u("T3 user turn, edited", 1006)
         reply = _a("a new reply", 1600)
         _trip(monkeypatch)
         trips = _trips(monkeypatch, engine)
-        engine.ingest([u0, call_new, result_new, a1, u2, a2, u3_edited, a3, reply])
+        engine.ingest([u0, call_new, result_new, a1, reply_row, a2, u3_edited, a3, reply])
         assert trips, "setup: the presence scan tripped"
         stored = _counts(engine)
         assert stored[_key(call_new)] == 1 and stored[_key(result_new)] == 1
-        assert stored[_key(u2)] == 1, "the rewrite's new bytes must be stored"
-        assert stored[_key({**u2, "content": original_u2})] == 1, "the original stays stored"
+        assert stored[_key(reply_row)] == 1, "the rewrite's new bytes must be stored"
+        assert stored[_key({**reply_row, "content": original})] == 1, "the original stays stored"
         assert stored[_key(u3_edited)] == 1 and stored[_key(reply)] == 1
     finally:
         engine.shutdown()
@@ -123,22 +125,24 @@ def test_f4_a_generated_placeholder_never_witnesses(tmp_path, monkeypatch):
 
 
 def test_f6_an_ambiguous_id_keeps_mains_result(tmp_path, monkeypatch):
-    """F6: an id that appears in two call rows of the view is ambiguous; the trip neither stores nor witnesses
-    either occurrence (main's result), and the fresh unambiguous pair is still stored."""
+    """F6: a fresh call reuses the id of a stored unstamped call and sits before it in the audit interval. The id is
+    ambiguous, so the trip neither stores nor witnesses either occurrence (main's result): the reuse cannot spend the
+    old occurrence's witness, so the old call is not copied. The unambiguous fresh pair is still stored."""
     engine = _engine(tmp_path)
     try:
-        u0, u1 = _u("T0 user turn", 1000), _u("T1 user turn", 1002)
+        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
         old_call = _unstamped(_call("call_x", 1003))
         a1 = _a("reply to T1", 1005)
-        engine.ingest([u0, old_call, u1, a1])
-        reused = _unstamped(_call("call_x", 1004))
-        fresh_call, fresh_result = _call("call_f6", 1002.2), _result("call_f6", "fresh", 1002.4)
+        engine.ingest([u0, a0, u1, old_call, a1])
+        reused = _unstamped(_call("call_x", 1001))
+        fresh_call, fresh_result = _call("call_f6", 1002), _result("call_f6", "fresh", 1500)
         _trip(monkeypatch)
         trips = _trips(monkeypatch, engine)
-        engine.ingest([u0, old_call, reused, fresh_call, fresh_result, a1, _a("reply", 1600)])
+        engine.ingest([u0, reused, fresh_call, old_call, a1, fresh_result, _a("reply", 1600)])
         assert trips, "setup: the presence scan tripped"
-        assert 1 not in trips[0] and 2 not in trips[0], trips
+        assert 1 not in trips[0] and 3 not in trips[0], trips
         stored = _counts(engine)
+        assert stored[_key(old_call)] == 1, "the old call is not copied"
         assert stored[_key(fresh_call)] == 1 and stored[_key(fresh_result)] == 1
     finally:
         engine.shutdown()
