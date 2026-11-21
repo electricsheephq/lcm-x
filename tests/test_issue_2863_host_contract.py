@@ -151,6 +151,7 @@ def stub_summarizer(chunk, focus_topic=None, **_kw):
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(compaction, "_host_has_post_tool_reanchor", lambda: True)
     force_char_estimate(monkeypatch)
     home = tmp_path / "hermes-home"
     home.mkdir()
@@ -549,6 +550,7 @@ def test_auxiliary_response_leaves_both_host_flags(engine, monkeypatch):
 
 
 def _side_engine(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(compaction, "_host_has_post_tool_reanchor", lambda: True)
     force_char_estimate(monkeypatch)
     home = tmp_path / "hermes-home"
     home.mkdir()

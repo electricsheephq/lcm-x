@@ -1,0 +1,1 @@
+- Fix: #2863 long-turn compaction recovery is inactive on Hermes hosts without post-tool turn re-anchoring. Update Hermes to enable it.

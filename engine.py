@@ -152,6 +152,7 @@ from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin,
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
+from . import compaction
 from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
@@ -1044,7 +1045,8 @@ class LCMEngine(
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
-        self._last_compression_made_progress = False  # #2863: read by the host after each compress()
+        if compaction._host_has_post_tool_reanchor():
+            self._last_compression_made_progress = False  # #2863: read by the host after each compress()
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -1945,8 +1947,9 @@ class LCMEngine(
         # 3b421578:1779-1785), so a response seen here is its bound session's own, ignored or stateless ones included.
         # Known limit: on a host that shares one engine across agents, a side channel's response clears these flags
         # for the foreground too.
-        self._verify_compaction_cleared_threshold = False
-        self.awaiting_real_usage_after_compression = False
+        if compaction._host_has_post_tool_reanchor():
+            self._verify_compaction_cleared_threshold = False
+            self.awaiting_real_usage_after_compression = False
 
     @property
     def cache_read_ratio(self) -> float:
