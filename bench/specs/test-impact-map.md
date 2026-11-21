@@ -18,6 +18,8 @@ The script reads `git diff --no-renames --name-only <base>..<head>` and prints o
 
 - `RUN <suite>: <reason>`: a mechanism, own path or other input of the suite changed. The reason names it.
 - `SKIP <suite>: suite <name> skipped: nothing it measures changed`. Copy these lines into the release notes.
+  For `release-yml` and `plugin-payload` a SKIP means only that their inputs did not change: GitHub still runs
+  both at every `v*` tag. Write them as "ran at the tag; inputs unchanged".
 - `MANUAL <suite>: ...`: the suite is not decided by the map. It is never printed as skipped.
 - `UNMAPPED <path>: ...`: no row covers a changed path. The script fails closed and every mapped suite runs.
 
@@ -37,29 +39,34 @@ input name, 1 on a usage or git error.
    that no glob covers is UNMAPPED until the map grows a row for it.
 3. **Manual suites are not decided here.** Their product reach is not mapped (the unmapped list below). Run them
    by hand when someone judges they are needed. Never record them as "skipped: nothing it measures changed".
-4. **Scheduled runs are map-gated too.** A nightly or weekly run diffs the last commit it tested against the
-   current head. It passes `--input hermes-host` when the Hermes host version under test changed, and
+4. **Scheduled runs are map-gated too.** For each suite, a nightly or weekly run diffs the last commit on which
+   that suite actually ran against the current head. A suite skipped on earlier heads, by the map or by a skip
+   claim (rule 8), therefore runs at the first scheduled run after its inputs changed. It passes `--input hermes-host` when the Hermes host version under test changed, and
    `--input provider-route` when a provider route or model it calls changed. A scheduled suite with nothing
    changed is skipped and logged the same way. A scheduled-run regression gets its own fix and never gates an
    unrelated hotfix.
-5. **The expensive boards** (BEAM, LongMemEval, LoCoMo and the other shared-reader boards, and AML) run in
-   three cases: when a recall or summary mechanism changes (M06, M07, M12, M13); before any claim of a board gain
-   (`--input board-claim`); and once a month for drift (`--input monthly-drift`). Boards are targets, not
-   release gates.
+5. **The expensive boards** (BEAM, LongMemEval, LoCoMo and the other shared-reader boards, and AML) run
+   when a recall or summary mechanism changes (M06, M07, M12, M13); before any claim of a board gain
+   (`--input board-claim`); once a month for drift (`--input monthly-drift`); and when their own harness or a
+   provider route they call changes (`bench/aml/**`, `--input provider-route`). Boards are targets, not release
+   gates.
 6. **Pull-request CI and tag workflows keep their own triggers.** Branch protection runs the required CI checks
-   on every pull request, and GitHub runs `release.yml` and `plugin-payload.yml` at every tag, whatever this map
-   says. The map decides the release-time, scheduled and by-hand runs. It records
+   on every pull request, and GitHub runs `release.yml` and `plugin-payload.yml` at every `v*` tag (not at
+   `claude-code-v*` tags), whatever this map says. The map decides the release-time, scheduled and by-hand runs. It records
    whether a CI suite's inputs changed, so a release note can say so.
 7. **Catch log.** Each suite keeps a catch log: the last time its result changed a release decision (date, pull
-   request or tag, and what changed). A heavy suite with no catch in a quarter is proposed for retirement, and the
+   request or tag, and what changed). A heavy suite (any suite that is not a pull-request CI check) with no catch in a quarter is proposed for
+   retirement, and the
    owner decides. The column starts empty: no catch is recorded before this map.
 8. **Interim skip claim, until the symbol tier lands.** The script matches files, so it can mark a suite RUN
    when the changed functions are outside that suite's mechanisms. The release manager may skip such a suite only
    by writing, in the release note, the changed functions and why none of them is in, or called by, that suite's
-   mechanism. The second reviewer checks that claim against the diff. A claim is never allowed for a MANUAL suite,
-   for any suite when an UNMAPPED or fail-closed path changed, or for a careful-lane mechanism test that the
-   change's own lane requires. The backstop is the scheduled full run: a regression it finds gets its own fix and
-   never gates an unrelated hotfix.
+   mechanism. The second reviewer checks that claim against the diff. A claim is allowed only when every RUN
+   reason the script printed for that suite is a mechanism match through a shared file. It is never allowed when
+   the suite's own path or another input triggered it, when an UNMAPPED or fail-closed path changed, for a MANUAL
+   suite, or for a careful-lane mechanism test that the change's own lane requires. The backstop is the next
+   scheduled run of that suite (rule 4 diffs from the last commit it actually ran on). A regression found there
+   gets its own fix and never gates an unrelated hotfix.
 9. **Change the map with the code.** A pull request that adds a module, moves a behaviour or adds a suite updates
    the JSON and these tables in the same change. The agreement test fails if they drift. The script fails
    closed on paths the map has not learned yet.
@@ -139,8 +146,8 @@ or more whole directories, any other `**` matches anything including `/`, and `*
 <!-- SUITES TABLE -->
 | Suite | Name | Kind | Mechanisms | Own paths | Other inputs | Runs | Catch log |
 |---|---|---|---|---|---|---|---|
-| `c1a` | L1 C1a reliability matrix, retained-store pair. Exports the whole plugin tree, so any product file is an input. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml` | `hermes-host`, `baseline` | Release L1, after the tag | — |
-| `respin` | Pre-tag respin reliability matrix (final head and previous GA). Same instrument and inputs as C1a. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml` | `hermes-host`, `baseline` | Release, before the tag | — |
+| `c1a` | L1 C1a reliability matrix, retained-store pair. Exports the whole plugin tree, so any product file is an input. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml`, `.github/actions/**` | `hermes-host`, `baseline` | Release L1, after the tag | — |
+| `respin` | Pre-tag respin reliability matrix (final head and previous GA). Same instrument and inputs as C1a. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml`, `.github/actions/**` | `hermes-host`, `baseline` | Release, before the tag | — |
 | `c1b` | L1 C1b crash-and-restart cells. | mapped | `M01`, `M02`, `M04`, `M14` | — | `hermes-host`, `instrument-pin` | Release L1 | — |
 | `c2` | L1 C2 tool matrix, local and cloud postures. | mapped | `M17`, `M12`, `M13`, `M19` | — | `provider-route`, `hermes-host`, `instrument-pin` | Release L1 | — |
 | `c3` | L1 C3 upgrade and rollback roundtrip. | mapped | `M14`, `M13` | — | `baseline` | Release L1 | — |
@@ -150,28 +157,28 @@ or more whole directories, any other `**` matches anything including `/`, and `*
 | `m2` | L1 M2 LongMemEval-S mini with the reader. | mapped | `M12`, `M13` | — | `provider-route`, `baseline` | Release L1 | — |
 | `m3` | L1 M3 Track S, one seed. | mapped | `M03`, `M04`, `M06`, `M08`, `M16` | — | `provider-route`, `instrument-pin` | Release L1 | — |
 | `probe-matrix` | L2 probe matrix (stored-row identity against the previous GA). | mapped | `M01`, `M02`, `M05` | `ingest_classifier.py` | `instrument-pin`, `baseline` | Release L2 | — |
-| `host-suite` | L2 host-suite pair (whole tests/ on pinned host Pythons). | mapped | — | `@product`, `tests/**`, `.github/workflows/host-suite.yml`, `bench/instruments/reliability/ci.py`, `bench/instruments/reliability/hosts.ci.json` | `hermes-host` | Release L2 | — |
+| `host-suite` | L2 host-suite pair (whole tests/ on pinned host Pythons). | mapped | — | `@product`, `tests/**`, `.github/workflows/host-suite.yml`, `.github/actions/**`, `bench/instruments/reliability/ci.py`, `bench/instruments/reliability/hosts.ci.json` | `hermes-host` | Release L2 | — |
 | `phase-c` | L2 soaks and install cells. | mapped | `M01`, `M04`, `M05`, `M07`, `M12`, `M13`, `M16`, `M18`, `M19` | `companions/**`, `requirements-semantic.txt`, `docs/embeddings-setup.md`, `plugin.yaml` | `hermes-host`, `provider-route`, `instrument-pin` | Release L2 | — |
 | `d5b` | L2 older-host cells. | mapped | `M01`, `M02`, `M05`, `M14`, `M16`, `M18`, `M19` | — | `hermes-host`, `provider-route` | Release L2 | — |
 | `d7` | L2 Track S, three seeds. | mapped | `M03`, `M05`, `M06`, `M08`, `M16` | — | `provider-route`, `instrument-pin` | Release L2 | — |
 | `busy-bar` | L2 busy-bar (busy events and write-lock hold times). | mapped | `M15` | — | `instrument-pin`, `baseline` | Release L2 | — |
-| `gate-copy` | Gate cells: copy checks. | mapped | `M01`, `M04`, `M05`, `M08`, `M09` | `bench/instruments/gate_kit/**` | `baseline` | Release gate sheet | — |
-| `gate-walks` | Gate cells: walks. | mapped | `M01`, `M03`, `M04`, `M05`, `M07`, `M08`, `M09`, `M16` | `bench/instruments/gate_kit/**` | `provider-route`, `baseline` | Release gate sheet | — |
+| `gate-copy` | Gate cells: copy checks. | mapped | `M01`, `M04`, `M05`, `M08`, `M09` | `bench/instruments/gate_kit/**` | `baseline`, `instrument-pin` | Release gate sheet | — |
+| `gate-walks` | Gate cells: walks. | mapped | `M01`, `M03`, `M04`, `M05`, `M07`, `M08`, `M09`, `M16` | `bench/instruments/gate_kit/**` | `provider-route`, `baseline`, `instrument-pin` | Release gate sheet | — |
 | `gate-timing` | Gate cells: timing (index build, cold ingest, cold starts). | mapped | `M14`, `M16`, `M01`, `M04`, `M08` | — | `baseline` | Release gate sheet | — |
-| `gate-reversibility` | Gate cells: reversibility and refusal replay. | mapped | `M14`, `M04`, `M01` | `bench/instruments/gate_kit/**` | `baseline` | Release gate sheet | — |
-| `gate-crossing` | Gate cells: crossing rehearsal. | mapped | `M01`, `M04`, `M07`, `M08`, `M16` | `bench/instruments/gate_kit/**` | — | Release gate sheet | — |
+| `gate-reversibility` | Gate cells: reversibility and refusal replay. | mapped | `M14`, `M04`, `M01` | `bench/instruments/gate_kit/**` | `baseline`, `instrument-pin` | Release gate sheet | — |
+| `gate-crossing` | Gate cells: crossing rehearsal. | mapped | `M01`, `M04`, `M07`, `M08`, `M16` | `bench/instruments/gate_kit/**` | `instrument-pin` | Release gate sheet | — |
 | `gate-live` | Gate cells: live stand-in and field read. Measures the tagged install. | mapped | `M01`, `M04`, `M05`, `M06`, `M07`, `M08`, `M09`, `M13`, `M15`, `M16` | `@product` | `hermes-host`, `provider-route` | Release, after the tag | — |
 | `ci-tests` | CI test shards (required). Branch protection runs it on every pull request whatever the map says. | mapped | — | `@product`, `tests/**`, `scripts/**`, `.github/workflows/ci.yml`, `.github/actions/**`, `pytest.ini`, `.github/tests-ran-allowlist.txt` | — | Every pull request | — |
 | `ci-lint` | CI lint, golden outcomes and store contract (required). | mapped | `M01`, `M04`, `M09`, `M14` | `@python`, `.github/workflows/**`, `.github/actionlint.yaml`, `ruff.toml`, `tests/fixtures/*_trace.json` | — | Every pull request | — |
 | `ci-bench` | CI bench-tests (instrument self-tests). | mapped | — | `bench/**` | — | Every pull request | — |
 | `ci-session-cost` | CI session-end attribution cost (advisory). | mapped | `M16`, `M02` | `tests/fixtures/session_end_attribution_cost/**` | — | Every pull request | — |
-| `differential` | Differential against older GA trees. Same file filter as the workflow's own relevance step. | mapped | — | `@turn_path`, `tests/differential/**`, `.github/workflows/differential.yml` | — | Pull request and nightly | — |
-| `nightly-matrix` | Reliability nightly matrix. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml` | `hermes-host` | Nightly | — |
-| `nightly-compare` | Reliability nightly compare, alarm and publish. Scores the matrix tables, so it has the matrix's inputs. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml` | `hermes-host` | Nightly | — |
-| `nightly-latency` | Reliability nightly latency tests. Any test file can carry the latency marker, so all of tests/ is an input. | mapped | `M16` | `tests/**`, `pytest.ini` | — | Nightly | — |
+| `differential` | Differential against older GA trees. Same file filter as the workflow's own relevance step. | mapped | — | `@turn_path`, `tests/differential/**`, `.github/workflows/differential.yml`, `.github/actions/**` | — | Pull request and nightly | — |
+| `nightly-matrix` | Reliability nightly matrix. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml`, `.github/actions/**` | `hermes-host` | Nightly | — |
+| `nightly-compare` | Reliability nightly compare, alarm and publish. Scores the matrix tables, so it has the matrix's inputs. | mapped | `M01`, `M02`, `M04`, `M05`, `M08`, `M18` | `@product`, `bench/instruments/reliability/**`, `.github/workflows/reliability-nightly.yml`, `.github/actions/**` | `hermes-host`, `baseline` | Nightly | — |
+| `nightly-latency` | Reliability nightly latency tests. Any test file can carry the latency marker, so all of tests/ is an input. | mapped | `M16` | `tests/**`, `pytest.ini`, `.github/actions/**` | — | Nightly | — |
 | `real-host` | Real host regression files (advisory). Loads the whole plugin under a real Hermes. | mapped | `M18`, `M01`, `M08` | `@product`, `tests/test_real_*.py`, `tests/test_issue_524_gen2_replay.py`, `tests/test_issue_559_tool_group_boundary.py`, `tests/test_issue_631_not_a_pm_member.py`, `tests/test_issue_1306_cli_new.py`, `tests/invariants/test_issue_1438_cli_new.py`, `tests/test_session_end_attribution_host.py`, `tests/test_host_stub_parity.py`, `tests/test_catalog_scanner_on.py`, `tests/test_issue_1186_host_dependencies.py`, `tests/conftest.py`, `.github/workflows/real-host.yml` | `hermes-host` | Every pull request | — |
 | `long-soak` | Opt-in long real-host soak. No workflow sets the switch; run it by hand when the map says RUN. | mapped | `M18`, `M01`, `M04` | `@product`, `tests/test_real_turn_loop_acp_override.py` | `hermes-host` | By hand | — |
-| `invariants` | Invariants nightly (property tests). | mapped | `M01`, `M05` | `tests/invariants/**`, `.github/workflows/invariants-nightly.yml` | — | Nightly | — |
+| `invariants` | Invariants nightly (property tests). | mapped | `M01`, `M05` | `tests/invariants/**`, `.github/workflows/invariants-nightly.yml`, `.github/actions/**` | — | Nightly | — |
 | `floor-1586` | Local catch-up floor surrogate and covered-store stage. | mapped | `M13`, `M12` | `bench/instruments/local_catchup/**`, `.github/workflows/lcmx-1586-floor.yml`, `.github/workflows/lcmx-1586-covered-store.yml` | `provider-route` | By dispatch | — |
 | `d1-identity` | D1 shard identity. | mapped | `M10` | `benchmarking/d1_cache.py`, `benchmarking/longmemeval.py`, `scripts/lcm_d1_local.py`, `bench/tools/d1-shard-check/**`, `.github/workflows/d1-shard-identity.yml` | — | Pull request, path filter | — |
 | `cc-smoke` | Claude Code release smoke. The unit bundles the root core files. | mapped | — | `@product`, `claude_code_*.py`, `adapters/claude-code/**`, `scripts/build_claude_code_unit.py`, `scripts/claude_code_*`, `.github/workflows/claude-code-release.yml` | — | claude-code tags only | — |

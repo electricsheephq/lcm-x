@@ -727,7 +727,8 @@
    "paths": [
     "@product",
     "bench/instruments/reliability/**",
-    ".github/workflows/reliability-nightly.yml"
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
    ],
    "inputs": [
     "hermes-host",
@@ -752,7 +753,8 @@
    "paths": [
     "@product",
     "bench/instruments/reliability/**",
-    ".github/workflows/reliability-nightly.yml"
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
    ],
    "inputs": [
     "hermes-host",
@@ -944,6 +946,7 @@
     "@product",
     "tests/**",
     ".github/workflows/host-suite.yml",
+    ".github/actions/**",
     "bench/instruments/reliability/ci.py",
     "bench/instruments/reliability/hosts.ci.json"
    ],
@@ -1057,7 +1060,8 @@
     "bench/instruments/gate_kit/**"
    ],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release gate sheet",
    "note": "",
@@ -1082,7 +1086,8 @@
    ],
    "inputs": [
     "provider-route",
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release gate sheet",
    "note": "",
@@ -1120,7 +1125,8 @@
     "bench/instruments/gate_kit/**"
    ],
    "inputs": [
-    "baseline"
+    "baseline",
+    "instrument-pin"
    ],
    "when": "Release gate sheet",
    "note": "",
@@ -1140,7 +1146,9 @@
    "paths": [
     "bench/instruments/gate_kit/**"
    ],
-   "inputs": [],
+   "inputs": [
+    "instrument-pin"
+   ],
    "when": "Release gate sheet",
    "note": "",
    "catch_log": []
@@ -1250,7 +1258,8 @@
    "paths": [
     "@turn_path",
     "tests/differential/**",
-    ".github/workflows/differential.yml"
+    ".github/workflows/differential.yml",
+    ".github/actions/**"
    ],
    "inputs": [],
    "when": "Pull request and nightly",
@@ -1272,7 +1281,8 @@
    "paths": [
     "@product",
     "bench/instruments/reliability/**",
-    ".github/workflows/reliability-nightly.yml"
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
    ],
    "inputs": [
     "hermes-host"
@@ -1296,10 +1306,12 @@
    "paths": [
     "@product",
     "bench/instruments/reliability/**",
-    ".github/workflows/reliability-nightly.yml"
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
    ],
    "inputs": [
-    "hermes-host"
+    "hermes-host",
+    "baseline"
    ],
    "when": "Nightly",
    "note": "Scores the matrix tables, so it has the matrix's inputs.",
@@ -1314,7 +1326,8 @@
    ],
    "paths": [
     "tests/**",
-    "pytest.ini"
+    "pytest.ini",
+    ".github/actions/**"
    ],
    "inputs": [],
    "when": "Nightly",
@@ -1382,7 +1395,8 @@
    ],
    "paths": [
     "tests/invariants/**",
-    ".github/workflows/invariants-nightly.yml"
+    ".github/workflows/invariants-nightly.yml",
+    ".github/actions/**"
    ],
    "inputs": [],
    "when": "Nightly",
