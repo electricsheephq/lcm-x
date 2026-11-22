@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import argparse
 import copy
+import cProfile
 import hashlib
 import json
+import fcntl
+import os
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -29,6 +33,18 @@ from bench.instruments.gate_kit.live_rows import lockwatch, rt, shape  # noqa: E
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux  # noqa: E402
 
 CELLS = ("d9", "d10", "d11", "selftest-cut")
+PROFILE: dict[str, str] = {}  # diagnostic only: --profile writes the first pass's cProfile stats
+
+
+def claim(work: Path) -> int:
+    """Hold an exclusive lock on WORK for this process: a second run on the same working copy refuses."""
+    work.mkdir(parents=True, exist_ok=True)
+    fd = os.open(work / ".run-lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(f"another run holds {work}; use a different --work") from None
+    return fd
 
 
 def fresh_copy(build: Path, work: Path) -> Path:
@@ -44,19 +60,24 @@ def fresh_copy(build: Path, work: Path) -> Path:
     return current / "lcm.db"
 
 
+def key(role: Any, content: Any, tool_call_id: Any) -> str:
+    """Tool results by call id (an externalized result is stored as a reference), other rows by role and content."""
+    value = ["tool", tool_call_id] if role == "tool" and tool_call_id else [role, content]
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
 def digest(row: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps([row.get("role"), row.get("content")], sort_keys=True).encode()).hexdigest()
+    return key(row.get("role"), row.get("content"), row.get("tool_call_id"))
 
 
 def rows_examined(db: Path, conversation: str, view: list[dict[str, Any]]) -> int:
-    """Host-list rows whose role and content are stored in the target conversation (multiset match)."""
-    stored = Counter(hashlib.sha256(json.dumps([role, content], sort_keys=True).encode()).hexdigest()
-                     for _sid, _session, role, content in rt.stored_rows(db, conversation))
+    """Host-list rows stored in the target conversation, matched as a multiset (`key`)."""
+    stored = Counter(key(role, content, call) for _sid, _session, role, content, call in rt.stored_rows(db, conversation))
     found = 0
     for row in view:
-        key = digest(row)
-        if stored[key] > 0:
-            stored[key] -= 1
+        wanted = digest(row)
+        if stored[wanted] > 0:
+            stored[wanted] -= 1
             found += 1
     return found
 
@@ -73,6 +94,8 @@ def timed(record: list[dict[str, Any]], name: str, call: Any) -> Any:
         return call()
     except Exception as error:  # noqa: BLE001 - class and frames only
         entry["exception"] = type(error).__name__
+        if isinstance(error, sqlite3.Error):  # SQLite's own text: no message content
+            entry["sqlite_message"] = str(error)[:200]
         entry["frames"] = [f"{Path(f.filename).name}:{f.lineno}:{f.name}"
                            for f in traceback.extract_tb(error.__traceback__)][-12:]
         raise
@@ -86,11 +109,18 @@ def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path,
     """Restart (a new engine and its session start), then the first compaction pass on the host list."""
     engine = timed(calls, "restart", lambda: rt.engine(engine_module, config, kit, home))
     result = None
+    profiler = cProfile.Profile() if PROFILE.get("path") else None
     try:
+        if profiler:
+            profiler.enable()
         result = timed(calls, "compress", lambda: engine.compress(copy.deepcopy(view),
                                                                   current_tokens=pressure(kit, view)))
     except Exception:  # noqa: BLE001 - recorded in `calls`
         pass
+    finally:
+        if profiler:
+            profiler.disable()
+            profiler.dump_stats(PROFILE["path"])
     return engine, result
 
 
@@ -152,19 +182,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--budget", default="default")
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--profile", type=Path, default=None, help="diagnostic: cProfile stats of the first pass")
     args = parser.parse_args(argv)
+    if args.profile:
+        PROFILE["path"] = str(args.profile)
     manifest = json.loads((args.build / "build-manifest.json").read_text())
     kit = builder.scaled(rt.load_kit(), manifest["scale"])
     generated = shape.build(kit)
     if generated["input_hash"] != manifest["input_hash"]:
         raise SystemExit("the kit's input hash does not match the build's; rebuild the store")
     env = {**kit["arms"][args.arm], **kit["budgets"][args.budget]}
+    lock = claim(args.work)  # noqa: F841 - held until the process exits
     rt.isolate(args.work / "home", env)
     modules = rt.load(args.tree, kit)
     db = fresh_copy(args.build, args.work)
     handler = {"d9": cell_d9, "selftest-cut": cell_selftest_cut}[args.cell]
     started = time.time()
-    receipt = handler(args, kit, modules, db, copy.deepcopy(generated["target_list"]))
+    receipt = handler(args, kit, modules, db, copy.deepcopy(generated["restart_list"]))
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                     "input_hash": manifest["input_hash"], "store_sha256": manifest["store_sha256"],

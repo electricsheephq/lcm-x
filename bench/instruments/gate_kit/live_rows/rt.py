@@ -122,7 +122,7 @@ def store_census(db: Path) -> dict[str, Any]:
 
 def stored_rows(db: Path, conversation: str) -> list[tuple[Any, ...]]:
     with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
-        return conn.execute("SELECT store_id, session_id, role, content FROM messages WHERE conversation_id = ? "
+        return conn.execute("SELECT store_id, session_id, role, content, tool_call_id FROM messages WHERE conversation_id = ? "
                             "ORDER BY store_id", (conversation,)).fetchall()
 
 

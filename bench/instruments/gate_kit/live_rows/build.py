@@ -72,6 +72,17 @@ def main(argv: list[str] | None = None) -> int:
     target = kit["target"]
     report.append(ingest_history(engine_module, config, kit, args.out / "home", generated["target_history"],
                                  target["session_id"], target["conversation_id"]))
+    # Earlier restarts: each binds the host's cold-rebuilt list once (no pass), as the reference store's earlier
+    # builds did; on the v0.30.0 tree such a bind stores copies of unstamped rows (#1674), which the store keeps.
+    for number in range(int(target.get("cold_restarts", 0))):
+        begun = time.monotonic()
+        engine = rt.engine(engine_module, config, kit, args.out / "home")
+        try:
+            engine.ingest(copy.deepcopy(generated["restart_list"]))
+        finally:
+            engine.shutdown()
+        report.append({"cold_restart": number + 1, "seconds": round(time.monotonic() - begun, 2),
+                       "stored": rt.store_census(db)["rows"]})
     with closing(sqlite3.connect(db)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     externalized = db.parent / "externalized"

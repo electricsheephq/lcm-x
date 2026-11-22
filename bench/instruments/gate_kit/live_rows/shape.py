@@ -41,6 +41,8 @@ def conversation(kit: dict[str, Any], name: str, turns: int, seed: int) -> list[
     """The full stored history of one conversation, oldest first."""
     rng = random.Random(seed)
     lengths, tools = kit["lengths"], kit["tools"]
+    if not name.startswith("target"):
+        lengths = {**lengths, **kit["others"].get("lengths", {})}
     rows: list[dict[str, Any]] = []
     clock = kit["start_epoch"] + seed % 997
 
@@ -82,11 +84,31 @@ def host_list(kit: dict[str, Any], history: list[dict[str, Any]]) -> list[dict[s
     target = kit["target"]
     starts = turn_starts(history) + [len(history)]
     oldest = int((len(starts) - 1) * target["hidden_turn_share"])
+    # The store holds the newest `stored_tail_turns` turns, which the host's list ends before (a turn the plugin
+    # stored and the host did not keep, as an interrupted turn leaves it): the restart walk finds no match at the end.
+    last = len(starts) - 1 - int(target.get("stored_tail_turns", 0))
     kept: list[dict[str, Any]] = []
-    for index in range(len(starts) - 1):
+    for index in range(last):
         if index >= oldest or index % target["hidden_keep_every"] == 0:
             kept.extend(history[starts[index]:starts[index + 1]])
     return kept
+
+
+def restart_view(kit: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The host list as the host hands it after a restart, rebuilt cold from its own records: assistant and tool
+    rows without timestamps (#1674) and tool rows naming their tool in `name`, not `tool_name` (#2886)."""
+    form = kit.get("restart_form") or {}
+    unstamp = set(form.get("unstamp_roles") or ())
+    rng = random.Random(kit["seed"] * 31 + 7)
+    out = []
+    for row in rows:
+        row = dict(row)
+        if row["role"] in unstamp:
+            row.pop("timestamp", None)
+        if row["role"] == "tool" and "tool_name" in row and rng.random() < form.get("tool_name_as_name_share", 0):
+            row["name"] = row.pop("tool_name")
+        out.append(row)
+    return out
 
 
 def build(kit: dict[str, Any]) -> dict[str, Any]:
@@ -97,10 +119,11 @@ def build(kit: dict[str, Any]) -> dict[str, Any]:
     others = [conversation(kit, f"other{index}", kit["others"]["turns"], seed + 1 + index)
               for index in range(kit["others"]["conversations"])]
     live = host_list(kit, history)
+    restart = restart_view(kit, live)
     digest = hashlib.sha256(json.dumps(kit, sort_keys=True).encode())
-    for rows in [history, live, *others]:
+    for rows in [history, live, restart, *others]:
         digest.update(json.dumps(rows, sort_keys=True).encode())
-    return {"target_history": history, "target_list": live, "others": others, "input_hash": digest.hexdigest(),
+    return {"target_history": history, "target_list": live, "restart_list": restart, "others": others, "input_hash": digest.hexdigest(),
             "counts": counts(kit, history, live, others)}
 
 
