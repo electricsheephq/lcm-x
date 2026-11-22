@@ -64,7 +64,12 @@ class Watcher:
             raise RuntimeError("lock watcher did not start: " + (self.process.communicate()[1] or "")[:300])
 
     def stop(self) -> dict[str, Any]:
-        output, error = self.process.communicate("stop\n", timeout=60)
+        try:
+            output, error = self.process.communicate("stop\n", timeout=60)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.communicate()
+            raise RuntimeError("lock watcher did not stop within 60 s") from None
         if self.process.returncode:
             raise RuntimeError(f"lock watcher failed: {error[:300]}")
         return json.loads(output)

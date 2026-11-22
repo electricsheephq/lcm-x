@@ -92,7 +92,9 @@ def snapshot(work: Path, out: Path) -> None:
     """Checkpoint the store at the working path and copy it, its payloads and the host store into the build."""
     live = work / "current" / "lcm.db"
     with closing(sqlite3.connect(live)) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        busy, _log, _done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if busy:  # frames left in the WAL would be missing from the copied store
+            raise SystemExit("the store's checkpoint did not complete; nothing was snapshotted")
     (out / "store").mkdir(parents=True, exist_ok=True)
     (out / "host").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(live, out / "store" / "lcm.db")
@@ -100,7 +102,8 @@ def snapshot(work: Path, out: Path) -> None:
         shutil.copytree(live.parent / "externalized", out / "store" / "externalized", dirs_exist_ok=True)
     if (work / "home" / "state.db").exists():
         with closing(sqlite3.connect(work / "home" / "state.db")) as conn:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+                raise SystemExit("the host store's checkpoint did not complete; nothing was snapshotted")
         shutil.copyfile(work / "home" / "state.db", out / "host" / "state.db")
     (work / "current" / MARKER).write_text(rt.sha256_file(out / "store" / "lcm.db"))
 

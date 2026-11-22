@@ -22,7 +22,6 @@ import argparse
 import json
 import sqlite3
 import sys
-import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -158,14 +157,13 @@ def main(argv: list[str] | None = None) -> int:
 
         ledger._window_step = counted_step
     statements: list[int] = []
-    owner = threading.get_ident()
     original_connect = sqlite3.connect
     tracing = {"on": False}
 
     def traced_connect(*a: Any, **k: Any) -> sqlite3.Connection:
         conn = original_connect(*a, **k)
         conn.set_trace_callback(lambda sql: statements.append(1)
-                                if tracing["on"] and threading.get_ident() == owner else None)
+                                if tracing["on"] else None)  # every thread of the process: statements executed
         return conn
 
     sqlite3.connect = traced_connect

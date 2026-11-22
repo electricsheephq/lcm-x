@@ -127,6 +127,11 @@ def main(argv: list[str] | None = None) -> int:
     steps: dict[str, int] = {}
     steps["build"] = module("build", "--tree", base, "--kit", str(args.kit.resolve()), "--out", str(build),
                             "--work", str(work), log=log)
+    if steps["build"] != 0 or not (build / "build-manifest.json").exists():
+        (args.out / "verdicts.json").write_text(json.dumps({"build_failed": steps["build"], "see": "dryrun.log",
+                                                            "verdicts": {}}, indent=1))
+        print(json.dumps({"build_failed": steps["build"], "see": str(log)}))
+        return 4
     kit = json.loads((build / "build-manifest.json").read_text())["kit_body"]  # bars and counts the store was built with
     history = kit.get("history")
     history_ok = True
@@ -177,8 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         # Recorded variants (requirements 2-5); none decides a row.
         cell("req2-d9-uid_on-load", cand, "d9", "--arm", "uid_on", "--load", str(args.load))
         cell("req2-d10-uid_on-load", cand, "d10", "--arm", "uid_on", "--load", str(args.load))
-        cell("req3-kill-uid_on", cand, "kill-at-first-call", "--arm", "uid_on")
-        cell("req3-after-kill-d11-uid_on", cand, "d11", "--arm", "uid_on", "--keep-copy")
+        killed = cell("req3-kill-uid_on", cand, "kill-at-first-call", "--arm", "uid_on")
+        if killed is None:  # no receipt: the process was killed at its first summary call, as intended
+            cell("req3-after-kill-d11-uid_on", cand, "d11", "--arm", "uid_on", "--keep-copy")
+        else:  # the pass made no summary call, so there was no interruption to recover from: recorded as not run
+            steps["req3-after-kill-d11-uid_on"] = -1
         cell("req4-turns-uid_on", cand, "turns", "--arm", "uid_on")
         cell("req5-timeout-hold-uid_on", cand, "timeout-hold", "--arm", "uid_on")
         steps["l1-switch"] = module("l1_switch", "--tree", cand, "--work", str(args.scratch / "switch"),

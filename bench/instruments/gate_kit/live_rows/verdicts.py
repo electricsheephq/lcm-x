@@ -14,6 +14,7 @@ from typing import Any
 PASS, FAIL, INCONCLUSIVE, UNRUN = "PASS", "FAIL", "INCONCLUSIVE", "UNRUN"
 JUDGED, RECORDED = "uid_on", "default"
 BUDGETS = ("default", "60s", "120s")
+GAP_MS = 1000.0  # a sampling gap over this could hide or stretch a hold: the run is INCONCLUSIVE
 
 
 def mismatch(receipt: dict[str, Any], cell: str, arm: str, budget: str | None = None) -> str | None:
@@ -56,6 +57,9 @@ def d9(receipts: dict[str, dict[str, Any] | None], bars: dict[str, Any], pinned_
     elif wrong:
         outcome = INCONCLUSIVE
         reasons.append(wrong)
+    elif (judged.get("lock_watch") or {}).get("largest_gap_ms", 0) > GAP_MS:
+        outcome = INCONCLUSIVE
+        reasons.append("the lock watcher's largest sampling gap could hide a hold over the bar")
     elif unexpected(judged):
         outcome = INCONCLUSIVE
         reasons.append(f"the lock watcher saw {unexpected(judged)} answers it could not classify")
@@ -99,6 +103,8 @@ def d10_run(receipt: dict[str, Any] | None, arm: str, bars: dict[str, Any], pinn
         reasons.append(f"examined {receipt.get('rows_examined')} rows, fewer than the pinned {pinned_rows}")
     if not started.get("turn") or not started.get("compaction"):
         reasons.append("no turn-path call or no further compaction call started during the hold")
+    if (receipt.get("lock_watch") or {}).get("largest_gap_ms", 0) > GAP_MS:
+        reasons.append("the lock watcher's largest sampling gap could hide a hold")
     if unexpected(receipt):
         reasons.append(f"the lock watcher saw {unexpected(receipt)} answers it could not classify")
     if reasons:
@@ -112,8 +118,7 @@ def d10_run(receipt: dict[str, Any] | None, arm: str, bars: dict[str, Any], pinn
     if slow:
         failed.append(f"bar 2: {len(slow)} compaction calls started during the hold returned in "
                       f"{bars['d10_compaction_return_s']} s or more")
-    waits = [c for c in receipt.get("turn_calls", []) if c.get("wait_s", 0) > bars["d10_turn_wait_s"]
-             or (c.get("unfinished") and c.get("wait_s", 0) > bars["d10_turn_wait_s"])]
+    waits = [c for c in receipt.get("turn_calls", []) if c.get("wait_s", 0) > bars["d10_turn_wait_s"]]
     if waits:
         failed.append(f"bar 3: {len(waits)} turn-path calls waited more than {bars['d10_turn_wait_s']} s")
     recorded = {"hold_s": hold} if arm != JUDGED else {}
@@ -137,10 +142,16 @@ def d11_budget(receipt: dict[str, Any] | None, arm: str = JUDGED, budget: str | 
         return {"outcome": INCONCLUSIVE, "reasons": [f"the sequence raised {receipt.get('exception')}"]}
     broken = [n for n, p in enumerate(passes, 1) if p.get("exception") or p.get("returned_list") is not True
               or "stop_reasons" not in p or "error" in (p.get("stop_reasons") or [])]  # no evidence is not success
-    if not any(p.get("published") for p in passes):
-        return {"outcome": INCONCLUSIVE, "reasons": ["no pass published a summary"],
-                "rows": [receipt.get("rows_before")] + [p.get("rows_out") for p in passes]}
     failed: list[str] = []
+    for number, item in enumerate(passes, 1):  # a measured loss or copy fails whether or not anything published
+        check = item.get("stored_check") or {}
+        if check.get("lost") or check.get("changed") or check.get("duplicated") or check.get("reordered"):
+            failed.append(f"pass {number}: stored rows lost {check.get('lost')} (changed {check.get('changed')}), "
+                          f"duplicated {check.get('duplicated')}, reordered {check.get('reordered')}")
+    if not any(p.get("published") for p in passes):
+        rows = [receipt.get("rows_before")] + [p.get("rows_out") for p in passes]
+        return ({"outcome": FAIL, "reasons": failed, "rows": rows} if failed else
+                {"outcome": INCONCLUSIVE, "reasons": ["no pass published a summary"], "rows": rows})
     last = next((p["rows_out"] for p in reversed(passes) if p.get("rows_out") is not None), None)
     if last is None or last >= receipt["rows_before"]:
         failed.append("the list is not shorter at the end than at the start")
@@ -149,10 +160,6 @@ def d11_budget(receipt: dict[str, Any] | None, arm: str = JUDGED, budget: str | 
             failed.append(f"pass {number} published and returned {item['rows_out']} rows for {item['rows_in']}")
         if item.get("hold_armed"):
             failed.append(f"pass {number} armed a compaction hold")
-        check = item.get("stored_check") or {}
-        if check.get("lost") or check.get("changed") or check.get("duplicated") or check.get("reordered"):
-            failed.append(f"pass {number}: stored rows lost {check.get('lost')} (changed {check.get('changed')}), "
-                          f"duplicated {check.get('duplicated')}, reordered {check.get('reordered')}")
     rows = [receipt.get("rows_before")] + [p.get("rows_out") for p in passes]
     if failed:
         return {"outcome": FAIL, "reasons": failed, "rows": rows}

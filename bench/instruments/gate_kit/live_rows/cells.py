@@ -165,9 +165,11 @@ def host_turn(engine: Any, pre: list[dict[str, Any]], post: list[dict[str, Any]]
     tokens = base.pressure(kit, pre)
     began = time.monotonic()
     compressed = None
+    engine.should_compress_preflight(pre)  # the host calls preflight every turn
     if engine.should_compress(tokens):
-        engine.should_compress_preflight(pre)
         compressed = engine.compress(copy.deepcopy(pre), current_tokens=tokens)
+    if isinstance(compressed, list):  # the host adopts the compressed list; the model's reply follows it
+        post = compressed + post[len(pre):]
     engine.should_compress(tokens)
     before_model = time.monotonic() - began
     usage = {"prompt_tokens": tokens, "completion_tokens": 64, "total_tokens": tokens + 64}
@@ -182,7 +184,8 @@ def host_turn(engine: Any, pre: list[dict[str, Any]], post: list[dict[str, Any]]
     note = getattr(engine, "note_turn_complete", None)
     if callable(note):  # the host's post-LLM-call hook ends turn-paced holds through this notification
         note()
-    return {"before_model_s": round(before_model, 3), "compressed": compressed is not None,
+    return {"returned": compressed if isinstance(compressed, list) else None,
+            "before_model_s": round(before_model, 3), "compressed": compressed is not None,
             "after_model_s": round(time.monotonic() - began - before_model, 3), "rows": len(pre)}
 
 
@@ -199,6 +202,9 @@ def cell_turns(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db
         reply = {"role": "assistant", "content": f"live-rows turn {number} reply", "timestamp": time.time()}
         pre, post = view + [user], view + [user, reply]
         record = host_turn(engine, pre, post, kit)
+        if record.get("returned") is not None:  # the host adopts a compressed list
+            post = record.pop("returned") + [reply]
+        record.pop("returned", None)
         record["after_first_publish"] = published_at is not None
         turns.append(record)
         if published_at is None and summary_nodes(db) > nodes:
@@ -277,7 +283,17 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     timer = threading.Timer(cap, stop.set) if args.worst_case else None
     if timer:
         timer.start()
-    engine, result = base.first_pass(engine_module, config, kit, home, db, view, calls)
+    try:
+        engine, result = base.first_pass(engine_module, config, kit, home, db, view, calls)
+    except rt.CellError:  # the restart raised: stop the threads, the timer and the watcher, then report it
+        stop.set()
+        if timer:
+            timer.cancel()
+        for thread in threads:
+            thread.join(timeout=120)
+        watcher.stop()
+        reader.close()
+        raise
     stop.set()
     for thread in threads:
         thread.join(timeout=120)
@@ -299,8 +315,8 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     windows = lockwatch.holds(observed["transitions"], restart["begin_ns"], compress["end_ns"])
     hold = max(windows, key=lambda w: w[1] - w[0], default=(compress["begin_ns"], compress["begin_ns"]))
 
-    def during(record: dict[str, Any]) -> bool:
-        return hold[0] <= record["begin_ns"] <= hold[1]
+    def during(record: dict[str, Any]) -> bool:  # any write-lock hold inside the restart and pass
+        return any(start <= record["begin_ns"] <= stop for start, stop in windows)
 
     for record in compaction_records:
         record["during_hold"] = during(record)
@@ -358,7 +374,13 @@ class Load:
     """Requirement 2: CPU-bound processes loading the machine for the cell's duration, stopped by exact PID."""
 
     def __init__(self, count: int) -> None:
-        self.processes = [subprocess.Popen([sys.executable, "-c", "while True: pass"]) for _ in range(count)]
+        self.processes: list[subprocess.Popen] = []
+        try:
+            for _ in range(count):
+                self.processes.append(subprocess.Popen([sys.executable, "-c", "while True: pass"]))
+        except Exception:
+            self.stop()  # never leave a started load process behind
+            raise
 
     def stop(self) -> list[int]:
         pids = [p.pid for p in self.processes]

@@ -173,6 +173,11 @@ def stored_identity(db: Path) -> list[tuple[int, bytes]]:
         columns = [c for c in IDENTITY_COLUMNS if c in names]
         for row in conn.execute(f"SELECT store_id, {', '.join(columns)} FROM messages ORDER BY store_id"):
             found.append((row[0], hashlib.blake2b(repr(row[1:]).encode(), digest_size=16).digest()))
+    payloads = Path(db).parent / "externalized"  # an externalized row's content is a reference: its file counts too
+    if payloads.exists():
+        for path in sorted(p for p in payloads.rglob("*") if p.is_file()):
+            found.append((f"payload:{path.relative_to(payloads)}",
+                          hashlib.blake2b(path.read_bytes(), digest_size=16).digest()))
     return found
 
 

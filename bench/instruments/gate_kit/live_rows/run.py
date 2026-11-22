@@ -335,7 +335,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())  # both resolved
     receipt["copy_marker_matches"] = builder.marker(args.work) == manifest["store_sha256"]
     receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
-                            and args.control == "none" and receipt["lineage_path_matches"]
+                            and args.control == "none" and not args.trace_txn and not args.keep_copy
+                            and receipt["lineage_path_matches"]
                             and receipt["copy_marker_matches"])
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "worst_case": bool(getattr(args, "worst_case", False)),
