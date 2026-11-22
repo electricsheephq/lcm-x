@@ -10,10 +10,9 @@ from threading import Event
 import pytest
 
 from hermes_lcm import engine as engine_module
-from tests.invariants.test_issue_2815_c9 import _contents, _mode, _open, _view
+from tests.invariants.test_issue_2815_c9 import _mode, _open, _view
 from tests.invariants.test_issue_2815_c10 import _BUSY, _IDLE, _gate_state
 from tests.test_host_uid_shadow import _state_db
-from tests.test_issue_581_582_store_complete_survival import _rows
 
 
 @contextmanager
