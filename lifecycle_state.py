@@ -1116,8 +1116,9 @@ class LifecycleStateStore:
         copies = known_head_copy_ids(conn, store_ids=sorted(
             (rows_by_store_id.keys() - set(excluded_ids)) | set(all_covered_ids)
         ))
-        if copies.intersection(all_covered_ids):
-            raise LifecyclePublicationConflictError("Compaction publication includes a known summary head copy")
+        # A copy a leaf already covers is published as covered, as v0.30.2 does; never a publication conflict,
+        # which would return the host list unchanged and stop every later pass on the same chunk.
+        copies -= set(all_covered_ids) | set(covered_ids)
         authoritative_ids = [store_id for store_id in authoritative_ids if store_id not in copies]
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
