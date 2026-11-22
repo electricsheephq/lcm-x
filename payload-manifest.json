@@ -1,12 +1,12 @@
 {
-  "source_sha": "56966cff537178ada821f0a999f0d2a91c699f60",
-  "tooling_sha": "56966cff537178ada821f0a999f0d2a91c699f60",
+  "source_sha": "f77d6ed98c8f2e896851b31720876e4c9d10f7b4",
+  "tooling_sha": "f77d6ed98c8f2e896851b31720876e4c9d10f7b4",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
   "file_count": 124,
-  "total_bytes": 5047224,
+  "total_bytes": 5056471,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "03069c8b27ddec4bf4f8983ece165ad741f1f84a9e814b14e4b99ce2501453fb"
+      "sha256": "93d261b0b831dabc9ce4937f999391eac3078e805aff3dd7110b5b125dd3b5d8"
     },
     {
       "path": "__init__.py",
@@ -165,8 +165,8 @@
     },
     {
       "path": "engine.py",
-      "bytes": 706519,
-      "sha256": "58a5a022aa36a7ba0f66f28ebddbcf5d48e5aeda56b4dbb0e32881cb070e526d"
+      "bytes": 709537,
+      "sha256": "6ac53e9128f5a1929a7cab2e3ad40425e7bd63269ecdc3aa7e36ce23b2d4ce8a"
     },
     {
       "path": "engine_registry.py",
@@ -260,8 +260,8 @@
     },
     {
       "path": "identity_anchor.py",
-      "bytes": 137057,
-      "sha256": "2a004af3a7ca770590d780382b2dd4e78ffe4b7b9eccb4ec00ecae5279c26fc4"
+      "bytes": 143286,
+      "sha256": "998f4b774add7c14c9bed141652562388418bbef1cc40c470ea300b6738d71bb"
     },
     {
       "path": "inactive_record.py",
@@ -376,7 +376,7 @@
     {
       "path": "plugin.yaml",
       "bytes": 887,
-      "sha256": "b7ce1c043e280b6f1445f18b41e2e14111b15c13b16fc93c3de4645d41a6dd0b"
+      "sha256": "458e93839a92446792fc83ec272954cbd3bd4944e82772794f10eb5f09be53d3"
     },
     {
       "path": "plugin_identity.py",
