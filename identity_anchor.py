@@ -672,8 +672,8 @@ class IdentityAnchorMixin:
             added_ids = {call_id for idx in found for key in (_trip_key(messages[idx]),) if key and key[0] == "call"
                          for call_id in key[1]}
             plan["kept_results"] = {idx for idx in plan["replayed"] if idx >= cursor
-                                    and messages[idx].get("role") == "tool"
-                                    and messages[idx].get("tool_call_id") in added_ids}
+                                    for key in (_trip_key(messages[idx]),)  # string ids only, never a raw value
+                                    if key and key[0] == "result" and key[1] in added_ids}
             if tripped:  # the presence check tripped (logged there): the same line main logs
                 logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
                             "session=%s", len(missed), min(missed), self._session_id)
