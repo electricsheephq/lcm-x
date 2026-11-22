@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     kit = scaled(rt.load_kit(args.kit), args.scale)
     rt.isolate(args.out / "home")
     config_module, engine_module, _lines = rt.load(args.tree, kit)
+    rt.aux.configure(floor_s=0.05, rate_tps=1e9)  # building only: earlier passes need no realistic latency
     db = args.out / "store" / "lcm.db"
     db.parent.mkdir()
     config = rt.config_for(config_module, db)
@@ -77,11 +78,16 @@ def main(argv: list[str] | None = None) -> int:
     for number in range(int(target.get("cold_restarts", 0))):
         begun = time.monotonic()
         engine = rt.engine(engine_module, config, kit, args.out / "home")
+        passed = None
         try:
             engine.ingest(copy.deepcopy(generated["restart_list"]))
+            if target.get("pass_at_restart"):  # each earlier start also ran a pass (fast stand-in; list not adopted)
+                view = generated["restart_list"]
+                passed = len(engine.compress(copy.deepcopy(view), current_tokens=sum(
+                    len(str(r.get("content") or "")) for r in view) // shape.CHARS_PER_TOKEN) or [])
         finally:
             engine.shutdown()
-        report.append({"cold_restart": number + 1, "seconds": round(time.monotonic() - begun, 2),
+        report.append({"cold_restart": number + 1, "seconds": round(time.monotonic() - begun, 2), "pass_rows_out": passed,
                        "stored": rt.store_census(db)["rows"]})
     with closing(sqlite3.connect(db)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

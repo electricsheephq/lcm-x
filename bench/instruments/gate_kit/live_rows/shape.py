@@ -53,13 +53,17 @@ def conversation(kit: dict[str, Any], name: str, turns: int, seed: int) -> list[
         tools = {**tools, **kit["target"].get("tools", {})}
     rows: list[dict[str, Any]] = []
     clock = kit["start_epoch"] + seed % 997
+    own = kit["target"] if name.startswith("target") else {}
+    uid_share = own.get("uid_share", kit["uid_share"])
+    empty_call_share = own.get("empty_call_content_share", 0.0)
+    reasoning_share = own.get("reasoning_share", 0.0)
 
     def stamp(row: dict[str, Any]) -> dict[str, Any]:
         nonlocal clock
         clock += rng.uniform(1.0, 30.0)
         if rng.random() < kit["stamp_share"]:
             row["timestamp"] = round(clock, 3)
-        if rng.random() < kit["uid_share"]:
+        if rng.random() < uid_share:
             row["message_uid"] = hashlib.sha256(f"{name}:{len(rows)}:{seed}".encode()).hexdigest()[:32]
         rows.append(row)
         return row
@@ -71,15 +75,23 @@ def conversation(kit: dict[str, Any], name: str, turns: int, seed: int) -> list[
                                       weights=tools["calls_per_turn_weights"])[0]):
             call_id = f"call_{hashlib.sha256(f'{tag}:{call}'.encode()).hexdigest()[:20]}"
             tool = tools["names"][rng.randrange(len(tools["names"]))]
-            stamp({"role": "assistant", "content": text(rng, _length(rng, lengths["assistant_call"]), tag + " plan"),
-                   "tool_calls": [{"id": call_id, "type": "function",
-                                   "function": {"name": tool, "arguments": json.dumps({"q": f"{tag}:{call}"})}}]})
+            content = "" if rng.random() < empty_call_share else text(rng, _length(rng, lengths["assistant_call"]),
+                                                                          tag + " plan")
+            planned = {"role": "assistant", "content": content,
+                       "tool_calls": [{"id": call_id, "type": "function",
+                                       "function": {"name": tool, "arguments": json.dumps({"q": f"{tag}:{call}"})}}]}
+            if rng.random() < reasoning_share:
+                planned["reasoning"] = text(rng, rng.randint(10, 80), tag + " thought")
+            stamp(planned)
             result = {"role": "tool", "tool_call_id": call_id,
                       "content": text(rng, _length(rng, lengths["tool_result"]), tag + f" result {call}")}
             # #2886 shape: a share of tool rows carry `name` and no `tool_name`.
             result["name" if rng.random() < tools["name_only_share"] else "tool_name"] = tool
             stamp(result)
-        stamp({"role": "assistant", "content": text(rng, _length(rng, lengths["assistant"]), tag + " reply")})
+        reply = {"role": "assistant", "content": text(rng, _length(rng, lengths["assistant"]), tag + " reply")}
+        if rng.random() < reasoning_share:
+            reply["reasoning"] = text(rng, rng.randint(10, 80), tag + " thought")
+        stamp(reply)
     return rows
 
 
@@ -112,6 +124,10 @@ def restart_view(kit: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[s
     starts = turn_starts(rows)
     keep = int(form.get("pruned_tool_before_last_turns", 0))
     prune_before = starts[-keep] if keep and len(starts) > keep else 0
+    share = float(form.get("pruned_tool_share", 0.0))
+    if share:  # the host clears the oldest `share` of the list's tool outputs
+        tools = [i for i, row in enumerate(rows) if row["role"] == "tool"]
+        prune_before = max(prune_before, tools[int(len(tools) * share) - 1] + 1 if int(len(tools) * share) else 0)
     out = []
     for index, row in enumerate(rows):
         row = dict(row)
