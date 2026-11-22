@@ -36,7 +36,8 @@ from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _has_lossy_redacted_identity
-from .store import _MESSAGE_SELECT_COLUMNS, is_known_head_copy
+from .head_copy import is_known_head_copy
+from .store import _MESSAGE_SELECT_COLUMNS
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)

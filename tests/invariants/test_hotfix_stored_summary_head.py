@@ -135,6 +135,7 @@ def test_compaction_matches_twin(twins, summaries, caplog, position):  # noqa: F
     assert results[0][0] and results[0][1]
 
 
+@pytest.mark.xfail(strict=True, reason="v0.30.3 ships the prompt and compaction exclusion only; recall exclusion follows in v0.30.4")
 def test_search_preserves_original_hits_and_summary(twins):
     _, (engine, _, copy_id) = twins
     hits = json.loads(tools.lcm_grep({"query": "Earlier turns", "limit": 20}, engine=engine))["results"]

@@ -16,7 +16,6 @@ import re
 import time
 from typing import Any, Callable, Mapping, Sequence
 
-from .store import get_recall_message
 from .evidence_pack import build_evidence_pack, normalize_question_date
 from .reasoning import EvidencePlan, compile_evidence_plan
 
@@ -207,7 +206,7 @@ def _source_window(engine: Any, exact_ref: str) -> tuple[str, int, int] | None:
     store_id = int(match.group("store_id"))
     start = int(match.group("start"))
     end = int(match.group("end"))
-    row = get_recall_message(engine._store, store_id)
+    row = engine._store.get(store_id)
     if row is None:
         return None
     content = str(row.get("content") or "")

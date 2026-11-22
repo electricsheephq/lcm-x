@@ -26,7 +26,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .sqlite_session import ConnectionPolicy, open_connection
-from .store import known_head_copy_ids
+from .head_copy import known_head_copy_ids
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200

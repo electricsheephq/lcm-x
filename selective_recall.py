@@ -15,7 +15,6 @@ import re
 import time
 from typing import Any, Mapping, Sequence
 
-from .store import get_recall_message
 
 SELECTIVE_RECALL_VERSION = "selective-recall-v1"
 _EXACT_REF_RE = re.compile(r"^lcm:(?P<store_id>[1-9]\d*):(?P<start>\d+)-(?P<end>\d+)$")
@@ -144,7 +143,7 @@ def _parse_ref(raw: Any, engine: Any) -> dict[str, Any] | None:
     store_id = int(match.group("store_id"))
     start = int(match.group("start"))
     end = int(match.group("end"))
-    row = get_recall_message(engine._store, store_id)
+    row = engine._store.get(store_id)
     if row is None:
         return None
     content = str(row.get("content") or "")

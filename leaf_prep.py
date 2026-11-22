@@ -531,7 +531,7 @@ class _LeafPrep:
             summarize_leaf_chunk_with_rescue,
         )
         from .escalation import summary_route_available
-        from .store import is_known_head_copy
+        from .head_copy import is_known_head_copy
 
         config = job.config
         if not self._current(job, conn):

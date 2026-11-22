@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from . import tools as _tools
-from .store import get_recall_message
 
 
 def lcm_describe(args: Dict[str, Any], **kwargs: Any) -> str:
@@ -230,7 +229,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
             store_id = int(raw_store_id_arg)
         except (TypeError, ValueError, OverflowError):
             return _tools.json.dumps({"error": "store_id must be an integer"})  # type: ignore[attr-defined, no-any-return]
-        stored = get_recall_message(engine._store, store_id)
+        stored = engine._store.get(store_id)
         if stored is None:
             return _tools.json.dumps({"error": f"Message store_id {store_id} not found"})  # type: ignore[attr-defined, no-any-return]
         transcript_content = stored.get("content", "") or ""

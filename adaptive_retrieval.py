@@ -21,7 +21,6 @@ import time
 from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 import uuid
 
-from .store import get_recall_message
 from .query_view_store import (
     CorpusSnapshot,
     QueryViewBuildInProgressError,
@@ -453,7 +452,7 @@ def _candidate_from_item(
         store_id = int(raw_store_id)
     except (TypeError, ValueError, OverflowError):
         return None
-    row = get_recall_message(engine._store, store_id)
+    row = engine._store.get(store_id)
     if row is None:
         return None
     content = str(row.get("content") or "")

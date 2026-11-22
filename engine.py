@@ -191,7 +191,8 @@ from .sqlite_util import (
     _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
-from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at, is_known_head_copy
+from .head_copy import is_known_head_copy
+from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
 from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
 from .frontier_state import FrontierState
