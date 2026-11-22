@@ -1,0 +1,1 @@
+- Fixed: Context assembly can include older uncondensed summaries at each depth within a window-scaled sweep band and the available summary and survival budgets.
