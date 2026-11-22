@@ -32,7 +32,9 @@ from bench.instruments.gate_kit.live_rows import lockwatch, rt, shape  # noqa: E
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux  # noqa: E402
 
 CELLS = ("d9", "d10", "d11", "selftest-cut", "timeout-hold", "turns", "kill-at-first-call")
-PROFILE: dict[str, str] = {}  # diagnostic only: --profile writes the first pass's cProfile stats
+PROFILE = rt.PROFILE  # diagnostic only: --profile writes the first pass's cProfile stats
+CONTROL = rt.CONTROL  # instrument self-test: "short-pass" ingests only half of the list
+# One shared dict each in `rt`: under `python -m ...run` this file is `__main__`, and `cells` imports a second copy.
 
 
 def claim(work: Path) -> int:
@@ -138,7 +140,16 @@ def write_windows(events: list[tuple[float, int, str, str]]) -> list[dict[str, A
     return sorted(found, key=lambda w: -w["seconds"])[:8]
 
 
-CONTROL: dict[str, str] = {}  # instrument self-test: "short-pass" ingests only half of the list
+def completed(result: Any, compress: dict[str, Any], reasons: list[str], kit: dict[str, Any]) -> bool:
+    """The pass reached its end: compress returned a list, raised nothing, logged a stop, and the stop is not one
+    that cuts the pass short (an error inside the product, an exhausted budget; the kit's `short_stop_reasons`)."""
+    short = set(kit["bars"].get("short_stop_reasons") or SHORT_STOPS)
+    return (isinstance(result, list) and "exception" not in compress and bool(reasons)
+            and not any(reason in short for reason in reasons))
+
+
+SHORT_STOPS = ("error", "time_budget_exhausted", "pass_budget_exhausted", "leaf_summary_error",
+               "summary_route_unavailable", "summary_result_rejected")
 
 
 def watch_cursor(engine: Any) -> dict[str, Any]:
@@ -168,7 +179,10 @@ def watch_cursor(engine: Any) -> dict[str, Any]:
 def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path, db: Path,
                view: list[dict[str, Any]], calls: list[dict[str, Any]]) -> tuple[Any, list[dict[str, Any]] | None]:
     """Restart (a new engine and its session start), then the first compaction pass on the host list."""
-    engine = timed(calls, "restart", lambda: rt.engine(engine_module, config, kit, home))
+    try:
+        engine = timed(calls, "restart", lambda: rt.engine(engine_module, config, kit, home))
+    except Exception as error:  # noqa: BLE001 - the restart raised: the receipt says so (never a silent UNRUN)
+        raise CellError("restart", error) from error
     engine._live_rows_cursor = watch_cursor(engine)
     result = None
     profiler = cProfile.Profile() if PROFILE.get("path") else None
@@ -184,6 +198,14 @@ def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path,
             profiler.disable()
             profiler.dump_stats(PROFILE["path"])
     return engine, result
+
+
+class CellError(Exception):
+    """A cell that could not reach its pass; main writes a receipt naming the step and the class."""
+
+    def __init__(self, step: str, error: BaseException) -> None:
+        super().__init__(f"{step}: {type(error).__name__}")
+        self.step, self.error_class = step, type(error).__name__
 
 
 def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: Path,
@@ -204,6 +226,7 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
         calls.append({"call": "shutdown", "exception": type(error).__name__})
     compress = next(c for c in calls if c["call"] == "compress")
     pid = None  # one process: every holder is this run
+    reasons = [r for r in _stop_reasons(lines)]
     return {
         "effective": rt.effective(config),
         "calls": calls,
@@ -213,8 +236,10 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
         "holds_over_1s": [round((e - s) / 1e9, 3) for s, e in lockwatch.holds(observed["transitions"], begin, end)
                           if e - s > 1e9],
         "lock_watch": {k: observed.get(k) for k in ("samples", "poll_ns", "largest_gap_ms", "unexpected_answers")},
-        "pass_completed": result is not None and "exception" not in compress,
-        "exception": compress.get("exception"),
+        "pass_completed": completed(result, compress, reasons, kit), "stop_reasons": reasons,
+        "exception": compress.get("exception") or ("compress failed inside the product" if "error" in reasons
+                                                    else None),
+        "lock_unexpected": observed.get("unexpected_answers"),
         "list_rows_in": len(view), "list_rows_out": len(result) if isinstance(result, list) else None,
         "rows_examined": engine._live_rows_cursor["max_cursor"],
         "cursor_watch": engine._live_rows_cursor,
@@ -223,6 +248,12 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
                           for c in aux.CALLS],
         "lines": [{"t_s": round(line["t"] - begin / 1e9, 3), "message": line["message"]} for line in lines.lines],
     }
+
+
+def _stop_reasons(lines: Any) -> list[str]:
+    from bench.instruments.gate_kit.live_rows.cells import stop_reasons
+    main = threading.main_thread().ident
+    return stop_reasons([line["message"] for line in lines.lines if line.get("thread") in (None, main)])
 
 
 def cell_selftest_cut(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: Path,
@@ -267,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     if generated["input_hash"] != manifest["input_hash"]:
         raise SystemExit("the kit's input hash does not match the build's; rebuild the store")
     env = {**kit["arms"][args.arm], **kit["budgets"][args.budget]}
+    args.work = rt.plain_dir(args.work)
     lock = claim(args.work)  # noqa: F841 - held until the process exits
     rt.isolate(args.work / "home", env)
     modules = rt.load(args.tree, kit)
@@ -274,10 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.stand_in_floor is not None:
         aux.configure(floor_s=args.stand_in_floor)
     if args.keep_copy:
+        # A killed run leaves its WAL: SQLite recovers it at the next open, as a restart does. The copy must be
+        # this build's (the marker restore wrote), never another build's left at the same path.
         db = args.work / "current" / "lcm.db"
-        for name in ("lcm.db-wal", "lcm.db-shm"):
-            if (args.work / "current" / name).exists():
-                break  # a killed run leaves its WAL: SQLite recovers it at the next open, as a restart does
+        if builder.marker(args.work) != manifest["store_sha256"]:
+            raise SystemExit("--keep-copy: the working copy is not this build's store")
     else:
         db = fresh_copy(args.build, args.work)
     from bench.instruments.gate_kit.live_rows import cells
@@ -288,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
     load = cells.Load(args.load) if args.load else None
     try:
         receipt = handler(args, kit, modules, db, copy.deepcopy(generated["restart_list"]))
+    except CellError as error:
+        receipt = {"cell_error": {"step": error.step, "class": error.error_class}, "exception": error.error_class,
+                   "exceptions": [error.error_class], "pass_completed": False}
     finally:
         load_pids = load.stop() if load else []
     receipt["load"] = {"processes": args.load, "pids": load_pids}
@@ -302,9 +338,13 @@ def main(argv: list[str] | None = None) -> int:
     receipt["census_disclosure"] = kit.get("census_disclosure")
     receipt["control"] = args.control
     receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())
+    receipt["copy_marker_matches"] = builder.marker(args.work) == manifest["store_sha256"]
     receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
-                            and args.control == "none" and receipt["lineage_path_matches"])
+                            and args.control == "none" and receipt["lineage_path_matches"]
+                            and receipt["copy_marker_matches"] and not receipt.get("cell_error"))
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
+                    "worst_case": bool(getattr(args, "worst_case", False)),
+                    "threads": sorted({t.name for t in threading.enumerate()}),
                     "tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                     "input_hash": manifest["input_hash"], "store_sha256": manifest["store_sha256"],
                     "scale": manifest["scale"], "started_epoch": started, "threads_alive": threading.active_count()})

@@ -71,7 +71,7 @@ def view_rows(count: int) -> list[dict[str, Any]]:
 
 
 def lineage_rows(db: Path, session: str) -> list[tuple[int, int, str]]:
-    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+    with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
         return conn.execute(
             "SELECT b.ordinal, b.store_id, m.content FROM occurrence_bindings b JOIN messages m "
             "ON m.store_id = b.store_id WHERE m.session_id = ? AND b.ordinal IS NOT NULL "
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     inserted = {"role": "user", "content": "planner fixture inserted row", "timestamp": 1_000_000.0 + 10.0 * middle - 5}
     new_view = view[:middle] + [inserted] + view[middle:]
 
-    counter = {"windows": 0, "active": False, "aborted": False}
+    counter = {"windows": 0, "active": False, "aborted": False, "step_calls": 0}
     limit = args.max_windows if args.max_windows is not None else DEFAULT_ABORT
     original_gap, original_plan = ledger.MIN_GAP, ledger.plan_ordinals
     ledger.MIN_GAP = counting_gap(original_gap, counter, limit)
@@ -144,6 +144,19 @@ def main(argv: list[str] | None = None) -> int:
             plans.append({"labels": len(a[0]) if a else None, "windows": counter["windows"] - before})
 
     ledger.plan_ordinals = counted_plan
+    # Main also has `_window_step`: every candidate window, the whole-lineage fallback included (its `step >= 1`
+    # does not pass through MIN_GAP), is one call. Counted when present; v0.30.0 has only the reflected compare.
+    original_step = getattr(ledger, "_window_step", None)
+    if callable(original_step):
+        def counted_step(*a: Any, **k: Any) -> Any:
+            if counter["active"]:
+                counter["step_calls"] += 1
+                if counter["step_calls"] > limit:
+                    counter["aborted"] = True
+                    raise WindowBudgetExceeded(f"candidate windows passed {limit}")
+            return original_step(*a, **k)
+
+        ledger._window_step = counted_step
     statements: list[int] = []
     owner = threading.get_ident()
     original_connect = sqlite3.connect
@@ -169,21 +182,28 @@ def main(argv: list[str] | None = None) -> int:
         receipt["insert_ingest_s"] = round(time.monotonic() - began, 3)
         sqlite3.connect = original_connect
         ledger.MIN_GAP, ledger.plan_ordinals = original_gap, original_plan
+        if callable(original_step):
+            ledger._window_step = original_step
         engine.shutdown()
     stored = lineage_rows(db, session)
     contents = [content for _o, _s, content in stored]
+    windows = max(counter["windows"], counter["step_calls"])
     receipt.update({
-        "windows": counter["windows"], "window_budget_exceeded": counter["aborted"], "plans": plans,
+        "windows": windows, "windows_reflected": counter["windows"], "window_step_calls": counter["step_calls"],
+        "window_budget_exceeded": counter["aborted"] or (args.max_windows is not None and windows > args.max_windows),
+        "plans": plans,
         "statements": len(statements), "exception": error,
         "respace_lines": [line["message"] for line in lines.lines if "respace" in line["message"]],
         "stored_in_order": contents == [row["content"] for row in new_view],
         "inserted_stored_once": contents.count(inserted["content"]) == 1,
         "lineage_rows": len(stored),
     })
-    within = ((args.max_windows is None or counter["windows"] <= args.max_windows)
+    within = ((args.max_windows is None or windows <= args.max_windows)
               and (args.max_statements is None or len(statements) <= args.max_statements))
     if args.max_windows is None or args.max_statements is None:
-        receipt["verdict"] = "RECORDED (no frozen counts given)"
+        receipt["verdict"] = "UNRUN"  # not green: the check is judged only against the kit's frozen counts
+    elif not plans or not windows:  # the counter never attached (a renamed planner): no evidence either way
+        receipt["verdict"] = "INCONCLUSIVE"
     else:
         receipt["verdict"] = "PASS" if (within and not counter["aborted"] and receipt["stored_in_order"]
                                         and receipt["inserted_stored_once"]) else "FAIL"

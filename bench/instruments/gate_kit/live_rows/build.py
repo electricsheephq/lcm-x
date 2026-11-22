@@ -53,6 +53,30 @@ def ingest_history(engine_module: Any, config: Any, kit: dict[str, Any], home: P
     return {"session": session, "rows": len(rows), "ingest_calls": calls, "seconds": round(time.monotonic() - started, 2)}
 
 
+MARKER = ".build-store-sha256"
+
+
+def marker(work: Path) -> str | None:
+    """The store hash of the build last restored (or snapshotted) at this working path."""
+    path = work / "current" / MARKER
+    return path.read_text().strip() if path.exists() else None
+
+
+def set_aside(path: Path) -> None:
+    """Move a stale working file or folder out of the way under a unique name (never deleted, never reused)."""
+    if path.exists() or path.is_symlink():
+        path.rename(path.with_name(f"{path.name}.stale-{time.time_ns()}"))
+
+
+def clear_working(work: Path) -> None:
+    """Before a build or a restore: no store, payload, host store or sidecar of another build stays in use."""
+    for name in ("lcm.db", "lcm.db-wal", "lcm.db-shm", "lcm.db-journal", MARKER):
+        (work / "current" / name).unlink(missing_ok=True)
+    set_aside(work / "current" / "externalized")
+    for name in ("state.db", "state.db-wal", "state.db-shm", "state.db-journal"):
+        set_aside(work / "home" / name)
+
+
 def snapshot(work: Path, out: Path) -> None:
     """Checkpoint the store at the working path and copy it, its payloads and the host store into the build."""
     live = work / "current" / "lcm.db"
@@ -64,22 +88,34 @@ def snapshot(work: Path, out: Path) -> None:
     if (live.parent / "externalized").exists():
         shutil.copytree(live.parent / "externalized", out / "store" / "externalized", dirs_exist_ok=True)
     if (work / "home" / "state.db").exists():
+        with closing(sqlite3.connect(work / "home" / "state.db")) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         shutil.copyfile(work / "home" / "state.db", out / "host" / "state.db")
+    (work / "current" / MARKER).write_text(rt.sha256_file(out / "store" / "lcm.db"))
 
 
 def restore(build: Path, work: Path) -> Path:
-    """The build's store, payloads and host store back at the working path (overwriting; stale WAL removed)."""
+    """Exactly the build's store, payloads and host store at the working path: whatever another build or run left
+    there is set aside first, and the marker records which build's store this copy is."""
+    work = rt.plain_dir(work)
     current = work / "current"
     current.mkdir(parents=True, exist_ok=True)
     (work / "home").mkdir(parents=True, exist_ok=True)
-    for name in ("lcm.db-wal", "lcm.db-shm"):
-        (current / name).unlink(missing_ok=True)
+    clear_working(work)
     shutil.copyfile(build / "store" / "lcm.db", current / "lcm.db")
     if (build / "store" / "externalized").exists():
         shutil.copytree(build / "store" / "externalized", current / "externalized", dirs_exist_ok=True)
     if (build / "host" / "state.db").exists():
         shutil.copyfile(build / "host" / "state.db", work / "home" / "state.db")
+    sha = json.loads((build / "build-manifest.json").read_text()).get("store_sha256")
+    if sha:
+        (current / MARKER).write_text(sha)
     return current / "lcm.db"
+
+
+def run_lock(work: Path) -> int:
+    from bench.instruments.gate_kit.live_rows.run import claim
+    return claim(work)
 
 
 def extend(args: argparse.Namespace) -> int:
@@ -89,7 +125,8 @@ def extend(args: argparse.Namespace) -> int:
     manifest = json.loads(manifest_path.read_text())
     kit = manifest["kit_body"]
     env = dict(item.split("=", 1) for item in args.env)
-    work = Path(manifest["work"])
+    work = rt.plain_dir(Path(manifest["work"]))
+    lock = run_lock(work)  # noqa: F841 - held until the process exits, as a run's is
     rt.isolate(work / "home", env)
     config_module, engine_module, _lines = rt.load(args.tree, kit)
     rt.aux.configure(floor_s=0.05, rate_tps=1e9)
@@ -100,14 +137,29 @@ def extend(args: argparse.Namespace) -> int:
     for number in range(args.restarts):
         begun = time.monotonic()
         engine = rt.engine(engine_module, config, kit, work / "home")
+        outs = []
         try:
             engine.ingest(copy.deepcopy(view))
-            out = engine.compress(copy.deepcopy(view), current_tokens=sum(
-                len(str(r.get("content") or "")) for r in view) // shape.CHARS_PER_TOKEN)
+            # Earlier passes after this start (the reference target's 33 summaries and non-zero frontier came from
+            # its own earlier compactions); the host list is not adopted, as a pass at an earlier start was not.
+            tokens = sum(len(str(r.get("content") or "")) for r in view) // shape.CHARS_PER_TOKEN
+            usage = {"prompt_tokens": tokens, "completion_tokens": 64, "total_tokens": tokens + 64}
+            for _ in range(max(1, args.passes)):
+                outs.append(len(engine.compress(copy.deepcopy(view), current_tokens=tokens) or []))
+                # A turn ends between earlier passes (a hold the product arms lasts until turn end).
+                engine.update_from_response(dict(usage))
+                try:
+                    engine.on_turn_complete(copy.deepcopy(view), usage=dict(usage), turn_id="build", task_id="build",
+                                            api_call_count=1, interrupted=False, failed=False,
+                                            turn_exit_reason="completed")
+                except TypeError:
+                    engine.on_turn_complete(copy.deepcopy(view))
         finally:
             engine.shutdown()
+        with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
+            nodes = conn.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0]
         steps.append({"restart": number + 1, "seconds": round(time.monotonic() - begun, 2),
-                      "pass_rows_out": len(out or []), "stored": rt.store_census(db)["rows"]})
+                      "pass_rows_out": outs, "summary_nodes": nodes, "stored": rt.store_census(db)["rows"]})
     snapshot(work, args.extend)
     db = args.extend / "store" / "lcm.db"
     manifest.setdefault("extended", []).append({"tree_identity": rt.driver.tree_identity(args.tree.resolve()),
@@ -129,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="the runs' working directory (the store is written at its current/ path); default OUT/work")
     parser.add_argument("--extend", type=Path, default=None, help="an existing build to extend with later restarts")
     parser.add_argument("--restarts", type=int, default=2)
+    parser.add_argument("--passes", type=int, default=1, help="passes after each extending restart")
     parser.add_argument("--env", action="append", default=[], help="KEY=VALUE for the extending tree")
     args = parser.parse_args(argv)
     if args.extend:
@@ -137,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out is required unless --extend is given")
     args.out.mkdir(parents=True, exist_ok=False)
     kit = scaled(rt.load_kit(args.kit), args.scale)
-    work = (args.work or args.out / "work").resolve()
+    work = rt.plain_dir((args.work or args.out / "work").absolute())
+    lock = run_lock(work)  # noqa: F841 - held until the process exits
     home = work / "home"
     rt.isolate(home)
     config_module, engine_module, _lines = rt.load(args.tree, kit)
@@ -146,8 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     # store's path) is the one the runs see; the result is then snapshotted into the build directory.
     db = work / "current" / "lcm.db"
     db.parent.mkdir(parents=True, exist_ok=True)
-    for name in ("lcm.db", "lcm.db-wal", "lcm.db-shm"):
-        (db.parent / name).unlink(missing_ok=True)
+    clear_working(work)
     config = rt.config_for(config_module, db)
     generated = shape.build(kit)
     target = kit["target"]

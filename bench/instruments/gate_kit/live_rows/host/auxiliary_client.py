@@ -91,8 +91,11 @@ def call_llm(task: str = "", messages: list[dict[str, Any]] | None = None, max_t
     hook = HOOKS.get("enter")
     if hook:
         hook(record)
-    cut = bool(SETTINGS["force_cut"]) or (limit is not None and want > limit)
-    time.sleep(limit if cut and limit is not None else (0.0 if cut else want))
+    # The absolute deadline holds through the return: time spent in the hook counts against the granted time.
+    left = None if limit is None else max(0.0, started + limit - time.monotonic())
+    cut = bool(SETTINGS["force_cut"]) or (left is not None and started + want > started + limit)
+    elapsed = time.monotonic() - started
+    time.sleep(left if cut and left is not None else (0.0 if cut else max(0.0, want - elapsed)))
     record["t_end"] = time.monotonic()
     record["slept_s"] = round(record["t_end"] - started, 3)
     record["outcome"] = "cut" if cut else "ok"
@@ -101,7 +104,8 @@ def call_llm(task: str = "", messages: list[dict[str, Any]] | None = None, max_t
         hook(record)
     if route_info is not None:
         route_info.update({"provider": "live-rows-stand-in", "model": "stand-in"})
-    if cut:
+    if cut or (limit is not None and time.monotonic() > started + limit):
+        record["outcome"] = "cut"
         raise TimeoutError("Request timed out.")
     match = _NONCE.search(text)
     out_tokens = max(int(SETTINGS["min_tokens"]),
@@ -111,6 +115,10 @@ def call_llm(task: str = "", messages: list[dict[str, Any]] | None = None, max_t
     body = (f"Stand-in summary {serial} of earlier turns: " + filler(out_tokens, serial)
             + "\nExpand for details about: earlier turns of this conversation")
     content = f'<lcm-summary nonce="{match.group(1)}">\n{body}\n</lcm-summary>' if match else body
+    if limit is not None and time.monotonic() > started + limit:  # the reply was built past the deadline
+        record["outcome"] = "cut"
+        raise TimeoutError("Request timed out.")
+    record["t_end"] = time.monotonic()  # the actual return
     record["output_tokens"] = _tokens(content)
     message = SimpleNamespace(content=content)
     return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])

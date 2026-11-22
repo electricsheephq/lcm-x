@@ -2,7 +2,9 @@
 
 Busy-bar's monitor keeps every 0.15 ms sample; a cold start can hold the lock for minutes, so this one keeps only
 the transitions (time, holder pid) plus the sample count and the largest sampling gap. A hold is a run of samples
-with a holder; gaps shorter than one poll are merged as busy-bar does.
+with a holder; gaps shorter than one poll are merged as busy-bar does, for the same holder only. Threads of one
+process share a pid, so holds by two threads of one process cannot be told apart (D10 records this). An answer
+that is not a plain write lock counts as held and makes a judged run INCONCLUSIVE (verdicts).
 """
 
 from __future__ import annotations
@@ -27,24 +29,24 @@ UNEXPECTED = -2  # an F_GETLK answer that is not a plain write lock on the byte;
 def holds(transitions: list[list[int]], begin: int, end: int, pid: int | None = None,
           poll_ns: int = POLL_NS) -> list[tuple[int, int]]:
     """Hold periods clipped to [begin, end]; with `pid`, only holds by that process (or an unknown holder)."""
-    found: list[tuple[int, int]] = []
-    opened = None
+    found: list[tuple[int, int, int]] = []
+    opened, holder = None, None
     for at, owner in transitions:
         mine = bool(owner) and (pid is None or owner in (pid, -1, UNEXPECTED))
-        if mine and opened is None:
-            opened = at
-        elif not mine and opened is not None:
-            found.append((opened, at))
+        if opened is not None and (not mine or owner != holder):  # a holder change ends the hold
+            found.append((opened, at, holder))
             opened = None
+        if mine and opened is None:
+            opened, holder = at, owner
     if opened is not None:
-        found.append((opened, transitions[-1][0]))
-    merged: list[tuple[int, int]] = []
-    for start, stop in found:
-        if merged and start - merged[-1][1] < poll_ns:
-            merged[-1] = (merged[-1][0], stop)
+        found.append((opened, transitions[-1][0], holder))
+    merged: list[tuple[int, int, int]] = []
+    for start, stop, owner in found:  # a gap shorter than one poll joins two holds by the same holder only
+        if merged and merged[-1][2] == owner and start - merged[-1][1] < poll_ns:
+            merged[-1] = (merged[-1][0], stop, owner)
         else:
-            merged.append((start, stop))
-    return [(max(s, begin), min(e, end)) for s, e in merged if s < end and e > begin]
+            merged.append((start, stop, owner))
+    return [(max(s, begin), min(e, end)) for s, e, _ in merged if s < end and e > begin]
 
 
 def longest_s(transitions: list[list[int]], begin: int, end: int, pid: int | None = None) -> float:

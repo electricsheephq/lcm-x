@@ -49,14 +49,16 @@ def bucket(length: int) -> str:
 
 
 def census(db: Path, payloads: Path | None, top: int) -> dict[str, Any]:
+    db = db.resolve()  # one path for the sidecar check and the open: a symlinked store is checked at its target
     for suffix in ("-wal", "-journal"):
         side = Path(str(db) + suffix)
         if side.exists() and side.stat().st_size:
             raise SystemExit(f"a non-empty {suffix} is beside the store: use a stopped, checkpointed copy")
     # The path goes through as_uri() so '#' or '?' in it cannot cut off the read-only parameters.
-    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as conn:
+    with closing(sqlite3.connect(db.as_uri() + "?mode=ro&immutable=1", uri=True)) as conn:
         conn.text_factory = bytes  # undecodable text is counted, never decoded into an error message
-        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        tables = {bytes(row[0]).decode("ascii", "replace") if isinstance(row[0], bytes) else str(row[0])
+                  for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         per: dict[str, dict[str, Any]] = defaultdict(lambda: {
             "rows": 0, "roles": Counter(), "sessions": set(), "lengths": Counter(), "copies": 0,
             "unstamped": 0, "tool_call_ids": 0, "externalized": 0, "chars": 0, "seen": set()})
@@ -68,8 +70,9 @@ def census(db: Path, payloads: Path | None, top: int) -> dict[str, Any]:
             item["rows"] += 1
             item["roles"][role_name(role)] += 1
             item["sessions"].add(session)
-            item["lengths"][bucket(len(text))] += 1
-            item["chars"] += len(text)
+            chars = len(text.decode("utf-8", "replace"))  # characters, as the kit's lengths are
+            item["lengths"][bucket(chars)] += 1
+            item["chars"] += chars
             item["unstamped"] += stamp is None
             item["tool_call_ids"] += bool(call)
             item["externalized"] += text.startswith(EXTERNALIZED_HEAD)
@@ -109,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.out.exists():
         raise SystemExit("--out exists; give a new file")
     result = census(args.db, args.payloads, args.top)
-    with args.out.open("x") as handle:
+    try:
+        handle = args.out.open("x")
+    except OSError as error:  # the message would carry the path; print the class only
+        raise SystemExit(f"cannot write --out ({type(error).__name__})") from None
+    with handle:
         json.dump(result, handle, indent=1, sort_keys=True)
     print(json.dumps({k: result[k] for k in ("store_rows", "conversations", "copies", "payload_files")}))
     return 0

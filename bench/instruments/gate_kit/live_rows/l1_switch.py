@@ -65,10 +65,22 @@ def b_view(count: int) -> list[dict[str, Any]]:
 
 
 def session_rows(db: Path, session: str) -> list[tuple[int, str]]:
-    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+    with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
         rows = conn.execute("SELECT store_id, role, content, tool_call_id FROM messages WHERE session_id = ? "
                             "ORDER BY store_id", (session,)).fetchall()
     return [(sid, key(role, content, call)) for sid, role, content, call in rows]
+
+
+def rows_with(db: Path, keys: set[str]) -> list[tuple[str, str]]:
+    """Every stored row of the whole store whose identity is one of `keys`: (session, key)."""
+    with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
+        rows = conn.execute("SELECT session_id, role, content, tool_call_id FROM messages ORDER BY store_id").fetchall()
+    found = []
+    for session, role, content, call in rows:
+        wanted = key(role, content, call)
+        if wanted in keys:
+            found.append((session, wanted))
+    return found
 
 
 def plant_copy(db: Path, session: str) -> int:
@@ -113,8 +125,11 @@ def main(argv: list[str] | None = None) -> int:
     entered, release = threading.Event(), threading.Event()
     trace: dict[str, float] = {}
 
+    held: dict[str, Any] = {}
+
     def hold(record: dict[str, Any]) -> None:
-        if not entered.is_set():
+        if not entered.is_set() and threading.current_thread().name == "live-rows-switch-pass":
+            held["serial"] = record["serial"]
             trace["call_enter"] = time.monotonic()
             entered.set()
             release.wait(args.hold_timeout)
@@ -142,8 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         trace["switch_end"] = time.monotonic()
     release.set()
     worker.join(args.hold_timeout + 60)
-    calls = [c for c in aux.CALLS if "t_end" in c]
-    trace["call_exit"] = calls[0]["t_end"] if calls else float("nan")
+    calls = [c for c in aux.CALLS if c.get("serial") == held.get("serial") and "t_end" in c]
+    trace["call_exit"] = calls[0]["t_end"] if calls else float("nan")  # the held call itself, by its serial
     aux.HOOKS.clear()
     if args.control == "drop-first-b-row":  # the loss #2851 produced, planted by the instrument
         engine.ingest(copy.deepcopy(planned_b[1:]))
@@ -153,15 +168,22 @@ def main(argv: list[str] | None = None) -> int:
     engine.shutdown()
 
     stored_a, stored_b = session_rows(db, "switch-A"), session_rows(db, "switch-B")
+    # Independent of the store: A's planned rows (each stored copy planted on purpose counts), B's planned rows.
+    planned_a = [key(r["role"], r["content"], r.get("tool_call_id")) for r in view]
+    planned_b_keys = [key(r["role"], r["content"], r.get("tool_call_id")) for r in planned_b]
+    everywhere_b = rows_with(db, set(planned_b_keys))
     inside = (switched and trace["call_enter"] <= trace["switch_begin"] and trace["switch_end"] <= trace["call_exit"]
               and trace["pass_begin"] <= trace["call_enter"] and trace["call_exit"] <= trace["pass_end"])
-    a_ok = stored_a == recorded_a
-    b_ok = [k for _sid, k in stored_b] == [key(r["role"], r["content"], r.get("tool_call_id")) for r in planned_b]
+    a_setup_ok = [k for _sid, k in recorded_a] == planned_a * (2 if planted else 1)
+    a_ok = a_setup_ok and stored_a == recorded_a
+    b_ok = ([k for _sid, k in stored_b] == planned_b_keys
+            and everywhere_b == [("switch-B", k) for k in planned_b_keys])  # once, in B's session, nowhere else
     verdict = "INCONCLUSIVE" if not inside else ("PASS" if a_ok and b_ok else "FAIL")
     receipt = {
         "verdict": verdict, "switch_inside_pass": inside, "control": args.control,
         "trace_s": {k: round(v - trace.get("pass_begin", v), 3) for k, v in trace.items() if v == v},
         "a_recorded_rows": len(recorded_a), "a_planted_copies": planted, "a_stored_rows": len(stored_a),
+        "a_setup_matches_plan": a_setup_ok, "b_rows_anywhere": len(everywhere_b), "held_call_serial": held.get("serial"),
         "a_unchanged": a_ok, "b_planned_rows": len(planned_b), "b_stored_rows": len(stored_b), "b_in_order_once": b_ok,
         "pass_exception": outcome.get("exception"), "summary_calls": len(aux.CALLS),
         "lines": [line["message"][:240] for line in lines.lines if line["message"].startswith("LCM compaction stop")],

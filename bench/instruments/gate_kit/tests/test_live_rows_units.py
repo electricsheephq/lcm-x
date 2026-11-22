@@ -58,9 +58,13 @@ def test_host_list_hides_whole_turns_and_keeps_tool_pairs(kit):
     assert live[-1] is not history[-1]  # the stored tail turn is not in the host list
 
 
-def test_full_kit_counts_are_the_draft_stand_in():
-    counts = shape.build(rt.load_kit())["counts"]
-    assert counts["rows"] >= 40_000 and counts["conversations"] >= 2
+def test_full_kit_counts_are_no_smaller_than_the_reference_copy():
+    kit = rt.load_kit()
+    counts = shape.build(kit)["counts"]
+    minimums = kit["minimums"]  # D9: the kit's counts are no smaller than the reference copy's (ruling T1-538)
+    assert counts["rows"] >= minimums["rows"] and counts["conversations"] >= minimums["conversations"]
+    assert counts["tool_pairs"] >= minimums["tool_pairs"]
+    assert counts["externalizable_payloads"] >= minimums["externalized_payloads"]
     assert counts["target_hidden_rows"] * 4 * 100 > 5 * 24_000  # hidden runs well past five chunks of tokens
     assert 1_700 <= counts["target_list_rows"] <= 1_900
 
@@ -135,29 +139,45 @@ def test_reporter_labels_are_the_2840_shape():
 
 # -- verdicts, both ways ------------------------------------------------------------------------------------------
 
-def d9_receipt(hold=10.0, **over):
-    return {"longest_hold_s": hold, "pass_completed": True, "exception": None, "rows_examined": 100, **over}
+def labelled(receipt, cell, arm, budget="default"):
+    if receipt is None:
+        return None
+    return {"cell": cell, "arm": arm, "budget": budget, "qualifies": True, "control": "none", "worst_case": False,
+            **receipt}
+
+
+def d9_receipt(hold=10.0, arm="uid_on", **over):
+    return labelled({"longest_hold_s": hold, "pass_completed": True, "exception": None, "rows_examined": 100,
+                     **over}, "d9", arm)
 
 
 @pytest.mark.parametrize("judged,expected", [
     (d9_receipt(10.0), "PASS"), (d9_receipt(31.0), "FAIL"),
     (d9_receipt(5.0, exception="RuntimeError"), "INCONCLUSIVE"),
     (d9_receipt(5.0, pass_completed=False), "INCONCLUSIVE"),
-    (d9_receipt(5.0, rows_examined=99), "INCONCLUSIVE"), (None, "UNRUN")])
+    (d9_receipt(5.0, rows_examined=99), "INCONCLUSIVE"), (None, "UNRUN"),
+    (d9_receipt(5.0, lock_unexpected=3), "INCONCLUSIVE"),
+    (d9_receipt(5.0, arm="default"), "INCONCLUSIVE"),  # a receipt decides only the arm it ran
+    (d9_receipt(5.0, qualifies=False), "INCONCLUSIVE"), (d9_receipt(5.0, control="short-pass"), "INCONCLUSIVE")])
 def test_d9(judged, expected):
-    result = verdicts.d9({"uid_on": judged, "default": d9_receipt(500.0)}, BARS, 100)
+    result = verdicts.d9({"uid_on": judged, "default": d9_receipt(500.0, arm="default")}, BARS, 100)
     assert result["outcome"] == expected  # the default arm's 500 s hold is recorded, never decides
 
 
-def d10_receipt(hold=10.0, **over):
-    return {"longest_hold_in_pass_s": hold, "pass_completed": True, "rows_examined": 100, "exceptions": [],
-            "started_during_hold": {"turn": 3, "compaction": 3},
-            "compaction_calls": [{"during_hold": True, "return_s": 0.2}], "turn_calls": [{"wait_s": 2.0}], **over}
+def d10_receipt(hold=10.0, arm="uid_on", **over):
+    return labelled({"longest_hold_in_pass_s": hold, "pass_completed": True, "rows_examined": 100, "exceptions": [],
+                     "started_during_hold": {"turn": 3, "compaction": 3},
+                     "compaction_calls": [{"during_hold": True, "return_s": 0.2}], "turn_calls": [{"wait_s": 2.0}],
+                     **over}, "d10", arm)
 
 
 def test_d10_bar1_only_in_the_opt_in_arm():
-    assert verdicts.d10({"uid_on": d10_receipt(), "default": d10_receipt(900.0)}, BARS, 100)["outcome"] == "PASS"
-    assert verdicts.d10({"uid_on": d10_receipt(301.0), "default": d10_receipt()}, BARS, 100)["outcome"] == "FAIL"
+    assert verdicts.d10({"uid_on": d10_receipt(), "default": d10_receipt(900.0, arm="default")}, BARS,
+                        100)["outcome"] == "PASS"
+    assert verdicts.d10({"uid_on": d10_receipt(301.0), "default": d10_receipt(arm="default")}, BARS,
+                        100)["outcome"] == "FAIL"
+    worst = d10_receipt(worst_case=True)  # the recorded worst-case arm never decides, whatever its label
+    assert verdicts.d10({"uid_on": worst, "default": d10_receipt(arm="default")}, BARS, 100)["outcome"] == "INCONCLUSIVE"
 
 
 @pytest.mark.parametrize("over,expected", [
@@ -166,42 +186,131 @@ def test_d10_bar1_only_in_the_opt_in_arm():
     ({"turn_calls": [{"wait_s": 30.5}]}, "FAIL"),
     ({"pass_completed": False}, "INCONCLUSIVE"),
     ({"started_during_hold": {"turn": 0, "compaction": 2}}, "INCONCLUSIVE"),
-    ({"rows_examined": 10}, "INCONCLUSIVE")])
+    ({"rows_examined": 10}, "INCONCLUSIVE"),
+    ({"turn_calls": [{"wait_s": 31.0, "unfinished": True}]}, "FAIL"),  # a call still waiting at the end counts
+    ({"compaction_calls": [{"during_hold": True, "return_s": 0.1, "unfinished": True}]}, "FAIL"),
+    ({"lock_unexpected": 2}, "INCONCLUSIVE")])
 def test_d10_bars_2_to_4_in_both_arms(over, expected):
     for arm in ("uid_on", "default"):
-        receipts = {"uid_on": d10_receipt(), "default": d10_receipt()}
-        receipts[arm] = d10_receipt(**over)
+        receipts = {"uid_on": d10_receipt(), "default": d10_receipt(arm="default")}
+        receipts[arm] = d10_receipt(arm=arm, **over)
         assert verdicts.d10(receipts, BARS, 100)["outcome"] == expected
 
 
-def d11_passes(published=(True,) * 8, armed=None, lost=0):
+def d11_passes(published=(True,) * 8, armed=None, lost=0, changed=0, arm="uid_on", budget="default"):
     rows, passes = 1000, []
     for number, flag in enumerate(published):
         out = rows - 100 if flag else rows
         passes.append({"rows_in": rows, "rows_out": out, "published": flag, "hold_armed": number == armed,
-                       "stored_check": {"lost": lost if number == 2 else 0, "duplicated": 0, "reordered": False},
+                       "returned_list": True, "stop_reasons": ["compacted" if flag else "noop"],
+                       "stored_check": {"lost": lost if number == 2 else 0, "changed": changed if number == 2 else 0,
+                                        "duplicated": 0, "reordered": False},
                        "returned_equals_input": not flag})
         rows = out
-    return {"rows_before": 1000, "passes": passes}
+    return labelled({"rows_before": 1000, "passes": passes}, "d11", arm, budget)
+
+
+def budgets(arm="uid_on", **over):
+    return {b: over.get(b) or d11_passes(arm=arm, budget=b) for b in ("default", "60s", "120s")}
 
 
 def test_d11_judged_arm_decides():
-    good = {b: d11_passes() for b in ("default", "60s", "120s")}
+    good = budgets()
     assert verdicts.d11({"uid_on": good, "default": {}})["outcome"] == "PASS"
-    assert verdicts.d11({"uid_on": {**good, "60s": d11_passes(armed=3)}})["outcome"] == "FAIL"
-    assert verdicts.d11({"uid_on": {**good, "60s": d11_passes(lost=1)}})["outcome"] == "FAIL"
-    assert verdicts.d11({"uid_on": {**good, "60s": d11_passes((False,) * 8)}})["outcome"] == "INCONCLUSIVE"
+    assert verdicts.d11({"uid_on": budgets(**{"60s": d11_passes(armed=3, budget="60s")})})["outcome"] == "FAIL"
+    assert verdicts.d11({"uid_on": budgets(**{"60s": d11_passes(lost=1, budget="60s")})})["outcome"] == "FAIL"
+    assert verdicts.d11({"uid_on": budgets(**{"60s": d11_passes(changed=1, budget="60s")})})["outcome"] == "FAIL"
+    assert verdicts.d11({"uid_on": budgets(**{"60s": d11_passes((False,) * 8, budget="60s")})})[
+        "outcome"] == "INCONCLUSIVE"
     assert verdicts.d11({"uid_on": {"default": good["default"]}})["outcome"] == "UNRUN"
-    assert verdicts.d11({"uid_on": good, "default": {"60s": d11_passes(armed=1)}})["outcome"] == "PASS"
+    assert verdicts.d11({"uid_on": good, "default": {"60s": d11_passes(armed=1, arm="default", budget="60s")}})[
+        "outcome"] == "PASS"
+    # A receipt from another budget never stands in for the missing one.
+    assert verdicts.d11({"uid_on": {**good, "120s": good["60s"]}})["outcome"] == "INCONCLUSIVE"
+    broken = d11_passes(budget="60s")
+    broken["passes"][4].update(exception="OperationalError", returned_list=False, rows_out=None, published=False)
+    assert verdicts.d11({"uid_on": budgets(**{"60s": broken})})["outcome"] == "INCONCLUSIVE"
 
 
 def test_d12_needs_one_unchanged_no_publish_pass_per_arm_and_budget():
-    mixed = d11_passes((True,) * 7 + (False,))
-    cells = {arm: {b: copy.deepcopy(mixed) for b in ("default", "60s", "120s")} for arm in ("uid_on", "default")}
+    def mixed(arm, budget):
+        return d11_passes((True,) * 7 + (False,), arm=arm, budget=budget)
+    cells = {arm: {b: mixed(arm, b) for b in ("default", "60s", "120s")} for arm in ("uid_on", "default")}
     assert verdicts.d12(cells)["outcome"] == "PASS"
     cells["default"]["60s"]["passes"][-1]["returned_equals_input"] = False
     assert verdicts.d12(cells)["outcome"] == "FAIL"  # judged in both arms
-    cells["default"]["60s"] = d11_passes()
+    cells["default"]["60s"] = d11_passes(arm="default", budget="60s")
     assert verdicts.d12(cells)["outcome"] == "INCONCLUSIVE"
     cells["default"]["60s"]["extra_passes"] = [{"published": False, "returned_equals_input": True}]
     assert verdicts.d12(cells)["outcome"] == "PASS"
+
+
+def test_d12_never_counts_a_pass_that_returned_nothing():
+    cells = {arm: {b: d11_passes((True,) * 7 + (False,), arm=arm, budget=b) for b in ("default", "60s", "120s")}
+             for arm in ("uid_on", "default")}
+    for item in cells["uid_on"]["60s"]["passes"]:
+        item.update(exception="RuntimeError", returned_list=False, returned_equals_input=False, published=False)
+    assert verdicts.d12(cells)["outcome"] == "INCONCLUSIVE"  # seven raised passes are not seven unchanged ones
+    del cells["default"]["120s"]
+    assert verdicts.d12(cells)["outcome"] in ("INCONCLUSIVE", "UNRUN")
+
+
+def test_stored_check_sees_a_changed_row_and_a_copy():
+    from bench.instruments.gate_kit.live_rows.cells import compare_stored
+    before = [(1, b"a"), (2, b"b"), (3, b"c")]
+    assert compare_stored(before, before)["lost"] == 0
+    changed = compare_stored(before, [(1, b"a"), (2, b"a"), (3, b"c")])
+    assert changed["lost"] == 1 and changed["changed"] == 1
+    swapped = compare_stored(before, [(1, b"b"), (2, b"a"), (3, b"c")])
+    assert swapped["reordered"] and swapped["lost"] == 2
+    copied = compare_stored(before, before + [(4, b"b")])
+    assert copied["duplicated"] == 1 and copied["added_copies"] == 1
+    assert compare_stored(before, before[:2])["lost"] == 1
+
+
+def test_lock_holds_split_at_a_holder_change():
+    transitions = [[0, 100], [5_000_000_000, 200], [9_000_000_000, 0], [10_000_000_000, 0]]
+    assert lockwatch.holds(transitions, 0, 10_000_000_000) == [(0, 5_000_000_000), (5_000_000_000, 9_000_000_000)]
+    assert lockwatch.longest_s(transitions, 0, 10_000_000_000) == 5.0
+
+
+def test_stand_in_held_past_its_deadline_never_returns_text(fresh_stand_in):
+    aux.configure(floor_s=0.05, rate_tps=1e9)
+    aux.HOOKS["enter"] = lambda record: time.sleep(0.3)
+    try:
+        with pytest.raises(TimeoutError):
+            aux.call_llm(messages=nonce_messages(10), timeout=0.2)
+    finally:
+        aux.HOOKS.clear()
+    assert aux.CALLS[-1]["outcome"] == "cut"
+
+
+def test_a_pass_cut_short_is_not_complete():
+    from bench.instruments.gate_kit.live_rows.run import completed
+    kit = {"bars": {}}
+    assert completed([1], {}, ["compacted"], kit)
+    assert not completed([1], {}, ["time_budget_exhausted"], kit)
+    assert not completed([1], {}, ["error"], kit)
+    assert not completed([1], {}, [], kit)  # no stop line: no evidence the pass ended
+    assert not completed(None, {}, ["compacted"], kit) and not completed([1], {"exception": "X"}, ["compacted"], kit)
+
+
+def test_qualification_needs_frozen_counts_minimums_and_the_pinned_baseline():
+    from bench.instruments.gate_kit.live_rows.dryrun import qualify
+    kit = {"bars": {"d9_hold_s": 30}, "frozen": {"target_rows_examined": 1784, "planner_windows": 66048,
+                                                 "planner_statements": 1000},
+           "minimums": {"rows": 10, "conversations": 2, "tool_pairs": 3, "externalized_payloads": 1},
+           "baseline": {"plugin_version": "0.30.0", "product_sha256": "abc"}}
+    counts = {"rows": 10, "conversations": 2, "tool_pairs": 3, "externalized_payloads": 1}
+    base = {"plugin_version": "0.30.0", "product_sha256": "abc"}
+    d9 = {"qualifies": True, "longest_hold_s": 40.0, "lock_unexpected": 0}
+    planner = {"window_budget_exceeded": True, "windows": 66049}
+    manifest = {"scale": 1.0}
+    assert qualify(kit, manifest, counts, base, d9, planner)["passed"]
+    assert not qualify({**kit, "frozen": {**kit["frozen"], "planner_windows": None}}, manifest, counts, base, d9,
+                       planner)["passed"]
+    assert not qualify(kit, manifest, {**counts, "conversations": 1}, base, d9, planner)["passed"]
+    assert not qualify(kit, manifest, counts, {**base, "product_sha256": "other"}, d9, planner)["passed"]
+    assert not qualify(kit, manifest, counts, base, {**d9, "longest_hold_s": 29.0}, planner)["passed"]
+    assert not qualify(kit, manifest, counts, base, {**d9, "lock_unexpected": 5}, planner)["passed"]
+    assert not qualify(kit, manifest, counts, base, d9, {"window_budget_exceeded": False})["passed"]

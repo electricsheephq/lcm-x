@@ -26,28 +26,56 @@ from bench.instruments.gate_kit.live_rows import host  # noqa: E402
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux  # noqa: E402
 
 KIT = Path(__file__).resolve().parent / "kit.json"
+PROFILE: dict[str, str] = {}  # run.py's diagnostic profile path (shared by `run` and `cells`)
+CONTROL: dict[str, str] = {}  # run.py's instrument self-test mode (shared by `run` and `cells`)
 
 
 def load_kit(path: Path | None = None) -> dict[str, Any]:
     return json.loads((path or KIT).read_text())
 
 
+def ro_uri(db: Path) -> str:
+    """A read-only SQLite URI; `as_uri()` escapes '?' and '#' so they cannot cut off `mode=ro`."""
+    return Path(db).resolve().as_uri() + "?mode=ro"
+
+
+def plain_dir(path: Path) -> Path:
+    """Refuse a working path that is, or passes through, a symlink: every write stays in the synthetic workspace."""
+    path = Path(path).absolute()
+    for part in [path, *path.parents]:
+        if part.is_symlink():
+            raise SystemExit(f"refusing a symlinked working path: {part.name}")
+    return path
+
+
 def isolate(home: Path, env: dict[str, str] | None = None) -> None:
-    """Drop every LCM_ and HERMES_ variable, point HOME and HERMES_HOME at an empty folder, apply the arm."""
+    """Drop every LCM_ and HERMES_ variable, point HOME and HERMES_HOME at an empty folder, apply the arm (LCM_
+    variables only), and refuse the network before anything imports a tree."""
+    env = dict(env or {})
+    bad = [key for key in env if not key.startswith("LCM_")]
+    if bad:
+        raise SystemExit(f"an arm or budget may set LCM_ variables only, not {bad}")
     for key in list(os.environ):
         if key.startswith(("LCM_", "HERMES_")):
             del os.environ[key]
+    home = plain_dir(home)
     home.mkdir(parents=True, exist_ok=True)
     os.environ["HOME"] = os.environ["HERMES_HOME"] = str(home)
-    os.environ.update(env or {})
+    os.environ.update(env)
+    deny_network()
 
 
 def deny_network() -> None:
+    """Refuse name resolution and every connect or send, so nothing leaves the host and no resolver delay is timed."""
     def refuse(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("live-rows is offline: network access forbidden")
+        raise OSError("live-rows is offline: network access forbidden")
 
     socket.socket.connect = refuse  # type: ignore[method-assign]
+    socket.socket.connect_ex = refuse  # type: ignore[method-assign]
+    socket.socket.sendto = refuse  # type: ignore[method-assign]
     socket.create_connection = refuse  # type: ignore[assignment]
+    socket.getaddrinfo = refuse  # type: ignore[assignment]
+    socket.gethostbyname = refuse  # type: ignore[assignment]
 
 
 class Lines(logging.Handler):
@@ -55,7 +83,7 @@ class Lines(logging.Handler):
 
     PREFIXES = ("LCM compaction stop", "LCM automatic compaction held", "LCM compression no-op", "LCM threshold sweep",
                 "LCM summary route", "LLM summarization failed", "LCM compaction #", "LCM store-complete leaf",
-                "LCM leaf summary input", "LCM survival fit", "LCM ledger ordinals respace")
+                "LCM leaf summary input", "LCM survival fit", "LCM ledger ordinals respace", "LCM compress failed")
 
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)
@@ -74,8 +102,8 @@ class Lines(logging.Handler):
 def load(tree: Path, kit: dict[str, Any]) -> tuple[Any, Any, Lines]:
     host.install()
     aux.configure(**{k: v for k, v in kit["summary_route"].items() if k in aux.SETTINGS})
+    deny_network()  # again, in case a caller skipped `isolate`
     config_module, engine_module = driver.load_tree(tree.resolve())
-    deny_network()
     lines = Lines()
     logger = logging.getLogger("hermes_lcm")
     logger.addHandler(lines)
@@ -112,7 +140,7 @@ def engine(engine_module: Any, config: Any, kit: dict[str, Any], home: Path, ses
 
 def store_census(db: Path) -> dict[str, Any]:
     """Counts, ids and a digest of every stored row's identity and order (read-only)."""
-    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+    with closing(sqlite3.connect(ro_uri(db), uri=True)) as conn:
         rows = conn.execute("SELECT store_id, conversation_id, session_id, role, length(content) "
                             "FROM messages ORDER BY store_id").fetchall()
     digest = hashlib.sha256(json.dumps(rows).encode()).hexdigest()
@@ -120,15 +148,30 @@ def store_census(db: Path) -> dict[str, Any]:
             "conversations": len({row[1] for row in rows}), "rows_digest": digest}
 
 
+IDENTITY_COLUMNS = ("conversation_id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name",
+                    "timestamp")
+
+
+def stored_identity(db: Path) -> list[tuple[int, bytes]]:
+    """Every stored row of the whole store, in store order: its id and a digest of its owner and value."""
+    found = []
+    with closing(sqlite3.connect(ro_uri(db), uri=True)) as conn:
+        names = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        columns = [c for c in IDENTITY_COLUMNS if c in names]
+        for row in conn.execute(f"SELECT store_id, {', '.join(columns)} FROM messages ORDER BY store_id"):
+            found.append((row[0], hashlib.blake2b(repr(row[1:]).encode(), digest_size=16).digest()))
+    return found
+
+
 def stored_rows(db: Path, conversation: str) -> list[tuple[Any, ...]]:
-    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+    with closing(sqlite3.connect(ro_uri(db), uri=True)) as conn:
         return conn.execute("SELECT store_id, session_id, role, content, tool_call_id FROM messages WHERE conversation_id = ? "
                             "ORDER BY store_id", (conversation,)).fetchall()
 
 
 def open_reader(db: Path) -> sqlite3.Connection:
     """An idle read-only connection: it makes SQLite create the WAL shared-memory file and holds no write lock."""
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(ro_uri(db), uri=True)
     conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
     return conn
 

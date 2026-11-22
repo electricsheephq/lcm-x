@@ -23,24 +23,45 @@ from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux
 
 
 def summary_nodes(db: Path) -> int:
-    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+    with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
         return int(conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0])
 
 
-def stored_identity(db: Path, conversation: str) -> list[tuple[int, str]]:
-    return [(sid, base.key(role, content, call)) for sid, _s, role, content, call in rt.stored_rows(db, conversation)]
+def stored_identity(db: Path, conversation: str | None = None) -> list[tuple[int, Any]]:
+    """The whole store's rows (ids are immutable keys; the value digest covers owner, session and content)."""
+    return rt.stored_identity(db)
 
 
-def compare_stored(before: list[tuple[int, str]], after: list[tuple[int, str]]) -> dict[str, Any]:
-    """By identity and order, not by count: every earlier row keeps its id, value and place; nothing is added."""
+def compare_stored(before: list[tuple[int, Any]], after: list[tuple[int, Any]]) -> dict[str, Any]:
+    """By identity and order across the whole store, not by count: every earlier row keeps its id, owner and value
+    (a changed value is a lost row), earlier values keep their order, and nothing is added (an added row whose
+    value an earlier row holds is a copy)."""
     old, new = dict(before), dict(after)
     lost = [sid for sid in old if sid not in new]
     changed = [sid for sid in old if sid in new and new[sid] != old[sid]]
     added = [sid for sid in new if sid not in old]
-    order_old = [sid for sid, _ in before if sid in new]
-    order_new = [sid for sid, _ in after if sid in old]
-    return {"lost": len(lost), "changed": len(changed), "duplicated": len(added),
-            "reordered": order_old != order_new, "lost_ids": lost[:20], "added_ids": added[:20]}
+    earlier_values = set(old.values())
+    copies = [sid for sid in added if new[sid] in earlier_values]
+    kept = [sid for sid, _ in before if sid in new]
+    reordered = bool(changed) and sorted(old[sid] for sid in changed) == sorted(new[sid] for sid in changed)
+    return {"lost": len(lost) + len(changed), "removed": len(lost), "changed": len(changed),
+            "duplicated": len(added), "added_copies": len(copies), "reordered": reordered,
+            "kept_in_order": [sid for sid, _ in after if sid in old] == kept,
+            "lost_ids": (lost + changed)[:20], "added_ids": added[:20]}
+
+
+SHORT_STOPS_DEFAULT = ("error", "time_budget_exhausted", "pass_budget_exhausted", "leaf_summary_error",
+                       "summary_route_unavailable", "summary_result_rejected")
+
+
+def stop_reasons(messages: list[str]) -> list[str]:
+    found = []
+    for message in messages:
+        if message.startswith("LCM compaction stop: reason="):
+            found.append(message.split("reason=", 1)[1].split()[0])
+        elif message.startswith("LCM compress failed"):
+            found.append("error")
+    return found
 
 
 class Holds:
@@ -64,20 +85,25 @@ def one_pass(engine: Any, db: Path, kit: dict[str, Any], view: list[dict[str, An
     mark, calls_before = len(lines.lines), len(aux.CALLS)
     began = time.monotonic()
     record: dict[str, Any] = {"rows_in": len(view)}
+    out: Any = None
     try:
         out = engine.compress(copy.deepcopy(view), current_tokens=base.pressure(kit, view))
     except Exception as error:  # noqa: BLE001 - class only
         record["exception"] = type(error).__name__
-        out = view
     record["seconds"] = round(time.monotonic() - began, 3)
-    out = out if isinstance(out, list) else view
+    # The host receives a list only when compress returns one; otherwise the pass is never scored as unchanged,
+    # and the next pass is given the host's previous list.
+    record["returned_list"] = isinstance(out, list)
     new_lines = [line["message"] for line in lines.lines[mark:]]
+    record["stop_reasons"] = stop_reasons(new_lines)
+    returned = out if isinstance(out, list) else None
+    out = returned if returned is not None else view
     record.update({
-        "rows_out": len(out), "published": summary_nodes(db) > nodes_before,
+        "rows_out": len(out) if returned is not None else None, "published": summary_nodes(db) > nodes_before,
         "hold_armed": holds.count > held_before or any(m.startswith("LCM automatic compaction held")
                                                        for m in new_lines),
         "stored_check": compare_stored(stored_before, stored_identity(db, conversation)),
-        "returned_equals_input": out == snapshot,
+        "returned_equals_input": returned is not None and returned == snapshot,
         "summary_calls": [{k: c.get(k) for k in ("input_tokens", "granted_s", "deadline_left", "slept_s", "outcome")}
                           for c in aux.CALLS[calls_before:]],
         "stop_lines": [m[:240] for m in new_lines if m.startswith(("LCM compaction stop", "LCM automatic"))],
@@ -171,18 +197,29 @@ def cell_turns(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db
     return {"effective": rt.effective(config), "turns": turns, "first_publish_turn": published_at}
 
 
-def busy_thread(stop: threading.Event, work: Any, records: list[dict[str, Any]], pause_s: float) -> None:
+def busy_thread(stop: threading.Event, works: list[tuple[str, Any]], records: list[dict[str, Any]],
+                pause_s: float) -> None:
+    """The kit's calls in order, each its own record, registered before it starts (an unfinished call is seen)."""
     while not stop.is_set():
-        began = time.monotonic_ns()
-        error = None
-        try:
-            work()
-        except Exception as exc:  # noqa: BLE001 - class only
-            error = type(exc).__name__
-        ended = time.monotonic_ns()
-        records.append({"begin_ns": began, "end_ns": ended, "seconds": round((ended - began) / 1e9, 4), "error": error})
-        if pause_s:
-            stop.wait(pause_s)
+        for name, work in works:
+            if stop.is_set():
+                break
+            record: dict[str, Any] = {"call": name, "begin_ns": time.monotonic_ns(), "end_ns": None, "error": None}
+            records.append(record)
+            try:
+                work()
+            except Exception as exc:  # noqa: BLE001 - class only
+                record["error"] = type(exc).__name__
+            record["end_ns"] = time.monotonic_ns()
+            if pause_s:
+                stop.wait(pause_s)
+
+
+def finish_records(records: list[dict[str, Any]], at_ns: int) -> None:
+    """Seconds per call, unrounded; a call still running when the cell ended runs to `at_ns` and is marked."""
+    for record in records:
+        record["unfinished"] = record["end_ns"] is None
+        record["seconds"] = ((record["end_ns"] or at_ns) - record["begin_ns"]) / 1e9
 
 
 def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: Path,
@@ -201,11 +238,12 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     pause = 0.0 if args.worst_case else float(kit["bars"].get("d10_pause_s", 0.5))
     counter = {"n": 0}
 
-    def turn_call() -> None:  # the turn path's calls, in the kit's order: preflight, then a store write
+    def turn_preflight() -> None:  # the turn path's calls, in the kit's order: preflight, then a store write
         counter["n"] += 1
-        row = {"role": "user", "content": f"live-rows busy turn {counter['n']}", "timestamp": time.time()}
-        turn_view.append(row)
+        turn_view.append({"role": "user", "content": f"live-rows busy turn {counter['n']}", "timestamp": time.time()})
         turn_engine.should_compress_preflight(copy.deepcopy(turn_view))
+
+    def turn_ingest() -> None:
         turn_engine.ingest(copy.deepcopy(turn_view))
 
     def compaction_call() -> None:
@@ -217,9 +255,10 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     calls: list[dict[str, Any]] = []
     reader = rt.open_reader(db)
     watcher = lockwatch.Watcher(db)
-    threads = [threading.Thread(target=busy_thread, args=(stop, turn_call, turn_records, pause), daemon=True),
-               threading.Thread(target=busy_thread, args=(stop, compaction_call, compaction_records, pause),
-                                daemon=True)]
+    threads = [threading.Thread(target=busy_thread, args=(stop, [("preflight", turn_preflight), ("ingest", turn_ingest)],
+                                                          turn_records, pause), daemon=True),
+               threading.Thread(target=busy_thread, args=(stop, [("compress", compaction_call)], compaction_records,
+                                                          pause), daemon=True)]
     begin = time.monotonic_ns()
     for thread in threads:
         thread.start()
@@ -234,6 +273,8 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     if timer:
         timer.cancel()
     end = time.monotonic_ns()
+    finish_records(turn_records, end)
+    finish_records(compaction_records, end)
     observed = watcher.stop()
     reader.close()
     for item in (engine, turn_engine, compact_engine):
@@ -242,7 +283,9 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
         except Exception:  # noqa: BLE001
             pass
     compress = next(c for c in calls if c["call"] == "compress")
-    windows = lockwatch.holds(observed["transitions"], compress["begin_ns"], compress["end_ns"])
+    # The hold window spans the restart and the pass, as D9's does (a cold start may hold in either).
+    restart = next(c for c in calls if c["call"] == "restart")
+    windows = lockwatch.holds(observed["transitions"], restart["begin_ns"], compress["end_ns"])
     hold = max(windows, key=lambda w: w[1] - w[0], default=(compress["begin_ns"], compress["begin_ns"]))
 
     def during(record: dict[str, Any]) -> bool:
@@ -256,20 +299,25 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     exceptions = [r["error"] for r in turn_records + compaction_records if r["error"]]
     if compress.get("exception"):
         exceptions.append(compress["exception"])
+    reasons = stop_reasons([line["message"] for line in lines.lines if line["thread"] == threading.main_thread().ident])
+    if "error" in reasons:
+        exceptions.append("compress failed inside the product (reason=error)")
     return {
         "effective": rt.effective(config), "worst_case": bool(args.worst_case), "pause_s": pause, "calls": calls,
         "lock_watch": {k: observed.get(k) for k in ("samples", "poll_ns", "largest_gap_ms", "unexpected_answers")},
         "longest_hold_in_pass_s": (hold[1] - hold[0]) / 1e9, "longest_hold_s": lockwatch.longest_s(
             observed["transitions"], begin, end),
-        "pass_completed": result is not None and "exception" not in compress, "exceptions": exceptions,
+        "pass_completed": base.completed(result, compress, reasons, kit), "stop_reasons": reasons,
+        "exceptions": exceptions,
         "rows_examined": engine._live_rows_cursor["max_cursor"],
         "rows_stored_matching_list": base.rows_examined(db, kit["target"]["conversation_id"], view),
         "started_during_hold": {"turn": sum(map(during, turn_records)),
                                 "compaction": sum(map(during, compaction_records))},
-        "turn_calls": [{k: r[k] for k in ("seconds", "wait_s", "error")} | {"during_hold": during(r)}
-                       for r in turn_records],
-        "compaction_calls": [{k: r[k] for k in ("seconds", "return_s", "during_hold", "error")}
+        "turn_calls": [{k: r[k] for k in ("call", "seconds", "wait_s", "error", "unfinished")}
+                       | {"during_hold": during(r)} for r in turn_records],
+        "compaction_calls": [{k: r[k] for k in ("call", "seconds", "return_s", "during_hold", "error", "unfinished")}
                              for r in compaction_records],
+        "lock_unexpected": observed.get("unexpected_answers"),
         "summary_calls": [{k: c.get(k) for k in ("input_tokens", "granted_s", "deadline_left", "slept_s", "outcome")}
                           for c in aux.CALLS],
     }
