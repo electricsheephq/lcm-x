@@ -1529,7 +1529,7 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
 
     assert identity["engine"] == "lcm-x"
     assert identity["plugin_name"] == "hermes-lcm-x"
-    assert identity["plugin_version"] == "0.30.1"
+    assert identity["plugin_version"] == "0.30.2"
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1557,11 +1557,11 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
 
     initial = identity_mod._plugin_metadata()
     assert initial["name"] == "hermes-lcm-x"
-    assert initial["version"] == "0.30.1"
+    assert initial["version"] == "0.30.2"
 
-    updated = original.replace('version: "0.30.1"', 'version: "9.9.9-test"')
+    updated = original.replace('version: "0.30.2"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 0.30.1', 'version: 9.9.9-test')
+        updated = original.replace('version: 0.30.2', 'version: 9.9.9-test')
     assert updated != original
 
     manifest.write_text(updated, encoding="utf-8")
@@ -1592,7 +1592,7 @@ def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-x"
-    assert payload["runtime_identity"]["plugin_version"] == "0.30.1"
+    assert payload["runtime_identity"]["plugin_version"] == "0.30.2"
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 
@@ -23314,7 +23314,7 @@ class TestAssemblyToolPairGuardrail:
         assert result == messages
         self._assert_provider_tool_sequence_valid(result)
 
-    def test_sanitize_tool_pairs_replaces_out_of_order_parallel_results_with_stubs(self, tmp_path):
+    def test_sanitize_tool_pairs_keeps_out_of_order_parallel_results_in_call_order(self, tmp_path):
         instance = self._make_engine(tmp_path, "lcm_parallel_out_of_order.db")
         messages = [
             {"role": "assistant", "tool_calls": [
@@ -23328,10 +23328,12 @@ class TestAssemblyToolPairGuardrail:
         result = instance._sanitize_tool_pairs([dict(m) for m in messages])
 
         self._assert_provider_tool_sequence_valid(result)
+        # #2894: both real results are kept and emitted in call order; this cell used to
+        # pin the loss (result B replaced by a stub).
         assert [msg.get("tool_call_id") for msg in result[1:3]] == ["call_a", "call_b"]
         assert result[1]["content"] == "A out of order"
-        assert "earlier conversation" in result[2]["content"]
-        assert all(msg.get("content") != "B out of order" for msg in result)
+        assert result[2]["content"] == "B out of order"
+        assert len(result) == 3
 
 
 class TestEngineTools:

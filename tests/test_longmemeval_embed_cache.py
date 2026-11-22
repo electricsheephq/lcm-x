@@ -172,6 +172,21 @@ def test_prewarm_is_resumable_and_skips_all_warm_units(tmp_path):
     assert raw.calls == calls_after_first
 
 
+@pytest.fixture
+def opt_into_embedding_privacy(monkeypatch):
+    # The filter is off by default (#2977); the changed-manifest path exists only for the opt-in.
+    from hermes_lcm.config import LCMConfig
+
+    configure = LCMConfig.__init__
+
+    def configure_with_privacy(config, *args, **kwargs):
+        kwargs["embedding_privacy_enabled"] = True
+        configure(config, *args, **kwargs)
+
+    monkeypatch.setattr(LCMConfig, "__init__", configure_with_privacy)
+
+
+@pytest.mark.usefixtures("opt_into_embedding_privacy")
 def test_prewarm_changed_manifest_truncates_to_current_scan(tmp_path, monkeypatch):
     documents = ["ordinary document", "password: hunter2000abc"]
     monkeypatch.setattr(

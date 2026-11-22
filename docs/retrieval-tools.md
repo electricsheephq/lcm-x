@@ -378,7 +378,7 @@ network, or deadline failures keep the incoming order and are reported under
 When the embedding-privacy resolution is ON for the provider, the rerank query and every
 snippet are transformed with the provider-copy transform before transport and validated for
 residuals; ranking indices map back to the original hits, so only what leaves the machine is
-changed. The explicit `privacy:off` opt-out sends raw payloads by choice. A privacy-policy
+changed. The default `privacy:off` setting sends unfiltered payloads. A privacy-policy
 error propagates rather than silently skipping to RRF order (#371/#370).
 
 If the summary or chunk arm ran under `coverage='bounded'` (recency-truncated

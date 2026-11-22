@@ -67,20 +67,19 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the commands below
 Then verify in Hermes:
 
 ```text
-# Cloud provider-bound copies are protected automatically. Durable storage stays raw.
+# The experimental cloud embedding filter defaults to off.
 /lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
 /lcm status                        # checks the active provider and coverage
 ```
 
-Known cloud providers protect every provider-bound copy — embedding documents
-and queries, recall/grep/proactive query payloads, and rerank inputs — using
-`LCM_SENSITIVE_PATTERNS`, while the durable corpus remains lossless by default.
-Set `LCM_SENSITIVE_PATTERNS_ENABLED=true` only if you also want irreversible
-redaction on future durable ingest. To deliberately send raw embedding input,
-set `LCM_EMBEDDING_PRIVACY_ENABLED=false`; this opt-out is recorded as the
-`privacy:off` vector revision, so changing the posture requires re-embedding.
+Known cloud providers receive unfiltered embedding documents, queries, and
+rerank inputs by default under the `privacy:off` vector revision. Set
+`LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to experimental provider-input
+filtering with `LCM_SENSITIVE_PATTERNS`. Changing the setting requires
+re-embedding. `LCM_SENSITIVE_PATTERNS_ENABLED=true` separately enables
+irreversible redaction on future durable ingest.
 
 Notes: requests are batched under Voyage's caps — both the token budget and the 1000-item
 per-request cap; over-length documents are skipped and reported, never silently truncated;
@@ -454,12 +453,11 @@ FTS-only instantly.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the
 chunk corpus starts from raw message bytes, including tool-result output and error/traceback content.
-For known cloud providers the configured provider-input privacy transform applies by default
-(`LCM_EMBEDDING_PRIVACY_ENABLED` unset) and rejects residual detector matches before
-transport; `LCM_EMBEDDING_PRIVACY_ENABLED=false` sends chunk text raw under the `privacy:off`
-revision. Neither posture redacts your durable history — the chunk corpus is read from raw
-message bytes either way. This protects configured patterns but cannot
-classify every possible sensitive fact in source-derived chunk text.
+Known cloud providers receive unfiltered chunk text by default under the
+`privacy:off` revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to the
+experimental filter, which applies configured patterns to the provider input
+and rejects residual matches before transport. Both modes read from the same
+durable history.
 
 Because of this, `--corpus chunks --apply` and `--corpus both --apply` **refuse** on a cloud provider
 unless you pass an explicit acknowledgment:

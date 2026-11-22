@@ -570,8 +570,9 @@ def test_a_failed_presence_lookup_keeps_only_the_audits_own_finds(tmp_path, monk
         with caplog.at_level(logging.WARNING):
             engine.ingest(turn_end)
         after = Counter(_key(row) for row in _stored(engine))
-        # Main stores the moved prompt (audit's own find), plus the result and reply at/after the cursor.
-        assert after - before == Counter(_key(row) for row in (turn_end[84], *turn_end[-2:]))
+        # Main stored the moved prompt (audit's own find), plus the result and reply at/after the cursor, and lost the
+        # new call row below the cursor. Topic 9: a failed presence read is a trip, and the unwitnessed call is stored.
+        assert after - before == Counter(_key(row) for row in (turn_end[84], *turn_end[-3:]))
         assert not before - after
         assert any("presence" in record.message and record.levelno == logging.WARNING for record in caplog.records)
     finally:
@@ -675,12 +676,13 @@ def _window_ingest(tmp_path, monkeypatch, shape, window):
 
 @pytest.mark.parametrize("shape", ["V1", "2116"])
 def test_past_presence_window_stored_multiset_equals_main(tmp_path, monkeypatch, shape):
-    after, main, _missing = _window_ingest(tmp_path, monkeypatch, shape, 8)
-    assert after == main
+    after, main, missing = _window_ingest(tmp_path, monkeypatch, shape, 8)
+    # Topic 9: past the window a moved call row is no longer credited by position (V1); a text row keeps main's (#2116).
+    assert after == main + Counter({missing: 1 if shape == "V1" else 0})
 
 
-@pytest.mark.xfail(strict=True, reason=_WINDOW_LIMIT)
 def test_2455_past_presence_window_moved_call_is_stored_named_limit(tmp_path, monkeypatch):
+    # Topic 9: the trip no longer credits an unwitnessed call row by position, so this limit is closed.
     after, _main, missing = _window_ingest(tmp_path, monkeypatch, "V1", 8)
     assert after[missing] == 1
 
@@ -691,7 +693,8 @@ def test_2116_past_presence_window_replaced_reply_is_stored_named_limit(tmp_path
     assert after[missing] == 1
 
 
-@pytest.mark.parametrize("window,stored", [(10, 1), (9, 0)], ids=["exactly-N", "N-plus-one"])
+# Topic 9: one row past the window the moved call is stored too (an unwitnessed call row is never credited).
+@pytest.mark.parametrize("window,stored", [(10, 1), (9, 1)], ids=["exactly-N", "N-plus-one"])
 def test_presence_window_ingest_boundary(tmp_path, monkeypatch, window, stored):
     after, main, missing = _window_ingest(tmp_path, monkeypatch, "V1", window)
     assert after == main + Counter({missing: stored})
@@ -830,7 +833,7 @@ def test_presence_byte_budget_ingest_boundary(tmp_path, monkeypatch, caplog, ove
     with caplog.at_level(logging.INFO, logger=identity_anchor.__name__):
         after, main, missing = _window_ingest(tmp_path, monkeypatch, "V1", 10000)
     assert budgets
-    assert after == main + Counter({missing: 0 if over else 1})
+    assert after == main + Counter({missing: 1})  # topic 9: stored on both sides of the byte budget
     limits = [r for r in caplog.records if "presence window incomplete" in r.message]
     assert len(limits) == over
     assert all(r.levelno == logging.INFO for r in limits)

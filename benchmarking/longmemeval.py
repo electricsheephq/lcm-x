@@ -2841,8 +2841,7 @@ def evaluate_question(
         rerank_enabled=recall_rerank,
         rerank_window_limit=recall_rerank_window,
         rerank_margin=recall_rerank_margin,
-        # Keep the benchmark corpus lossless. Cloud privacy applies only to
-        # provider-bound copies and resolves on automatically for cloud names.
+        # Keep the benchmark corpus lossless and use the default cloud revision.
         sensitive_patterns_enabled=False,
         embedding_privacy_enabled=None,
     )

@@ -1,7 +1,7 @@
 """#2466 review, round 5 (the release manager's rule-pairs lens), named limit: the presence check runs only on a turn
 where the audit already missed a row. A tool row the host moved below the cursor while every text row there is
-accounted for keeps main's result (a positional replay). Main-equal, tracked under #2467: the new-call tests assert
-the correct behaviour and are strict xfails until that follow-up; the old pair and repeat-ingest checks run unmarked.
+accounted for kept main's result (a positional replay), tracked under #2467. The topic-9 loss fix runs the call-id
+scan in that case too, so the new-call tests now pass unmarked, beside the old pair and repeat-ingest checks.
 Default config, unique ids."""
 from __future__ import annotations
 
@@ -16,9 +16,6 @@ from hermes_lcm.engine import LCMEngine
 SESSION = "s-r51"
 PAD = " alpha beta gamma delta" * 40
 SLOT = 4
-LIMIT = pytest.mark.xfail(strict=True, raises=AssertionError,
-                          reason="#2467: the presence check runs only when the audit misses a row; a moved tool row "
-                                 "with every text row accounted for keeps main's result")
 
 
 def _engine(tmp_path):
@@ -114,7 +111,7 @@ def test_the_gate_shapes_keep_the_old_pair_and_a_repeat_ingest_changes_nothing(t
     assert first["call_old"] == (1, 1), first
 
 
-@LIMIT
+# Topic 9 closes #2467 for these shapes: the call-id scan runs even when every text row is accounted for.
 @pytest.mark.parametrize("scenario", list(SCENARIOS))
 def test_the_new_call_is_stored_once_with_its_result(tmp_path, scenario):
     first, _ = _go(tmp_path, scenario)
