@@ -88,8 +88,7 @@ def d10_run(receipt: dict[str, Any] | None, arm: str, bars: dict[str, Any], pinn
     if receipt is None:
         return {"arm": arm, "outcome": UNRUN, "reasons": ["no receipt"]}
     wrong = mismatch(receipt, "d10", arm, "default")
-    labels_ok = wrong is None or wrong.startswith("the receipt does not qualify")
-    if receipt.get("exceptions") and labels_ok:  # an exception fails bar 4 in either arm, crash receipts included
+    if receipt.get("exceptions") and wrong is None:  # an exception fails bar 4 in either arm, crash receipts included
         return {"arm": arm, "outcome": FAIL, "reasons": ["an exception: bar 4 fails"]}
     if wrong:
         return {"arm": arm, "outcome": INCONCLUSIVE, "reasons": [wrong]}

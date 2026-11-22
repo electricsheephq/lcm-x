@@ -325,8 +325,7 @@ def test_delta_receipt_rules():
         "outcome"] == "INCONCLUSIVE"
     assert verdicts.d9({"uid_on": d9_receipt(5.0)}, BARS, 100)["outcome"] == "PASS"
     # A D10 run that crashed in its restart is a raw FAIL (bar 4), not INCONCLUSIVE, even when it does not qualify.
-    crashed = d10_receipt(cell_error={"step": "restart", "class": "RuntimeError"}, exceptions=["RuntimeError"],
-                          qualifies=False)
+    crashed = d10_receipt(cell_error={"step": "restart", "class": "RuntimeError"}, exceptions=["RuntimeError"])
     assert verdicts.d10({"uid_on": crashed, "default": d10_receipt(arm="default")}, BARS, 100)["outcome"] == "FAIL"
 
 
@@ -353,3 +352,11 @@ def test_delta_network_refusal_covers_reverse_lookups(monkeypatch):
                  lambda: socket.getaddrinfo("example.invalid", 80)):
         with pytest.raises(OSError):
             call()
+
+
+def test_delta2_new_payload_file_is_recorded_not_a_copy():
+    from bench.instruments.gate_kit.live_rows.cells import compare_stored
+    before = [(1, b"a"), ("payload:x", b"p")]
+    added = compare_stored(before, before + [("payload:y", b"q")])
+    assert added["duplicated"] == 0 and added["payloads_added"] == 1
+    assert compare_stored(before, [(1, b"a")])["lost"] == 1  # a lost payload is still a loss

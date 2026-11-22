@@ -47,14 +47,17 @@ def compare_stored(before: list[tuple[int, Any]], after: list[tuple[int, Any]]) 
     old, new = dict(before), dict(after)
     lost = [sid for sid in old if sid not in new]
     changed = [sid for sid in old if sid in new and new[sid] != old[sid]]
-    added = [sid for sid in new if sid not in old]
+    added_all = [sid for sid in new if sid not in old]
+    # A new payload file is recorded, not a copy (a pass may externalize); a lost or changed one counts as lost.
+    payloads_added = [sid for sid in added_all if isinstance(sid, str)]
+    added = [sid for sid in added_all if not isinstance(sid, str)]
     earlier_values = set(old.values())
     copies = [sid for sid in added if new[sid] in earlier_values]
     kept = [sid for sid, _ in before if sid in new]
     reordered = bool(changed) and sorted(old[sid] for sid in changed) == sorted(new[sid] for sid in changed)
     return {"lost": len(lost) + len(changed), "removed": len(lost), "changed": len(changed),
             "duplicated": len(added), "added_copies": len(copies), "reordered": reordered,
-            "kept_in_order": [sid for sid, _ in after if sid in old] == kept,
+            "kept_in_order": [sid for sid, _ in after if sid in old] == kept, "payloads_added": len(payloads_added),
             "lost_ids": (lost + changed)[:20], "added_ids": added[:20]}
 
 
@@ -291,7 +294,10 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
             timer.cancel()
         for thread in threads:
             thread.join(timeout=120)
-        watcher.stop()
+        try:  # a watcher failure must not replace the restart's error (its receipt is the bar-4 FAIL)
+            watcher.stop()
+        except Exception:  # noqa: BLE001
+            pass
         reader.close()
         raise
     stop.set()
@@ -315,8 +321,11 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     windows = lockwatch.holds(observed["transitions"], restart["begin_ns"], compress["end_ns"])
     hold = max(windows, key=lambda w: w[1] - w[0], default=(compress["begin_ns"], compress["begin_ns"]))
 
-    def during(record: dict[str, Any]) -> bool:  # any write-lock hold inside the restart and pass
+    def during(record: dict[str, Any]) -> bool:  # bar 2: any write-lock hold inside the restart and pass
         return any(start <= record["begin_ns"] <= stop for start, stop in windows)
+
+    def in_hold(record: dict[str, Any]) -> bool:  # the row's guard: a call starting during THE hold (the longest)
+        return hold[0] <= record["begin_ns"] <= hold[1]
 
     for record in compaction_records:
         record["during_hold"] = during(record)
@@ -343,8 +352,8 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
         "exceptions": exceptions,
         "rows_examined": engine._live_rows_cursor_pass["max_cursor"],
         "rows_stored_matching_list": base.rows_examined(db, kit["target"]["conversation_id"], view),
-        "started_during_hold": {"turn": sum(map(during, turn_records)),
-                                "compaction": sum(map(during, compaction_records))},
+        "started_during_hold": {"turn": sum(map(in_hold, turn_records)),
+                                "compaction": sum(map(in_hold, compaction_records))},
         "turn_calls": [{k: r[k] for k in ("call", "seconds", "wait_s", "error", "unfinished")}
                        | {"during_hold": during(r)} for r in turn_records],
         "compaction_calls": [{k: r[k] for k in ("call", "seconds", "return_s", "during_hold", "error", "unfinished")}
