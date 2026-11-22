@@ -109,8 +109,9 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
 ```
 
 Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
-`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
-by default for provider-bound copies; durable storage stays raw. See
+`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is off
+by default for provider-bound copies (opt in with `LCM_EMBEDDING_PRIVACY_ENABLED=true`);
+durable storage stays raw. See
 [Voyage setup, key creation and current limits](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
 
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
