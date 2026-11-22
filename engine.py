@@ -153,7 +153,10 @@ from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
-from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
+from .reconcile import (
+    _commit_proof_identity_digest, _emitted_user_replay_digest, _has_lossy_redacted_identity,
+    _merge_append_cut, _proof_user_identity,
+)
 from . import compaction
 from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
@@ -8798,6 +8801,7 @@ class LCMEngine(
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
+        accepted_emitted_users = set()
         proof = stored_proof = getattr(self, "_compress_commit_proof", None)
         if proof and proof.get("durable") is False:
             metadata = proof.get("output_metadata")
@@ -8840,11 +8844,12 @@ class LCMEngine(
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
                 proven_cursor = self._ingest_cursor
+                output_metadata = proof.get("output_metadata", ())
                 new_prefix_occurrences = {
-                    idx for idx, previous in enumerate(proof.get("output_metadata", ()))
+                    idx for idx, previous in enumerate(output_metadata)
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
-                restamp_metadata.update({idx: (self._session_id, proof["output_metadata"][idx])
+                restamp_metadata.update({idx: (self._session_id, output_metadata[idx])
                                          for idx in new_prefix_occurrences})
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -8853,6 +8858,11 @@ class LCMEngine(
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
                 accepted_compaction_prefix = cursor
+                if len(output_metadata) == proven_cursor:
+                    accepted_emitted_users = {
+                        idx for idx, digest in proof.get("emitted_user_digests", {}).items()
+                        if idx < accepted_compaction_prefix and digest == _emitted_user_replay_digest(messages[idx])
+                    }
                 self._compress_commit_proof = None
             elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
                 self._proof_replay_identity(m, strip_carrier=False, allow_pruned_tool_alias=idx not in recent_tools)
@@ -8901,6 +8911,10 @@ class LCMEngine(
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
+                if idx in accepted_emitted_users:
+                    # The host can stamp the exact new emission. The cached
+                    # timestamp belongs to the head before reassembly.
+                    continue
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
                 elif (messages[idx].get("content") == previous.get("content")
@@ -9137,12 +9151,16 @@ class LCMEngine(
                         self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]
                     ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
+                    cached_prefix = self._copy_active_replay_messages_preserving_generated_ids(
+                        cached_active_replay_messages[:cursor]
+                    )
+                    for idx in accepted_emitted_users:
+                        if idx < cursor:
+                            cached_prefix[idx] = fresh_replay_messages[idx]
                     replay_messages = (
                         self._keep_host_held_stubs(
                             messages[:cursor],
-                            self._copy_active_replay_messages_preserving_generated_ids(
-                                cached_active_replay_messages[:cursor]
-                            ),
+                            cached_prefix,
                             fresh_replay_messages[:cursor],
                         )
                         + replay_messages[cursor:]
@@ -9251,7 +9269,8 @@ class LCMEngine(
 
             def finish_no_new():
                 freeze_trip_witness(replay_messages)
-                cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+                cached_replay = (None if accepted_emitted_users else
+                                 self._cached_active_replay_messages(messages, fresh_replay_messages))
                 return cached_replay if cached_replay is not None else remember(replay_messages)
 
             return replay_messages, finish_no_new
