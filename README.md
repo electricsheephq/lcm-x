@@ -161,9 +161,8 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 v0.30.0 was cut on the `release/v0.30.x` maintenance branch (its candidates from rc4 on),
-not from `main`; v0.30.x patch releases are cut from that branch. That branch carries the
-forward identity `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carries first, on top
-of `v0.30.0` (the first v0.30.x release train). The `v0.30.0` tag carries
+not from `main`; v0.30.x patch releases are cut from that line. Its first patch release, v0.30.1 (the first v0.30.x release train),
+carries `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`. The `v0.30.0` tag carries
 `hermes-lcm-x v0.30.0`, and the `main` line keeps that identity in `plugin.yaml` until its
 own next release.
 An identity is never a restamp of any past commit's own recorded identity
@@ -343,11 +342,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `release/v0.30.x` line, output with all three opt-in flags enabled is:
+Example output for v0.30.2 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.2 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
