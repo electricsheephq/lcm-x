@@ -981,7 +981,8 @@ class CompactionMixin:
                     if restore_trimmed:
                         guarded_restore = guarded
                     result = guarded
-            elif scope is not None and scope.uid_trimmed and result is not messages:
+            # The stub-first fallback assembles from pre-trim rows, as the ratio-0 immediate exit does.
+            elif scope is not None and scope.uid_trimmed and result is not messages and not self._stub_first_exit_now:
                 restore_trimmed = True
             if restore_trimmed:
                 result = self._sanitize_active_context_messages(
@@ -4395,10 +4396,10 @@ class CompactionMixin:
                 if action == "return":
                     return result
             except Exception as exc:
-                if self._compress_binding_changed():
-                    return messages
                 if leaf_passes or not state.stub_first_fallback:
                     raise
+                if self._compress_binding_changed():
+                    return messages
                 # The staged free cuts belong to the old binding after a lifecycle failure.
                 if isinstance(exc, (LifecycleBindingChangedError, LifecyclePublicationConflictError)):
                     return self._fail_open_after_publication_failure(
