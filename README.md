@@ -162,8 +162,8 @@ installed stable product.
 
 v0.30.0 was cut on the `release/v0.30.x` maintenance branch (its candidates from rc4 on),
 not from `main`; v0.30.x patch releases are cut from that line. It carried the identity
-`hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`
-(the first v0.30.x release train); the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`. The `v0.30.0` tag carries
+`hermes-lcm-x v0.30.1` (the first v0.30.x release train), which the `v0.30.1-rc1` tag carried
+first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`. The `v0.30.0` tag carries
 `hermes-lcm-x v0.30.0`, and the `main` line keeps that identity in `plugin.yaml` until its
 own next release.
 An identity is never a restamp of any past commit's own recorded identity
@@ -343,7 +343,7 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `release/v0.30.x` line, output with all three opt-in flags enabled is:
+For a loaded v0.30.2 build, with all three opt-in flags enabled and no tools disabled, the output is:
 
 ```text
 Plugins (1):

@@ -313,7 +313,7 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `release/v0.30.x` line, output with all three opt-in flags enabled is:
+For a loaded v0.30.2 build, with all three opt-in flags enabled and no tools disabled, the output is:
 
 ```text
 Plugins (1):

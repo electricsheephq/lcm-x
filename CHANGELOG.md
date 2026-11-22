@@ -12,9 +12,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   messages Hermes merged, is no longer counted as stored without being stored (#3019; main port #3020). Unmatched
   tool call and result rows in the changed part of the list before the resume point are looked up by call id in the
   session's stored rows and its verified lineage, even when the audit finds no missing row; rows not found are stored
-  when they pass the id, ignore and tool-group checks. When the lookup stops early, an eligible row keeps its credit
-  if the previous completed ingest's list held a row of the same kind with the same ids below its published resume
-  point, and the other eligible rows are stored. Rows lost before this release are not restored; a transcript-based repair is planned
+  when they pass the id, ignore and tool-group checks. When the lookup stops early, an eligible row can keep its
+  credit through a matching key (its kind and ids) retained from the same session's previous completed ingest, each
+  key once, and the other eligible rows are stored. Rows lost before this release are not restored; a transcript-based repair is planned
   for v0.30.3 (#3022). Residual shapes: #3023.
 
 ## v0.30.1 (nothing lost, part 2; turn recovery is opt-in)
