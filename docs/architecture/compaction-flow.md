@@ -57,10 +57,10 @@ figure or list count is missing. Increases use the unscaled token count.
 With an active depth target and the resolved foreground defaults (60 s soft,
 120 s hard), a sweep that has stored a leaf or condensed node can admit
 additional calls while its estimate stays above the depth target. A call the
-base budget would refuse must fit its estimate by the start of the pass plus
-210 s minus the greater of the finalization reserve and 20 s. Its timeout is
-85% of the smaller of the configured summary timeout and its remaining usable
-time. Pre-leaf condensation keeps its leaf reservation and credits the frontier
+base budget would refuse gets a timeout of 85% of the smaller of the configured
+summary timeout and the time left to the catch-up bound (the start of the pass
+plus 210 s, minus the greater of the finalization reserve and 20 s), and it is
+admitted only when its estimate fits that timeout. Pre-leaf condensation keeps its leaf reservation and credits the frontier
 saving before the first leaf check. Each stored post-leaf condensation group
 refreshes the estimate and closes catch-up as soon as it reaches the target.
 Forced, overflow and recovery passes, non-default foreground settings, and
