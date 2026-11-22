@@ -81,5 +81,3 @@ def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
         return set()
     columns = [column[0] for column in candidates.description]
     return {row["store_id"] for raw in candidates if is_known_head_copy(conn, row := dict(zip(columns, raw)))}
-
-
