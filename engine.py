@@ -9188,31 +9188,35 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
-        def freeze_trip_witness():
+        def freeze_trip_witness(active):
+            # Topic 9: keys from the active replay list this ingest publishes, where every ignored row is already a
+            # generated placeholder (an ignored call carries no tool_calls). Only rows below the published cursor
+            # count: a cursor short of the list leaves the rest unwitnessed, so they fail toward storing. A list
+            # that is not index-aligned with the host list freezes no witness (copies, never a loss).
             keys = Counter()
-            patterns = bool(getattr(self, "_compiled_ignore_message_patterns", None))
-            # Only rows below the published cursor count: a cursor short of the list (a budget or a compaction
-            # output) leaves the rest unwitnessed, so they fail toward storing.
-            for idx, message in enumerate(messages[:max(0, min(len(messages), int(self._ingest_cursor or 0)))]):
-                key = _trip_key(message)
-                if key is None:
-                    continue  # text rows never witness, so they never reach the pattern check
-                content = message.get("content")
-                if isinstance(content, str) and content.lstrip().startswith("[LCM active replay placeholder:"):
-                    continue  # a generated placeholder is never stored, so it never witnesses (F4)
-                # Patterns run on the tail this ingest classified only (the scan-only-new-tail contract);
-                # earlier rows were classified by earlier ingests, and the trip never credits an ignored view row.
-                if patterns and idx >= scan_start:
+            active = list(active or ())
+            # A pass whose audit fell open stored nothing that proves its unaudited prefix [unaudited_from, entry
+            # cursor): those rows never witness. Rows it stored past the entry cursor still do.
+            limit = min(len(active), int(self._ingest_cursor or 0))
+            skip = range(int(unaudited_from), entry_cursor) if unaudited_from is not None else range(0)
+            if len(active) == len(messages):
+                for idx, message in enumerate(active[:max(0, limit)]):
+                    if idx in skip:
+                        continue
+                    key = _trip_key(message)
+                    if key is None:
+                        continue  # text rows and ignored calls never witness
                     try:
-                        if self._matches_ignore_message_patterns(message):
-                            continue  # an ignored row is never stored, so it never witnesses (F4)
+                        text = text_content_for_pattern_matching(message.get("content")) or ""
+                        if self._is_ignored_active_replay_placeholder(message, text):
+                            continue  # a generated placeholder is never stored, so it never witnesses (F4)
                     except Exception:
                         continue
-                keys[key] += 1
+                    keys[key] += 1
             self._trip_witness = (self._session_id, keys)
 
         def remember(active):
-            freeze_trip_witness()
+            freeze_trip_witness(active)
             previous_replay = getattr(self, "_last_active_replay_messages", ())
             previous_generated_ids = (
                 self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
@@ -9240,7 +9244,7 @@ class LCMEngine(
                 self._persist_ingest_replay_evidence(replay_messages)
 
             def finish_no_new():
-                freeze_trip_witness()
+                freeze_trip_witness(replay_messages)
                 cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
                 return cached_replay if cached_replay is not None else remember(replay_messages)
 

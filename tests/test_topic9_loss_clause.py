@@ -86,7 +86,9 @@ def test_whole_interval_scan_before_the_rewind(tmp_path, monkeypatch):
         edited = _u("T1 user turn, edited by the host", 1002)
         reply = _a("a new reply", 1600)
         monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
+        seen = _spy_unaccounted(monkeypatch, engine)
         engine.ingest([u0, fresh_call, fresh_result, edited, reply])
+        assert seen and seen[0][1] is None, "setup: the presence scan must trip"
         stored = _counts(engine)
         assert stored[_key(fresh_call)] == 1
         assert stored[_key(fresh_result)] == 1
@@ -150,7 +152,10 @@ def test_a_stored_calls_unstored_result_slid_below_the_cursor_is_stored(tmp_path
         m2 = _a("answer", 2005)
         if window is not None:
             monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", window, raising=False)
+        seen = _spy_unaccounted(monkeypatch, engine)
         engine.ingest([*history, prompt_a, m1, r_a, r_b, m2])  # r_b now sits below the old cursor
+        assert seen, "setup: the presence scan ran"
+        assert (seen[0][1] is None) == (window is not None), "setup: the scan trips only with the small window"
         stored = _counts(engine)
         assert stored[_key(r_b)] == 1, "the stored call's second result must be stored once"
         for row in (*history, m1, r_a, m2):
@@ -172,7 +177,9 @@ def test_trip_never_stores_an_orphan_result_of_an_ignored_call(tmp_path, monkeyp
         edited = _u("T1 user turn, edited by the host", 1002)
         reply = _a("a new reply", 1600)
         monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
+        seen = _spy_unaccounted(monkeypatch, engine)
         engine.ingest([u0, ignored_call, its_result, edited, reply])
+        assert seen and seen[0][1] is None, "setup: the presence scan must trip"
         stored = _counts(engine)
         assert stored[_key(its_result)] == 0, "a result is never stored without its call"
         assert stored[_key(ignored_call)] == 0

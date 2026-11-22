@@ -196,7 +196,9 @@ def test_i2_absent_call_whose_result_is_already_stored(tmp_path, monkeypatch, wi
         engine.ingest([u0, a0, _u("T1 user turn, edited", 1002), call_x, result_x, _a("reply", 1600)])
         if window is not None:
             assert trips, "setup: the presence scan tripped"
-        assert _counts(engine)[_key(call_x)] == 1
+        counts = _counts(engine)
+        assert counts[_key(result_x)] == 1, "restoring the call never stores its stored result again"
+        assert counts[_key(call_x)] == 1
     finally:
         engine.shutdown()
 
@@ -301,5 +303,136 @@ def test_cold_start_on_the_same_store_and_list_stores_nothing_new(tmp_path, monk
     try:
         engine.ingest(list(rows))
         assert _counts(engine) == before
+    finally:
+        engine.shutdown()
+
+
+def test_r1_an_ignored_call_seen_again_below_the_scan_start_never_witnesses(tmp_path, monkeypatch):
+    """Review r1 (Astra): an ignored call ingested twice sits below the next pass's scan start; it must not
+    witness the storable version of the same invocation, nor authorize its result alone."""
+    engine = _engine(tmp_path)
+    engine._compiled_ignore_message_patterns = [_IgnoreMe()]
+    try:
+        u0, a0, u1, a1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002), \
+            _a("reply to T1", 1004)
+        ignored = _unstamped({**_call("call_r1", 1003), "content": "IGNORE-ME"})
+        engine.ingest([u0, a0, u1, ignored, a1])
+        u2 = _u("T2 user turn", 1005)
+        engine.ingest([u0, a0, u1, ignored, a1, u2])  # the same raw list again: the call is now below scan start
+        real = _unstamped(_call("call_r1", 1003))
+        result = _unstamped(_result("call_r1", "its result", 1004))
+        _trip(monkeypatch)
+        trips = _trips(monkeypatch, engine)
+        engine.ingest([u0, a0, u1, real, result, u2, _a("reply", 1600)])  # the result takes a1's slot
+        assert trips, "setup: the presence scan tripped"
+        stored = _counts(engine)
+        assert stored[_key(real)] == 1 and stored[_key(result)] == 1
+    finally:
+        engine.shutdown()
+
+
+def test_r1_a_placeholder_echoed_as_text_parts_never_witnesses(tmp_path, monkeypatch):
+    """Review r1 (Astra): the host echoes LCM's placeholder as a list of text parts; it still never witnesses."""
+    engine = _engine(tmp_path)
+    engine._compiled_ignore_message_patterns = [_IgnoreMe()]
+    try:
+        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
+        call = _unstamped(_call("call_r1p", 1003))
+        ignored = _unstamped(_result("call_r1p", "IGNORE-ME raw output", 1004))
+        a1 = _a("reply to T1", 1005)
+        engine.ingest([u0, a0, u1, call, ignored, a1])
+        replay = list(engine._last_active_replay_messages)
+        marker = replay[4]["content"]
+        assert str(marker).startswith("[LCM active replay placeholder:"), marker
+        echoed = {**replay[4], "content": [{"type": "text", "text": marker}]}
+        engine.ingest([*replay[:4], echoed, replay[5], _u("T2 user turn", 1006)])
+        real = _unstamped(_result("call_r1p", "the real output", 1004))
+        _trip(monkeypatch)
+        trips = _trips(monkeypatch, engine)
+        engine.ingest([*replay[:4], real, replay[5], _u("T2 user turn", 1006), _a("reply", 1600)])
+        assert trips, "setup: the presence scan tripped"
+        assert _counts(engine)[_key(real)] == 1
+    finally:
+        engine.shutdown()
+
+
+def test_r1_a_repeated_result_id_never_copies_the_stored_result(tmp_path, monkeypatch):
+    """Review r1 (Astra): a new result reusing a stored result's id, placed before it, must not spend its witness
+    and copy it. A repeated result id is ambiguous and keeps main's result (a named limit)."""
+    engine = _engine(tmp_path)
+    try:
+        rows = _tool_history()
+        engine.ingest(list(rows))
+        before = _counts(engine)
+        again = _unstamped(_result("call_d1", "a second result for d1", 1015))
+        fresh_call, fresh_result = _call("call_rr", 1003), _result("call_rr", "fresh", 1004)
+        _trip(monkeypatch)
+        trips = _trips(monkeypatch, engine)
+        # The host drops two stored text rows (fresh pair) and one more (the repeated result) before d1's pair.
+        engine.ingest([rows[0], fresh_call, fresh_result, *rows[3:6], again, *rows[7:], _a("reply", 1600)])
+        assert trips, "setup: the presence scan tripped"
+        stored = _counts(engine)
+        assert stored[_key(rows[8])] == 1, "the stored d1 result is not copied"
+        assert stored[_key(fresh_call)] == 1 and stored[_key(fresh_result)] == 1
+        assert not before - stored
+    finally:
+        engine.shutdown()
+
+
+def test_r1_a_real_output_that_starts_like_a_placeholder_still_witnesses(tmp_path, monkeypatch):
+    """Review r1 (Astra): a genuine stored tool output that begins with the placeholder prefix is not a placeholder;
+    on a trip it is witnessed, not copied."""
+    engine = _engine(tmp_path)
+    try:
+        rows = _tool_history()
+        rows[8] = _unstamped(_result("call_d1", "[LCM active replay placeholder: example]", 1022))
+        engine.ingest(list(rows))
+        before = _counts(engine)
+        fresh_call, fresh_result = _call("call_rp", 1003), _result("call_rp", "fresh", 1004)
+        _trip(monkeypatch)
+        trips = _trips(monkeypatch, engine)
+        engine.ingest([rows[0], fresh_call, fresh_result, *rows[3:], _a("reply", 1600)])
+        assert trips, "setup: the presence scan tripped"
+        added = _counts(engine) - before
+        assert added[_key(rows[8])] == 0, added
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("window", [1, None], ids=["trip", "no-trip"])
+def test_r1_a_pass_whose_audit_fell_open_never_witnesses_its_prefix(tmp_path, monkeypatch, window):
+    """Review r1 (Claude): the topic-9 merge turn's pre-match raises on both attempts, so the ingest falls open and
+    never stores the slid reply. Its witness must not hold that reply, so the next ingest stores it once."""
+    engine = _engine(tmp_path)
+    try:
+        hist = [_u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002), _a("reply to T1", 1003)]
+        prompt_a, prompt_b = _u("A: first part", 2000), _u("B: second part", 2001)
+        engine.ingest([*hist, prompt_a, prompt_b])
+        m1 = {"role": "assistant", "content": "Let me check both files.", "tool_calls": [
+            {"id": "call_fo_a", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "a"}'}},
+            {"id": "call_fo_b", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "b"}'}}]}
+        r1a = _unstamped(_result("call_fo_a", "contents a", 2003))
+        r1b = _unstamped(_result("call_fo_b", "contents b", 2004))
+        m2 = _a("answer", 2005)
+        original = prompt_a["content"]
+        prompt_a["content"] = original + "\n\n" + prompt_b["content"]
+        prompt_a["_merged_turn_prefix"] = original
+        with monkeypatch.context() as patch:
+            def boom(*_a, **_k):
+                raise RuntimeError("injected pre-match fault")
+            patch.setattr(engine, "_identity_anchor_prematch", boom)
+            try:
+                engine.ingest([*hist, prompt_a, m1, r1a, r1b, m2])
+            except Exception:  # noqa: BLE001 (the fall-open path may surface the fault; the next ingest decides)
+                pass
+        witness = (engine.__dict__.get("_trip_witness") or (None, {}))[1]
+        assert not witness.get(("call", ("call_fo_a", "call_fo_b"))), "the fallen-open pass never witnesses m1"
+        if window is not None:
+            _trip(monkeypatch)
+        engine.ingest([*hist, prompt_a, m1, r1a, r1b, m2, _a("next answer", 2100)])
+        stored = _counts(engine)
+        for row in (m1, r1a, r1b, m2):
+            assert stored[_key(row)] >= 1, row
+        assert stored[_key(m1)] == 1
     finally:
         engine.shutdown()
