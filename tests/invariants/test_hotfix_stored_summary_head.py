@@ -4,10 +4,12 @@ import json
 
 import pytest
 
-from hermes_lcm import tools
+from hermes_lcm import host_uid_emit, ingest_ledger, tools
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
+from tests.test_issue_2854_no_summary_pass_unchanged import open_engine  # noqa: F401
 from tests.test_issue_671_stub_first_exit import (
     THRESHOLD,
+    TURN,
     exit_engine,
     make_engine,  # noqa: F401
     run,
@@ -155,6 +157,111 @@ def test_search_preserves_original_hits_and_summary(twins):
     assert all(row["store_id"] != copy_id for row in loaded["messages"])
 
 
+class _QuotedTurnHidden(AssertionError):
+    """A separately identified turn was excluded as a copy."""
+
+
+def _assert_distinct_head_uid(engine, emitted, quote):
+    store = engine._store
+    salt = store.ingest_ledger_salt()
+    heads = store.connection.execute(
+        "SELECT e.output_index, e.emission_id, e.descriptor_digest, v.entries "
+        "FROM ledger_emissions e LEFT JOIN ingest_views v "
+        "ON v.lineage=e.lineage AND v.view_seq=e.view_seq AND v.kind='emission' "
+        "WHERE e.kind IN ('summary', 'carrier')"
+    ).fetchall()
+    assert any(index == 0 for index, *_ in heads)
+    quote_uid = quote["message_uid"]
+    for index, emission_id, digest, entries in heads:
+        entry = ingest_ledger.decode_entries(entries)[index]
+        head = emitted[index]
+        assert entry.is_descriptor and entry.ref == emission_id
+        assert entry.identity_digest == digest == ingest_ledger.identity_digest(salt, head)
+        uid, absorbed = head["message_uid"], head.get("_absorbed_message_uids", [])
+        assert entry.uidset_digest == ingest_ledger.uidset_digest(salt, uid, absorbed)
+        assert entry.uidset_digest != ingest_ledger.uidset_digest(salt, quote_uid, [])
+        assert quote_uid != uid and quote_uid not in absorbed
+
+
+@pytest.mark.parametrize("quote_mode", [
+    "default",
+    pytest.param("on", marks=pytest.mark.xfail(
+        strict=True, raises=_QuotedTurnHidden,
+        reason="UID-on refinement: keep a separately stamped quote with a UID distinct from every emitted head",
+    )),
+])
+@pytest.mark.parametrize("repeat_request", [False, True], ids=["quote-only", "quote-and-request"])
+def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkeypatch,  # noqa: F811
+                                          quote_mode, repeat_request):
+    """Pin the accepted default tradeoff: the quote stays stored but is hidden from prompt, compaction and recall."""
+    if quote_mode == "on":
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    else:
+        monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
+    engine = exit_engine(open_engine)
+    assert engine._uid_recognition_enabled() == (quote_mode == "on")
+    flush = _host_flush()
+    seed = flush([dict(row, message_uid=f"seed-{index}")
+                  for index, row in enumerate([*text_view()[1:-2], *NEW_TURN])])
+    emitted = run(engine, seed, caplog)
+    head = emitted[0]["content"]
+    assert emitted[0]["role"] == "user" and engine._verified_lcm_summary_prefix_end(head) == len(head)
+    assert engine._last_compress_leaves[1] > 0
+
+    earlier = engine._store.get_session_messages(engine._session_id)
+    request = next(row["content"] for row in reversed(earlier) if row["role"] == "user")
+    content = f"{head}\n\n{request}" if repeat_request else head
+    live = flush(emitted)
+    quote, = flush([{"role": "user", "content": content, "message_uid": "separately-stamped-quote"}])
+    assert quote["timestamp"] > live[0]["timestamp"]
+    if quote_mode == "on":
+        _assert_distinct_head_uid(engine, emitted, quote)
+    engine.note_turn_complete()
+    engine.ingest([*live, quote])
+    stored = engine._store.get_session_messages_after(engine._session_id, earlier[-1]["store_id"])
+    row, = [row for row in stored if row["observed_at"] == quote["timestamp"]]
+    assert (row["role"], row["content"]) == ("user", content)
+    quote_id = row["store_id"]
+
+    view = _view(engine)
+    assert any(row["store_id"] == quote_id for row in view)
+    control = [row for row in view if row["store_id"] != quote_id]
+    prompt_visible = engine._assemble_context(None, view, persist=False) != engine._assemble_context(
+        None, control, persist=False,
+    )
+    expanded = json.loads(tools.lcm_expand({"store_id": quote_id}, engine=engine))
+    loaded = json.loads(tools.lcm_load_session({"session_id": engine._session_id, "limit": 100}, engine=engine))
+    recall_visible = ("error" not in expanded, any(row["store_id"] == quote_id for row in loaded["messages"]))
+
+    followers = flush([
+        {"role": "assistant", "content": "I read the quote."},
+        {"role": "user", "content": "Please check the next accounts." + TURN * 10},
+        {"role": "assistant", "content": "These accounts also reconcile."},
+        {"role": "user", "content": "Please file the comparison."},
+        {"role": "assistant", "content": "The comparison is filed."},
+    ])
+    engine.ingest([*live, quote, *followers])
+    view = _view(engine)
+    assert any(row["store_id"] == quote_id for row in view)
+    reply_id, = [row["store_id"] for row in view if row["content"] == followers[0]["content"]]
+    # Present the durable rows as a loaded host view, including the separately stored quote.
+    engine._ingest_cursor = len(view)
+    engine._ingest_cursor_needs_reconcile = False
+    engine._compress_commit_proof = None
+    nodes_before = {node.node_id for node in engine._dag.get_session_nodes(engine._session_id)}
+    run(engine, view, caplog, force=True)
+    sources = {source for node in engine._dag.get_session_nodes(engine._session_id)
+               if node.source_type == "messages" and node.node_id not in nodes_before for source in node.source_ids}
+    assert reply_id in sources
+    assert engine._store.get(quote_id) == row
+    visible = (prompt_visible, quote_id in sources, *recall_visible)
+    if quote_mode == "default":
+        assert visible == (False, False, False, False)
+    elif not all(visible):
+        raise _QuotedTurnHidden(f"Quote visibility (prompt, compaction, expand, session recall): {visible}")
+
+
 def _head_with_remainder(engine, source_id, remainder):
     from hermes_lcm.dag import SummaryNode
     from hermes_lcm.engine import _summary_part_text
@@ -179,6 +286,21 @@ def test_carried_old_repeated_turn_is_not_a_known_copy(make_engine):  # noqa: F8
     assert not is_known_head_copy(engine._store.connection, stored)
     hits = json.loads(tools.lcm_grep({"query": "continue"}, engine=engine))["results"]
     assert any(hit.get("store_id") == store_id for hit in hits)
+
+
+@pytest.mark.parametrize(("legacy_id", "recognised"), [(" conv ", True), (" \t ", True), (" other ", False)])
+def test_carried_head_copy_with_legacy_conversation_id(make_engine, legacy_id, recognised):  # noqa: F811
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    engine = make_engine()
+    engine.on_session_start("legacy", conversation_id="conv", context_length=200_000)
+    earlier = _append(engine, {"role": "user", "content": "continue"})
+    head = _head_with_remainder(engine, earlier, "continue")
+    store_id = _append(engine, head, RELATION)
+    conn = engine._store.connection
+    with engine._store.atomic():
+        conn.execute("UPDATE messages SET conversation_id=? WHERE store_id=?", (legacy_id, earlier))
+    assert is_known_head_copy(conn, engine._store.get(store_id)) == recognised
 
 
 def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  # noqa: F811

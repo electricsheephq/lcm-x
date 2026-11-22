@@ -95,7 +95,7 @@ def _stored_rows(engine):
     ).fetchall()
 
 
-def _host_pass(engine, live, head, copy_id, flush, caplog, pass_number):
+def _host_pass(engine, live, original_head, copy_id, flush, caplog, pass_number):
     # Four ordinary turns keep the observed token count above threshold even after compaction.
     new_turns = [
         {"role": role, "content": f"Pass {pass_number}, turn {turn}, {role}." + TURN * 10}
@@ -107,10 +107,14 @@ def _host_pass(engine, live, head, copy_id, flush, caplog, pass_number):
         for row in [*live, *new_turns]
     ])
     assert count_messages_tokens(view) >= engine.threshold_tokens
+    replayed_head = view[0]["content"]
+    assert view[0]["role"] == "user" and engine._verified_lcm_summary_prefix_end(replayed_head)
+    if pass_number == 2:
+        assert replayed_head != original_head
     before = _stored_rows(engine)
     if copy_id is not None:
         assert engine._store.get(copy_id)["content"] == _with_head_remainder(
-            engine, {"content": head}, NEW_TURN[0]["content"],
+            engine, {"content": original_head}, NEW_TURN[0]["content"],
         )["content"]
     old_nodes = {node.node_id for node in engine._dag.get_session_nodes(engine._session_id)}
     engine.note_turn_complete()
@@ -129,8 +133,9 @@ def _host_pass(engine, live, head, copy_id, flush, caplog, pass_number):
     assert leaves or engine.last_compression_noop_reason, (context, engine.last_compression_status)
     after = _stored_rows(engine)
     assert after[:len(before)] == before, context
-    assert not any(role == "user" and content == head for _, _, role, content, _, _ in after[len(before):]), context
-    assert sum(row["content"] == head for row in result) <= 1, context
+    assert not any(role == "user" and content == replayed_head
+                   for _, _, role, content, _, _ in after[len(before):]), context
+    assert sum(row["content"] == replayed_head for row in result) <= 1, context
     return result, leaves
 
 

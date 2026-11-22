@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from hermes_lcm import host_uid_emit
+from hermes_lcm.config import host_message_uid_mode
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_host_uid_shadow import _state_db
 from tests.test_issue_1116_stub_first_exit_commit_proof import (
@@ -20,12 +21,13 @@ from tests.test_issue_1116_stub_first_exit_commit_proof import (
 from tests.test_refused_compaction_rollback import _drain_session_end_maintenance
 
 
-@pytest.fixture(params=["unset", "on"])
+@pytest.fixture(params=["unset", "on", "off"])
 def uid_mode(request, monkeypatch):
-    if request.param == "on":
-        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
-    else:
+    if request.param == "unset":
         monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    else:
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", request.param)
+    assert host_message_uid_mode() == ("shadow" if request.param == "unset" else request.param)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
     return request.param
 

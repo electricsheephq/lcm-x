@@ -99,7 +99,7 @@ def _verify_marked_head_copy(conn, row) -> bool:
                     if previous is not None:
                         break
             return (previous is not None and previous[0] == remainder
-                    and (previous[1] or "") in ("", row.get("conversation_id") or ""))
+                    and (previous[1] or "").strip() in ("", (row.get("conversation_id") or "").strip()))
     return False
 
 
