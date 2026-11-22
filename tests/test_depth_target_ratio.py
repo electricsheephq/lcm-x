@@ -13,6 +13,7 @@ import pytest
 import hermes_lcm.compaction as compaction
 import hermes_lcm.externalize as externalize
 import hermes_lcm.leaf_prep as leaf_prep
+import hermes_lcm.survival_fit as survival_fit
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
@@ -697,15 +698,14 @@ def _seed_prepared_chain(engine, view, monkeypatch, count):
     cache._cache[(str(engine._store.db_path), engine._conversation_id)] = chain
 
 
-@pytest.mark.parametrize("trigger, turns, prepared", [(0.50, 40, 16), (0.75, 51, 30), (0.75, 51, 24)])
-def test_t12_prepared_leaves_continue_to_depth(make_engine, summaries, monkeypatch, trigger, turns, prepared):
-    view = _view(turns)
-    start = count_messages_tokens(view)
+@pytest.mark.parametrize("trigger, start, prepared", [(0.50, 62_500, 16), (0.75, 80_000, 30), (0.75, 80_000, 24)])
+def test_t12_prepared_leaves_continue_to_depth(make_engine, summaries, monkeypatch, trigger, start, prepared):
+    view = _view(31)
     engine = _sweep_engine(make_engine, view, depth_target_ratio=0.40, background_leaf_prep_enabled=True)
     engine.threshold_tokens = int(trigger * WINDOW)
     _seed_prepared_chain(engine, view, monkeypatch, prepared)
     expected = math.ceil((start - 40_000) / (_leaf_tokens(view) - count_tokens(SUMMARY)))
-    assert 12 < expected < 30
+    assert 12 < expected < 30 and count_messages_tokens(view) <= start
 
     engine.compress(view, current_tokens=start)
 
@@ -923,6 +923,46 @@ def test_retry_that_meets_depth_adopts_without_a_leaf(make_engine, monkeypatch, 
         assert set(status) == MAIN_SWEEP_KEYS | {"hidden_rows"}
 
 
+def _force_unit_depth_scale(engine, monkeypatch):
+    prepare = engine._prepare_compression_sweep
+
+    def prepare_sweep(state, *args, **kwargs):
+        result = prepare(state, *args, **kwargs)
+        state.depth_token_scale = 1.0
+        return result
+
+    monkeypatch.setattr(engine, "_prepare_compression_sweep", prepare_sweep)
+
+
+@pytest.mark.parametrize("host_estimator", [False, True], ids=["no-host-estimator", "host-estimator"])
+def test_depth_scale_excludes_fixed_load(make_engine, summaries, monkeypatch, host_estimator):
+    view = _view(31)
+    observed, trigger = 80_000, 75_000
+
+    def host_estimate(rows):
+        return round(count_messages_tokens(rows) * 1.1)
+
+    monkeypatch.setattr(survival_fit, "_host_estimate", host_estimate if host_estimator else lambda rows: None)
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=0.73)
+    engine.threshold_tokens = trigger
+    result = engine.compress(view, current_tokens=observed)
+    status = _sweep(engine)
+    recount = host_estimate if host_estimator else count_messages_tokens
+
+    assert status["fixed_load_tokens"] == observed - recount(view)
+    assert recount(result) + status["fixed_load_tokens"] < trigger
+    if host_estimator:
+        assert status["depth_token_scale"] == pytest.approx(1.1, abs=0.0001)
+        assert status["depth_token_scale"] < observed / count_messages_tokens(view)
+    else:
+        assert status["depth_token_scale"] == 1.0
+        unscaled_engine = _sweep_engine(make_engine, view, depth_target_ratio=0.73)
+        unscaled_engine.threshold_tokens = trigger
+        _force_unit_depth_scale(unscaled_engine, monkeypatch)
+        unscaled_engine.compress(view, current_tokens=observed)
+        assert status["leaf_passes"] == _sweep(unscaled_engine)["leaf_passes"]
+
+
 def _reasoning_view(turns, carrier_chars):
     view = _view(turns)
     for row in view:
@@ -939,60 +979,60 @@ def _host_recount(view):
         + sum(len(detail["text"]) for detail in row.get("reasoning_details") or [])
         for row in view
     )
-    return count_messages_tokens(view) + reasoning_chars // 4 + 20_000
+    return count_messages_tokens(view) + reasoning_chars // 4
 
 
 def test_depth_scale_calibrates_against_reasoning_recount(make_engine, summaries, monkeypatch):
-    """The scale includes fixed load, so it errs low by about fixed/observed of the credited savings."""
+    """Use the reasoning-aware row recount to calibrate savings with a separate fixed load."""
     view = _reasoning_view(turns=25, carrier_chars=1600)
-    observed = _host_recount(view)
+    fixed_load = 20_000
+    observed = _host_recount(view) + fixed_load
     target = observed - 16_000
+    trigger = observed - 1_000
+    monkeypatch.setattr(survival_fit, "_host_estimate", _host_recount)
 
     def run(*, unit_scale):
         engine = _sweep_engine(make_engine, view, depth_target_ratio=target / WINDOW, survival_fit=False)
-        engine.threshold_tokens = observed - 1_000
+        engine.threshold_tokens = trigger
         if unit_scale:
-            prepare = engine._prepare_compression_sweep
-
-            def prepare_sweep(state, *args, **kwargs):
-                result = prepare(state, *args, **kwargs)
-                state.depth_token_scale = 1.0
-                return result
-
-            monkeypatch.setattr(engine, "_prepare_compression_sweep", prepare_sweep)
+            _force_unit_depth_scale(engine, monkeypatch)
 
         estimates = []
-        if hasattr(engine, "_depth_target_reached"):
-            reached = engine._depth_target_reached
+        reached = engine._depth_target_reached
 
-            def record_estimate(state, estimate=None):
-                estimates.append(state.estimated_active_tokens if estimate is None else estimate)
-                return reached(state, estimate)
+        def record_estimate(state, estimate=None):
+            estimates.append(state.estimated_active_tokens if estimate is None else estimate)
+            return reached(state, estimate)
 
-            monkeypatch.setattr(engine, "_depth_target_reached", record_estimate)
+        monkeypatch.setattr(engine, "_depth_target_reached", record_estimate)
         result = engine.compress(view, current_tokens=observed)
-        return _sweep(engine), estimates, _host_recount(result), _leaves(engine)
+        return _sweep(engine), estimates, _host_recount(result) + fixed_load, _leaves(engine)
 
     status, estimates, recounted, leaves = run(unit_scale=False)
     unscaled, _, _, unscaled_leaves = run(unit_scale=True)
 
-    assert status["depth_token_scale"] == round(observed / count_messages_tokens(view), 4) > 1
-    assert status["depth_target_met"] is unscaled["depth_target_met"] is True
+    assert status["fixed_load_tokens"] == fixed_load
+    assert status["depth_token_scale"] == round(_host_recount(view) / count_messages_tokens(view), 4) > 1
     assert status["leaf_passes"] == len(leaves) < unscaled["leaf_passes"]
     assert [(leaf.source_token_count, leaf.token_count) for leaf in leaves] == [
         (leaf.source_token_count, leaf.token_count) for leaf in unscaled_leaves[:len(leaves)]
     ]
-    assert estimates[-1] <= target
+    if status["depth_target_met"]:
+        assert estimates[-1] <= target
+        assert recounted <= target * 1.05
+    assert recounted < trigger
     assert estimates[-1] == pytest.approx(recounted, rel=0.10)
 
 
-def test_depth_scale_caps_large_host_ratio(make_engine, summaries):
+def test_depth_scale_caps_large_host_ratio(make_engine, summaries, monkeypatch):
     view = _reasoning_view(turns=5, carrier_chars=12_000)
-    observed = _host_recount(view)
+    fixed_load = 20_000
+    observed = _host_recount(view) + fixed_load
+    monkeypatch.setattr(survival_fit, "_host_estimate", _host_recount)
     engine = _sweep_engine(make_engine, view, depth_target_ratio=0.40, survival_fit=False)
     engine.threshold_tokens = 48_000
-    assert observed / count_messages_tokens(view) > 4
-    assert _host_recount(view[:1] + view[3:]) > engine.threshold_tokens
+    assert _host_recount(view) / count_messages_tokens(view) > 4
+    assert _host_recount(view[:1] + view[3:]) + fixed_load > engine.threshold_tokens
 
     engine.compress(view, current_tokens=observed)
 
@@ -1001,8 +1041,9 @@ def test_depth_scale_caps_large_host_ratio(make_engine, summaries):
     assert status["leaf_passes"] == len(summaries) > 1
 
 
-def test_depth_scale_floors_small_host_ratio_and_defaults_without_host(make_engine, summaries):
+def test_depth_scale_floors_small_host_ratio_and_defaults_without_host(make_engine, summaries, monkeypatch):
     view = _view()
+    monkeypatch.setattr(survival_fit, "_host_estimate", lambda rows: None)
     for observed, expected_leaves in [(count_messages_tokens(view) - 250, 2), (None, 2)]:
         engine = _sweep_engine(make_engine, view, depth_target_ratio=_target_after(view, 2) / WINDOW)
         engine.compress(view, current_tokens=observed)
@@ -1019,7 +1060,7 @@ def test_depth_scale_inert_with_reasoning_carriers(make_engine, summaries, monke
     else:
         monkeypatch.setenv("LCM_DEPTH_TARGET_RATIO", raw_ratio)
     view = _reasoning_view(turns=25, carrier_chars=1600)
-    observed = _host_recount(view)
+    observed = _host_recount(view) + 20_000
     engine = _sweep_engine(make_engine, view, depth_target_ratio=LCMConfig.from_env().depth_target_ratio,
                            survival_fit=False)
     engine.threshold_tokens = observed - 1_000

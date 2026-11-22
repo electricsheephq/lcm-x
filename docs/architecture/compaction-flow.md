@@ -49,6 +49,7 @@ fixed load.
 A retry can stop as soon as it adopts a committed prefix that meets the depth
 target. It then returns the adopted summary and skips post-leaf condensation.
 
-While the depth target is active, the sweep credits token savings using the
-host prompt figure divided by the LCM-X count of the input list. The scale is
-clamped to 1–4 and defaults to 1 when the host figure or list count is missing.
+While the depth target is active, the sweep scales positive token savings using
+the host prompt figure minus the booked fixed load, divided by the LCM-X count
+of the input list. The scale is clamped to 1–4 and defaults to 1 when the host
+figure or list count is missing. Increases use the unscaled token count.

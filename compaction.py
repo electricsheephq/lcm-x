@@ -74,7 +74,7 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 _EXTRACTION_HEADROOM_SECONDS = 2.0  # overhead between the extraction timeout and the next admit
 _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE = 0.25
-# Credit at least the local count, without letting a near-zero count dominate the estimate.
+# Bound host row savings between the local count and four times that count.
 _DEPTH_TOKEN_SCALE_MIN = 1.0
 _DEPTH_TOKEN_SCALE_MAX = 4.0
 _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
@@ -2659,7 +2659,8 @@ class CompactionMixin:
             if state.observed_prompt_tokens > 0 and self._survival_pass_observed:
                 counted = count_messages_tokens(state.host_messages)
                 if counted > 0:
-                    scale = state.observed_prompt_tokens / counted
+                    rows_host = max(0, state.observed_prompt_tokens - fixed_load)
+                    scale = rows_host / counted
                     state.depth_token_scale = max(_DEPTH_TOKEN_SCALE_MIN, min(_DEPTH_TOKEN_SCALE_MAX, scale))
             depth_status = {
                 "depth_target_tokens": state.depth_target_tokens,
@@ -2911,7 +2912,9 @@ class CompactionMixin:
             if resumed:  # the committed summary replaces the dropped rows in the estimate
                 resumed_tokens = count_messages_tokens([state.working_messages[index] for index in resumed])
                 if state.depth_target_tokens:
-                    freed = int(round((resumed_tokens - summary_tokens) * state.depth_token_scale))
+                    freed = resumed_tokens - summary_tokens
+                    if freed > 0:
+                        freed = int(round(freed * state.depth_token_scale))
                     state.estimated_active_tokens = max(0, state.estimated_active_tokens - freed)
                 else:
                     state.estimated_active_tokens = max(0, state.estimated_active_tokens - resumed_tokens + summary_tokens)
@@ -3328,9 +3331,7 @@ class CompactionMixin:
         state.post_drain_condensation_skipped = ""
         try:
             if state.threshold_full_sweep_active:
-                post_leaf_condensation = state.sweep_raw_drained or (
-                    state.leaf_passes > 0 and state.sweep_stop_reason == "depth_target_reached"
-                )
+                post_leaf_condensation = state.sweep_raw_drained or state.sweep_stop_reason == "depth_target_reached"
                 if post_leaf_condensation and state.pre_leaf_condensation_reason == "summary_result_rejected":
                     state.post_drain_condensation_skipped = "pre_leaf_rejected"
                     state.sweep_stop_reason = "summary_result_rejected"
@@ -3757,7 +3758,9 @@ class CompactionMixin:
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         if state.depth_target_tokens:
-            freed = int(round((leaf.source_tokens - leaf.summary_tokens) * state.depth_token_scale))
+            freed = leaf.source_tokens - leaf.summary_tokens
+            if freed > 0:
+                freed = int(round(freed * state.depth_token_scale))
             state.estimated_active_tokens = max(0, state.estimated_active_tokens - freed)
             if self._depth_target_reached(state):
                 state.sweep_stop_reason = "depth_target_reached"
