@@ -92,10 +92,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--load", type=int, default=2, help="requirement 2's load processes (recorded arms)")
     parser.add_argument("--skip-candidate", action="store_true", help="qualification only")
     parser.add_argument("--kit", type=Path, default=rt.KIT, help="the kit the store is built from")
+    parser.add_argument("--history-tree", type=Path, default=None,
+                        help="the tree the kit's `history` step names (its later starts and earlier passes)")
     args = parser.parse_args(argv)
     # Absolute before any child runs: the children run in the repository, the caller may not.
-    for name in ("baseline", "candidate", "scratch", "out", "kit"):
-        setattr(args, name, getattr(args, name).absolute())
+    for name in ("baseline", "candidate", "scratch", "out", "kit", "history_tree"):
+        if getattr(args, name) is not None:
+            setattr(args, name, getattr(args, name).absolute())
     args.scratch.mkdir(parents=True, exist_ok=False)
     args.out.mkdir(parents=True, exist_ok=False)
     log = args.out / "dryrun.log"
@@ -105,8 +108,20 @@ def main(argv: list[str] | None = None) -> int:
     steps: dict[str, int] = {}
     steps["build"] = module("build", "--tree", base, "--kit", str(args.kit.resolve()), "--out", str(build),
                             "--work", str(work), log=log)
-    (args.out / "build-manifest.json").write_text((build / "build-manifest.json").read_text())
     kit = json.loads((build / "build-manifest.json").read_text())["kit_body"]  # bars and counts the store was built with
+    history = kit.get("history")
+    history_ok = True
+    if history:  # the reference store's later starts and earlier passes ran another tree (the kit names it)
+        identity = rt.driver.tree_identity(args.history_tree) if args.history_tree else {}
+        history_ok = bool(args.history_tree) and {k: identity.get(k) for k in history["tree"]} == history["tree"]
+        if history_ok:
+            extend = ["--tree", str(args.history_tree), "--extend", str(build), "--restarts", str(history["restarts"]),
+                      "--passes", str(history["passes"])]
+            for key, value in sorted(history.get("env", {}).items()):
+                extend += ["--env", f"{key}={value}"]
+            steps["history"] = module("build", *extend, log=log)
+            history_ok = steps["history"] == 0
+    (args.out / "build-manifest.json").write_text((build / "build-manifest.json").read_text())
 
     def cell(name: str, tree: str, cell_name: str, *extra: str) -> dict[str, Any] | None:
         out = args.out / f"{name}.json"
@@ -126,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     qualification = qualify(kit, manifest, stored_counts(build, manifest),
                             rt.driver.tree_identity(args.baseline), qualify_d9,
                             load(args.out / "qualify-planner-v0300.json"))
+    if not history_ok:
+        qualification["passed"] = False
+        qualification["reasons"].append("the kit's history step did not run on its pinned tree")
     result: dict[str, Any] = {"qualification": qualification, "kit_frozen": frozen,
                               "census_disclosure": kit.get("census_disclosure")}
     if not args.skip_candidate:

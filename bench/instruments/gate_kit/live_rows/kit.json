@@ -321,5 +321,18 @@
   "plugin_version": "0.30.0",
   "product_sha256": "f34bb7354312505c1a4cbd855009b55d1fbe16082a8693f2294a3cf669423d18"
  },
- "baseline_source": "tree identity of the v0.30.0 tag (6260c31f) as busy_bar.driver.tree_identity computes it"
+ "baseline_source": "tree identity of the v0.30.0 tag (6260c31f) as busy_bar.driver.tree_identity computes it",
+ "history": {
+  "tree": {
+   "plugin_version": "0.30.1",
+   "product_sha256": "a5e370c653e9ba327d038b4669bb9ef6bdf2acfb8e2870afd27a7f2e2906cd93"
+  },
+  "tree_source": "the v0.30.1 hotfix line hotfix/v0.30.1-2815 at 32d8ab0a, which wrote the reference store's later history (tree identity as busy_bar.driver.tree_identity computes it)",
+  "env": {
+   "LCM_HOST_MESSAGE_UID": "on"
+  },
+  "restarts": 1,
+  "passes": 40,
+  "source": "the reference target had 33 summaries and a frontier past its hidden rows; earlier passes on the host's adopted list, a turn end between them, stopping at the first that publishes nothing"
+ }
 }

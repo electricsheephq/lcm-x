@@ -142,18 +142,29 @@ def extend(args: argparse.Namespace) -> int:
             engine.ingest(copy.deepcopy(view))
             # Earlier passes after this start (the reference target's 33 summaries and non-zero frontier came from
             # its own earlier compactions); the host list is not adopted, as a pass at an earlier start was not.
-            tokens = sum(len(str(r.get("content") or "")) for r in view) // shape.CHARS_PER_TOKEN
-            usage = {"prompt_tokens": tokens, "completion_tokens": 64, "total_tokens": tokens + 64}
+            # Earlier passes as a host runs them: each is given the list the previous one returned (the host
+            # adopts it), and a turn ends between them (a hold the product arms lasts until turn end). They stop
+            # at the first pass that publishes nothing. The later restart's cold-rebuilt list is the kit's.
+            current = copy.deepcopy(view)
+            nodes_before = None
             for _ in range(max(1, args.passes)):
-                outs.append(len(engine.compress(copy.deepcopy(view), current_tokens=tokens) or []))
-                # A turn ends between earlier passes (a hold the product arms lasts until turn end).
+                tokens = sum(len(str(r.get("content") or "")) for r in current) // shape.CHARS_PER_TOKEN
+                usage = {"prompt_tokens": tokens, "completion_tokens": 64, "total_tokens": tokens + 64}
+                with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
+                    nodes_before = conn.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0]
+                out = engine.compress(copy.deepcopy(current), current_tokens=tokens)
+                current = out if isinstance(out, list) else current
+                outs.append(len(current))
                 engine.update_from_response(dict(usage))
                 try:
-                    engine.on_turn_complete(copy.deepcopy(view), usage=dict(usage), turn_id="build", task_id="build",
-                                            api_call_count=1, interrupted=False, failed=False,
+                    engine.on_turn_complete(copy.deepcopy(current), usage=dict(usage), turn_id="build",
+                                            task_id="build", api_call_count=1, interrupted=False, failed=False,
                                             turn_exit_reason="completed")
                 except TypeError:
-                    engine.on_turn_complete(copy.deepcopy(view))
+                    engine.on_turn_complete(copy.deepcopy(current))
+                with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
+                    if conn.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0] == nodes_before:
+                        break
         finally:
             engine.shutdown()
         with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
