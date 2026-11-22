@@ -6,6 +6,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.30.2 (the merged-reply loss fix)
+
+- Fix: an assistant reply that calls tools, at the start of a turn whose two user messages Hermes merged, is no
+  longer counted as stored without being stored. Unmatched tool call and result rows before the resume point are
+  checked against the session's stored call ids; when that check cannot finish, such a row keeps its credit only if
+  the session's previous completed ingest held the same row, and every other such row is stored (#3019; main port
+  #3020). Rows lost before this release are not restored; the repair is planned for v0.30.3 (#3022). Residual
+  shapes: #3023.
+
 ## v0.30.1 (nothing lost, part 2; turn recovery is opt-in)
 
 - Changed (rc3): one docstring in `ingest_pem_scan.py` names a private-key header line in words instead of
