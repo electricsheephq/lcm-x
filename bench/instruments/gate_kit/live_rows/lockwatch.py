@@ -1,0 +1,111 @@
+"""External read-only watcher of SQLite's WAL write lock (busy-bar's F_GETLK probe), transitions only.
+
+Busy-bar's monitor keeps every 0.15 ms sample; a cold start can hold the lock for minutes, so this one keeps only
+the transitions (time, holder pid) plus the sample count and the largest sampling gap. A hold is a run of samples
+with a holder; gaps shorter than one poll are merged as busy-bar does, for the same holder only. Threads of one
+process share a pid, so holds by two threads of one process cannot be told apart (D10 records this). An answer
+that is not a plain write lock counts as held and makes a judged run INCONCLUSIVE (verdicts).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import select
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+from bench.instruments.busy_bar import monitor  # noqa: E402
+
+POLL_NS = monitor.POLL_NS
+UNEXPECTED = -2  # an F_GETLK answer that is not a plain write lock on the byte; counted as held
+
+
+def holds(transitions: list[list[int]], begin: int, end: int, pid: int | None = None,
+          poll_ns: int = POLL_NS) -> list[tuple[int, int]]:
+    """Hold periods clipped to [begin, end]; with `pid`, only holds by that process (or an unknown holder)."""
+    found: list[tuple[int, int, int]] = []
+    opened, holder = None, None
+    for at, owner in transitions:
+        mine = bool(owner) and (pid is None or owner in (pid, -1, UNEXPECTED))
+        if opened is not None and (not mine or owner != holder):  # a holder change ends the hold
+            found.append((opened, at, holder))
+            opened = None
+        if mine and opened is None:
+            opened, holder = at, owner
+    if opened is not None:
+        found.append((opened, transitions[-1][0], holder))
+    merged: list[tuple[int, int, int]] = []
+    for start, stop, owner in found:  # a gap shorter than one poll joins two holds by the same holder only
+        if merged and merged[-1][2] == owner and start - merged[-1][1] < poll_ns:
+            merged[-1] = (merged[-1][0], stop, owner)
+        else:
+            merged.append((start, stop, owner))
+    return [(max(s, begin), min(e, end)) for s, e, _ in merged if s < end and e > begin]
+
+
+def longest_s(transitions: list[list[int]], begin: int, end: int, pid: int | None = None) -> float:
+    return max(((e - s) / 1e9 for s, e in holds(transitions, begin, end, pid)), default=0.0)
+
+
+class Watcher:
+    def __init__(self, database: Path) -> None:
+        monitor.flock_type()
+        self.process = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), str(database) + "-shm"],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True)
+        if not select.select([self.process.stdout], [], [], 20)[0] or self.process.stdout.readline() != "READY\n":
+            self.process.kill()
+            raise RuntimeError("lock watcher did not start: " + (self.process.communicate()[1] or "")[:300])
+
+    def stop(self) -> dict[str, Any]:
+        try:
+            output, error = self.process.communicate("stop\n", timeout=60)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.communicate()
+            raise RuntimeError("lock watcher did not stop within 60 s") from None
+        if self.process.returncode:
+            raise RuntimeError(f"lock watcher failed: {error[:300]}")
+        return json.loads(output)
+
+
+def main() -> None:
+    fd = os.open(sys.argv[1], os.O_RDONLY)
+    transitions: list[list[int]] = []
+    samples, last, largest_gap, state, unexpected = 0, None, 0, None, 0
+    try:
+        while True:
+            try:
+                owner = monitor.lock_owner(fd) or 0
+            except RuntimeError:  # a lock of another type on the byte (recovery, checkpoint): held, counted
+                owner = UNEXPECTED
+                unexpected += 1
+            now = time.monotonic_ns()
+            samples += 1
+            if last is not None:
+                largest_gap = max(largest_gap, now - last)
+            last = now
+            if owner != state:
+                transitions.append([now, owner])
+                state = owner
+            if samples == 1:
+                print("READY", flush=True)
+            if select.select([sys.stdin], [], [], 0)[0]:
+                break
+            time.sleep(POLL_NS / 1e9)
+        transitions.append([last, state or 0])
+        print(json.dumps({"transitions": transitions, "samples": samples, "poll_ns": POLL_NS,
+                          "largest_gap_ms": largest_gap / 1e6, "platform": sys.platform,
+                          "unexpected_answers": unexpected}))
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    main()
