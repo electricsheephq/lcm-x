@@ -133,6 +133,19 @@ def open_reader(db: Path) -> sqlite3.Connection:
     return conn
 
 
+def host_state_db(home: Path, sessions: list[str]) -> Path:
+    """The host's session store with one root row per session (no parent, not ended), so the product can resolve
+    each session's lineage and write host-uid bindings, as on a real host. Its path is part of the lineage key."""
+    path = home / "state.db"
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, source TEXT, "
+                         "parent_session_id TEXT, end_reason TEXT, started_at REAL)")
+            conn.executemany("INSERT OR IGNORE INTO sessions (id, source, started_at) VALUES (?, 'live-rows', 0)",
+                             [(sid,) for sid in sessions])
+    return path
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

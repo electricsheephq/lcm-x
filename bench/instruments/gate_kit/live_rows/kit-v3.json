@@ -223,12 +223,14 @@
    "max_copies_of_one_value": 14053,
    "summary_nodes": 33,
    "host_uid_bindings": 3028,
-   "frontier_nonzero": true
+   "frontier_nonzero": true,
+   "host_uid_bindings_source": "the last bound_restarts starts write bindings for the target only"
   },
   "uid_share": 1.0,
   "empty_call_content_share": 0.6,
   "reasoning_share": 0.99,
-  "pass_at_restart": true
+  "pass_at_restart": false,
+  "bound_restarts": 2
  },
  "others": {
   "conversations": 470,

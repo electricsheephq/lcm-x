@@ -56,7 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     base, cand = str(args.baseline.resolve()), str(args.candidate.resolve())
     started = time.time()
     steps: dict[str, int] = {}
-    steps["build"] = module("build", "--tree", base, "--kit", str(args.kit.resolve()), "--out", str(build), log=log)
+    steps["build"] = module("build", "--tree", base, "--kit", str(args.kit.resolve()), "--out", str(build),
+                            "--work", str(work), log=log)
     (args.out / "build-manifest.json").write_text((build / "build-manifest.json").read_text())
     kit = json.loads((build / "build-manifest.json").read_text())["kit_body"]  # bars and counts the store was built with
 

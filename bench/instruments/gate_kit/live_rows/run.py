@@ -16,7 +16,6 @@ import hashlib
 import json
 import fcntl
 import os
-import shutil
 import sqlite3
 import sys
 import threading
@@ -48,16 +47,8 @@ def claim(work: Path) -> int:
 
 
 def fresh_copy(build: Path, work: Path) -> Path:
-    """Overwrite WORK/current with the build's store; stale WAL and shared-memory files are removed first."""
-    current = work / "current"
-    current.mkdir(parents=True, exist_ok=True)
-    for name in ("lcm.db-wal", "lcm.db-shm"):
-        (current / name).unlink(missing_ok=True)
-    shutil.copyfile(build / "store" / "lcm.db", current / "lcm.db")
-    source = build / "store" / "externalized"
-    if source.exists():
-        shutil.copytree(source, current / "externalized", dirs_exist_ok=True)
-    return current / "lcm.db"
+    """Overwrite WORK/current (and WORK/home/state.db) with the build's store, payloads and host store."""
+    return builder.restore(build, work)
 
 
 def key(role: Any, content: Any, tool_call_id: Any) -> str:
@@ -305,8 +296,9 @@ def main(argv: list[str] | None = None) -> int:
     receipt["keep_copy"] = bool(args.keep_copy)
     receipt["stand_in"] = dict(aux.SETTINGS)
     receipt["control"] = args.control
+    receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())
     receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
-                            and args.control == "none")
+                            and args.control == "none" and receipt["lineage_path_matches"])
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                     "input_hash": manifest["input_hash"], "store_sha256": manifest["store_sha256"],

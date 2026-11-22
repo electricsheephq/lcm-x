@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import shutil
 import sqlite3
 import sys
 import time
@@ -52,6 +53,35 @@ def ingest_history(engine_module: Any, config: Any, kit: dict[str, Any], home: P
     return {"session": session, "rows": len(rows), "ingest_calls": calls, "seconds": round(time.monotonic() - started, 2)}
 
 
+def snapshot(work: Path, out: Path) -> None:
+    """Checkpoint the store at the working path and copy it, its payloads and the host store into the build."""
+    live = work / "current" / "lcm.db"
+    with closing(sqlite3.connect(live)) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    (out / "store").mkdir(parents=True, exist_ok=True)
+    (out / "host").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(live, out / "store" / "lcm.db")
+    if (live.parent / "externalized").exists():
+        shutil.copytree(live.parent / "externalized", out / "store" / "externalized", dirs_exist_ok=True)
+    if (work / "home" / "state.db").exists():
+        shutil.copyfile(work / "home" / "state.db", out / "host" / "state.db")
+
+
+def restore(build: Path, work: Path) -> Path:
+    """The build's store, payloads and host store back at the working path (overwriting; stale WAL removed)."""
+    current = work / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    (work / "home").mkdir(parents=True, exist_ok=True)
+    for name in ("lcm.db-wal", "lcm.db-shm"):
+        (current / name).unlink(missing_ok=True)
+    shutil.copyfile(build / "store" / "lcm.db", current / "lcm.db")
+    if (build / "store" / "externalized").exists():
+        shutil.copytree(build / "store" / "externalized", current / "externalized", dirs_exist_ok=True)
+    if (build / "host" / "state.db").exists():
+        shutil.copyfile(build / "host" / "state.db", work / "home" / "state.db")
+    return current / "lcm.db"
+
+
 def extend(args: argparse.Namespace) -> int:
     """Later restarts by a newer tree on an existing build (the reference store's last starts ran the hotfix line
     with the opt-in mode, which wrote its host-uid bindings): each binds the restart list and runs one pass."""
@@ -59,16 +89,17 @@ def extend(args: argparse.Namespace) -> int:
     manifest = json.loads(manifest_path.read_text())
     kit = manifest["kit_body"]
     env = dict(item.split("=", 1) for item in args.env)
-    rt.isolate(args.extend / "home-extend", env)
+    work = Path(manifest["work"])
+    rt.isolate(work / "home", env)
     config_module, engine_module, _lines = rt.load(args.tree, kit)
     rt.aux.configure(floor_s=0.05, rate_tps=1e9)
-    db = args.extend / "store" / "lcm.db"
+    db = restore(args.extend, work)
     config = rt.config_for(config_module, db)
     view = shape.build(kit)["restart_list"]
     steps = []
     for number in range(args.restarts):
         begun = time.monotonic()
-        engine = rt.engine(engine_module, config, kit, args.extend / "home-extend")
+        engine = rt.engine(engine_module, config, kit, work / "home")
         try:
             engine.ingest(copy.deepcopy(view))
             out = engine.compress(copy.deepcopy(view), current_tokens=sum(
@@ -77,8 +108,8 @@ def extend(args: argparse.Namespace) -> int:
             engine.shutdown()
         steps.append({"restart": number + 1, "seconds": round(time.monotonic() - begun, 2),
                       "pass_rows_out": len(out or []), "stored": rt.store_census(db)["rows"]})
-    with closing(sqlite3.connect(db)) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    snapshot(work, args.extend)
+    db = args.extend / "store" / "lcm.db"
     manifest.setdefault("extended", []).append({"tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                                                 "env": env, "steps": steps})
     manifest["stored"] = rt.store_census(db)
@@ -94,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--kit", type=Path, default=rt.KIT)
     parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--work", type=Path, default=None,
+                        help="the runs' working directory (the store is written at its current/ path); default OUT/work")
     parser.add_argument("--extend", type=Path, default=None, help="an existing build to extend with later restarts")
     parser.add_argument("--restarts", type=int, default=2)
     parser.add_argument("--env", action="append", default=[], help="KEY=VALUE for the extending tree")
@@ -104,24 +137,35 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out is required unless --extend is given")
     args.out.mkdir(parents=True, exist_ok=False)
     kit = scaled(rt.load_kit(args.kit), args.scale)
-    rt.isolate(args.out / "home")
+    work = (args.work or args.out / "work").resolve()
+    home = work / "home"
+    rt.isolate(home)
     config_module, engine_module, _lines = rt.load(args.tree, kit)
     rt.aux.configure(floor_s=0.05, rate_tps=1e9)  # building only: earlier passes need no realistic latency
-    db = args.out / "store" / "lcm.db"
-    db.parent.mkdir()
+    # The store is written at the runs' own working path, so the host-uid lineage key (it hashes the host
+    # store's path) is the one the runs see; the result is then snapshotted into the build directory.
+    db = work / "current" / "lcm.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    for name in ("lcm.db", "lcm.db-wal", "lcm.db-shm"):
+        (db.parent / name).unlink(missing_ok=True)
     config = rt.config_for(config_module, db)
     generated = shape.build(kit)
-    started = time.monotonic()
-    report = [ingest_history(engine_module, config, kit, args.out / "home", rows, f"other{index}-s",
-                             f"other{index}-conv") for index, rows in enumerate(generated["others"])]
     target = kit["target"]
-    report.append(ingest_history(engine_module, config, kit, args.out / "home", generated["target_history"],
+    started = time.monotonic()
+    report = [ingest_history(engine_module, config, kit, home, rows, f"other{index}-s",
+                             f"other{index}-conv") for index, rows in enumerate(generated["others"])]
+    report.append(ingest_history(engine_module, config, kit, home, generated["target_history"],
                                  target["session_id"], target["conversation_id"]))
     # Earlier restarts: each binds the host's cold-rebuilt list once (no pass), as the reference store's earlier
     # builds did; on the v0.30.0 tree such a bind stores copies of unstamped rows (#1674), which the store keeps.
-    for number in range(int(target.get("cold_restarts", 0))):
+    restarts, bound = int(target.get("cold_restarts", 0)), int(target.get("bound_restarts", 0))
+    for number in range(restarts):
+        if bound and number == restarts - bound:
+            # From here the host store resolves the target's lineage, so these last starts write its host-uid
+            # bindings (the reference store held bindings for only part of its rows); other sessions stay unbound.
+            rt.host_state_db(home, [target["session_id"]])
         begun = time.monotonic()
-        engine = rt.engine(engine_module, config, kit, args.out / "home")
+        engine = rt.engine(engine_module, config, kit, home)
         passed = None
         try:
             engine.ingest(copy.deepcopy(generated["restart_list"]))
@@ -133,10 +177,11 @@ def main(argv: list[str] | None = None) -> int:
             engine.shutdown()
         report.append({"cold_restart": number + 1, "seconds": round(time.monotonic() - begun, 2), "pass_rows_out": passed,
                        "stored": rt.store_census(db)["rows"]})
-    with closing(sqlite3.connect(db)) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    snapshot(work, args.out)
+    db = args.out / "store" / "lcm.db"
     externalized = db.parent / "externalized"
     manifest = {
+        "work": str(work), "host_sessions": rt.store_census(db)["conversations"],
         "kit": str(args.kit.name), "kit_body": kit, "scale": args.scale, "qualifies": args.scale == 1.0,
         "seed": kit["seed"], "input_hash": generated["input_hash"], "generated": generated["counts"],
         "stored": rt.store_census(db),
