@@ -4,7 +4,8 @@
 
 Writes NEW_DIR/store/lcm.db (+ externalized payloads) and NEW_DIR/build-manifest.json: the kit's input hash, the
 generated counts, a census of the stored rows (counts, ids and a digest; no content) and the store's sha256 after a
-WAL checkpoint. `--scale` shrinks every turn count for a local smoke; a scaled store never qualifies.
+WAL checkpoint. `--scale` shrinks every turn count for a local smoke; a scaled store never qualifies. `--extend BUILD --tree T
+--env K=V --restarts N` adds later restarts by another tree (recorded in the manifest, with the new store hash).
 """
 
 from __future__ import annotations
@@ -51,13 +52,56 @@ def ingest_history(engine_module: Any, config: Any, kit: dict[str, Any], home: P
     return {"session": session, "rows": len(rows), "ingest_calls": calls, "seconds": round(time.monotonic() - started, 2)}
 
 
+def extend(args: argparse.Namespace) -> int:
+    """Later restarts by a newer tree on an existing build (the reference store's last starts ran the hotfix line
+    with the opt-in mode, which wrote its host-uid bindings): each binds the restart list and runs one pass."""
+    manifest_path = args.extend / "build-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    kit = manifest["kit_body"]
+    env = dict(item.split("=", 1) for item in args.env)
+    rt.isolate(args.extend / "home-extend", env)
+    config_module, engine_module, _lines = rt.load(args.tree, kit)
+    rt.aux.configure(floor_s=0.05, rate_tps=1e9)
+    db = args.extend / "store" / "lcm.db"
+    config = rt.config_for(config_module, db)
+    view = shape.build(kit)["restart_list"]
+    steps = []
+    for number in range(args.restarts):
+        begun = time.monotonic()
+        engine = rt.engine(engine_module, config, kit, args.extend / "home-extend")
+        try:
+            engine.ingest(copy.deepcopy(view))
+            out = engine.compress(copy.deepcopy(view), current_tokens=sum(
+                len(str(r.get("content") or "")) for r in view) // shape.CHARS_PER_TOKEN)
+        finally:
+            engine.shutdown()
+        steps.append({"restart": number + 1, "seconds": round(time.monotonic() - begun, 2),
+                      "pass_rows_out": len(out or []), "stored": rt.store_census(db)["rows"]})
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    manifest.setdefault("extended", []).append({"tree_identity": rt.driver.tree_identity(args.tree.resolve()),
+                                                "env": env, "steps": steps})
+    manifest["stored"] = rt.store_census(db)
+    manifest["store_sha256"] = rt.sha256_file(db)
+    manifest_path.write_text(json.dumps(manifest, indent=1, sort_keys=True))
+    print(json.dumps({"extended": steps, "stored": manifest["stored"]["rows"]}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tree", type=Path, required=True)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--kit", type=Path, default=rt.KIT)
     parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--extend", type=Path, default=None, help="an existing build to extend with later restarts")
+    parser.add_argument("--restarts", type=int, default=2)
+    parser.add_argument("--env", action="append", default=[], help="KEY=VALUE for the extending tree")
     args = parser.parse_args(argv)
+    if args.extend:
+        return extend(args)
+    if args.out is None:
+        parser.error("--out is required unless --extend is given")
     args.out.mkdir(parents=True, exist_ok=False)
     kit = scaled(rt.load_kit(args.kit), args.scale)
     rt.isolate(args.out / "home")
