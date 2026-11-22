@@ -52,6 +52,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
     _carrier_emission_key,
     _commit_proof_identity_digest,
+    _emitted_user_replay_digest,
     _emission_identity,
     _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
@@ -683,6 +684,7 @@ class CompactionMixin:
         so the pressure-yield gate judges tail blockage from the numbers the
         compaction pass would actually see.
         """
+        messages = self._without_known_head_copies(messages)
         if not messages:
             return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
@@ -1387,6 +1389,15 @@ class CompactionMixin:
             # #671: a stub-first exit hands the host a rewritten list (summary prefix re-emitted from the DAG, stubs);
             # once the host commits it, the durable proof must describe that list, or a cold rebind reads a stale one.
             proof["stub_first"] = bool(getattr(self, "_stub_first_exit_now", None))
+            if len(result) == len(messages) and (proof["stub_first"] or (
+                    proof["published"] and getattr(self, "_compress_host_rows_consumed", None) == 0)):
+                # A same-length reassembly can replace the occurrence at the old
+                # head's index. Keep literal identities of its fresh user emissions
+                # for the warm ingest check, separate from the normalized replay keys.
+                for item in fresh:
+                    if item["role"] == "user" and item["kind"] in {"summary", "carrier", "objective"}:
+                        index = item["output_occurrence"]["index"]
+                        proof.setdefault("emitted_user_digests", {})[index] = _emitted_user_replay_digest(result[index])
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
             # not identity (a gateway may send only a new turn), so the proof binds each row's host key
@@ -2489,6 +2500,7 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
+        state.working_messages = self._without_known_head_copies(state.working_messages)
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
