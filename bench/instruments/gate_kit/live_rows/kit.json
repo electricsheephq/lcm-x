@@ -1,0 +1,28 @@
+{
+  "kit_version": 1,
+  "status": "DRAFT: stand-in counts until the release manager confirms the reference-agent totals (#2868)",
+  "seed": 2868,
+  "start_epoch": 1763000000.0,
+  "stamp_share": 0.97,
+  "uid_share": 0.9,
+  "externalization_threshold_chars": 12000,
+  "lengths": {
+    "user": {"normal": [20, 300]},
+    "assistant_call": {"normal": [10, 120]},
+    "assistant": {"normal": [40, 500]},
+    "tool_result": {"normal": [50, 900], "large_share": 0.04, "large": [3100, 12000]}
+  },
+  "tools": {"names": ["terminal", "read_file", "web_search", "write_file", "browser"],
+            "calls_per_turn_weights": [0.35, 0.3, 0.2, 0.1, 0.05], "name_only_share": 0.5},
+  "target": {"turns": 744, "hidden_turn_share": 0.6, "hidden_keep_every": 4,
+             "session_id": "live-rows-target", "conversation_id": "live-rows-target-conv",
+             "platform": "telegram", "context_length": 400000},
+  "others": {"conversations": 30, "turns": 280},
+  "summary_route": {"floor_s": 44.4, "rate_tps": 2970.0, "ratio": 0.1,
+                    "source": "#2869: 6,707 tokens in 44.4 s and 112,867 tokens in 38.0 s (2,970 = 112,867 / 38.0); stand-in pending a ruling"},
+  "budgets": {"default": {}, "60s": {"LCM_FOREGROUND_HARD_SECONDS": "60"}, "120s": {"LCM_FOREGROUND_HARD_SECONDS": "120"}},
+  "arms": {"default": {}, "uid_on": {"LCM_HOST_MESSAGE_UID": "on"}},
+  "bars": {"d9_hold_s": 30, "d10_hold_s": 300, "d10_compaction_return_s": 1.0, "d10_turn_wait_s": 30,
+           "d11_passes": 8, "d12_extra_passes": 3},
+  "frozen": {"target_rows_examined": null, "planner_windows": null, "planner_statements": null}
+}
