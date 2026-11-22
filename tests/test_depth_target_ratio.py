@@ -1017,9 +1017,9 @@ def test_depth_scale_calibrates_against_reasoning_recount(make_engine, summaries
     assert [(leaf.source_token_count, leaf.token_count) for leaf in leaves] == [
         (leaf.source_token_count, leaf.token_count) for leaf in unscaled_leaves[:len(leaves)]
     ]
-    if status["depth_target_met"]:
-        assert estimates[-1] <= target
-        assert recounted <= target * 1.05
+    assert status["depth_target_met"] is True
+    assert estimates[-1] <= target
+    assert recounted <= target * 1.05
     assert recounted < trigger
     assert estimates[-1] == pytest.approx(recounted, rel=0.10)
 
