@@ -5,6 +5,7 @@ import json
 import pytest
 
 from hermes_lcm import host_uid_emit, ingest_ledger, tools
+from hermes_lcm.tokens import count_message_tokens
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_issue_2854_no_summary_pass_unchanged import open_engine  # noqa: F401
 from tests.test_issue_671_stub_first_exit import (
@@ -159,6 +160,62 @@ def test_search_preserves_original_hits_and_summary(twins):
     assert all(row["store_id"] != copy_id for row in loaded["messages"])
 
 
+@pytest.mark.usefixtures("uid_mode")
+def test_budget_trimmed_tail_carrier_copy_is_excluded(make_engine, summaries, caplog):  # noqa: F811
+    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False)
+    run(engine, text_view()[1:], caplog)
+    oversized = {"role": "user", "content": "Earlier uncovered request." + TURN * 10}
+    carried = {"role": "user", "content": "Please check the pending invoice."}
+    cap = 512
+    assert count_message_tokens(oversized) > cap
+    oversized_id = _append(engine, oversized)
+    carried_id = _append(engine, carried)
+    _append(engine, {"role": "assistant", "content": "The invoice is pending."})
+    for row in NEW_TURN:
+        _append(engine, row)
+
+    emitted = engine._assemble_context(None, _view(engine), assembly_cap_override=cap)
+    head = emitted[0]
+    assert engine._generated_context_carrier_remainder(head) == carried["content"]
+    assert all(row["content"] != oversized["content"] for row in emitted)
+    _, node_ids = engine._verified_lcm_summary_prefix(head["content"])
+    assert engine._dag.coverage_end(node_ids) < oversized_id < carried_id
+    assert any(candidate["kind"] == "carrier" and candidate["retained_source"] == {"store_id": carried_id}
+               for candidate in engine._pending_emission_candidates)
+
+    copy_id = _append(engine, head, RELATION)
+    _append(engine, {"role": "assistant", "content": "The pending invoice was checked."})
+    for row in NEW_TURN:
+        _append(engine, row)
+    view = _view(engine)
+    control = [row for row in view if row["store_id"] != copy_id]
+    assert len(control) == len(view) - 1
+    prompt_visible = engine._assemble_context(None, view, THRESHOLD, persist=False) != engine._assemble_context(
+        None, control, THRESHOLD, persist=False,
+    )
+    expanded = json.loads(tools.lcm_expand({"store_id": copy_id}, engine=engine))
+    loaded = json.loads(tools.lcm_load_session({"session_id": engine._session_id, "limit": 100}, engine=engine))
+    recall_ids = {row["store_id"] for row in loaded["messages"]}
+    assert carried_id in recall_ids
+
+    engine._ingest_cursor = len(view)
+    engine._ingest_cursor_needs_reconcile = False
+    engine._compress_commit_proof = None
+    nodes_before = {node.node_id for node in engine._dag.get_session_nodes(engine._session_id)}
+    run(engine, view, caplog, force=True)
+    sources = {source for node in engine._dag.get_session_nodes(engine._session_id)
+               if node.source_type == "messages" and node.node_id not in nodes_before for source in node.source_ids}
+    assert carried_id in sources
+    assert engine._store.get(copy_id)["content"] == head["content"]
+    visibility = {
+        "assembly": prompt_visible,
+        "compaction": copy_id in sources,
+        "expand": "error" not in expanded,
+        "session recall": copy_id in recall_ids,
+    }
+    assert not any(visibility.values()), visibility
+
+
 class _QuotedTurnHidden(AssertionError):
     """A separately identified turn was excluded as a copy."""
 
@@ -292,7 +349,6 @@ def test_carried_old_repeated_turn_is_not_a_known_copy(make_engine):  # noqa: F8
     earlier = _append(engine, {"role": "user", "content": "continue"})
     head = _head_with_remainder("continue", _summary_node(engine, [earlier]))
     _append(engine, {"role": "user", "content": "Stop at the next checkpoint."})
-    _append(engine, {"role": "user", "content": "continue"})
     store_id = _append(engine, head, RELATION)
     stored = engine._store.get(store_id)
     assert not is_known_head_copy(engine._store.connection, stored)
@@ -367,7 +423,7 @@ def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  #
     _append(engine, {"role": "user", "content": "Stop at the next checkpoint."}, session="child")
     later_head = _head_with_remainder("Second parent turn.", node)
     store_id = _append(engine, later_head, RELATION, session="child")
-    assert not is_known_head_copy(conn, engine._store.get(store_id))
+    assert is_known_head_copy(conn, engine._store.get(store_id))
 
 
 def test_host_prefilter_skips_store_lookup_for_ordinary_turn(make_engine, monkeypatch):  # noqa: F811

@@ -1,7 +1,7 @@
 """Recognise stored copies of LCM-X's own summary head.
 
 A marked user row is a known copy when its leading summary parts verify byte for byte
-against owned nodes. Any carrier remainder must equal the first stored user turn in
+against owned nodes. Any carrier remainder must equal a stored user turn in
 the same normalised conversation across the session and its rotation predecessors, strictly
 after the verified summaries' highest source store ID and before the candidate.
 With no source coverage, use the first stored user turn of the candidate's session.
@@ -96,8 +96,12 @@ def _verify_marked_head_copy(conn, row) -> bool:
             )
             conversation = (row.get("conversation_id") or "").strip()
             for prior_content, prior_conversation in prior_users:
-                if (prior_conversation or "").strip() in ("", conversation):
-                    return prior_content == remainder
+                if (prior_conversation or "").strip() not in ("", conversation):
+                    continue
+                if prior_content == remainder:
+                    return True
+                if covered_through is None:
+                    return False
             return False
     return False
 
