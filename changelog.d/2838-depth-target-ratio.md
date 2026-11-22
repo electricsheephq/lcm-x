@@ -1,0 +1,2 @@
+- New: `LCM_DEPTH_TARGET_RATIO` lets automatic threshold sweeps stop at an estimated whole-prompt share of the model window. It defaults to off.
+- New: `LCM_SUMMARY_PREFIX_TARGET_RATIO` sets the summary-frontier budget as a share of the model window when the tokens override is unset.
