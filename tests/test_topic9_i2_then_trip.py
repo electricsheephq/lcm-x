@@ -20,24 +20,36 @@ def _call(call_id, ts) -> dict:
         {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": '{"path": "x.txt"}'}}]}
 
 
+def _run_i2_then_trip(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
+    result_x = _result("call_i2", "result stored without its call", 1004)
+    engine.ingest([u0, a0, u1, result_x])
+    call_x = _call("call_i2", 1003)
+    view = [u0, a0, _u("T1 user turn, edited", 1002), call_x, result_x, _a("reply", 1600)]
+    engine.ingest(list(view))  # no trip: the blocked segment leaves call_x unstored (I2)
+    monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
+    engine.ingest([*view[:2], _u("T1 user turn, edited again", 1002), *view[3:], _a("next", 1700)])
+    return engine, Counter(_key(row) for row in _stored(engine)), (u0, a0, u1, result_x, call_x)
+
+
+def test_a_blocked_call_then_trip_copies_nothing(tmp_path, monkeypatch):
+    """The part both trees keep: the stored result is never copied, and the text rows are stored once."""
+    engine, stored, (u0, a0, u1, result_x, _call_x) = _run_i2_then_trip(tmp_path, monkeypatch)
+    try:
+        assert stored[_key(result_x)] == 1
+        for row in (u0, a0, u1):
+            assert stored[_key(row)] == 1
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError,
                    reason="#3022: a call the blocked segment left unstored stays unstored after a later trip "
                           "(the base does the same; the repair restores it)")
 def test_a_blocked_call_stays_unstored_after_a_later_trip_named_limit(tmp_path, monkeypatch):
-    engine = _engine(tmp_path)
+    engine, stored, (_u0, _a0, _u1, _result_x, call_x) = _run_i2_then_trip(tmp_path, monkeypatch)
     try:
-        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
-        result_x = _result("call_i2", "result stored without its call", 1004)
-        engine.ingest([u0, a0, u1, result_x])
-        call_x = _call("call_i2", 1003)
-        view = [u0, a0, _u("T1 user turn, edited", 1002), call_x, result_x, _a("reply", 1600)]
-        engine.ingest(list(view))  # no trip: the blocked segment leaves call_x unstored (I2)
-        monkeypatch.setattr(identity_anchor, "_PRESENCE_WINDOW_ROWS", 1, raising=False)
-        engine.ingest([*view[:2], _u("T1 user turn, edited again", 1002), *view[3:], _a("next", 1700)])
-        stored = Counter(_key(row) for row in _stored(engine))
-        assert stored[_key(result_x)] == 1, "the stored result is never copied"
-        for row in (u0, a0, u1):
-            assert stored[_key(row)] == 1
         assert stored[_key(call_x)] == 1, "#3022: the call is restored"
     finally:
         engine.shutdown()
