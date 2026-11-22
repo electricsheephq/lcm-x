@@ -317,7 +317,7 @@ On the `release/v0.30.x` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.1 (16 tools)
+  ✓ hermes-lcm-x v0.30.2 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -325,10 +325,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.30.1` is the forward identity of the next patch release: the `v0.30.1-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
-that rc tree plus the GA release-notes file. The rollback target for this candidate
-is `v0.30.0`; it adds no schema change. The current stable release is
+and tag. `0.30.2` is a patch release on
+[v0.30.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.1) with one fix and no
+rc tags. Its rollback target is `v0.30.1`, and it adds no schema change. The rollback
+target for v0.30.1 is
 [v0.30.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.0)
 at `6260c31fbce11e4cd542878f1f6a37410d678ae8` (2026-11-12); see [project status](project-status.md).
 The rollback target for v0.30.0 is `v0.29.2`; take a SQLite-safe backup and verify ordered messages and summary
