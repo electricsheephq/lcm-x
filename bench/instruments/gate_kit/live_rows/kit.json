@@ -303,9 +303,9 @@
   "short_stop_reasons_source": "D9/D10's 'does not reach its end for the whole conversation': a pass whose stop is one of these was cut short (reading proposed to the release manager)"
  },
  "frozen": {
-  "target_rows_examined": null,
-  "planner_windows": null,
-  "planner_statements": null
+  "target_rows_examined": 1784,
+  "planner_windows": 49731,
+  "planner_statements": 827
  },
  "census_disclosure": "The kit's counts were fitted to a census of the kept copy final-20261118T1105Z's store, accepted as the stand-in for the deleted copy D9's bar was measured on (release ruling T1-538). The records name it as that copy's 'final lcm.db' and the highest store ids match (601,182); byte equality cannot be proven because no digest of the deleted copy exists.",
  "budgets_source": "D11's three budgets: default = LCM_FOREGROUND_SOFT_SECONDS and LCM_FOREGROUND_HARD_SECONDS both unset; 60 s and 120 s set LCM_FOREGROUND_HARD_SECONDS (ruling T1-538)",
