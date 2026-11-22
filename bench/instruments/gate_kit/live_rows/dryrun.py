@@ -47,17 +47,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--load", type=int, default=2, help="requirement 2's load processes (recorded arms)")
     parser.add_argument("--skip-candidate", action="store_true", help="qualification only")
+    parser.add_argument("--kit", type=Path, default=rt.KIT, help="the kit the store is built from")
     args = parser.parse_args(argv)
     args.scratch.mkdir(parents=True, exist_ok=False)
     args.out.mkdir(parents=True, exist_ok=False)
-    kit = rt.load_kit()
     log = args.out / "dryrun.log"
     build, work = args.scratch / "build", args.scratch / "work"
     base, cand = str(args.baseline.resolve()), str(args.candidate.resolve())
     started = time.time()
     steps: dict[str, int] = {}
-    steps["build"] = module("build", "--tree", base, "--out", str(build), log=log)
+    steps["build"] = module("build", "--tree", base, "--kit", str(args.kit.resolve()), "--out", str(build), log=log)
     (args.out / "build-manifest.json").write_text((build / "build-manifest.json").read_text())
+    kit = json.loads((build / "build-manifest.json").read_text())["kit_body"]  # bars and counts the store was built with
 
     def cell(name: str, tree: str, cell_name: str, *extra: str) -> dict[str, Any] | None:
         out = args.out / f"{name}.json"
