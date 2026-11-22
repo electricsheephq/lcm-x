@@ -453,3 +453,26 @@ def test_r2_a_list_valued_result_id_never_breaks_the_audit(tmp_path, monkeypatch
         assert _counts(engine)[_key(edited)] == 1
     finally:
         engine.shutdown()
+
+
+def test_r3_a_redacted_call_echoed_back_is_not_stored_again(tmp_path, monkeypatch):
+    """Review r3 (Astra): with redaction on, the active copy of an unstamped call carries a redacted id. When a later
+    host list echoes that redacted copy below the cursor on a trip, the witness must still hold it, so the call is not
+    stored a second time (the base credits it by position and stores one)."""
+    engine = _engine(tmp_path, sensitive_patterns_enabled=True)
+    try:
+        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
+        secret_id = "Bearer abcdefghijklmnop"
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": secret_id, "type": "function", "function": {"name": "read_file", "arguments": '{"path": "x.txt"}'}}]}
+        result = {"role": "tool", "content": "result text", "tool_call_id": "call_plain", "tool_name": "read_file"}
+        engine.ingest([u0, a0, u1, call, result, _a("reply", 1600)])
+        echoed = engine._redact_active_replay_messages([call])[0]
+        assert echoed["tool_calls"][0]["id"] != secret_id, "the cell needs a call id that redaction rewrites"
+        calls_before = sum(1 for row in _stored(engine) if row.get("tool_calls"))
+        _trip(monkeypatch)
+        engine.ingest([u0, a0, _u("T1 user turn, edited by the host", 1002), echoed, result, _a("reply", 1600),
+                       _a("next", 1700)])
+        assert sum(1 for row in _stored(engine) if row.get("tool_calls")) == calls_before
+    finally:
+        engine.shutdown()
