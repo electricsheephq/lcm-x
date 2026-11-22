@@ -104,10 +104,81 @@ def timed(record: list[dict[str, Any]], name: str, call: Any) -> Any:
         entry["seconds"] = round((entry["end_ns"] - entry["begin_ns"]) / 1e9, 3)
 
 
+TXN: dict[str, Any] = {}  # diagnostic only: --trace-txn records write windows per connection and thread
+
+
+def trace_transactions() -> list[tuple[float, int, str, str]]:
+    """Patch sqlite3.connect so every later connection logs (time, connection, thread name, first SQL word)."""
+    events: list[tuple[float, int, str, str]] = []
+    original, counter = sqlite3.connect, {"n": 0}
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = original(*args, **kwargs)
+        index = counter["n"]
+        counter["n"] += 1
+
+        def callback(statement: str) -> None:
+            word = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
+            if word in ("BEGIN", "COMMIT", "ROLLBACK", "END", "INSERT", "UPDATE", "DELETE", "REPLACE", "SAVEPOINT",
+                        "RELEASE"):
+                events.append((time.monotonic(), index, threading.current_thread().name, word))
+
+        conn.set_trace_callback(callback)
+        return conn
+
+    sqlite3.connect = connect  # type: ignore[assignment]
+    return events
+
+
+def write_windows(events: list[tuple[float, int, str, str]]) -> list[dict[str, Any]]:
+    """Top-level write windows per connection: from BEGIN (or a first write) to COMMIT/ROLLBACK/END."""
+    opened: dict[int, tuple[float, str, int]] = {}
+    found = []
+    for at, conn, thread, word in events:
+        if conn not in opened:
+            if word == "BEGIN" or word in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
+                opened[conn] = (at, thread, 0)
+        elif word in ("COMMIT", "ROLLBACK", "END"):
+            start, owner, writes = opened.pop(conn)
+            found.append({"conn": conn, "thread": owner, "seconds": round(at - start, 3), "writes": writes})
+        elif word in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
+            start, owner, writes = opened[conn]
+            opened[conn] = (start, owner, writes + 1)
+    return sorted(found, key=lambda w: -w["seconds"])[:8]
+
+
+CONTROL: dict[str, str] = {}  # instrument self-test: "short-pass" ingests only half of the list
+
+
+def watch_cursor(engine: Any) -> dict[str, Any]:
+    """Rows the pass itself examined: the engine's ingest cursor after each of its ingests during the pass (the
+    host-list position the store has reached). A count the pass moves, so a short pass reads short."""
+    seen: dict[str, Any] = {"max_cursor": None, "ingests": 0, "hooked": False}
+    original = getattr(engine, "_ingest_messages", None)
+    if not callable(original) or not hasattr(engine, "_ingest_cursor"):
+        return seen
+    seen["hooked"] = True
+
+    def counted(messages: Any, *args: Any, **kwargs: Any) -> Any:
+        if CONTROL.get("mode") == "short-pass" and isinstance(messages, list):
+            messages = messages[: len(messages) // 2]
+        try:
+            return original(messages, *args, **kwargs)
+        finally:
+            seen["ingests"] += 1
+            cursor = getattr(engine, "_ingest_cursor", None)
+            if isinstance(cursor, int):
+                seen["max_cursor"] = max(cursor, seen["max_cursor"] or 0)
+
+    engine._ingest_messages = counted
+    return seen
+
+
 def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path, db: Path,
                view: list[dict[str, Any]], calls: list[dict[str, Any]]) -> tuple[Any, list[dict[str, Any]] | None]:
     """Restart (a new engine and its session start), then the first compaction pass on the host list."""
     engine = timed(calls, "restart", lambda: rt.engine(engine_module, config, kit, home))
+    engine._live_rows_cursor = watch_cursor(engine)
     result = None
     profiler = cProfile.Profile() if PROFILE.get("path") else None
     try:
@@ -154,7 +225,9 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
         "pass_completed": result is not None and "exception" not in compress,
         "exception": compress.get("exception"),
         "list_rows_in": len(view), "list_rows_out": len(result) if isinstance(result, list) else None,
-        "rows_examined": rows_examined(db, kit["target"]["conversation_id"], view),
+        "rows_examined": engine._live_rows_cursor["max_cursor"],
+        "cursor_watch": engine._live_rows_cursor,
+        "rows_stored_matching_list": rows_examined(db, kit["target"]["conversation_id"], view),
         "summary_calls": [{k: c.get(k) for k in ("input_tokens", "latency_s", "granted_s", "slept_s", "outcome")}
                           for c in aux.CALLS],
         "lines": [{"t_s": round(line["t"] - begin / 1e9, 3), "message": line["message"]} for line in lines.lines],
@@ -183,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--profile", type=Path, default=None, help="diagnostic: cProfile stats of the first pass")
+    parser.add_argument("--control", choices=("none", "short-pass"), default="none",
+                        help="instrument self-test: short-pass ingests half the list, so the row must read short")
+    parser.add_argument("--trace-txn", action="store_true", help="diagnostic: write windows by connection and thread")
     parser.add_argument("--worst-case", action="store_true", help="D10's recorded arm: threads never sleep")
     parser.add_argument("--load", type=int, default=0, help="requirement 2: N CPU-bound processes during the cell")
     parser.add_argument("--keep-copy", action="store_true",
@@ -192,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.profile:
         PROFILE["path"] = str(args.profile)
+    CONTROL["mode"] = args.control
     manifest = json.loads((args.build / "build-manifest.json").read_text())
     kit = builder.scaled(rt.load_kit(), manifest["scale"])
     generated = shape.build(kit)
@@ -201,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     lock = claim(args.work)  # noqa: F841 - held until the process exits
     rt.isolate(args.work / "home", env)
     modules = rt.load(args.tree, kit)
+    events = trace_transactions() if args.trace_txn else None
     if args.stand_in_floor is not None:
         aux.configure(floor_s=args.stand_in_floor)
     if args.keep_copy:
@@ -221,9 +299,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         load_pids = load.stop() if load else []
     receipt["load"] = {"processes": args.load, "pids": load_pids}
+    if events is not None:
+        receipt["write_windows"] = write_windows(events)
     receipt["keep_copy"] = bool(args.keep_copy)
     receipt["stand_in"] = dict(aux.SETTINGS)
-    receipt["qualifies"] = manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
+    receipt["control"] = args.control
+    receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
+                            and args.control == "none")
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                     "input_hash": manifest["input_hash"], "store_sha256": manifest["store_sha256"],

@@ -19,6 +19,7 @@ from typing import Any
 WORDS = ("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau "
          "upsilon phi chi psi omega").split()
 CHARS_PER_TOKEN = 4
+PRUNED_PLACEHOLDER = "[Old tool output cleared to save context space]"  # the host's own text
 
 
 def text(rng: random.Random, tokens: int, tag: str) -> str:
@@ -96,13 +97,19 @@ def host_list(kit: dict[str, Any], history: list[dict[str, Any]]) -> list[dict[s
 
 def restart_view(kit: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The host list as the host hands it after a restart, rebuilt cold from its own records: assistant and tool
-    rows without timestamps (#1674) and tool rows naming their tool in `name`, not `tool_name` (#2886)."""
+    rows without timestamps (#1674), tool rows naming their tool in `name`, not `tool_name` (#2886), and tool
+    outputs older than the newest `pruned_tool_before_last_turns` turns cleared to the host's placeholder."""
     form = kit.get("restart_form") or {}
     unstamp = set(form.get("unstamp_roles") or ())
     rng = random.Random(kit["seed"] * 31 + 7)
+    starts = turn_starts(rows)
+    keep = int(form.get("pruned_tool_before_last_turns", 0))
+    prune_before = starts[-keep] if keep and len(starts) > keep else 0
     out = []
-    for row in rows:
+    for index, row in enumerate(rows):
         row = dict(row)
+        if row["role"] == "tool" and index < prune_before:
+            row["content"] = PRUNED_PLACEHOLDER  # the host clears old tool outputs; the store keeps the text
         if row["role"] in unstamp:
             row.pop("timestamp", None)
         if row["role"] == "tool" and "tool_name" in row and rng.random() < form.get("tool_name_as_name_share", 0):

@@ -262,7 +262,8 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
         "longest_hold_in_pass_s": (hold[1] - hold[0]) / 1e9, "longest_hold_s": lockwatch.longest_s(
             observed["transitions"], begin, end),
         "pass_completed": result is not None and "exception" not in compress, "exceptions": exceptions,
-        "rows_examined": base.rows_examined(db, kit["target"]["conversation_id"], view),
+        "rows_examined": engine._live_rows_cursor["max_cursor"],
+        "rows_stored_matching_list": base.rows_examined(db, kit["target"]["conversation_id"], view),
         "started_during_hold": {"turn": sum(map(during, turn_records)),
                                 "compaction": sum(map(during, compaction_records))},
         "turn_calls": [{k: r[k] for k in ("seconds", "wait_s", "error")} | {"during_hold": during(r)}

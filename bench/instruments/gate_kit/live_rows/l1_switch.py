@@ -2,8 +2,8 @@
 
     python -B -m bench.instruments.gate_kit.live_rows.l1_switch --tree TREE --work NEW_DIR --out RECEIPT.json
 
-Session A holds a tool-heavy view, plus a second stored copy of its rows (planted, as #2851's reproduction does, so
-the summary publication cannot prove contiguous coverage). The stand-in summariser holds the pass's first summary
+Session A holds a tool-heavy view (`--plant-copy` adds a second stored copy of its rows, as #2851's reproduction
+does; off by default, since it sends A's pass to a no-publish stop). The stand-in summariser holds the pass's first summary
 call open; meanwhile the engine is bound to a new, empty session B; then the call is released. B's first row and
 then a grown view for B are ingested.
 
@@ -88,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--hold-timeout", type=float, default=120.0)
+    parser.add_argument("--plant-copy", action="store_true",
+                        help="diagnostic: a second stored copy of A's rows (#2851's staging); off by default")
     parser.add_argument("--control", choices=("none", "drop-first-b-row", "switch-after-pass"), default="none",
                         help="instrument self-test: a planted loss must FAIL, a late switch must be INCONCLUSIVE")
     args = parser.parse_args(argv)
@@ -104,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     engine.on_session_start("switch-A", platform=platform, context_length=WINDOW, conversation_id="switch-A-conv")
     view = a_view()
     engine.ingest(copy.deepcopy(view))
-    planted = plant_copy(db, "switch-A")
+    planted = plant_copy(db, "switch-A") if args.plant_copy else 0
     recorded_a = session_rows(db, "switch-A")
     planned_b = b_view(9)
 
