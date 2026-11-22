@@ -263,7 +263,7 @@
   "floor_s": 44.4,
   "rate_tps": 2970.0,
   "ratio": 0.1,
-  "source": "#2869: 6,707 tokens in 44.4 s and 112,867 tokens in 38.0 s (2,970 = 112,867 / 38.0); stand-in pending a ruling"
+  "source": "#2869 (6,707 tokens in 44.4 s; 112,867 tokens in 38.0 s; 2,970 = 112,867 / 38.0); latency = max(44.4 s, input tokens / 2,970 tok/s), accepted by ruling T1-538"
  },
  "budgets": {
   "default": {},
@@ -292,5 +292,7 @@
   "target_rows_examined": null,
   "planner_windows": null,
   "planner_statements": null
- }
+ },
+ "census_disclosure": "The kit's counts were fitted to a census of the kept copy final-20261118T1105Z's store, accepted as the stand-in for the deleted copy D9's bar was measured on (release ruling T1-538). The records name it as that copy's 'final lcm.db' and the highest store ids match (601,182); byte equality cannot be proven because no digest of the deleted copy exists.",
+ "budgets_source": "D11's three budgets: default = LCM_FOREGROUND_SOFT_SECONDS and LCM_FOREGROUND_HARD_SECONDS both unset; 60 s and 120 s set LCM_FOREGROUND_HARD_SECONDS (ruling T1-538)"
 }

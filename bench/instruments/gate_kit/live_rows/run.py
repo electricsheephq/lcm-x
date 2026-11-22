@@ -295,6 +295,11 @@ def main(argv: list[str] | None = None) -> int:
         receipt["write_windows"] = write_windows(events)
     receipt["keep_copy"] = bool(args.keep_copy)
     receipt["stand_in"] = dict(aux.SETTINGS)
+    # Ruling T1-538: every receipt names the latency law and D11's budget mapping as kit fields, and discloses
+    # the census stand-in copy the kit's counts were fitted to.
+    receipt["kit_fields"] = {"summary_route": kit.get("summary_route"), "budgets": kit.get("budgets"),
+                             "budget_used": {args.budget: kit["budgets"].get(args.budget)}}
+    receipt["census_disclosure"] = kit.get("census_disclosure")
     receipt["control"] = args.control
     receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())
     receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
