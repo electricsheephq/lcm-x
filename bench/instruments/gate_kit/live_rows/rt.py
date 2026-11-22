@@ -96,7 +96,8 @@ class Lines(logging.Handler):
 
     PREFIXES = ("LCM compaction stop", "LCM automatic compaction held", "LCM compression no-op", "LCM threshold sweep",
                 "LCM summary route", "LLM summarization failed", "LCM compaction #", "LCM store-complete leaf",
-                "LCM leaf summary input", "LCM survival fit", "LCM ledger ordinals respace", "LCM compress failed")
+                "LCM leaf summary input", "LCM survival fit", "LCM ledger ordinals respace", "LCM compress failed",
+                "LCM automatic compress failed", "LCM ingest failed", "LCM retained-stop back-off")
 
     def __init__(self) -> None:
         super().__init__(logging.DEBUG)

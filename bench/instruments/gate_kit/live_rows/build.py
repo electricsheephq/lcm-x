@@ -75,7 +75,7 @@ def clear_working(work: Path, build: Path | None = None) -> None:
     for name in ("lcm.db", "lcm.db-wal", "lcm.db-shm", "lcm.db-journal", MARKER):
         (work / "current" / name).unlink(missing_ok=True)
     payloads, source = work / "current" / "externalized", (build / "store" / "externalized") if build else None
-    if payloads.exists() and not payloads.is_symlink():
+    if payloads.exists() and not payloads.is_symlink() and not any(p.is_symlink() for p in payloads.rglob("*")):
         mine = {p.relative_to(payloads) for p in payloads.rglob("*") if p.is_file()}
         theirs = {p.relative_to(source) for p in source.rglob("*") if p.is_file()} if source and source.exists() else set()
         if not mine <= theirs:
@@ -84,8 +84,8 @@ def clear_working(work: Path, build: Path | None = None) -> None:
         set_aside(payloads)
     for name in ("state.db-wal", "state.db-shm", "state.db-journal"):
         set_aside(work / "home" / name)
-    if not (build and (build / "host" / "state.db").exists()):
-        set_aside(work / "home" / "state.db")
+    if not (build and (build / "host" / "state.db").exists()) or (work / "home" / "state.db").is_symlink():
+        set_aside(work / "home" / "state.db")  # never written through a link
 
 
 def snapshot(work: Path, out: Path) -> None:

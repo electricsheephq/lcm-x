@@ -89,6 +89,9 @@ def qualify(kit: dict[str, Any], manifest: dict[str, Any], counts: dict[str, int
     if manifest.get("scale") != 1.0:
         reasons.append("the store is scaled")
     hold = d9.get("longest_hold_s") if d9 else None
+    gap = ((d9 or {}).get("lock_watch") or {}).get("largest_gap_ms", 0)
+    if gap > verdicts.GAP_MS:
+        reasons.append(f"the v0.30.0 D9 lock watch had a {gap:.0f} ms sampling gap (over {verdicts.GAP_MS:.0f} ms)")
     if not d9 or not d9.get("qualifies") or d9.get("lock_unexpected") or d9.get("cell_error"):
         reasons.append("the v0.30.0 D9 receipt is missing, non-qualifying, or its lock watch saw unclassified answers")
     elif hold is None or hold <= kit["bars"]["d9_hold_s"]:

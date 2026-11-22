@@ -65,12 +65,17 @@ SHORT_STOPS_DEFAULT = ("error", "time_budget_exhausted", "pass_budget_exhausted"
                        "summary_route_unavailable", "summary_result_rejected")
 
 
+def is_error(reason: str) -> bool:
+    """A stop that is an error inside the product (`error`, `leaf_summary_error`, ...)."""
+    return reason == "error" or reason.endswith("_error")
+
+
 def stop_reasons(messages: list[str]) -> list[str]:
     found = []
     for message in messages:
         if message.startswith("LCM compaction stop: reason="):
             found.append(message.split("reason=", 1)[1].split()[0])
-        elif message.startswith("LCM compress failed"):
+        elif message.startswith(("LCM compress failed", "LCM automatic compress failed", "LCM ingest failed")):
             found.append("error")
     return found
 
@@ -111,7 +116,8 @@ def one_pass(engine: Any, db: Path, kit: dict[str, Any], view: list[dict[str, An
     out = returned if returned is not None else view
     record.update({
         "rows_out": len(out) if returned is not None else None, "published": summary_nodes(db) > nodes_before,
-        "hold_armed": holds.count > held_before or any(m.startswith("LCM automatic compaction held")
+        "hold_armed": holds.count > held_before or any(m.startswith(("LCM automatic compaction held",
+                                                                    "LCM retained-stop back-off"))
                                                        for m in new_lines),
         "stored_check": compare_stored(stored_before, stored_identity(db, conversation)),
         "returned_equals_input": returned is not None and returned == snapshot,
@@ -168,8 +174,8 @@ def host_turn(engine: Any, pre: list[dict[str, Any]], post: list[dict[str, Any]]
     tokens = base.pressure(kit, pre)
     began = time.monotonic()
     compressed = None
-    engine.should_compress_preflight(pre)  # the host calls preflight every turn
-    if engine.should_compress(tokens):
+    wants = engine.should_compress_preflight(pre)  # the host calls preflight every turn; it may ask for cleanup
+    if wants or engine.should_compress(tokens):
         compressed = engine.compress(copy.deepcopy(pre), current_tokens=tokens)
     if isinstance(compressed, list):  # the host adopts the compressed list; the model's reply follows it
         post = compressed + post[len(pre):]
@@ -336,11 +342,11 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     if compress.get("exception"):
         exceptions.append(compress["exception"])
     reasons = stop_reasons([line["message"] for line in lines.lines if line["thread"] == threading.main_thread().ident])
-    if "error" in reasons:
-        exceptions.append("compress failed inside the product (reason=error)")
+    if any(is_error(r) for r in reasons):
+        exceptions.append("compress failed inside the product (an error stop)")
     # The busy compaction thread's own swallowed errors (a returned fallback list is still an error: bar 4).
     busy_errors = [line for line in lines.lines if line["thread"] != threading.main_thread().ident
-                   and line["t"] * 1e9 <= end and "error" in stop_reasons([line["message"]])]
+                   and line["t"] * 1e9 <= end and any(is_error(r) for r in stop_reasons([line["message"]]))]
     if busy_errors:
         exceptions.append(f"{len(busy_errors)} busy-thread compress failures inside the product (reason=error)")
     return {

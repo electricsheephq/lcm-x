@@ -41,6 +41,10 @@ def combine(outcomes: list[str]) -> str:
     return PASS
 
 
+def is_error(reason: str) -> bool:
+    return reason == "error" or reason.endswith("_error")
+
+
 def unexpected(receipt: dict[str, Any]) -> int:
     return int(receipt.get("lock_unexpected") or (receipt.get("lock_watch") or {}).get("unexpected_answers") or 0)
 
@@ -140,9 +144,11 @@ def d11_budget(receipt: dict[str, Any] | None, arm: str = JUDGED, budget: str | 
     if receipt.get("cell_error") or (receipt.get("exception") and not passes):
         return {"outcome": INCONCLUSIVE, "reasons": [f"the sequence raised {receipt.get('exception')}"]}
     broken = [n for n, p in enumerate(passes, 1) if p.get("exception") or p.get("returned_list") is not True
-              or "stop_reasons" not in p or "error" in (p.get("stop_reasons") or [])]  # no evidence is not success
+              or "stop_reasons" not in p or any(is_error(r) for r in p.get("stop_reasons") or [])]  # no evidence is not success
     failed: list[str] = []
-    for number, item in enumerate(passes, 1):  # a measured loss or copy fails whether or not anything published
+    for number, item in enumerate(passes, 1):  # a loss, copy or armed hold fails whether or not anything published
+        if item.get("hold_armed"):
+            failed.append(f"pass {number} armed a compaction hold")
         check = item.get("stored_check") or {}
         if check.get("lost") or check.get("changed") or check.get("duplicated") or check.get("reordered"):
             failed.append(f"pass {number}: stored rows lost {check.get('lost')} (changed {check.get('changed')}), "
@@ -157,8 +163,6 @@ def d11_budget(receipt: dict[str, Any] | None, arm: str = JUDGED, budget: str | 
     for number, item in enumerate(passes, 1):
         if item.get("published") and (item.get("rows_out") is None or item["rows_out"] >= item["rows_in"]):
             failed.append(f"pass {number} published and returned {item['rows_out']} rows for {item['rows_in']}")
-        if item.get("hold_armed"):
-            failed.append(f"pass {number} armed a compaction hold")
     rows = [receipt.get("rows_before")] + [p.get("rows_out") for p in passes]
     if failed:
         return {"outcome": FAIL, "reasons": failed, "rows": rows}
@@ -194,7 +198,7 @@ def d12(receipts: dict[str, dict[str, dict[str, Any] | None]]) -> dict[str, Any]
             every = (receipt.get("passes") or []) + (receipt.get("extra_passes") or [])
             # A pass that raised or returned no list gave the host nothing to compare: never an unchanged pass.
             broken = [p for p in every if p.get("exception") or p.get("returned_list") is not True
-                      or "stop_reasons" not in p or "error" in (p.get("stop_reasons") or [])]
+                      or "stop_reasons" not in p or any(is_error(r) for r in p.get("stop_reasons") or [])]
             judged = [p for p in every if not p.get("published") and p not in broken]
             changed = [p for p in judged if not p.get("returned_equals_input")]
             if changed:

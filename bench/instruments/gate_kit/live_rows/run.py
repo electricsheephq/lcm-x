@@ -145,7 +145,7 @@ def completed(result: Any, compress: dict[str, Any], reasons: list[str], kit: di
     that cuts the pass short (an error inside the product, an exhausted budget; the kit's `short_stop_reasons`)."""
     short = set(kit["bars"].get("short_stop_reasons") or SHORT_STOPS)
     return (isinstance(result, list) and "exception" not in compress and bool(reasons)
-            and not any(reason in short for reason in reasons))
+            and not any(reason in short or reason.endswith("_error") for reason in reasons))
 
 
 SHORT_STOPS = ("error", "time_budget_exhausted", "pass_budget_exhausted", "leaf_summary_error",
@@ -234,7 +234,8 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
                           if e - s > 1e9],
         "lock_watch": {k: observed.get(k) for k in ("samples", "poll_ns", "largest_gap_ms", "unexpected_answers")},
         "pass_completed": completed(result, compress, reasons, kit), "stop_reasons": reasons,
-        "exception": compress.get("exception") or ("compress failed inside the product" if "error" in reasons
+        "exception": compress.get("exception") or ("compress failed inside the product"
+                                                    if any(r == "error" or r.endswith("_error") for r in reasons)
                                                     else None),
         "lock_unexpected": observed.get("unexpected_answers"),
         "list_rows_in": len(view), "list_rows_out": len(result) if isinstance(result, list) else None,
@@ -285,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stand-in-floor", type=float, default=None,
                         help="smoke only: override the kit's latency floor (the receipt says so; never qualifies)")
     args = parser.parse_args(argv)
+    if args.cell == "kill-at-first-call" and args.load:
+        parser.error("--load cannot be used with kill-at-first-call (its SIGKILL would leave the load running)")
     if args.profile:
         PROFILE["path"] = str(args.profile)
     CONTROL["mode"] = args.control
