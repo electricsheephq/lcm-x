@@ -341,7 +341,7 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
             observed["transitions"], begin, end),
         "pass_completed": base.completed(result, compress, reasons, kit), "stop_reasons": reasons,
         "exceptions": exceptions,
-        "rows_examined": engine._live_rows_cursor["max_cursor"],
+        "rows_examined": engine._live_rows_cursor_pass["max_cursor"],
         "rows_stored_matching_list": base.rows_examined(db, kit["target"]["conversation_id"], view),
         "started_during_hold": {"turn": sum(map(during, turn_records)),
                                 "compaction": sum(map(during, compaction_records))},

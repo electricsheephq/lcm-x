@@ -197,6 +197,8 @@ def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path,
         if profiler:
             profiler.disable()
             profiler.dump_stats(PROFILE["path"])
+        # The pass's own count, read as it returns: a later shutdown may ingest again and move the cursor.
+        engine._live_rows_cursor_pass = dict(engine._live_rows_cursor)
     return engine, result
 
 
@@ -236,7 +238,7 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
                                                     else None),
         "lock_unexpected": observed.get("unexpected_answers"),
         "list_rows_in": len(view), "list_rows_out": len(result) if isinstance(result, list) else None,
-        "rows_examined": engine._live_rows_cursor["max_cursor"],
+        "rows_examined": engine._live_rows_cursor_pass["max_cursor"],
         "cursor_watch": engine._live_rows_cursor,
         "rows_stored_matching_list": rows_examined(db, kit["target"]["conversation_id"], view),
         "summary_calls": [{k: c.get(k) for k in ("input_tokens", "latency_s", "granted_s", "slept_s", "outcome")}
