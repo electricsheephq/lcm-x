@@ -1,7 +1,10 @@
 """Recognise stored copies of LCM-X's own summary head.
 
 A marked user row is a known copy when its leading summary parts verify byte for byte
-against owned nodes and any carrier remainder matches the nearest earlier user turn.
+against owned nodes. Any carrier remainder must equal the first stored user turn in
+the same normalised conversation across the session and its rotation predecessors, strictly
+after the verified summaries' highest source store ID and before the candidate.
+With no source coverage, use the first stored user turn of the candidate's session.
 The proof is read-only and leaves the stored row and its relations intact.
 """
 
@@ -10,7 +13,7 @@ import sqlite3
 from functools import cache
 from types import SimpleNamespace
 
-from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, verify_summary_prefix
+from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, summary_coverage_end, verify_summary_prefix
 
 
 def _head_copy_shape_sql(prefix=""):
@@ -45,13 +48,6 @@ def _head_copy_candidate(row) -> bool:
     )
 
 
-def _nearest_prior_user(conn, session_id, store_id):
-    return conn.execute(
-        "SELECT content, conversation_id FROM messages WHERE session_id=? AND store_id<? AND role='user' "
-        "ORDER BY store_id DESC LIMIT 1", (session_id, store_id),
-    ).fetchone()
-
-
 def _verify_marked_head_copy(conn, row) -> bool:
     content = row["content"]
     store_id, session_id = row["store_id"], row["session_id"]
@@ -82,7 +78,7 @@ def _verify_marked_head_copy(conn, row) -> bool:
     def owns_node(owner):
         return owner == session_id or owner in predecessors()
 
-    end, _ = verify_summary_prefix(content, get_node, owns_node)
+    end, node_ids = verify_summary_prefix(content, get_node, owns_node)
     if end is None or end == len(content):
         return end is not None
     suffix = content[end:]
@@ -91,15 +87,18 @@ def _verify_marked_head_copy(conn, row) -> bool:
             remainder = suffix[len(separator):]
             if not remainder.strip():
                 return False
-            previous = _nearest_prior_user(conn, session_id, store_id)
-            if previous is None:
-                # A rotated session can start with a head carrying its predecessor's last user turn.
-                for predecessor in predecessors():
-                    previous = _nearest_prior_user(conn, predecessor, store_id)
-                    if previous is not None:
-                        break
-            return (previous is not None and previous[0] == remainder
-                    and (previous[1] or "").strip() in ("", (row.get("conversation_id") or "").strip()))
+            covered_through = summary_coverage_end(conn, node_ids)
+            sessions = [session_id] if covered_through is None else [session_id, *predecessors()]
+            prior_users = conn.execute(
+                "SELECT content, conversation_id FROM messages "
+                f"WHERE session_id IN ({','.join('?' * len(sessions))}) AND role='user' "
+                "AND store_id>? AND store_id<? ORDER BY store_id", (*sessions, covered_through or 0, store_id),
+            )
+            conversation = (row.get("conversation_id") or "").strip()
+            for prior_content, prior_conversation in prior_users:
+                if (prior_conversation or "").strip() in ("", conversation):
+                    return prior_content == remainder
+            return False
     return False
 
 

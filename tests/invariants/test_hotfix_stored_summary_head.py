@@ -43,12 +43,6 @@ def _append(engine, row, relation=None, *, session=None):
     return store_id
 
 
-def _with_head_remainder(engine, head, remainder):
-    end = engine._verified_lcm_summary_prefix_end(head["content"])
-    assert end is not None
-    return {**head, "content": head["content"][:end] + "\n\n" + remainder}
-
-
 @pytest.fixture
 def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
     engines = []
@@ -74,9 +68,7 @@ def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
         assert not any(
             r["content"] == head["content"]
             for r in engine._store.get_session_messages_after(engine._session_id, old_top)
-        )
-        # Inject the stored shape after warm ingest. The carrier must reproduce the nearest stored user turn.
-        head = _with_head_remainder(engine, head, NEW_TURN[0]["content"])
+        )  # This synthetic warm ingest leaves the copy out. Seed the stored shape through the ingest writer.
         copy_id = (_append(engine, head, RELATION) if with_copy else None)
         if not with_copy:
             # Occupy the same global ID outside this conversation's session, so leaf IDs are directly comparable.
@@ -114,6 +106,16 @@ def test_assembly_preserves_rows_and_relations(twins):
     assert (copy_id, "user", head["content"]) in before[0]
     engine._assemble_context(None, _view(engine), persist=False)
     assert _snapshot(engine) == before
+
+
+def test_consecutive_stored_carrier_copies_are_both_known(twins):
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    _, (engine, head, first_id) = twins
+    second_id = _append(engine, head, RELATION)
+    assert second_id == first_id + 1
+    for store_id in (first_id, second_id):
+        assert is_known_head_copy(engine._store.connection, engine._store.get(store_id))
 
 
 @pytest.mark.parametrize("position", ["leaf", "tail"])
@@ -190,7 +192,7 @@ def _assert_distinct_head_uid(engine, emitted, quote):
         reason="UID-on refinement: keep a separately stamped quote with a UID distinct from every emitted head",
     )),
 ])
-@pytest.mark.parametrize("repeat_request", [False, True], ids=["quote-only", "quote-and-request"])
+@pytest.mark.parametrize("repeat_request", [False, True], ids=["quote-only", "quote-and-carrier-remainder"])
 def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkeypatch,  # noqa: F811
                                           quote_mode, repeat_request):
     """Pin the accepted default tradeoff: the quote stays stored but is hidden from prompt, compaction and recall."""
@@ -206,11 +208,13 @@ def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkey
                   for index, row in enumerate([*text_view()[1:-2], *NEW_TURN])])
     emitted = run(engine, seed, caplog)
     head = emitted[0]["content"]
-    assert emitted[0]["role"] == "user" and engine._verified_lcm_summary_prefix_end(head) == len(head)
+    end, node_ids = engine._verified_lcm_summary_prefix(head)
+    assert emitted[0]["role"] == "user" and end == len(head)
     assert engine._last_compress_leaves[1] > 0
 
     earlier = engine._store.get_session_messages(engine._session_id)
-    request = next(row["content"] for row in reversed(earlier) if row["role"] == "user")
+    covered_through = engine._dag.coverage_end(node_ids) or 0
+    request = next(row["content"] for row in earlier if row["role"] == "user" and row["store_id"] > covered_through)
     content = f"{head}\n\n{request}" if repeat_request else head
     live = flush(emitted)
     quote, = flush([{"role": "user", "content": content, "message_uid": "separately-stamped-quote"}])
@@ -262,25 +266,33 @@ def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkey
         raise _QuotedTurnHidden(f"Quote visibility (prompt, compaction, expand, session recall): {visible}")
 
 
-def _head_with_remainder(engine, source_id, remainder):
+def _summary_node(engine, source_ids, *, depth=0):
     from hermes_lcm.dag import SummaryNode
-    from hermes_lcm.engine import _summary_part_text
 
     node = SummaryNode(
-        session_id=engine._session_id, depth=0, summary="Earlier turns.", expand_hint="turns",
-        source_type="messages", source_ids=[source_id], token_count=3, source_token_count=10,
+        session_id=engine._session_id, depth=depth, summary="Earlier turns.", expand_hint="turns",
+        source_type="nodes" if depth else "messages", source_ids=source_ids, token_count=3, source_token_count=10,
     )
     engine._dag.add_node(node)
-    return {"role": "user", "content": _summary_part_text(node) + "\n\n" + remainder}
+    return node
 
 
+def _head_with_remainder(remainder, *nodes):
+    from hermes_lcm.engine import _summary_part_text
+
+    prefix = "\n\n---\n\n".join(_summary_part_text(node) for node in nodes)
+    return {"role": "user", "content": prefix + "\n\n" + remainder}
+
+
+@pytest.mark.usefixtures("uid_mode")
 def test_carried_old_repeated_turn_is_not_a_known_copy(make_engine):  # noqa: F811
     from hermes_lcm.head_copy import is_known_head_copy
 
     engine = make_engine()
     earlier = _append(engine, {"role": "user", "content": "continue"})
-    head = _head_with_remainder(engine, earlier, "continue")
+    head = _head_with_remainder("continue", _summary_node(engine, [earlier]))
     _append(engine, {"role": "user", "content": "Stop at the next checkpoint."})
+    _append(engine, {"role": "user", "content": "continue"})
     store_id = _append(engine, head, RELATION)
     stored = engine._store.get(store_id)
     assert not is_known_head_copy(engine._store.connection, stored)
@@ -294,8 +306,9 @@ def test_carried_head_copy_with_legacy_conversation_id(make_engine, legacy_id, r
 
     engine = make_engine()
     engine.on_session_start("legacy", conversation_id="conv", context_length=200_000)
+    source = _append(engine, {"role": "assistant", "content": "Earlier reply."})
     earlier = _append(engine, {"role": "user", "content": "continue"})
-    head = _head_with_remainder(engine, earlier, "continue")
+    head = _head_with_remainder("continue", _summary_node(engine, [source]))
     store_id = _append(engine, head, RELATION)
     conn = engine._store.connection
     with engine._store.atomic():
@@ -303,13 +316,48 @@ def test_carried_head_copy_with_legacy_conversation_id(make_engine, legacy_id, r
     assert is_known_head_copy(conn, engine._store.get(store_id)) == recognised
 
 
+@pytest.mark.usefixtures("uid_mode")
+def test_carried_head_copy_uses_highest_source_across_the_verified_prefix(make_engine):  # noqa: F811
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    engine = make_engine()
+    first = _append(engine, {"role": "user", "content": "First covered turn."})
+    later = _append(engine, {"role": "user", "content": "Last covered turn."})
+    leaf = _summary_node(engine, [first, later])
+    condensed = _summary_node(engine, [leaf.node_id], depth=1)
+    older = _summary_node(engine, [first])
+    _append(engine, {"role": "user", "content": "First uncovered turn."})
+    for nodes in ((condensed, older), (older, condensed)):
+        head = _head_with_remainder("First uncovered turn.", *nodes)
+        store_id = _append(engine, head, RELATION)
+        assert is_known_head_copy(engine._store.connection, engine._store.get(store_id))
+
+
+@pytest.mark.usefixtures("uid_mode")
+def test_carried_head_copy_with_no_source_coverage_uses_first_user_turn(make_engine):  # noqa: F811
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    engine = make_engine()
+    _append(engine, {"role": "user", "content": "First turn."})
+    _append(engine, {"role": "user", "content": "Second turn."})
+    node = _summary_node(engine, [])
+    conn = engine._store.connection
+    for remainder, recognised in (("First turn.", True), ("Second turn.", False)):
+        store_id = _append(engine, _head_with_remainder(remainder, node), RELATION)
+        assert is_known_head_copy(conn, engine._store.get(store_id)) == recognised
+
+
+@pytest.mark.usefixtures("uid_mode")
 def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  # noqa: F811
     from hermes_lcm.head_copy import is_known_head_copy
 
     engine = make_engine()
     parent = engine._session_id
-    earlier = _append(engine, {"role": "user", "content": "continue"})
-    head = _head_with_remainder(engine, earlier, "continue")
+    source = _append(engine, {"role": "assistant", "content": "Earlier reply."})
+    node = _summary_node(engine, [source])
+    _append(engine, {"role": "user", "content": "First parent turn."})
+    _append(engine, {"role": "user", "content": "Second parent turn."})
+    head = _head_with_remainder("First parent turn.", node)
     engine._record_rotation_predecessor("child", parent)
     store_id = _append(engine, head, RELATION, session="child")
     conn = engine._store.connection
@@ -317,7 +365,8 @@ def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  #
     store_id = _append(engine, head, RELATION, session="unrelated")
     assert not is_known_head_copy(conn, engine._store.get(store_id))
     _append(engine, {"role": "user", "content": "Stop at the next checkpoint."}, session="child")
-    store_id = _append(engine, head, RELATION, session="child")
+    later_head = _head_with_remainder("Second parent turn.", node)
+    store_id = _append(engine, later_head, RELATION, session="child")
     assert not is_known_head_copy(conn, engine._store.get(store_id))
 
 

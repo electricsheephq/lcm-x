@@ -8,7 +8,6 @@ import pytest
 from hermes_lcm import host_uid_emit
 from hermes_lcm.engine import _summary_part_text
 from hermes_lcm.tokens import count_messages_tokens
-from tests.invariants.test_hotfix_stored_summary_head import _with_head_remainder
 from tests.invariants.test_issue_3006_post_refusal import LINEAGE_STOP, _host_flush
 from tests.test_issue_2854_no_summary_pass_unchanged import open_engine, published_head  # noqa: F401
 from tests.test_issue_671_stub_first_exit import (
@@ -74,8 +73,7 @@ def _build_host_twin(make_engine, caplog, *, with_copy):  # noqa: F811
     if with_copy:
         from hermes_lcm.head_copy import is_known_head_copy
 
-        copy = _with_head_remainder(engine, head, NEW_TURN[0]["content"])
-        copy_id, = engine._store.append_batch("hf2", [copy], conversation_id="hf2")
+        copy_id, = engine._store.append_batch("hf2", [head], conversation_id="hf2")
         engine._store.add_message_relations([[(copy_id, RELATION, None, None, None)]])
         assert is_known_head_copy(engine._store.connection, engine._store.get(copy_id))
     else:
@@ -113,9 +111,7 @@ def _host_pass(engine, live, original_head, copy_id, flush, caplog, pass_number)
         assert replayed_head != original_head
     before = _stored_rows(engine)
     if copy_id is not None:
-        assert engine._store.get(copy_id)["content"] == _with_head_remainder(
-            engine, {"content": original_head}, NEW_TURN[0]["content"],
-        )["content"]
+        assert engine._store.get(copy_id)["content"] == original_head
     old_nodes = {node.node_id for node in engine._dag.get_session_nodes(engine._session_id)}
     engine.note_turn_complete()
     caplog.clear()
