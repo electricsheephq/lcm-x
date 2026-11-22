@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from hermes_lcm import host_uid_emit
+from hermes_lcm.config import host_message_uid_mode
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_host_uid_shadow import _state_db
 from tests.test_issue_1116_stub_first_exit_commit_proof import (
@@ -27,7 +28,9 @@ def uid_mode(request, monkeypatch):
     else:
         monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
-    return request.param
+    # On main, explicit on and default shadow both enable UID emission.
+    assert host_message_uid_mode() == ("on" if request.param == "on" else "shadow")
+    assert host_uid_emit.identity_emit_enabled()
 
 
 @pytest.fixture
@@ -48,7 +51,6 @@ def committed_stub_exit(uid_mode, host_for, monkeypatch, caplog):  # noqa: F811
     grow_over_threshold(host)
     result, original = stub_first_result(host, caplog)
     engine = host.engine
-    assert engine._uid_recognition_enabled() == (uid_mode == "on")
     assert len(result) == len(original)
     assert engine._last_compress_leaves[1] == engine._compress_host_rows_consumed == 0
     assert engine._verified_lcm_summary_prefix_end(result[0]["content"])

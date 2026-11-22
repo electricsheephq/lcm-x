@@ -78,7 +78,13 @@ try:
     grow_over_threshold(host)
     result, original = stub_first_result(host, capture)
     head = result[0]
-    assert engine._uid_recognition_enabled() == (mode == "on")
+    # The archived release has a separate recognition gate. On main, both
+    # configured modes use shadow behavior and allow UID emission.
+    recognition_enabled = getattr(engine, "_uid_recognition_enabled", None)
+    if recognition_enabled is not None:
+        assert recognition_enabled() == (mode == "on")
+    else:
+        assert host_uid_emit.identity_emit_enabled()
     assert len(result) == len(original), (len(result), len(original))
     assert engine._last_compress_leaves[1] == engine._compress_host_rows_consumed == 0
     assert head["role"] == "user" and "timestamp" not in head

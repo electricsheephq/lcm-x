@@ -6,6 +6,7 @@ from copy import deepcopy
 import pytest
 
 from hermes_lcm import host_uid_emit
+from hermes_lcm.config import host_message_uid_mode
 from hermes_lcm.engine import _summary_part_text
 from hermes_lcm.tokens import count_messages_tokens
 from tests.invariants.test_issue_3006_post_refusal import LINEAGE_STOP, _host_flush
@@ -41,7 +42,9 @@ def uid_mode(request, monkeypatch):
         monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
     # The test ContextEngine stub does not advertise the host metadata fields.
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
-    return request.param
+    # On main, explicit on and default shadow both enable UID emission.
+    assert host_message_uid_mode() == ("on" if request.param == "on" else "shadow")
+    assert host_uid_emit.identity_emit_enabled()
 
 
 def _build_host_twin(make_engine, caplog, *, with_copy):  # noqa: F811
@@ -134,7 +137,6 @@ def test_host_shaped_compaction_matches_twin(uid_mode, make_engine, summaries, c
     clean, clean_live, clean_head, _, clean_flush = _build_host_twin(make_engine, caplog, with_copy=False)
     copied, copied_live, copied_head, copy_id, copied_flush = _build_host_twin(make_engine, caplog, with_copy=True)
     assert clean_head == copied_head == clean_live[0]["content"] == copied_live[0]["content"]
-    assert clean._uid_recognition_enabled() == copied._uid_recognition_enabled() == (uid_mode == "on")
     advanced = False
     for pass_number in (1, 2):
         clean_live, clean_leaves = _host_pass(clean, clean_live, clean_head, None, clean_flush, caplog, pass_number)
@@ -160,7 +162,6 @@ def test_ingest_after_same_length_cleanup(uid_mode, open_engine, summaries, capl
     engine = open_engine(survival_fit=False)
     flush = _host_flush()
     initial = published_head(engine)
-    assert engine._uid_recognition_enabled() == (uid_mode == "on")
     nodes = engine._dag.get_session_nodes(engine._session_id)
     node, = nodes
     summary = _summary_part_text(node)
