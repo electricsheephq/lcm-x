@@ -14,7 +14,7 @@
   },
   "tools": {"names": ["terminal", "read_file", "web_search", "write_file", "browser"],
             "calls_per_turn_weights": [0.35, 0.3, 0.2, 0.1, 0.05], "name_only_share": 0.5},
-  "target": {"turns": 744, "hidden_turn_share": 0.6, "hidden_keep_every": 4, "stored_tail_turns": 1, "cold_restarts": 16,
+  "target": {"turns": 1100, "hidden_turn_share": 0.85, "hidden_keep_every": 4, "stored_tail_turns": 1, "cold_restarts": 16,
              "session_id": "live-rows-target", "conversation_id": "live-rows-target-conv",
              "platform": "telegram", "context_length": 400000},
   "others": {"conversations": 30, "turns": 290,

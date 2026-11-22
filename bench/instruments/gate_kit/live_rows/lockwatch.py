@@ -21,6 +21,7 @@ if __package__ in (None, ""):
 from bench.instruments.busy_bar import monitor  # noqa: E402
 
 POLL_NS = monitor.POLL_NS
+UNEXPECTED = -2  # an F_GETLK answer that is not a plain write lock on the byte; counted as held
 
 
 def holds(transitions: list[list[int]], begin: int, end: int, pid: int | None = None,
@@ -29,7 +30,7 @@ def holds(transitions: list[list[int]], begin: int, end: int, pid: int | None = 
     found: list[tuple[int, int]] = []
     opened = None
     for at, owner in transitions:
-        mine = bool(owner) and (pid is None or owner in (pid, -1))
+        mine = bool(owner) and (pid is None or owner in (pid, -1, UNEXPECTED))
         if mine and opened is None:
             opened = at
         elif not mine and opened is not None:
@@ -70,10 +71,14 @@ class Watcher:
 def main() -> None:
     fd = os.open(sys.argv[1], os.O_RDONLY)
     transitions: list[list[int]] = []
-    samples, last, largest_gap, state = 0, None, 0, None
+    samples, last, largest_gap, state, unexpected = 0, None, 0, None, 0
     try:
         while True:
-            owner = monitor.lock_owner(fd) or 0
+            try:
+                owner = monitor.lock_owner(fd) or 0
+            except RuntimeError:  # a lock of another type on the byte (recovery, checkpoint): held, counted
+                owner = UNEXPECTED
+                unexpected += 1
             now = time.monotonic_ns()
             samples += 1
             if last is not None:
@@ -89,7 +94,8 @@ def main() -> None:
             time.sleep(POLL_NS / 1e9)
         transitions.append([last, state or 0])
         print(json.dumps({"transitions": transitions, "samples": samples, "poll_ns": POLL_NS,
-                          "largest_gap_ms": largest_gap / 1e6, "platform": sys.platform}))
+                          "largest_gap_ms": largest_gap / 1e6, "platform": sys.platform,
+                          "unexpected_answers": unexpected}))
     finally:
         os.close(fd)
 

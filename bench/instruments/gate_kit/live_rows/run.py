@@ -32,7 +32,7 @@ from bench.instruments.gate_kit.live_rows import build as builder  # noqa: E402
 from bench.instruments.gate_kit.live_rows import lockwatch, rt, shape  # noqa: E402
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux  # noqa: E402
 
-CELLS = ("d9", "d10", "d11", "selftest-cut")
+CELLS = ("d9", "d10", "d11", "selftest-cut", "timeout-hold", "turns", "kill-at-first-call")
 PROFILE: dict[str, str] = {}  # diagnostic only: --profile writes the first pass's cProfile stats
 
 
@@ -150,7 +150,7 @@ def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, A
                                                        compress["end_ns"], pid),
         "holds_over_1s": [round((e - s) / 1e9, 3) for s, e in lockwatch.holds(observed["transitions"], begin, end)
                           if e - s > 1e9],
-        "lock_watch": {k: observed[k] for k in ("samples", "poll_ns", "largest_gap_ms")},
+        "lock_watch": {k: observed.get(k) for k in ("samples", "poll_ns", "largest_gap_ms", "unexpected_answers")},
         "pass_completed": result is not None and "exception" not in compress,
         "exception": compress.get("exception"),
         "list_rows_in": len(view), "list_rows_out": len(result) if isinstance(result, list) else None,
@@ -183,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--profile", type=Path, default=None, help="diagnostic: cProfile stats of the first pass")
+    parser.add_argument("--worst-case", action="store_true", help="D10's recorded arm: threads never sleep")
+    parser.add_argument("--load", type=int, default=0, help="requirement 2: N CPU-bound processes during the cell")
+    parser.add_argument("--keep-copy", action="store_true",
+                        help="requirement 3: reuse WORK/current as the killed run left it (no fresh copy)")
+    parser.add_argument("--stand-in-floor", type=float, default=None,
+                        help="smoke only: override the kit's latency floor (the receipt says so; never qualifies)")
     args = parser.parse_args(argv)
     if args.profile:
         PROFILE["path"] = str(args.profile)
@@ -195,10 +201,29 @@ def main(argv: list[str] | None = None) -> int:
     lock = claim(args.work)  # noqa: F841 - held until the process exits
     rt.isolate(args.work / "home", env)
     modules = rt.load(args.tree, kit)
-    db = fresh_copy(args.build, args.work)
-    handler = {"d9": cell_d9, "selftest-cut": cell_selftest_cut}[args.cell]
+    if args.stand_in_floor is not None:
+        aux.configure(floor_s=args.stand_in_floor)
+    if args.keep_copy:
+        db = args.work / "current" / "lcm.db"
+        for name in ("lcm.db-wal", "lcm.db-shm"):
+            if (args.work / "current" / name).exists():
+                break  # a killed run leaves its WAL: SQLite recovers it at the next open, as a restart does
+    else:
+        db = fresh_copy(args.build, args.work)
+    from bench.instruments.gate_kit.live_rows import cells
+    handler = {"d9": cell_d9, "selftest-cut": cell_selftest_cut, "d10": cells.cell_d10, "d11": cells.cell_d11,
+               "timeout-hold": cells.cell_timeout_hold, "turns": cells.cell_turns,
+               "kill-at-first-call": cells.cell_kill_at_first_call}[args.cell]
     started = time.time()
-    receipt = handler(args, kit, modules, db, copy.deepcopy(generated["restart_list"]))
+    load = cells.Load(args.load) if args.load else None
+    try:
+        receipt = handler(args, kit, modules, db, copy.deepcopy(generated["restart_list"]))
+    finally:
+        load_pids = load.stop() if load else []
+    receipt["load"] = {"processes": args.load, "pids": load_pids}
+    receipt["keep_copy"] = bool(args.keep_copy)
+    receipt["stand_in"] = dict(aux.SETTINGS)
+    receipt["qualifies"] = manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "tree_identity": rt.driver.tree_identity(args.tree.resolve()),
                     "input_hash": manifest["input_hash"], "store_sha256": manifest["store_sha256"],
