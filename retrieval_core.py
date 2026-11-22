@@ -27,6 +27,8 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, Iterator, TYPE_CHECKING
 
+from .store import known_head_copy_ids
+
 if TYPE_CHECKING:
     from .engine import LCMEngine
 
@@ -424,9 +426,10 @@ def hydrate_chunk_hits(
             ):
                 rows_by_id.setdefault(str(row["chunk_id"]), row)
         hydrated: list[tuple[dict[str, Any], float]] = []
+        copies = known_head_copy_ids(conn, store_ids=sorted({int(row["store_id"]) for row in rows_by_id.values()}))
         for cid in ordered_ids:  # preserve KNN rank order
             row = rows_by_id.get(cid)
-            if row is None:
+            if row is None or row["store_id"] in copies:
                 continue
             content = str(row["content"] or "")
             char_start = int(row["char_start"])

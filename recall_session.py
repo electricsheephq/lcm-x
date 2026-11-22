@@ -13,6 +13,7 @@ from .message_analysis import _tool_call_id
 from .reasoning import resolve_occurrence_time
 from .recall_delivery import _without_event_time
 from .retrieval_context import RetrievalContext
+from .store import is_known_head_copy
 
 TOKEN_BUDGET, CHAR_BUDGET = 16_000, 64_000
 
@@ -245,7 +246,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 node = io.dag.get_node(int(hit["node_id"]))
                 ids = io.dag.source_message_ids(node.node_id, limit=25) if node and node.session_id == sid else []
                 sources = store.get_batch(ids) if ids else {}
-                row = next((sources[i] for i in ids if i in sources and sources[i]["session_id"] == sid), None)
+                row = next((sources[i] for i in ids if i in sources and sources[i]["session_id"] == sid
+                            and not is_known_head_copy(store.connection, sources[i])), None)
                 if row is not None:
                     resolved_summaries.add((sid, hit["node_id"]))
                 if row is None and len(delivery["summary_leads"]) < response["limit"]:

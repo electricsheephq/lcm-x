@@ -717,6 +717,7 @@ class CompactionMixin:
         so the pressure-yield gate judges tail blockage from the numbers the
         compaction pass would actually see.
         """
+        messages = self._without_known_head_copies(messages)
         if not messages:
             return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
@@ -2514,6 +2515,7 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
+        state.working_messages = self._without_known_head_copies(state.working_messages)
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow

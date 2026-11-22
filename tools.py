@@ -101,7 +101,7 @@ from .search_query import (
     normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
-from .store import _normalize_observed_at, build_message_fts_spec
+from .store import _normalize_observed_at, build_message_fts_spec, is_known_head_copy
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
 from .config import _recall_extra_entries, _recall_snippet_window_hits
@@ -778,7 +778,7 @@ def _expand_message_sources(
             has_more = True
             break
         stored = stored_by_id.get(store_id)
-        if not stored:
+        if not stored or is_known_head_copy(engine._store.connection, stored):
             next_source_offset = source_index + 1
             next_content_offset = 0
             has_more = next_source_offset < total_sources
@@ -1092,6 +1092,7 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         roles=roles or None,
         time_from=time_from,
         time_to=time_to,
+        for_recall=True,
     )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
@@ -3702,7 +3703,7 @@ def _lcm_recall_summary_source_hits(
         for store_id in ordered_ids[:candidate_limit]:
             require_remaining("message shaping")
             row = rows.get(store_id)
-            if row is None:
+            if row is None or is_known_head_copy(read_store.connection, row):
                 continue
             content = str(row.get("content") or "")
             if not content:
@@ -4275,16 +4276,18 @@ def default_semantic_cpu_limited(config) -> bool:
 
 
 _LCM_RECALL_ADJACENT_SQL = (
-    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, tool_call_id, tool_name, content, "
     "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
     "ORDER BY store_id LIMIT 1"
 )
 
 
 def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
-    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
-    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
-    return dict(found) if found is not None else None
+    """The next recallable row of ``session_id`` after ``store_id``."""
+    while (row := conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
+           ) and is_known_head_copy(conn, dict(row)):
+        store_id = row["store_id"]
+    return dict(row) if row is not None else None
 
 
 def _lcm_recall_adjacent_reply(
