@@ -188,7 +188,7 @@ from .sqlite_util import (
     _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
-from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
+from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at, is_known_head_copy
 from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
 from .frontier_state import FrontierState
@@ -6949,20 +6949,22 @@ class LCMEngine(
         session_id = getattr(self, "_session_id", "")
         if dag is None or not session_id:
             return None, []
+        return self._verify_summary_prefix(content, dag.get_node, lambda sid: sid == session_id, self._LCM_SUMMARY_PART_HEADER_RE)
+
+    @staticmethod
+    def _verify_summary_prefix(content, get_node, owns_session, header_re=_LCM_SUMMARY_PART_HEADER_RE):
         pos = 0
         node_ids: list[int] = []
         while True:
-            header = self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos)
+            header = header_re.match(content, pos)
             if header is None:
                 break
             try:
-                node = dag.get_node(int(header.group(2)))
+                node = get_node(int(header.group(2)))
             except Exception:
                 return None, []
-            # Only the bound session's own nodes: compress() renders them, and a
-            # rotation carries them to the child. A quoted part of another
-            # session's summary is content (#484 item 11j).
-            if node is None or node.session_id != session_id or int(node.depth) != int(header.group(1)):
+            # A quoted part of an unrelated session's summary is user content (#484 item 11j).
+            if node is None or not owns_session(node.session_id) or int(node.depth) != int(header.group(1)):
                 return None, []
             label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
             part = (
@@ -6973,7 +6975,7 @@ class LCMEngine(
                 return None, []
             pos += len(part)
             node_ids.append(int(node.node_id))
-            if content.startswith("\n\n---\n\n", pos) and self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos + 7):
+            if content.startswith("\n\n---\n\n", pos) and header_re.match(content, pos + 7):
                 pos += 7
                 continue
             break
@@ -10226,6 +10228,7 @@ class LCMEngine(
         on its own — merging there would force an all-or-nothing decision on a
         combined row and could drop a small tail turn glued to an oversized one.
         """
+        messages = self._without_known_head_copies(messages)
         cleaned: list[Dict[str, Any]] = []
         dropped_assistant_messages = 0
         stripped_assistant_messages = 0
@@ -11259,6 +11262,23 @@ class LCMEngine(
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
 
+    def _without_known_head_copies(self, messages):
+        """Filter store-backed occurrences while leaving the host's emitted head in place."""
+        kept = []
+        for row in messages:
+            if (row.get("role") == "user" and row.get("session_id")
+                    and type(row.get("store_id")) is int
+                    and not any(row.get(key) for key in ("api_content", "tool_calls", "tool_call_id", "name"))
+                    and (stored := self._store.get(row["store_id"]))
+                    and stored["session_id"] == row["session_id"] and stored["content"] == row.get("content")
+                    and stored.get("conversation_id") in ("", self._conversation_id)
+                    and (stored["session_id"] == self._session_id
+                         or self._identity_anchor_owned(stored, self._load_compression_carry_ranges()))
+                    and is_known_head_copy(self._store.connection, stored)):
+                continue
+            kept.append(row)
+        return messages if len(kept) == len(messages) else kept
+
     @payload_lookup_scope()
     def _assemble_context(
         self,
@@ -11281,6 +11301,7 @@ class LCMEngine(
           [highest-depth summary nodes first, then lower]
           [fresh tail messages]
         """
+        tail_messages = self._without_known_head_copies(tail_messages)
         result = []
         emission_candidates: list[dict[str, Any]] = []
         summary_candidate: Optional[dict[str, Any]] = None
@@ -12071,6 +12092,7 @@ class LCMEngine(
         assembly_cap_override: Optional[int] = None,
         retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        tail_messages = self._without_known_head_copies(tail_messages)
         if tail_messages:
             first = tail_messages[0]
             content = first.get("content") or ""

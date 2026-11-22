@@ -36,7 +36,7 @@ from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _has_lossy_redacted_identity
-from .store import _MESSAGE_SELECT_COLUMNS
+from .store import _MESSAGE_SELECT_COLUMNS, is_known_head_copy
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -108,17 +108,18 @@ class StoreCompleteMixin:
             for _ in range(_SCAN_EXTEND if scale == 1 else 1):
                 batch = self._store.get_range(source, start_id=start + 1, end_id=stop, limit=limit,
                                               conversation_id=self._conversation_id, include_blank_conversation=True)
-                page.extend(batch)
+                visible = [row for row in batch if not is_known_head_copy(self._store.connection, row)]
+                page.extend(visible)
                 covered = self._store_complete_node_covered([int(row["store_id"]) for row in batch])
                 if len(batch) < limit or any(
                     int(row["store_id"]) not in covered and int(row["store_id"]) not in excluded_ids
                     and row.get("role") != "system" and not self._matches_ignore_message_patterns(row, stored_row=True)
-                    for row in batch
+                    for row in visible
                 ):
                     break
                 start = int(batch[-1]["store_id"])
             if len(batch) >= limit:
-                last = int(page[-1]["store_id"])
+                last = int(batch[-1]["store_id"])
                 reached = last if reached is None else min(reached, last)
             rows.update((int(row["store_id"]), row) for row in page if self._identity_anchor_owned(row, carry))
         return [rows[key] for key in sorted(rows) if reached is None or key <= reached], reached is not None

@@ -20,6 +20,7 @@ import time
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
 from .db_bootstrap import (
@@ -115,6 +116,89 @@ _MESSAGE_SELECT_COLUMNS = (
 )
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
+
+
+def _read_head_copy_candidates(conn, sql, args):
+    try:
+        return conn.execute(sql, args)
+    except sqlite3.OperationalError as exc:
+        if str(exc) != "no such table: message_relations":
+            raise
+        return None  # Older stores may never have created the optional relation table.
+
+
+def is_known_head_copy(conn, row) -> bool:
+    """Prove this stored user occurrence is fully represented by earlier LCM context."""
+    content = row.get("content")
+    if (conn is None or row.get("role") != "user" or not isinstance(content, str) or not content.startswith("[")
+            or "[Expand for details:" not in content or not row.get("session_id") or not row.get("store_id")
+            or any(row.get(key) for key in ("tool_calls", "tool_call_id", "tool_name"))):
+        return False
+    store_id, session_id = row["store_id"], row["session_id"]
+    relation = _read_head_copy_candidates(
+        conn, "SELECT 1 FROM message_relations WHERE store_id=? AND kind='generated_unproven'", (store_id,)
+    )
+    if relation is None or relation.fetchone() is None:
+        return False
+
+    from .engine import LCMEngine
+
+    def get_node(node_id):
+        node = conn.execute(
+            "SELECT session_id, depth, summary, expand_hint FROM summary_nodes WHERE node_id=?", (node_id,)
+        ).fetchone()
+        return SimpleNamespace(node_id=node_id, session_id=node[0], depth=node[1],
+                               summary=node[2], expand_hint=node[3] or "") if node else None
+
+    def owns_node(owner):
+        return owner == session_id or conn.execute(
+            "WITH RECURSIVE lineage(owner, hops) AS (VALUES (?, 0) UNION ALL "
+            "SELECT CASE WHEN json_valid(m.value) THEN json_extract(m.value, '$') END, hops+1 "
+            "FROM lineage JOIN metadata m ON m.key='rotation_predecessor_session:' || owner WHERE hops<32) "
+            "SELECT 1 FROM lineage WHERE owner=? LIMIT 1", (owner, session_id),
+        ).fetchone() is not None
+
+    end, _ = LCMEngine._verify_summary_prefix(content, get_node, owns_node)
+    if end is None or end == len(content):
+        return end is not None
+    suffix = content[end:]
+    for separator in ("\n\n---\n\n", "\n\n"):
+        if suffix.startswith(separator):
+            remainder = suffix[len(separator):]
+            return bool(remainder.strip() and conn.execute(
+                "SELECT 1 FROM messages WHERE session_id=? AND store_id<? AND role='user' "
+                "AND COALESCE(conversation_id, '') IN ('', ?) AND content=? LIMIT 1",
+                (session_id, store_id, row.get("conversation_id") or "", remainder),
+            ).fetchone())
+    return False
+
+
+def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
+    if conn is None or store_ids == []:
+        return set()
+    session_filter = "" if session_id is None else "AND m.session_id=?"
+    id_filter = "" if store_ids is None else "AND r.store_id IN (SELECT value FROM json_each(?))"
+    args = ([] if session_id is None else [session_id]) + ([] if store_ids is None else [json.dumps(store_ids)])
+    candidates = _read_head_copy_candidates(
+        conn,
+        "SELECT DISTINCT m.* FROM message_relations r JOIN messages m USING (store_id) "
+        f"WHERE r.kind='generated_unproven' AND m.role='user' AND m.content GLOB '[[]*' {session_filter} {id_filter}", args
+    )
+    if candidates is None:
+        return set()
+    columns = [column[0] for column in candidates.description]
+    return {row["store_id"] for raw in candidates if is_known_head_copy(conn, row := dict(zip(columns, raw)))}
+
+
+def _exclude_head_copies(conn, where, args, session_id, column="store_id"):
+    if copies := known_head_copy_ids(conn, session_id):
+        where.append(f"{column} NOT IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(sorted(copies)))
+
+
+def get_recall_message(store, store_id):
+    row = store.get(store_id)
+    return None if row and is_known_head_copy(getattr(store, "connection", None), row) else row
 
 
 class _ObservedAtRows(list):
@@ -1162,6 +1246,7 @@ class MessageStore:
             time_from=time_from,
             time_to=time_to,
         )
+        _exclude_head_copies(self._conn, where, args, session_id)
         return int(
             self._conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE {' AND '.join(where)}",
@@ -1178,6 +1263,7 @@ class MessageStore:
         roles: list[str] | None = None,
         time_from: float | None = None,
         time_to: float | None = None,
+        for_recall: bool = False,
     ) -> List[Dict[str, Any]]:
         """Load one ordered raw-message page for a session.
 
@@ -1190,6 +1276,8 @@ class MessageStore:
             time_from=time_from,
             time_to=time_to,
         )
+        if for_recall:
+            _exclude_head_copies(self._conn, where, args, session_id)
         where.append("store_id > ?")
         args.extend([after_store_id, limit])
         rows = self._conn.execute(
@@ -1211,19 +1299,21 @@ class MessageStore:
         """Load one bounded ordered window around an exact message anchor."""
         before = min(12, max(0, int(before)))
         after = min(12, max(0, int(after)))
+        copy_ids = json.dumps(sorted(known_head_copy_ids(self._conn, session_id)))
+        where = "session_id = ? AND store_id NOT IN (SELECT value FROM json_each(?))"
         prior = self._conn.execute(
             f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                 FROM messages
-                WHERE session_id = ? AND store_id < ?
+                WHERE {where} AND store_id < ?
                 ORDER BY store_id DESC LIMIT ?""",
-            (session_id, anchor_store_id, before),
+            (session_id, copy_ids, anchor_store_id, before),
         ).fetchall()
         following = self._conn.execute(
             f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                 FROM messages
-                WHERE session_id = ? AND store_id >= ?
+                WHERE {where} AND store_id >= ?
                 ORDER BY store_id LIMIT ?""",
-            (session_id, anchor_store_id, after + 1),
+            (session_id, copy_ids, anchor_store_id, after + 1),
         ).fetchall()
         rows = list(reversed(prior)) + list(following)
         return [self._row_to_dict(row) for row in rows]
@@ -2513,10 +2603,12 @@ class MessageStore:
         offset = 0
         scanned_rows = 0
         results: list[Dict[str, Any]] = []
+        copy_where, copy_args = [], []
+        _exclude_head_copies(self._conn, copy_where, copy_args, session_id, "m.store_id")
         while True:
             try:
-                where = [f"{fts_table} MATCH ?"]
-                args: list[Any] = [safe_query]
+                where = [f"{fts_table} MATCH ?", *copy_where]
+                args: list[Any] = [safe_query, *copy_args]
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
@@ -2661,6 +2753,7 @@ class MessageStore:
 
         where: list[str] = ["content IS NOT NULL"]
         args: list[Any] = []
+        _exclude_head_copies(self._conn, where, args, session_id)
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)

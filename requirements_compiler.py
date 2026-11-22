@@ -17,6 +17,7 @@ import re
 import time
 from typing import Any, Callable, Mapping, Sequence
 
+from .store import get_recall_message
 from .answer_contract import (
     AnswerContract,
     EvidenceSlot,
@@ -308,7 +309,7 @@ def _normalize_ref(raw: Any, *, engine: Any, origin: str, contract: AnswerContra
     store_id = int(match.group("store_id"))
     declared_start = int(match.group("start"))
     declared_end = int(match.group("end"))
-    row = engine._store.get(store_id)
+    row = get_recall_message(engine._store, store_id)
     if row is None:
         return None
     content = str(row.get("content") or "")

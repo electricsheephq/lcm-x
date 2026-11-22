@@ -531,6 +531,7 @@ class _LeafPrep:
             summarize_leaf_chunk_with_rescue,
         )
         from .escalation import summary_route_available
+        from .store import is_known_head_copy
 
         config = job.config
         if not self._current(job, conn):
@@ -546,7 +547,7 @@ class _LeafPrep:
         )
         if len(raw) >= _SCAN_LIMIT:
             return  # the newest rows (the fresh tail) were not read
-        rows = [_decode_row(row) for row in raw]
+        rows = [row for raw_row in raw if not is_known_head_copy(conn, row := _decode_row(raw_row))]
         following = {  # the next stored row, tail included: what the host could merge a chunk end with
             int(row["store_id"]): rows[index + 1] if index + 1 < len(rows) else None
             for index, row in enumerate(rows)
