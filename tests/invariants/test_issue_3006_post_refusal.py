@@ -6,7 +6,7 @@ import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
 from itertools import count
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -113,9 +113,9 @@ def _r3_fit_coverage(engine, before, plan):
     return uncovered, unknown
 
 
-def _r3_threshold_pass(engine, live, caplog, summarizer, monkeypatch):
+def _r3_threshold_pass(engine, live, caplog, summarizer, monkeypatch, *, overhead=R3_OVERHEAD):
     estimate = count_messages_tokens(live)
-    prompt_tokens = estimate + R3_OVERHEAD
+    prompt_tokens = estimate + overhead
     frontier = _r3_frontier(engine)
     record = {
         "gate": "below threshold", "stop": "—", "noop": "", "leaves": 0, "condensations": 0,
@@ -528,3 +528,254 @@ def test_merged_replay_requires_exact_covered_pair(tmp_path, monkeypatch, uid_mo
         assert (drops, tokens, kept) == (([0], 12, 0) if case in ("covered", "json-join") else ([], 0, 0))
     finally:
         engine.shutdown()
+
+
+def _tool_reply(turn, suffix=""):
+    call_id = f"call-{turn}{suffix}"
+    return [
+        {"role": "assistant", "content": f"Looking up turn {turn}{suffix}. ", "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "content": f"Result for turn {turn}{suffix}.", "tool_call_id": call_id},
+    ]
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("shape,uncovered", [
+    ("three-way", None), ("three-way", 0),
+    ("tool-separated", None), ("tool-separated", 1),
+    ("two-tool-separated", None), ("two-tool-separated", 4),
+    ("cleanup-middle", None), ("cleanup-middle", 1),
+    ("ignored-marker-middle", None), ("ignored-marker-middle", 1),
+], ids=[
+    "three-way-covered", "three-way-uncovered-end",
+    "tool-separated-covered", "tool-separated-uncovered-tool",
+    "two-tool-separated-covered", "two-tool-separated-uncovered-tool",
+    "cleanup-middle-covered", "cleanup-middle-uncovered-middle",
+    "ignored-marker-middle-covered-negative", "ignored-marker-middle-uncovered-negative",
+])
+def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monkeypatch, uid_mode, shape, uncovered):
+    """I2, I11. A merged reply replays only when its entire durable run was summarised."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    left = {"role": "assistant", "content": " First reply. "}
+    middle = {"role": "assistant", "content": " Second reply. "}
+    right = {"role": "assistant", "content": "Last reply."}
+    by_shape = {
+        "three-way": [left, middle, right],
+        "tool-separated": [*_tool_reply(1), right],
+        "two-tool-separated": [*_tool_reply(1), *_tool_reply(1, "b"), right],
+        "cleanup-middle": [left, {"role": "assistant", "content": "<think>Internal-only narration.</think>"}, right],
+        "ignored-marker-middle": [left, {"role": "assistant", "content": "Visible narration."}, right],
+    }
+    run = [{**row, "store_id": 11 + i} for i, row in enumerate(by_shape[shape])]
+    joined = "\n".join(
+        row["content"].strip() for i, row in enumerate(run)
+        if row["role"] == "assistant" and not (i == 1 and shape.endswith("-middle"))
+    )
+    frontier = run[-1]["store_id"]
+    successor = {"role": "user", "content": "Next request.", "store_id": frontier + 1}
+    messages = [{"role": "assistant", "content": joined}, successor]
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start(SID, platform="acp", conversation_id="refusal-test")
+        if shape == "cleanup-middle":
+            assert [row["content"] for row in engine._sanitize_active_context_messages(run)] == [joined]
+        if shape == "ignored-marker-middle":
+            engine._remember_generated_ignored_dependent_reply(run[1], run[1]["content"])
+            # The store-scoped marker can prove EOF cleanup. Between replies
+            # it does not prove that the visible narration was omitted.
+            assert engine._drop_preexisting_generated_ignored_dependent_eof_replies(
+                run, engine._load_generated_ignored_dependent_reply_records(),
+            ) == run
+        engine._last_compacted_store_id = frontier
+        monkeypatch.setattr(engine._lifecycle, "get_by_conversation", lambda _: SimpleNamespace(
+            current_session_id=SID, current_frontier_store_id=frontier,
+        ))
+        monkeypatch.setattr(engine._store, "get_session_rows_through", lambda _, end, limit:
+                            [row for row in run if row["store_id"] <= end][-limit:] if limit else [])
+        monkeypatch.setattr(engine._store, "get_session_messages_after", lambda *_args, **_kwargs: [successor])
+        monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda *_args, **_kwargs:
+                            {id(successor): successor["store_id"]})
+        monkeypatch.setattr(engine, "_latest_compaction_was_refused", lambda: True)
+        sources = [(i + 1, 3, row["store_id"]) for i, row in enumerate(run) if i != uncovered]
+        monkeypatch.setattr(engine._dag, "get_leaf_sources_through", lambda *_: sources)
+
+        drops, _, tokens, kept = engine._committed_replay_drops(messages, 0)
+        covered = uncovered is None and shape != "ignored-marker-middle"
+        assert (drops, tokens, kept) == (([0], 3 * len(run), 0) if covered else ([], 0, 0))
+    finally:
+        engine.shutdown()
+
+
+@pytest.fixture
+def tool_refusal_host(tmp_path, monkeypatch):
+    """I1, I2, I11. Seed a kept host view with one real stored tool group projected to text."""
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", _stub_summarizer())
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    config = _config(tmp_path)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    binding = dict(platform="acp", context_length=R3_WINDOW, conversation_id="refusal-test")
+    try:
+        engine.on_session_start(SID, **binding)
+        pre = [row for i in range(1, 12) for row in _turn(i)]
+        group = [*_tool_reply(12), _turn(12)[1]]
+        pre.extend([_turn(12)[0], *group, _turn(13)[0]])
+        emitted = engine.compress(pre, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        # The kept host list carries narration after it discards the tool payload
+        # and call metadata. Send that projection through the real merge funnel.
+        left = {key: value for key, value in group[0].items() if key != "tool_calls"}
+        assert all(row in emitted for row in group)
+        kept = engine._sanitize_active_context_messages([
+            left if row == group[0] else row for row in emitted if row != group[1]
+        ])
+        merged = left["content"].strip() + "\n" + group[2]["content"]
+        assert any(row["content"] == merged for row in kept)
+        _drain_session_end_maintenance(engine)
+        engine.on_session_end(SID, pre)
+        engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, **binding)
+        kept += [_turn(13)[1], *(row for i in range(14, 20) for row in _turn(i)), _turn(20)[0]]
+        yield engine, kept, binding, group, merged
+    finally:
+        engine.shutdown()
+
+
+def _emission_state(engine, handle=None):
+    handle = handle or engine._emission_handle
+    if handle is None:
+        return None
+    conn = engine._store._conn
+    lineage = engine_module.ingest_ledger.persisted_lineage(conn, handle.session_id, handle.lineage)
+    return conn.execute(
+        "SELECT state FROM ingest_views WHERE lineage IN (?,?) AND view_seq=? AND kind='emission'",
+        (lineage, handle.lineage, handle.view_seq),
+    ).fetchone()
+
+
+def _real_leaf_refusal(engine, kept, binding):
+    engine.on_session_start(SID, **binding)
+    before = _r3_frontier(engine)
+    refused = engine.compress(kept, force=True)
+    frontier = _r3_frontier(engine)
+    assert engine._last_compress_leaves[1] == 1 and frontier > before and refused != kept
+    _drain_session_end_maintenance(engine)
+    return refused, frontier
+
+
+def test_tool_separated_refusal_recovers_with_covered_survival_fit(tool_refusal_host, monkeypatch, caplog):
+    """I1, I2, I11. A refused leaf already covering a merged tool reply lets the next pass advance."""
+    engine, kept, binding, group, merged = tool_refusal_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    engine.record_rejected_compaction()
+    assert _emission_state(engine) == ("refused",)
+    engine.note_turn_complete()
+    live = kept + [_turn(20)[1]]
+    engine.ingest(live)
+    sources = {sid for _, _, sid in engine._dag.get_leaf_sources_through(SID, frontier)}
+    group_ids = {row["store_id"] for row in engine._store.get_session_messages(SID)
+                 if row["content"] in {msg["content"] for msg in group}}
+    assert len(group_ids) == len(group) and group_ids <= sources
+    before = engine._store.get_session_messages(SID)
+    caplog.set_level(logging.INFO, logger="hermes_lcm")
+    summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+    replay = engine._committed_replay_drops
+    replayed = []
+
+    def observe_replay(working, *args, **kwargs):
+        result = replay(working, *args, **kwargs)
+        replayed.extend(working[position]["content"] for position in result[0])
+        return result
+
+    monkeypatch.setattr(engine, "_committed_replay_drops", observe_replay)
+    returned, record = _r3_threshold_pass(
+        engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+    )
+    assert record["gate"] == "ran" and LINEAGE_STOP not in (record["stop"], record["noop"]), record
+    assert record["leaves"] and _r3_frontier(engine) > frontier and len(returned) < len(live), record
+    assert record["uncovered"] == record["unknown_coverage"] == 0, record
+    assert all(row["content"] != merged for row in returned)
+    assert engine._store.get_session_messages(SID) == before
+    assert merged in replayed, record
+
+
+@pytest.mark.parametrize("adopted", [False, True], ids=["retry-before-gate", "already-adopted"])
+def test_refused_emission_write_retries_original_view(committed_host, monkeypatch, adopted):  # noqa: F811
+    """I1, I2, I11. A skipped refusal follows the original proposal, even across compress calls."""
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    engine, kept, binding = committed_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    assert _emission_state(engine, handle) == ("proposed",)
+
+    @contextmanager
+    def unavailable(_salt):
+        yield None, "in_transaction"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_emission_owner", unavailable)
+        engine.record_rejected_compaction()
+    assert _emission_state(engine, handle) == ("proposed",)
+    if adopted:
+        with engine._emission_owner(engine._store.ingest_ledger_salt()) as (conn, _):
+            moved, _ = engine_module.ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, "adopted")
+        assert moved > 0
+    engine.note_turn_complete()
+
+    gate_outcomes = []
+    gate = engine._latest_compaction_was_refused
+
+    def observe_gate():
+        result = gate()
+        gate_outcomes.append((result, _emission_state(engine, handle)))
+        return result
+
+    monkeypatch.setattr(engine, "_latest_compaction_was_refused", observe_gate)
+    live = kept + [_turn(20)[1]]
+    returned = engine.compress(live, force=True)
+    assert engine._compress_calls > handle.compress_call and gate_outcomes
+    assert gate_outcomes[0] == ((False, ("adopted",)) if adopted else (True, ("refused",)))
+    if not adopted:
+        assert _r3_frontier(engine) > frontier and len(returned) < len(live)
+
+
+@pytest.mark.parametrize("case", ["later-accepted", "session-switch", "ledger-off"])
+def test_real_refusal_gate_boundaries(request, monkeypatch, case):
+    """I1, I2, I11. The replay gate is scoped to a genuine host refusal and the bound frontier."""
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    if case == "ledger-off":
+        monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    engine.record_rejected_compaction()
+    if case == "ledger-off":
+        assert handle is None and not engine._latest_compaction_was_refused()
+    else:
+        assert _emission_state(engine, handle) == ("refused",)
+        assert engine._latest_compaction_was_refused()
+        assert engine._committed_replay_drops(kept, 0)[0]
+    engine.note_turn_complete()
+    if case == "later-accepted":
+        # Route backoff permits a no-leaf replay to re-emit the summaries.
+        # Carry out the later host commit in its normal end/start order.
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_summary_route_stop_applies", lambda *_args, **_kwargs: True)
+            accepted = engine.compress(kept, force=True)
+        assert _r3_frontier(engine) == frontier and engine._last_compress_leaves[1] == 0
+        assert len(accepted) < len(kept) and engine._emission_handle.view_seq > handle.view_seq
+        _drain_session_end_maintenance(engine)
+        engine.on_session_end(SID, kept)
+        engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, **binding)
+        assert _emission_state(engine) == ("adopted",)
+        assert _emission_state(engine, handle) == ("refused",)
+    elif case == "session-switch":
+        engine.on_session_start("S1", **binding)
+        assert engine._lifecycle.get_by_conversation(engine._conversation_id).current_session_id != SID
+
+    drops, store_map, _, _ = engine._committed_replay_drops(kept, 0)
+    if case == "later-accepted":
+        assert drops, (frontier, _emission_state(engine), engine._latest_compaction_was_refused())
+    else:
+        assert drops == []
+        assert (store_map is None) == (case == "session-switch")
