@@ -898,6 +898,8 @@ class LCMEngine(
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
         self._compress_refusal = None
         self._emission_handle = None
+        self._emission_handle_salt = None
+        self._pending_refused_emissions = set()
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
@@ -3333,6 +3335,10 @@ class LCMEngine(
             timeout=timeout,
         )
 
+    def _reset_session_scoped_runtime_state(self) -> None:
+        self._pending_refused_emissions = set()
+        super()._reset_session_scoped_runtime_state()
+
     def _bind_lifecycle_state(
         self,
         session_id: str,
@@ -3340,6 +3346,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._pending_refused_emissions = set()
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
@@ -4354,6 +4361,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._pending_refused_emissions = set()
         self._ledger_count("ledger.emission_boundary_unadopted")
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
@@ -8143,6 +8151,7 @@ class LCMEngine(
                 ingest_ledger.write_view(conn, salt, lineage, "emission", "proposed", entries, view_seq=seq)
             self._ledger_count("ledger.emissions_written", amount=len(ids))
             self._ledger_count("ledger.emission_views_written")
+            self._emission_handle_salt = salt
             self._emission_handle = ingest_ledger.EmissionHandle(lineage, seq, self._compress_calls, sid, conversation_key)
         except Exception as exc:
             self._mark_pending_emission(store_key, lineage, payload)
@@ -8227,19 +8236,44 @@ class LCMEngine(
     def _signal_emission_state(self, new_state, session_id, *, require_conversation=False):
         if ingest_ledger_mode() == "off":
             return
+        self._retry_refused_emissions()
+        pending = self._pending_refused_emissions
+        handle = self._emission_handle
+        if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
+                or require_conversation and handle.conversation_key != self._hold_conversation_key()):
+            self._ledger_count("ledger.emission_signal_unmatched")
+            return
+        target = (handle, self._emission_handle_salt)
+        if not self._write_emission_state(*target, new_state) and new_state == "refused":
+            pending.add(target)
+
+    def _retry_refused_emissions(self):
+        pending = self._pending_refused_emissions
+        if not pending or ingest_ledger_mode() == "off":
+            return
+        for target in tuple(pending):
+            handle, salt = target
+            if (handle.session_id, handle.conversation_key) != (self._session_id, self._hold_conversation_key()):
+                pending.discard(target)
+            elif self._write_emission_state(handle, salt, "refused"):
+                pending.discard(target)
+                self._ledger_count("ledger.refused_retry_ok")
+            else:
+                self._ledger_count("ledger.refused_retry_failed")
+
+    def _write_emission_state(self, handle, original_salt, new_state):
+        """Return false on a transient failure; a settled view ends the retry."""
         try:
-            handle = self._emission_handle
-            if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
-                    or require_conversation and handle.conversation_key != self._hold_conversation_key()):
-                self._ledger_count("ledger.emission_signal_unmatched")
-                return
             salt = self._store.ingest_ledger_salt()
             if salt is None or self._store.ingest_ledger_state() != "ready":
                 self._ledger_count("ledger.emission_skipped_not_ready")
-                return
+                return False
+            if salt != original_salt:
+                self._ledger_count("ledger.salt_changed")
+                return True
             with self._emission_owner(salt) as (conn, _reason):
                 if conn is None:
-                    return
+                    return False
                 lineage = ingest_ledger.persisted_lineage(conn, handle.session_id, handle.lineage)
                 moved, _views = ingest_ledger.set_emission_state(conn, lineage, handle.view_seq, new_state)
                 if not moved and lineage != handle.lineage:
@@ -8253,8 +8287,10 @@ class LCMEngine(
                 self._ledger_count("ledger.refused_after_adopted")
             else:
                 self._ledger_count("ledger.emission_signal_unmatched")
+            return True
         except Exception as exc:
             self._ledger_count("ledger.emission_state_failed", exc, subject="compress output")
+            return False
 
     @staticmethod
     def _ledger_view_entries(salt, messages):
@@ -13178,6 +13214,7 @@ class LCMEngine(
                 self._stable_use_closed = True
 
     def _shutdown_unlocked(self, *, deadline: float):
+        self._pending_refused_emissions = set()
         snapshot = getattr(self, "_compress_refusal", None)
         if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
             try:

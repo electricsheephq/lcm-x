@@ -16,6 +16,7 @@ import pytest
 import hermes_lcm.engine as engine_module
 from hermes_lcm import rollup_builder
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.message_analysis import _merge_adjacent_assistant_messages
 from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_compression_boundary import _config, _stub_summarizer, _turn
@@ -608,7 +609,7 @@ def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monke
 
 
 @pytest.fixture
-def tool_refusal_host(tmp_path, monkeypatch):
+def tool_refusal_host(tmp_path, monkeypatch, request):
     """I1, I2, I11. Seed a kept host view with one real stored tool group projected to text."""
     monkeypatch.setattr(engine_module, "summarize_with_escalation", _stub_summarizer())
     monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
@@ -620,16 +621,42 @@ def tool_refusal_host(tmp_path, monkeypatch):
         pre = [row for i in range(1, 12) for row in _turn(i)]
         group = [*_tool_reply(12), _turn(12)[1]]
         pre.extend([_turn(12)[0], *group, _turn(13)[0]])
-        emitted = engine.compress(pre, force=True)
+        left = {key: value for key, value in group[0].items() if key != "tool_calls"}
+        merged = left["content"].strip() + "\n" + group[2]["content"]
+        stored_projection = getattr(request, "param", "projected") == "stored-projection"
+        sanitize = engine._sanitize_active_context_messages
+
+        def project_stored_group(messages, **kwargs):
+            # Exercise the host's text-only assembly shape before the engine
+            # records the initial output, so the refused input stays that shape.
+            if kwargs.get("generated_rows") is not None and all(row in messages for row in group):
+                group_text = {row["content"] for row in group}
+                stored = engine._store.get_session_messages(SID)
+                raw = [row for row in stored if row["content"] in group_text]
+                assert [row["role"] for row in raw] == ["assistant", "tool", "assistant"]
+                assert raw[0]["tool_calls"] and all(row["content"] != merged for row in stored)
+                projected, = _merge_adjacent_assistant_messages([
+                    {"role": row["role"], "content": row["content"]}
+                    for row in raw if row["role"] != "tool"
+                ])
+                start = messages.index(group[0])
+                assert messages[start:start + len(group)] == group
+                messages = [*messages[:start], projected, *messages[start + len(group):]]
+            return sanitize(messages, **kwargs)
+
+        with monkeypatch.context() as patch:
+            if stored_projection:
+                patch.setattr(engine, "_sanitize_active_context_messages", project_stored_group)
+            emitted = engine.compress(pre, force=True)
         assert engine._last_compress_leaves[1] == 1
         # The kept host list carries narration after it discards the tool payload
         # and call metadata. Send that projection through the real merge funnel.
-        left = {key: value for key, value in group[0].items() if key != "tool_calls"}
-        assert all(row in emitted for row in group)
-        kept = engine._sanitize_active_context_messages([
-            left if row == group[0] else row for row in emitted if row != group[1]
-        ])
-        merged = left["content"].strip() + "\n" + group[2]["content"]
+        kept = emitted
+        if not stored_projection:
+            assert all(row in emitted for row in group)
+            kept = engine._sanitize_active_context_messages([
+                left if row == group[0] else row for row in emitted if row != group[1]
+            ])
         assert any(row["content"] == merged for row in kept)
         _drain_session_end_maintenance(engine)
         engine.on_session_end(SID, pre)
@@ -699,6 +726,46 @@ def test_tool_separated_refusal_recovers_with_covered_survival_fit(tool_refusal_
     assert merged in replayed, record
 
 
+@pytest.mark.parametrize("tool_refusal_host", ["stored-projection"], indirect=True)
+def test_refused_tool_reply_reconstructs_original_stored_rows(tool_refusal_host, monkeypatch, caplog):
+    """I1, I2, I11. A refused leaf can cover a host merge that has no exact stored row."""
+    engine, kept, binding, group, merged = tool_refusal_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    engine.record_rejected_compaction()
+    assert _emission_state(engine) == ("refused",)
+    engine.note_turn_complete()
+
+    stored = engine._store.get_session_messages(SID)
+    group_text = {row["content"] for row in group}
+    stored_group = [row for row in stored if row["content"] in group_text]
+    assert [row["role"] for row in stored_group] == ["assistant", "tool", "assistant"]
+    assert stored_group[0]["tool_calls"] and all(row["content"] != merged for row in stored)
+    covered = {store_id for _, _, store_id in engine._dag.get_leaf_sources_through(SID, frontier)}
+    assert {row["store_id"] for row in stored_group} <= covered
+    live = kept + [_turn(20)[1]]
+    replay = engine._committed_replay_drops
+    replayed = []
+
+    def observe_replay(working, start, **kwargs):
+        result = replay(working, start, **kwargs)
+        replayed.extend(working[position]["content"] for position in result[0])
+        return result
+
+    monkeypatch.setattr(engine, "_committed_replay_drops", observe_replay)
+    caplog.set_level(logging.INFO, logger="hermes_lcm")
+    summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+    returned, record = _r3_threshold_pass(
+        engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+    )
+    assert LINEAGE_STOP not in (record["stop"], record["noop"]), record
+    assert record["leaves"] and _r3_frontier(engine) > frontier and len(returned) < len(live), record
+    assert record["uncovered"] == record["unknown_coverage"] == 0, record
+    assert merged in replayed and all(row["content"] != merged for row in returned)
+    after = engine._store.get_session_messages(SID)
+    assert after[:-1] == stored and after[-1]["content"] == live[-1]["content"]
+
+
 @pytest.mark.parametrize("adopted", [False, True], ids=["retry-before-gate", "already-adopted"])
 def test_refused_emission_write_retries_original_view(committed_host, monkeypatch, adopted):  # noqa: F811
     """I1, I2, I11. A skipped refusal follows the original proposal, even across compress calls."""
@@ -731,7 +798,8 @@ def test_refused_emission_write_retries_original_view(committed_host, monkeypatc
         return result
 
     monkeypatch.setattr(engine, "_latest_compaction_was_refused", observe_gate)
-    live = kept + [_turn(20)[1]]
+    # Leave compactable input beyond the fresh tail after the retry drops the covered prefix.
+    live = kept + [_turn(20)[1], *(row for i in range(21, 28) for row in _turn(i))]
     returned = engine.compress(live, force=True)
     assert engine._compress_calls > handle.compress_call and gate_outcomes
     assert gate_outcomes[0] == ((False, ("adopted",)) if adopted else (True, ("refused",)))
@@ -740,7 +808,7 @@ def test_refused_emission_write_retries_original_view(committed_host, monkeypatc
 
 
 @pytest.mark.parametrize("case", ["later-accepted", "session-switch", "ledger-off"])
-def test_real_refusal_gate_boundaries(request, monkeypatch, case):
+def test_real_refusal_gate_boundaries(request, monkeypatch, caplog, case):
     """I1, I2, I11. The replay gate is scoped to a genuine host refusal and the bound frontier."""
     monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
     if case == "ledger-off":
@@ -761,6 +829,8 @@ def test_real_refusal_gate_boundaries(request, monkeypatch, case):
         # Carry out the later host commit in its normal end/start order.
         with monkeypatch.context() as patch:
             patch.setattr(engine, "_summary_route_stop_applies", lambda *_args, **_kwargs: True)
+            # This synthetic route refusal has no real circuit cooldown.
+            patch.setattr(engine, "_start_sweep_budget_hold", lambda *_args, **_kwargs: None)
             accepted = engine.compress(kept, force=True)
         assert _r3_frontier(engine) == frontier and engine._last_compress_leaves[1] == 0
         assert len(accepted) < len(kept) and engine._emission_handle.view_seq > handle.view_seq
@@ -769,13 +839,29 @@ def test_real_refusal_gate_boundaries(request, monkeypatch, case):
         engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, **binding)
         assert _emission_state(engine) == ("adopted",)
         assert _emission_state(engine, handle) == ("refused",)
+        assert not engine._latest_compaction_was_refused()
+        covered = {store_id for _, _, store_id in engine._dag.get_leaf_sources_through(SID, frontier)}
+        ids = engine._get_store_id_map_for_messages(accepted)
+        scaffold_end, carrier = engine._replay_head(accepted, 0, frontier)
+        for i, row in enumerate(accepted):
+            if i < scaffold_end or (i == scaffold_end and carrier):
+                continue
+            store_id = ids.get(id(row))
+            assert store_id and (store_id > frontier or store_id in covered), row
+        assert engine._committed_replay_drops(accepted, 0)[0] == []
+        caplog.set_level(logging.INFO, logger="hermes_lcm")
+        summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+        live = accepted + [_turn(20)[1], *_turn(21)]
+        _, record = _r3_threshold_pass(
+            engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+        )
+        assert record["gate"] == "ran" and LINEAGE_STOP not in (record["stop"], record["noop"]), record
+        return
     elif case == "session-switch":
         engine.on_session_start("S1", **binding)
         assert engine._lifecycle.get_by_conversation(engine._conversation_id).current_session_id != SID
 
     drops, store_map, _, _ = engine._committed_replay_drops(kept, 0)
-    if case == "later-accepted":
-        assert drops, (frontier, _emission_state(engine), engine._latest_compaction_was_refused())
-    else:
-        assert drops == []
-        assert (store_map is None) == (case == "session-switch")
+    assert drops == []
+    assert (store_map is None) == (case == "session-switch")
