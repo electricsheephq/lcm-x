@@ -32,7 +32,11 @@ def text(rng: random.Random, tokens: int, tag: str) -> str:
 
 
 def _length(rng: random.Random, spec: dict[str, Any]) -> int:
-    """Tokens from a [low, high] uniform range, with a `large_share` drawn from [large_low, large_high]."""
+    """Tokens: `mix` = [[low, high, weight], ...] (a bucket by weight, then uniform inside it), else a [low, high]
+    uniform range with a `large_share` drawn from [large_low, large_high]."""
+    if spec.get("mix"):
+        low, high, _weight = rng.choices(spec["mix"], weights=[b[2] for b in spec["mix"]])[0]
+        return rng.randint(low, high)
     if spec.get("large_share") and rng.random() < spec["large_share"]:
         return rng.randint(*spec["large"])
     return rng.randint(*spec["normal"])
@@ -44,6 +48,9 @@ def conversation(kit: dict[str, Any], name: str, turns: int, seed: int) -> list[
     lengths, tools = kit["lengths"], kit["tools"]
     if not name.startswith("target"):
         lengths = {**lengths, **kit["others"].get("lengths", {})}
+    else:  # the target conversation's own shape, when the kit gives one (fitted to the census, #2868)
+        lengths = {**lengths, **kit["target"].get("lengths", {})}
+        tools = {**tools, **kit["target"].get("tools", {})}
     rows: list[dict[str, Any]] = []
     clock = kit["start_epoch"] + seed % 997
 

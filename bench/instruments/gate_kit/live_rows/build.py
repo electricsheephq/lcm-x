@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     externalized = db.parent / "externalized"
     manifest = {
-        "kit": str(args.kit.name), "scale": args.scale, "qualifies": args.scale == 1.0,
+        "kit": str(args.kit.name), "kit_body": kit, "scale": args.scale, "qualifies": args.scale == 1.0,
         "seed": kit["seed"], "input_hash": generated["input_hash"], "generated": generated["counts"],
         "stored": rt.store_census(db),
         "externalized_files": sum(1 for p in externalized.rglob("*") if p.is_file()) if externalized.exists() else 0,

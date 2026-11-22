@@ -270,7 +270,8 @@ def main(argv: list[str] | None = None) -> int:
         PROFILE["path"] = str(args.profile)
     CONTROL["mode"] = args.control
     manifest = json.loads((args.build / "build-manifest.json").read_text())
-    kit = builder.scaled(rt.load_kit(), manifest["scale"])
+    # The store carries its kit (already scaled); older builds fall back to the kit file.
+    kit = manifest.get("kit_body") or builder.scaled(rt.load_kit(), manifest["scale"])
     generated = shape.build(kit)
     if generated["input_hash"] != manifest["input_hash"]:
         raise SystemExit("the kit's input hash does not match the build's; rebuild the store")
