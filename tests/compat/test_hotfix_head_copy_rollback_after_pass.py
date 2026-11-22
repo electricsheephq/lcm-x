@@ -55,7 +55,7 @@ from hashlib import sha256
 
 from hermes_lcm.config import host_message_uid_mode
 from hermes_lcm.tokens import count_messages_tokens
-from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, _append, _host_flush, _view
+from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, _append, _host_flush, _view, _with_head_remainder
 from tests.test_issue_671_stub_first_exit import THRESHOLD, text_view, tool_view
 ''' + getsource(message_hashes) + "\n\n" + getsource(compact_loaded_turn) + r'''
 
@@ -99,7 +99,8 @@ try:
         view, result = compact_loaded_turn(engine, turn)
         passes.append(result)
     report = dict(
-        occupied_id=occupied_id, seed_rows=seed_rows, seed_frontier=seed_frontier, head=returned[0]["content"],
+        occupied_id=occupied_id, seed_rows=seed_rows, seed_frontier=seed_frontier,
+        head=_with_head_remainder(engine, returned[0], NEW_TURN[0]["content"])["content"],
         passes=passes, view=view, messages=message_hashes(conn), frontier=engine._last_compacted_store_id,
     )
 finally:

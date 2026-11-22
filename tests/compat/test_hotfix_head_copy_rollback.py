@@ -12,7 +12,7 @@ from hermes_lcm import tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from tests.compat.helpers import run_old
-from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, RELATION, _append, _view
+from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, RELATION, _append, _view, _with_head_remainder
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_issue_671_stub_first_exit import THRESHOLD, run, stop_line, summaries, text_view, tool_view  # noqa: F401
 
@@ -90,8 +90,9 @@ def _seed_copy(engine, caplog):
         row["content"] != head["content"]
         for row in engine._store.get_session_messages_after(engine._session_id, previous_max)
     )
+    head = _with_head_remainder(engine, head, NEW_TURN[0]["content"])
     copy_id = _append(engine, head, RELATION)
-    return head["content"], copy_id, flush(host_view + ROLLBACK_TURN)
+    return head["content"], copy_id, flush([head, *host_view[1:], *ROLLBACK_TURN])
 
 
 def _snapshot(path):
@@ -153,7 +154,7 @@ def test_v0302_rollback_after_reading_known_head_copy(tmp_path, old_tree, host_r
         assert assembled and all(row.get("store_id") != copy_id for row in assembled)
         hits = json.loads(tools.lcm_grep(GREP, engine=hotfix))["results"]
         assert any(hit.get("store_id") for hit in hits)
-        # v0.30.3 leaves recall unchanged: lcm_grep may still return the copy (recall exclusion follows in v0.30.4).
+        assert all(hit.get("store_id") != copy_id for hit in hits)
     finally:
         hotfix.shutdown()
 

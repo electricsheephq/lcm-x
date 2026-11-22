@@ -41,6 +41,12 @@ def _append(engine, row, relation=None, *, session=None):
     return store_id
 
 
+def _with_head_remainder(engine, head, remainder):
+    end = engine._verified_lcm_summary_prefix_end(head["content"])
+    assert end is not None
+    return {**head, "content": head["content"][:end] + "\n\n" + remainder}
+
+
 @pytest.fixture
 def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
     engines = []
@@ -66,7 +72,9 @@ def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
         assert not any(
             r["content"] == head["content"]
             for r in engine._store.get_session_messages_after(engine._session_id, old_top)
-        )  # This synthetic warm ingest leaves the copy out. Seed the stored shape through the ingest writer.
+        )
+        # Inject the stored shape after warm ingest. The carrier must reproduce the nearest stored user turn.
+        head = _with_head_remainder(engine, head, NEW_TURN[0]["content"])
         copy_id = (_append(engine, head, RELATION) if with_copy else None)
         if not with_copy:
             # Occupy the same global ID outside this conversation's session, so leaf IDs are directly comparable.
@@ -135,7 +143,6 @@ def test_compaction_matches_twin(twins, summaries, caplog, position):  # noqa: F
     assert results[0][0] and results[0][1]
 
 
-@pytest.mark.xfail(strict=True, reason="v0.30.3 ships the prompt and compaction exclusion only; recall exclusion follows in v0.30.4")
 def test_search_preserves_original_hits_and_summary(twins):
     _, (engine, _, copy_id) = twins
     hits = json.loads(tools.lcm_grep({"query": "Earlier turns", "limit": 20}, engine=engine))["results"]
@@ -146,6 +153,61 @@ def test_search_preserves_original_hits_and_summary(twins):
     assert "error" in expanded
     loaded = json.loads(tools.lcm_load_session({"session_id": engine._session_id, "limit": 100}, engine=engine))
     assert all(row["store_id"] != copy_id for row in loaded["messages"])
+
+
+def _head_with_remainder(engine, source_id, remainder):
+    from hermes_lcm.dag import SummaryNode
+    from hermes_lcm.engine import _summary_part_text
+
+    node = SummaryNode(
+        session_id=engine._session_id, depth=0, summary="Earlier turns.", expand_hint="turns",
+        source_type="messages", source_ids=[source_id], token_count=3, source_token_count=10,
+    )
+    engine._dag.add_node(node)
+    return {"role": "user", "content": _summary_part_text(node) + "\n\n" + remainder}
+
+
+def test_carried_old_repeated_turn_is_not_a_known_copy(make_engine):  # noqa: F811
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    engine = make_engine()
+    earlier = _append(engine, {"role": "user", "content": "continue"})
+    head = _head_with_remainder(engine, earlier, "continue")
+    _append(engine, {"role": "user", "content": "Stop at the next checkpoint."})
+    store_id = _append(engine, head, RELATION)
+    stored = engine._store.get(store_id)
+    assert not is_known_head_copy(engine._store.connection, stored)
+    hits = json.loads(tools.lcm_grep({"query": "continue"}, engine=engine))["results"]
+    assert any(hit.get("store_id") == store_id for hit in hits)
+
+
+def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  # noqa: F811
+    from hermes_lcm.head_copy import is_known_head_copy
+
+    engine = make_engine()
+    parent = engine._session_id
+    earlier = _append(engine, {"role": "user", "content": "continue"})
+    head = _head_with_remainder(engine, earlier, "continue")
+    engine._record_rotation_predecessor("child", parent)
+    store_id = _append(engine, head, RELATION, session="child")
+    conn = engine._store.connection
+    assert is_known_head_copy(conn, engine._store.get(store_id))
+    store_id = _append(engine, head, RELATION, session="unrelated")
+    assert not is_known_head_copy(conn, engine._store.get(store_id))
+    _append(engine, {"role": "user", "content": "Stop at the next checkpoint."}, session="child")
+    store_id = _append(engine, head, RELATION, session="child")
+    assert not is_known_head_copy(conn, engine._store.get(store_id))
+
+
+def test_host_prefilter_skips_store_lookup_for_ordinary_turn(make_engine, monkeypatch):  # noqa: F811
+    engine = make_engine()
+    messages = [{"role": "user", "session_id": engine._session_id, "store_id": 1, "content": "continue"}]
+
+    def unexpected_lookup(store_id):
+        pytest.fail(f"Unexpected store read for ordinary user row {store_id}")
+
+    monkeypatch.setattr(engine._store, "get", unexpected_lookup)
+    assert engine._without_known_head_copies(messages) is messages
 
 
 @pytest.mark.parametrize("shape", ["unverified", "unique_remainder", "no_relation"])

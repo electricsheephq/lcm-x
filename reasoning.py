@@ -18,7 +18,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from .assertion_state import query_assertion_state
 from .assertion_store import AssertionStore
-from .store import MessageStore
+from .store import MessageStore, get_recall_message
 
 
 ComputationOperation = Literal[
@@ -791,7 +791,7 @@ def _ground_one(
 
     if not quote or len(quote) > _MAX_QUOTE_CHARS:
         return None, f"operand quote must contain 1..{_MAX_QUOTE_CHARS} characters"
-    stored = messages.get(store_id)
+    stored = get_recall_message(messages, store_id)
     if not stored:
         return None, f"message store_id {store_id} does not exist"
     content = str(stored.get("content") or "")

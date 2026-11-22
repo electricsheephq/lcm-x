@@ -101,6 +101,7 @@ from .search_query import (
     normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
+from .head_copy import _head_copy_candidate, exclude_head_copies, known_head_copies_in_rows, known_head_copy_ids
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
@@ -762,6 +763,7 @@ def _expand_message_sources(
     content_offset = max(0, content_offset)
     source_ids = node.source_ids[source_offset:source_offset + source_limit]
     stored_by_id = engine._store.get_batch(source_ids)
+    copies = known_head_copies_in_rows(getattr(engine._store, "connection", None), stored_by_id.values())
 
     messages: list[dict[str, Any]] = []
     budget_used = 0
@@ -778,7 +780,7 @@ def _expand_message_sources(
             has_more = True
             break
         stored = stored_by_id.get(store_id)
-        if not stored:
+        if not stored or store_id in copies:
             next_source_offset = source_index + 1
             next_content_offset = 0
             has_more = next_source_offset < total_sources
@@ -1079,13 +1081,7 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "include_exact_ref must be a boolean"})
     include_exact_ref = raw_include_exact_ref
 
-    total_messages = engine._store.count_session_load_messages(
-        session_id,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    rows = engine._store.load_session_page(
+    total_messages, rows = engine._store.load_recall_session_page(
         session_id,
         after_store_id=after_store_id,
         limit=limit + 1,
@@ -3699,10 +3695,11 @@ def _lcm_recall_summary_source_hits(
         rows = (
             read_store.get_batch(ordered_ids[:candidate_limit]) if ordered_ids else {}
         )
+        copies = known_head_copies_in_rows(getattr(read_store, "connection", None), rows.values())
         for store_id in ordered_ids[:candidate_limit]:
             require_remaining("message shaping")
             row = rows.get(store_id)
-            if row is None:
+            if row is None or store_id in copies:
                 continue
             content = str(row.get("content") or "")
             if not content:
@@ -4275,16 +4272,26 @@ def default_semantic_cpu_limited(config) -> bool:
 
 
 _LCM_RECALL_ADJACENT_SQL = (
-    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
-    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
-    "ORDER BY store_id LIMIT 1"
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, tool_call_id, tool_name, content, "
+    "timestamp, observed_at FROM messages WHERE {where} ORDER BY store_id LIMIT 1"
 )
 
 
 def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
-    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
-    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
-    return dict(found) if found is not None else None
+    """The next recallable row of ``session_id`` after ``store_id``."""
+    where, args = ["session_id = ?", "store_id > ?"], [session_id, int(store_id)]
+
+    def read():
+        row = conn.execute(_LCM_RECALL_ADJACENT_SQL.format(where=" AND ".join(where)), args).fetchone()
+        return dict(row) if row is not None else None
+
+    row = read()
+    if row is not None and _head_copy_candidate(row):
+        copies = known_head_copy_ids(conn, session_id)
+        if row["store_id"] in copies:
+            exclude_head_copies(where, args, copies)
+            return read()
+    return row
 
 
 def _lcm_recall_adjacent_reply(
@@ -4320,6 +4327,7 @@ def _lcm_recall_adjacent_reply(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                conn.execute("BEGIN")
                 read_next = partial(_lcm_recall_next_row, conn)
             neighbour = read_next(session_id, int(hit["store_id"]))
             if time.monotonic() >= deadline:
