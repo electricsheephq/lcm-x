@@ -28,7 +28,7 @@ FIRST_ROWS = {
 CURSOR_WRITERS = {
     "leaf-gap": "_finish_with_leaf",
     "no-leaf-gap": "_finish_without_leaf",
-    "stub-first-gap": "_stub_first_exit",  # hotfix tree: no _finalize_stub_first_exit split; the cursor write is here
+    "stub-first-gap": "_finalize_stub_first_exit",  # The port split the stub-first exit.
     "nonempty-gap": "_finish_with_leaf",
     "reset-gap": "_finish_with_leaf",
 }
