@@ -9203,11 +9203,13 @@ class LCMEngine(
                 for idx, message in enumerate(active[:max(0, limit)]):
                     if idx in skip:
                         continue
-                    # The key is the host row's (the trip compares host ids, and redaction may change the active
-                    # copy's); the active copy decides whether the row is ignored or a placeholder.
-                    key = _trip_key(messages[idx]) if _trip_key(message) is not None else None
+                    # The active copy decides whether the row is ignored or a placeholder. Both its key and the host
+                    # row's witness: redaction can change a call id in the active copy, and a later host list can
+                    # carry either form (its own raw id, or the redacted copy echoed back).
+                    key = _trip_key(message)
                     if key is None:
                         continue  # text rows and ignored calls never witness
+                    host_key = _trip_key(messages[idx]) or key
                     try:
                         text = text_content_for_pattern_matching(message.get("content")) or ""
                         if self._is_ignored_active_replay_placeholder(message, text):
@@ -9215,6 +9217,8 @@ class LCMEngine(
                     except Exception:
                         continue
                     keys[key] += 1
+                    if host_key != key:
+                        keys[host_key] += 1
             self._trip_witness = (self._session_id, keys)
 
         def remember(active):
