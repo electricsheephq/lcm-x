@@ -51,6 +51,11 @@ with attribution improving retrieval binding generally, not just abstention.
   pins verified against disk; env pins verify the reconstruction, not the original process.
 - Left-only correct 38 / right-only correct 44 (paired failclose record) — the discordance is
   two-sided, not drift in one direction.
+- Caveats added 2026-10-28, for anyone citing this result:
+  - The comparison with F48 is not same-day. F48's baseline ran about 18 days earlier, and C2 inherits C1's environment changes (frozen codex transport, `HF_HUB_OFFLINE=1`, a 1,200 s initialize timeout; run sheet lines 12-14). The single delta is single for the code, not for the environment.
+  - No paired test against F48 is reported; the pairing reported is A against A′.
+  - §5's slices sum to 490 rows (256 + 44 + 190) against 446 adversarial rows. The E− slice overlaps another slice (arm A's adversarial numerator is 135 + 143 = 278, without the E− rows), and the table does not say which.
+  - The effect is about 17 times the A/A′ spread, so drift is unlikely to explain it. The control a paper needs is a same-day prefix 0 vs prefix 1 pair in one environment.
 
 ## 4. What this does NOT prove
 

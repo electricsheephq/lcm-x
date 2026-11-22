@@ -1,6 +1,6 @@
 # F26 — wave-1 does NOT improve LongMemEval-V1. A placebo arm made the result readable.
 
-**Date:** 2026-07-26 · **Issue:** #163 · **Verdict:** NULL — wave-1's effect is inside the noise floor.
+**Date:** 2026-07-26 (note added 2026-10-28: the correction below is dated 2026-07-25, the date of F27, which it cites; the two dates are inconsistent and the original filing date was not recorded separately) · **Issue:** #163 · **Verdict:** NULL — wave-1's effect is inside the noise floor.
 **Design credit:** the executing agent added a **placebo arm** (#423's identical code, re-run) that I did not
 specify. Without it this experiment would have produced a false positive.
 
