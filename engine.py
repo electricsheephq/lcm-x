@@ -157,7 +157,7 @@ from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
 from .compaction_request import CompactionRequest
 from .compress_run import CompressRun
-from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder
+from .identity_anchor import IdentityAnchorMixin, _ROTATION_LINEAGE_UNRECORDED, _raw_remainder, _trip_key
 from .host_uid import HostUidShadowMixin, _valid_uid
 from .host_row_recovery import HostRowRecoveryMixin
 from .unended_catchup import UnendedCatchupMixin
@@ -8168,6 +8168,7 @@ class LCMEngine(
                     "_generated_ignored_active_replay_placeholder_hash_ordinals",
                     "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
                     "_pending_session_tails",
+                    "_trip_witness",  # topic 9: a rolled-back attempt restores the witness for its retry
                 )}
                 # Stores and host objects are identity-bearing; never deepcopy them.
                 for name in ("_host_rewrite_store", "_pruned_tool_source_store"):
@@ -9232,6 +9233,13 @@ class LCMEngine(
         Store-dependent protection/token counts are part of lock_hold_ms, and
         would move out with classification under the design's section 5 fallback.
         """
+        # Topic 9 (F8): the trip witness counts only when this session's previous completed ingest froze it. It is
+        # taken once here and cleared, so a failed or read-only pass never leaves a stale witness behind.
+        witness = getattr(self, "_trip_witness", None)
+        self._trip_witness_for_audit = (Counter(witness[1]) if isinstance(witness, tuple) and len(witness) == 2
+                                        and witness[0] == self._session_id else Counter())
+        if getattr(self, "_ingest_read_only", None) is None:
+            self._trip_witness = None
         # This guard belongs to #2042's catch-up and runs only when host_row_recovery_enabled is on.
         # The eager write lock serializes the probe and writes if another writer filled an empty-store bind.
         if getattr(getattr(self, "_config", None), "host_row_recovery_enabled", False) and self._ingest_cursor == 0 and not self._ingest_cursor_needs_reconcile:
@@ -9638,7 +9646,41 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
+        def freeze_trip_witness(active):
+            # Topic 9: keys from the active replay list this ingest publishes, where every ignored row is already a
+            # generated placeholder (an ignored call carries no tool_calls). Only rows below the published cursor
+            # count: a cursor short of the list leaves the rest unwitnessed, so they fail toward storing. A list
+            # that is not index-aligned with the host list freezes no witness (copies, never a loss).
+            keys = Counter()
+            active = list(active or ())
+            # A pass whose audit fell open stored nothing that proves its unaudited prefix [unaudited_from, entry
+            # cursor): those rows never witness. Rows it stored past the entry cursor still do.
+            limit = min(len(active), int(self._ingest_cursor or 0))
+            skip = range(int(unaudited_from), entry_cursor) if unaudited_from is not None else range(0)
+            if len(active) == len(messages):
+                for idx, message in enumerate(active[:max(0, limit)]):
+                    if idx in skip:
+                        continue
+                    # The active copy decides whether the row is ignored or a placeholder. Both its key and the host
+                    # row's witness: redaction can change a call id in the active copy, and a later host list can
+                    # carry either form (its own raw id, or the redacted copy echoed back).
+                    key = _trip_key(message)
+                    if key is None:
+                        continue  # text rows and ignored calls never witness
+                    host_key = _trip_key(messages[idx]) or key
+                    try:
+                        text = text_content_for_pattern_matching(message.get("content")) or ""
+                        if self._is_ignored_active_replay_placeholder(message, text):
+                            continue  # a generated placeholder is never stored, so it never witnesses (F4)
+                    except Exception:
+                        continue
+                    keys[key] += 1
+                    if host_key != key:
+                        keys[host_key] += 1
+            self._trip_witness = (self._session_id, keys)
+
         def remember(active):
+            freeze_trip_witness(active)
             previous_replay = getattr(self, "_last_active_replay_messages", ())
             previous_generated_ids = (
                 self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
@@ -9666,6 +9708,7 @@ class LCMEngine(
                 self._persist_ingest_replay_evidence(replay_messages)
 
             def finish_no_new():
+                freeze_trip_witness(replay_messages)
                 cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
                 return cached_replay if cached_replay is not None else remember(replay_messages)
 

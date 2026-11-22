@@ -78,8 +78,9 @@ def test_rewritten_row_still_trips_and_keeps_mains_plan(tmp_path, monkeypatch, k
     seen, plans, _ = _run(tmp_path, monkeypatch, kind, rewrite=True)
     found, ancestry, _, cursor, missed = seen[0]
     assert found is None and ancestry > 0
-    assert plans[0] == (min(missed), set(range(min(missed), cursor)) - set(missed))
-    assert 4 in plans[0][1] and min(missed) < 4
+    # Topic 9 (F2): the trip never credits the unexplained rewrite at 4; its new bytes stay a write.
+    assert plans[0] == (min(missed), set(range(min(missed), cursor)) - set(missed) - {4})
+    assert 4 not in plans[0][1] and min(missed) < 4
 
 
 def test_unstored_call_and_result_still_run_check_and_are_stored(tmp_path, monkeypatch):
