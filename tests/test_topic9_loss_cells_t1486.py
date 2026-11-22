@@ -436,3 +436,20 @@ def test_r1_a_pass_whose_audit_fell_open_never_witnesses_its_prefix(tmp_path, mo
         assert stored[_key(m1)] == 1
     finally:
         engine.shutdown()
+
+
+def test_r2_a_list_valued_result_id_never_breaks_the_audit(tmp_path, monkeypatch):
+    """Review r2 (Astra): a replayed tail result whose tool_call_id is a list (stringified the same as a stored string
+    id) must not raise in the audit; the missed user edit below the cursor is still stored."""
+    engine = _engine(tmp_path)
+    try:
+        u0, a0, u1 = _u("T0 user turn", 1000), _a("reply to T0", 1001), _u("T1 user turn", 1002)
+        stored_result = _result("['x']", "result text", 1003)
+        engine.ingest([u0, a0, u1, stored_result])
+        edited = _u("T1 user turn, edited by the host", 1002)
+        listed = {**stored_result, "tool_call_id": ["x"]}
+        # A new text row before it moves the stamp-matched result to the old cursor (a replayed tail row).
+        engine.ingest([u0, a0, edited, _a("a new reply before the result", 1002.5), listed, _a("reply", 1600)])
+        assert _counts(engine)[_key(edited)] == 1
+    finally:
+        engine.shutdown()

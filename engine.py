@@ -9661,7 +9661,9 @@ class LCMEngine(
                 for idx, message in enumerate(active[:max(0, limit)]):
                     if idx in skip:
                         continue
-                    key = _trip_key(message)
+                    # The key is the host row's (the trip compares host ids, and redaction may change the active
+                    # copy's); the active copy decides whether the row is ignored or a placeholder.
+                    key = _trip_key(messages[idx]) if _trip_key(message) is not None else None
                     if key is None:
                         continue  # text rows and ignored calls never witness
                     try:
