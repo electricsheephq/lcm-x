@@ -156,10 +156,12 @@ def test_2468_a_late_call_does_not_store_an_unlinked_second_result(tmp_path, cau
             (_presence_window_exceeded if cause == "window" else _presence_read_fails)(patch, engine)
             engine.ingest(turn_end)
         assert _stored(engine)[_key(call)] == 1, "topic 9: the call row is stored at the drop turn"
+        assert _stored(engine)[_key(result)] == 1, "its result is stored once at the drop turn"
         engine.shutdown()
         engine = _engine(tmp_path)
         engine.ingest(longer)
         assert _stored(engine)[_key(call)] == 1, "the later ingest stores no second copy of the call"
+        assert _stored(engine)[_key(result)] >= 1, "the result stays stored after the restart"
         ids = [r["store_id"] for r in engine._store.get_session_messages(SESSION) if _key(r) == _key(result)]
         linked = {int(a) for a, in engine._store._conn.execute(
             "SELECT store_id FROM message_relations WHERE kind = 'possible_replay_of' AND related_store_id = ?",

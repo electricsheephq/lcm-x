@@ -497,7 +497,8 @@ class IdentityAnchorMixin:
                 self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
-        self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
+        self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched,
+                                            set(plan.get("positional", ())) | plan.get("kept_results", set()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
@@ -666,6 +667,13 @@ class IdentityAnchorMixin:
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed
                                   and idx not in rewritten and idx not in plan["remainders"]}
             plan["replayed"].update(plan["positional"])
+            # A call the audit adds below the cursor splits its segment: its results at or past the old cursor that
+            # are already proven stored stay replayed, so restoring the call never stores them again.
+            added_ids = {call_id for idx in found for key in (_trip_key(messages[idx]),) if key and key[0] == "call"
+                         for call_id in key[1]}
+            plan["kept_results"] = {idx for idx in plan["replayed"] if idx >= cursor
+                                    and messages[idx].get("role") == "tool"
+                                    and messages[idx].get("tool_call_id") in added_ids}
             if tripped:  # the presence check tripped (logged there): the same line main logs
                 logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
                             "session=%s", len(missed), min(missed), self._session_id)
@@ -680,17 +688,21 @@ class IdentityAnchorMixin:
         this session's previous completed ingest never held (F8: the witness frozen when it finished, F3: as
         immutable keys; ignored rows are never witnesses, F4). A witnessed row keeps today's credit; one witness key
         credits one view row. An id that is ambiguous in the view or the witness keeps main's result (F6). A result
-        joins only with its call: added now, fresh at or past the cursor, in the accepted prefix before ``start``,
-        or a non-ignored view row that is proven or witnessed (F1). A result whose call is ignored or absent keeps main's result (no orphan, I7)."""
+        joins only with its call: added now, fresh at or past the cursor, in the accepted prefix before ``start``
+        and held by the witness, or a non-ignored view row that is proven or witnessed (F1). A result id repeated in
+        the view is ambiguous too. A result whose call is ignored or absent keeps main's result (no orphan; tool pairs, I8)."""
         witness = Counter(getattr(self, "_trip_witness_for_audit", None) or ())
+        witness_all = Counter(witness)
         keys = {idx: _trip_key(message) for idx, message in enumerate(messages)}
         call_ids = Counter(call_id for key in keys.values() if key and key[0] == "call" for call_id in key[1])
         witness_ids = Counter()
         for key, count in witness.items():
             for call_id in (key[1] if key[0] == "call" else ()):
                 witness_ids[call_id] += count
+        result_ids = Counter(key[1] for key in keys.values() if key and key[0] == "result")
         ambiguous = {call_id for call_id, count in call_ids.items() if count > 1}
         ambiguous |= {call_id for call_id, count in witness_ids.items() if count > 1}
+        ambiguous |= {call_id for call_id, count in result_ids.items() if count > 1}  # repeated result ids
 
         def ignored(idx):
             try:
@@ -725,7 +737,8 @@ class IdentityAnchorMixin:
                 continue  # an absent or ignored call: main's result, never an orphan result
             # Its call is stored or written now: added here, fresh at or past the cursor, in the accepted prefix
             # before ``start``, or a proven or witnessed view row (F1).
-            if call in added_calls or call >= cursor or call < start or call in witnessed or proven(call):
+            prefix_call = call < start and witness_all[keys[call]] > 0  # held by the previous ingest's list
+            if call in added_calls or call >= cursor or prefix_call or call in witnessed or proven(call):
                 added.append(idx)
         return sorted(added)
 
