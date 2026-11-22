@@ -49,12 +49,12 @@ def summary_coverage_end(conn, node_ids):
     """The greatest store_id under node_ids, walked down to the messages leaves."""
     row = conn.execute(
         f"""WITH RECURSIVE walk(source_type, source_id) AS (
-                SELECT n.source_type, CAST(j.value AS INTEGER) FROM summary_nodes n, json_each(n.source_ids) j
-                WHERE n.node_id IN ({",".join("?" * len(node_ids))})
-                UNION SELECT child.source_type, CAST(j.value AS INTEGER) FROM summary_nodes child
-                JOIN walk ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
-                JOIN json_each(child.source_ids) j
-            ) SELECT MAX(source_id) FROM walk WHERE source_type = 'messages'""",
+                        SELECT n.source_type, CAST(j.value AS INTEGER) FROM summary_nodes n, json_each(n.source_ids) j
+                        WHERE n.node_id IN ({",".join("?" * len(node_ids))})
+                        UNION SELECT child.source_type, CAST(j.value AS INTEGER) FROM summary_nodes child
+                        JOIN walk ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
+                        JOIN json_each(child.source_ids) j
+                    ) SELECT MAX(source_id) FROM walk WHERE source_type = 'messages'""",
         [int(node_id) for node_id in node_ids],
     ).fetchone()
     return None if row is None or row[0] is None else int(row[0])

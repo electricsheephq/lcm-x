@@ -491,7 +491,12 @@ def _n2_stages(records):
     for stage, sql in records:
         text = ' '.join(sql.split())
         if text.startswith('SELECT m.store_id,m.session_id,m.timestamp,m.observed_at FROM ') or text.startswith(
-                'SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE '):
+                'SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE ') or text.startswith(
+                # v0.30.4 recall exclusion: the same mention read plus exactly one head-shape flag column.
+                "SELECT m.store_id,m.session_id,m.timestamp,m.observed_at,(m.role='user' AND m.content GLOB '[[]*' "
+                "AND instr(m.content, '[Expand for details:') > 0) FROM ") or text.startswith(
+                # v0.30.4: the same LIKE mention read plus exactly the role column the copy check needs.
+                'SELECT store_id,session_id,timestamp,observed_at,content,role FROM messages WHERE '):
             assert stage == 'mention', (stage, text)
             key = 'metadata'
         elif text.startswith('WITH ranked AS NOT MATERIALIZED (') or (
