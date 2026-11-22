@@ -10,10 +10,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 - Fix: on both reproduced routes, an assistant reply that calls tools, at the start of a turn whose two user
   messages Hermes merged, is no longer counted as stored without being stored (#3019; main port #3020). Unmatched
-  tool call and result rows before the resume point are looked up by call id among the conversation's stored rows,
-  even when the audit finds no missing row, and the rows not found are stored, subject to named limits. When the
-  lookup stops early, such a row keeps its credit only if the session's previous completed ingest held a row of the
-  same kind with the same ids. Rows lost before this release are not restored; a transcript-based repair is planned
+  tool call and result rows in the changed part of the list before the resume point are looked up by call id in the
+  session's stored rows and its verified lineage, even when the audit finds no missing row; rows not found are stored
+  when they pass the id, ignore and tool-group checks. When the lookup stops early, an eligible row keeps its credit
+  if the previous completed ingest's list held a row of the same kind with the same ids below its published resume
+  point, and the other eligible rows are stored. Rows lost before this release are not restored; a transcript-based repair is planned
   for v0.30.3 (#3022). Residual shapes: #3023.
 
 ## v0.30.1 (nothing lost, part 2; turn recovery is opt-in)
