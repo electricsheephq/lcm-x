@@ -2,6 +2,11 @@
 the cursor in the same session. The previous ingest's trip witness no longer holds it, so a tripped presence lookup
 stores the pair a second time. v0.30.1 stores no copy.
 
+Accepted tradeoff for v0.30.3 (rulings T1-511, T1-541): the copy stays. A returning pair and a byte-identical repeat
+cannot be told apart in the store, and seven fix rounds each found a field a store proof missed (a reused id, a
+host note line, metadata, a boolean, a tool name), so crediting the pair could lose a row. The returning-pair cells
+are strict expected failures that document the copy; the never-stored cells guard against loss.
+
 Expectations fixed before any run: the returning pair keeps exactly one stored copy, and an unstamped pair the store
 never held is still stored exactly once (no loss). The restart route named in #3026 is not covered here: a cold bind
 never runs the changed-prefix audit, so it cannot reach the trip helper."""
@@ -50,6 +55,9 @@ def _run(tmp_path, monkeypatch, trip, returning):
     return engine, before, pair
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#3026, accepted tradeoff (rulings T1-511, T1-541): on a tripped lookup the store cannot tell a returning pair "
+    "from a byte-identical repeat, so the pair is stored again (a copy) rather than risk losing a repeat"))
 @pytest.mark.parametrize("trip", ["odd_shape", "window"])
 def test_a_returning_stored_pair_is_not_stored_again(tmp_path, monkeypatch, trip):
     engine, before, pair = _run(tmp_path, monkeypatch, trip, lambda stored: stored)
