@@ -172,11 +172,11 @@ class ForegroundBudget:
 
     def admit(self, route_key: str) -> float:
         """Check admission before preparing a leaf or condensation group."""
-        usable_left, _ = self.admit_attempt(route_key)
-        return usable_left
+        timeout_limit, _ = self.admit_attempt(route_key)
+        return timeout_limit
 
     def admit_attempt(self, route_key: str) -> tuple[float, str]:
-        """Return usable time and, for a catch-up admit, the reason the base budget refused."""
+        """Return the timeout limit and, for a catch-up admit, the reason the base budget refused."""
         now = time.monotonic()
         estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
         refusal = ""
@@ -191,8 +191,9 @@ class ForegroundBudget:
             return usable_left, ""
         if self.catchup_open:
             catchup_left = self.step_deadline - self.leaf_reserve - now
-            if estimate <= catchup_left:
-                return catchup_left, refusal
+            catchup_timeout = _DEPTH_CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, catchup_left)
+            if estimate <= catchup_timeout:
+                return catchup_timeout, refusal
         if refusal == "soft_target_reached":
             raise self.stop("foreground soft target reached", reason="soft_target_reached")
         raise self.stop()
@@ -1143,14 +1144,11 @@ def _invoke_summary_llm_routes(
         catchup_refusal, catchup_deadline = "", None
         if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
             if getattr(budget, "catchup_open", False):
-                usable_left, catchup_refusal = budget.admit_attempt(route_key)
+                timeout_limit, catchup_refusal = budget.admit_attempt(route_key)
             else:
-                usable_left = budget.admit(route_key)
-            budget_bound = timeout is None or usable_left < timeout
-            call_timeout = usable_left if budget_bound else timeout
-            if catchup_refusal:
-                call_timeout = _DEPTH_CATCHUP_TIMEOUT_SHARE * min(budget.configured_timeout, usable_left)
-                budget_bound = True
+                timeout_limit = budget.admit(route_key)
+            budget_bound = bool(catchup_refusal) or timeout is None or timeout_limit < timeout
+            call_timeout = timeout_limit if budget_bound else timeout
         elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
             if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:

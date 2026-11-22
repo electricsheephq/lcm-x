@@ -140,6 +140,16 @@ def test_k2_estimate_must_fit_before_the_catchup_bound(make_engine, monkeypatch,
     assert clock.offset == 132 and 190 - clock.offset < provider.budget.estimate("")
 
 
+def test_k10_estimate_must_fit_the_extension_timeout(make_engine, monkeypatch, install_provider, clock):
+    engine, view = _case(make_engine, monkeypatch)
+    provider = install_provider(engine, *((60, SUMMARY),) * 3)
+
+    _compress(engine, view)
+
+    _assert_pass(engine, provider, [(0, 115, 115), (60, 102, 162)], "time_budget_exhausted", False, 2)
+    assert clock.offset == 120 and len(_leaves(engine)) == 2
+
+
 @pytest.mark.parametrize("ratio", [None, "depth"])
 def test_k3_force_uses_only_the_base_hard_budget(ratio, make_engine, monkeypatch, install_provider):
     engine, view = _case(make_engine, monkeypatch, ratio)
@@ -242,6 +252,18 @@ def test_k7_first_condensation_closes_catchup_above_the_prefix_budget(make_engin
     assert status["summary_prefix_tokens_after"] > 510
     assert len([node for node in engine._summary_frontier_nodes() if node.depth == 0]) == 5
     assert provider.budget.catchup_ended
+
+
+def test_depth_stop_survives_post_leaf_condensation_deadline(make_engine, monkeypatch, install_provider, clock):
+    engine, view = _case(make_engine, monkeypatch, summary_prefix_target_tokens=10, condensation_fanin=2)
+    provider = install_provider(engine, *((25, SUMMARY),) * 5)
+
+    _compress(engine, view)
+
+    _assert_pass(engine, provider, FIVE_CATCHUP, "depth_target_reached", True, 5)
+    status = _sweep(engine)
+    assert clock.offset == 125 and status["condensation_passes"] == 0
+    assert status["summary_prefix_tokens_after"] > status["summary_prefix_target_tokens"]
 
 
 def test_k8_first_call_is_base_admitted_before_progress(make_engine, monkeypatch, install_provider):

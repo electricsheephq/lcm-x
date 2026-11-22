@@ -3389,8 +3389,11 @@ class CompactionMixin:
                             **({"on_stored": credit_group} if state.depth_target_tokens else {}),
                         )
                     )
-                    if (state.sweep_stop_reason != "depth_target_reached" or state.condensation_passes
-                            or condensation_reason != "summary_prefix_target_reached"):
+                    preserve_depth_stop = state.sweep_stop_reason == "depth_target_reached" and (
+                        condensation_reason == "time_budget_exhausted"
+                        or (not state.condensation_passes and condensation_reason == "summary_prefix_target_reached")
+                    )
+                    if not preserve_depth_stop:
                         state.sweep_stop_reason = condensation_reason
             else:
                 state.condensation_passes = self._maybe_condense(
