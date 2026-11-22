@@ -241,7 +241,8 @@ def test_d12_needs_one_unchanged_no_publish_pass_per_arm_and_budget():
     assert verdicts.d12(cells)["outcome"] == "FAIL"  # judged in both arms
     cells["default"]["60s"] = d11_passes(arm="default", budget="60s")
     assert verdicts.d12(cells)["outcome"] == "INCONCLUSIVE"
-    cells["default"]["60s"]["extra_passes"] = [{"published": False, "returned_equals_input": True}]
+    cells["default"]["60s"]["extra_passes"] = [{"published": False, "returned_equals_input": True,
+                                                "returned_list": True, "stop_reasons": ["noop"]}]
     assert verdicts.d12(cells)["outcome"] == "PASS"
 
 
@@ -314,3 +315,41 @@ def test_qualification_needs_frozen_counts_minimums_and_the_pinned_baseline():
     assert not qualify(kit, manifest, counts, base, {**d9, "longest_hold_s": 29.0}, planner)["passed"]
     assert not qualify(kit, manifest, counts, base, {**d9, "lock_unexpected": 5}, planner)["passed"]
     assert not qualify(kit, manifest, counts, base, d9, {"window_budget_exceeded": False})["passed"]
+
+
+def test_delta_receipt_rules():
+    # A kept-copy (after-kill) or other-budget receipt never decides a row; lock answers count from either field.
+    assert verdicts.d9({"uid_on": d9_receipt(5.0, keep_copy=True)}, BARS, 100)["outcome"] == "INCONCLUSIVE"
+    assert verdicts.d9({"uid_on": d9_receipt(5.0, budget="120s")}, BARS, 100)["outcome"] == "INCONCLUSIVE"
+    assert verdicts.d9({"uid_on": d9_receipt(5.0, lock_watch={"unexpected_answers": 1})}, BARS, 100)[
+        "outcome"] == "INCONCLUSIVE"
+    assert verdicts.d9({"uid_on": d9_receipt(5.0)}, BARS, 100)["outcome"] == "PASS"
+    # A D10 run that crashed in its restart is a raw FAIL (bar 4), not INCONCLUSIVE, even when it does not qualify.
+    crashed = d10_receipt(cell_error={"step": "restart", "class": "RuntimeError"}, exceptions=["RuntimeError"],
+                          qualifies=False)
+    assert verdicts.d10({"uid_on": crashed, "default": d10_receipt(arm="default")}, BARS, 100)["outcome"] == "FAIL"
+
+
+def test_delta_passes_without_return_evidence_are_never_green():
+    old = d11_passes(budget="60s")
+    for item in old["passes"]:
+        item.pop("returned_list")
+    assert verdicts.d11({"uid_on": budgets(**{"60s": old})})["outcome"] == "INCONCLUSIVE"
+    cells = {arm: {b: d11_passes((True,) * 7 + (False,), arm=arm, budget=b) for b in ("default", "60s", "120s")}
+             for arm in ("uid_on", "default")}
+    cells["default"]["120s"]["passes"][-1].pop("stop_reasons")
+    assert verdicts.d12(cells)["outcome"] == "INCONCLUSIVE"
+
+
+def test_delta_network_refusal_covers_reverse_lookups(monkeypatch):
+    import socket
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo",
+                 "create_connection"):
+        monkeypatch.setattr(socket, name, getattr(socket, name))  # restored after the test
+    for name in ("connect", "connect_ex", "sendto"):
+        monkeypatch.setattr(socket.socket, name, getattr(socket.socket, name))
+    rt.deny_network()
+    for call in (lambda: socket.gethostbyaddr("127.0.0.1"), lambda: socket.getnameinfo(("127.0.0.1", 80), 0),
+                 lambda: socket.getaddrinfo("example.invalid", 80)):
+        with pytest.raises(OSError):
+            call()

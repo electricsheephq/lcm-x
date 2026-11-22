@@ -22,8 +22,9 @@ def mismatch(receipt: dict[str, Any], cell: str, arm: str, budget: str | None = 
         return f"receipt is {receipt.get('cell')}/{receipt.get('arm')}, not {cell}/{arm}"
     if budget is not None and receipt.get("budget") != budget:
         return f"receipt budget is {receipt.get('budget')}, not {budget}"
-    if receipt.get("worst_case") or receipt.get("control", "none") != "none" or receipt.get("load", {}).get("processes"):
-        return "a recorded variant (worst case, control or load) never decides a row"
+    if (receipt.get("worst_case") or receipt.get("control", "none") != "none"
+            or (receipt.get("load") or {}).get("processes") or receipt.get("keep_copy")):
+        return "a recorded variant (worst case, control, load or a kept copy) never decides a row"
     if not receipt.get("qualifies", False):
         return "the receipt does not qualify (scaled store, stand-in override, profile, control or copy mismatch)"
     return None
@@ -39,21 +40,25 @@ def combine(outcomes: list[str]) -> str:
     return PASS
 
 
+def unexpected(receipt: dict[str, Any]) -> int:
+    return int(receipt.get("lock_unexpected") or (receipt.get("lock_watch") or {}).get("unexpected_answers") or 0)
+
+
 def d9(receipts: dict[str, dict[str, Any] | None], bars: dict[str, Any], pinned_rows: int) -> dict[str, Any]:
     """Judged arm: the first pass completes without an exception and holds <= bar; a pass that raises, does not
     reach its end, or examines fewer rows than pinned is INCONCLUSIVE. The default arm is recorded."""
     judged = receipts.get(JUDGED)
     reasons: list[str] = []
-    wrong = mismatch(judged, "d9", JUDGED) if judged is not None else None
+    wrong = mismatch(judged, "d9", JUDGED, "default") if judged is not None else None
     if judged is None:
         outcome = UNRUN
         reasons.append("no receipt for the judged arm")
     elif wrong:
         outcome = INCONCLUSIVE
         reasons.append(wrong)
-    elif judged.get("lock_unexpected"):
+    elif unexpected(judged):
         outcome = INCONCLUSIVE
-        reasons.append(f"the lock watcher saw {judged['lock_unexpected']} answers it could not classify")
+        reasons.append(f"the lock watcher saw {unexpected(judged)} answers it could not classify")
     elif judged.get("exception") or not judged.get("pass_completed"):
         outcome = INCONCLUSIVE
         reasons.append("the first pass raised or did not reach its end")
@@ -78,7 +83,10 @@ def d10_run(receipt: dict[str, Any] | None, arm: str, bars: dict[str, Any], pinn
     """One run in one arm. Bars 2-4 in both arms; bar 1 (hold) judged in the opt-in arm, recorded in the default."""
     if receipt is None:
         return {"arm": arm, "outcome": UNRUN, "reasons": ["no receipt"]}
-    wrong = mismatch(receipt, "d10", arm)
+    wrong = mismatch(receipt, "d10", arm, "default")
+    labels_ok = wrong is None or wrong.startswith("the receipt does not qualify")
+    if receipt.get("exceptions") and labels_ok:  # an exception fails bar 4 in either arm, crash receipts included
+        return {"arm": arm, "outcome": FAIL, "reasons": ["an exception: bar 4 fails"]}
     if wrong:
         return {"arm": arm, "outcome": INCONCLUSIVE, "reasons": [wrong]}
     if receipt.get("exceptions"):
@@ -91,8 +99,8 @@ def d10_run(receipt: dict[str, Any] | None, arm: str, bars: dict[str, Any], pinn
         reasons.append(f"examined {receipt.get('rows_examined')} rows, fewer than the pinned {pinned_rows}")
     if not started.get("turn") or not started.get("compaction"):
         reasons.append("no turn-path call or no further compaction call started during the hold")
-    if receipt.get("lock_unexpected"):
-        reasons.append(f"the lock watcher saw {receipt['lock_unexpected']} answers it could not classify")
+    if unexpected(receipt):
+        reasons.append(f"the lock watcher saw {unexpected(receipt)} answers it could not classify")
     if reasons:
         return {"arm": arm, "outcome": INCONCLUSIVE, "reasons": reasons}
     failed: list[str] = []
@@ -127,8 +135,8 @@ def d11_budget(receipt: dict[str, Any] | None, arm: str = JUDGED, budget: str | 
     passes = receipt.get("passes") or []
     if receipt.get("cell_error") or (receipt.get("exception") and not passes):
         return {"outcome": INCONCLUSIVE, "reasons": [f"the sequence raised {receipt.get('exception')}"]}
-    broken = [n for n, p in enumerate(passes, 1) if p.get("exception") or not p.get("returned_list", True)
-              or "error" in (p.get("stop_reasons") or [])]
+    broken = [n for n, p in enumerate(passes, 1) if p.get("exception") or p.get("returned_list") is not True
+              or "stop_reasons" not in p or "error" in (p.get("stop_reasons") or [])]  # no evidence is not success
     if not any(p.get("published") for p in passes):
         return {"outcome": INCONCLUSIVE, "reasons": ["no pass published a summary"],
                 "rows": [receipt.get("rows_before")] + [p.get("rows_out") for p in passes]}
@@ -179,8 +187,8 @@ def d12(receipts: dict[str, dict[str, dict[str, Any] | None]]) -> dict[str, Any]
                 continue
             every = (receipt.get("passes") or []) + (receipt.get("extra_passes") or [])
             # A pass that raised or returned no list gave the host nothing to compare: never an unchanged pass.
-            broken = [p for p in every if p.get("exception") or not p.get("returned_list", True)
-                      or "error" in (p.get("stop_reasons") or [])]
+            broken = [p for p in every if p.get("exception") or p.get("returned_list") is not True
+                      or "stop_reasons" not in p or "error" in (p.get("stop_reasons") or [])]
             judged = [p for p in every if not p.get("published") and p not in broken]
             changed = [p for p in judged if not p.get("returned_equals_input")]
             if changed:

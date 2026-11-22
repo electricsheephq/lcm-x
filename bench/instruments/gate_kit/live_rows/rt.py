@@ -30,6 +30,15 @@ PROFILE: dict[str, str] = {}  # run.py's diagnostic profile path (shared by `run
 CONTROL: dict[str, str] = {}  # run.py's instrument self-test mode (shared by `run` and `cells`)
 
 
+class CellError(Exception):
+    """A cell that could not reach its pass; run.main writes a receipt naming the step and the class. Defined here
+    (one module) because under `python -m ...run` the runner is `__main__` and `cells` imports a second copy."""
+
+    def __init__(self, step: str, error: BaseException) -> None:
+        super().__init__(f"{step}: {type(error).__name__}")
+        self.step, self.error_class = step, type(error).__name__
+
+
 def load_kit(path: Path | None = None) -> dict[str, Any]:
     return json.loads((path or KIT).read_text())
 
@@ -40,9 +49,10 @@ def ro_uri(db: Path) -> str:
 
 
 def plain_dir(path: Path) -> Path:
-    """Refuse a working path that is, or passes through, a symlink: every write stays in the synthetic workspace."""
+    """Refuse a working path that is, passes through, or holds (current/, home/) a symlink: every write stays in the
+    synthetic workspace."""
     path = Path(path).absolute()
-    for part in [path, *path.parents]:
+    for part in [path, *path.parents, path / "current", path / "home"]:
         if part.is_symlink():
             raise SystemExit(f"refusing a symlinked working path: {part.name}")
     return path
@@ -76,6 +86,9 @@ def deny_network() -> None:
     socket.create_connection = refuse  # type: ignore[assignment]
     socket.getaddrinfo = refuse  # type: ignore[assignment]
     socket.gethostbyname = refuse  # type: ignore[assignment]
+    socket.gethostbyname_ex = refuse  # type: ignore[assignment]
+    socket.gethostbyaddr = refuse  # type: ignore[assignment]
+    socket.getnameinfo = refuse  # type: ignore[assignment]
 
 
 class Lines(logging.Handler):
@@ -148,8 +161,8 @@ def store_census(db: Path) -> dict[str, Any]:
             "conversations": len({row[1] for row in rows}), "rows_digest": digest}
 
 
-IDENTITY_COLUMNS = ("conversation_id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name",
-                    "timestamp")
+IDENTITY_COLUMNS = ("conversation_id", "session_id", "source", "role", "content", "tool_call_id", "tool_calls",
+                    "tool_name", "timestamp", "sender_id", "sender_source")  # owner, attribution and value
 
 
 def stored_identity(db: Path) -> list[tuple[int, bytes]]:

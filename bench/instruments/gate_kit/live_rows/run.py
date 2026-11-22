@@ -200,12 +200,7 @@ def first_pass(engine_module: Any, config: Any, kit: dict[str, Any], home: Path,
     return engine, result
 
 
-class CellError(Exception):
-    """A cell that could not reach its pass; main writes a receipt naming the step and the class."""
-
-    def __init__(self, step: str, error: BaseException) -> None:
-        super().__init__(f"{step}: {type(error).__name__}")
-        self.step, self.error_class = step, type(error).__name__
+CellError = rt.CellError
 
 
 def cell_d9(args: argparse.Namespace, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: Path,
@@ -321,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     load = cells.Load(args.load) if args.load else None
     try:
         receipt = handler(args, kit, modules, db, copy.deepcopy(generated["restart_list"]))
-    except CellError as error:
+    except rt.CellError as error:  # one class in `rt`, whichever copy of this module raised it
         receipt = {"cell_error": {"step": error.step, "class": error.error_class}, "exception": error.error_class,
                    "exceptions": [error.error_class], "pass_completed": False}
     finally:
@@ -337,11 +332,11 @@ def main(argv: list[str] | None = None) -> int:
                              "budget_used": {args.budget: kit["budgets"].get(args.budget)}}
     receipt["census_disclosure"] = kit.get("census_disclosure")
     receipt["control"] = args.control
-    receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())
+    receipt["lineage_path_matches"] = manifest.get("work") == str(args.work.resolve())  # both resolved
     receipt["copy_marker_matches"] = builder.marker(args.work) == manifest["store_sha256"]
     receipt["qualifies"] = (manifest["scale"] == 1.0 and args.stand_in_floor is None and not args.profile
                             and args.control == "none" and receipt["lineage_path_matches"]
-                            and receipt["copy_marker_matches"] and not receipt.get("cell_error"))
+                            and receipt["copy_marker_matches"])
     receipt.update({"cell": args.cell, "arm": args.arm, "budget": args.budget, "env": env,
                     "worst_case": bool(getattr(args, "worst_case", False)),
                     "threads": sorted({t.name for t in threading.enumerate()}),

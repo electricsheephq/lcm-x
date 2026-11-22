@@ -1,6 +1,6 @@
 {
- "kit_version": 3,
- "status": "DRAFT v3: target and restart form fitted to the census and follow-up counts of the kept copy final-20261118T1105Z (inbox 053b73f4, 8f354890, 6c9e5328); NOT frozen until the release manager accepts that stand-in copy",
+ "kit_version": 4,
+ "status": "v4: target and restart form fitted to the census and follow-up counts of the accepted stand-in copy (ruling T1-538), counts at or above its minimums, a history step on the pinned 2815 tree; frozen counts are set only after the dry run qualifies",
  "seed": 2868,
  "start_epoch": 1763000000.0,
  "stamp_share": 0.97,
@@ -309,7 +309,6 @@
  },
  "census_disclosure": "The kit's counts were fitted to a census of the kept copy final-20261118T1105Z's store, accepted as the stand-in for the deleted copy D9's bar was measured on (release ruling T1-538). The records name it as that copy's 'final lcm.db' and the highest store ids match (601,182); byte equality cannot be proven because no digest of the deleted copy exists.",
  "budgets_source": "D11's three budgets: default = LCM_FOREGROUND_SOFT_SECONDS and LCM_FOREGROUND_HARD_SECONDS both unset; 60 s and 120 s set LCM_FOREGROUND_HARD_SECONDS (ruling T1-538)",
- "version": 4,
  "minimums": {
   "rows": 599763,
   "conversations": 483,

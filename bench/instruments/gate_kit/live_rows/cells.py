@@ -22,6 +22,14 @@ from bench.instruments.gate_kit.live_rows import run as base
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux
 
 
+def start(engine_module: Any, config: Any, kit: dict[str, Any], home: Path, *names: str) -> Any:
+    """An engine start inside a cell; a raise becomes `rt.CellError`, which run.main turns into a receipt."""
+    try:
+        return rt.engine(engine_module, config, kit, home, *names)
+    except Exception as error:  # noqa: BLE001
+        raise rt.CellError("engine start", error) from error
+
+
 def summary_nodes(db: Path) -> int:
     with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
         return int(conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0])
@@ -117,7 +125,7 @@ def cell_d11(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     config_module, engine_module, lines = modules
     config = rt.config_for(config_module, db)
     conversation = kit["target"]["conversation_id"]
-    engine = rt.engine(engine_module, config, kit, args.work / "home")
+    engine = start(engine_module, config, kit, args.work / "home")
     holds = Holds(engine)
     passes, extra = [], []
     rows_before = len(view)
@@ -140,7 +148,7 @@ def cell_timeout_hold(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, A
     config_module, engine_module, lines = modules
     config = rt.config_for(config_module, db)
     conversation = kit["target"]["conversation_id"]
-    engine = rt.engine(engine_module, config, kit, args.work / "home")
+    engine = start(engine_module, config, kit, args.work / "home")
     holds = Holds(engine)
     aux.configure(force_cut=True)
     view, first = one_pass(engine, db, kit, view, holds, lines, conversation)
@@ -171,6 +179,9 @@ def host_turn(engine: Any, pre: list[dict[str, Any]], post: list[dict[str, Any]]
                                     api_call_count=1, interrupted=False, failed=False, turn_exit_reason="completed")
         except TypeError:
             engine.on_turn_complete(copy.deepcopy(post))
+    note = getattr(engine, "note_turn_complete", None)
+    if callable(note):  # the host's post-LLM-call hook ends turn-paced holds through this notification
+        note()
     return {"before_model_s": round(before_model, 3), "compressed": compressed is not None,
             "after_model_s": round(time.monotonic() - began - before_model, 3), "rows": len(pre)}
 
@@ -180,7 +191,7 @@ def cell_turns(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db
     """Requirement 4, recorded: LCM-X seconds before the model call per turn, before and after the first publish."""
     config_module, engine_module, lines = modules
     config = rt.config_for(config_module, db)
-    engine = rt.engine(engine_module, config, kit, args.work / "home")
+    engine = start(engine_module, config, kit, args.work / "home")
     turns, published_at = [], None
     nodes = summary_nodes(db)
     for number in range(int(kit["bars"].get("turn_count", 6))):
@@ -233,8 +244,8 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     generated = base.shape.build(kit)
     turn_view = copy.deepcopy(generated["others"][0])
     compact_view = copy.deepcopy(generated["others"][1 % len(generated["others"])])
-    turn_engine = rt.engine(engine_module, config, kit, home, "other0-s", "other0-conv")
-    compact_engine = rt.engine(engine_module, config, kit, home, "other1-s", "other1-conv")
+    turn_engine = start(engine_module, config, kit, home, "other0-s", "other0-conv")
+    compact_engine = start(engine_module, config, kit, home, "other1-s", "other1-conv")
     pause = 0.0 if args.worst_case else float(kit["bars"].get("d10_pause_s", 0.5))
     counter = {"n": 0}
 
@@ -302,6 +313,11 @@ def cell_d10(args: Any, kit: dict[str, Any], modules: tuple[Any, Any, Any], db: 
     reasons = stop_reasons([line["message"] for line in lines.lines if line["thread"] == threading.main_thread().ident])
     if "error" in reasons:
         exceptions.append("compress failed inside the product (reason=error)")
+    # The busy compaction thread's own swallowed errors (a returned fallback list is still an error: bar 4).
+    busy_errors = [line for line in lines.lines if line["thread"] != threading.main_thread().ident
+                   and line["t"] * 1e9 <= end and "error" in stop_reasons([line["message"]])]
+    if busy_errors:
+        exceptions.append(f"{len(busy_errors)} busy-thread compress failures inside the product (reason=error)")
     return {
         "effective": rt.effective(config), "worst_case": bool(args.worst_case), "pause_s": pause, "calls": calls,
         "lock_watch": {k: observed.get(k) for k in ("samples", "poll_ns", "largest_gap_ms", "unexpected_answers")},
@@ -333,7 +349,7 @@ def cell_kill_at_first_call(args: Any, kit: dict[str, Any], modules: tuple[Any, 
     aux.HOOKS["enter"] = kill
     config_module, engine_module, _lines = modules
     config = rt.config_for(config_module, db)
-    engine = rt.engine(engine_module, config, kit, args.work / "home")
+    engine = start(engine_module, config, kit, args.work / "home")
     engine.compress(copy.deepcopy(view), current_tokens=base.pressure(kit, view))
     return {"killed": False, "note": "the pass ended before any summary call; nothing was stopped"}
 

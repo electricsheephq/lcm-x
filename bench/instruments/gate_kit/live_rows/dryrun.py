@@ -48,10 +48,27 @@ MINIMUMS = ("rows", "conversations", "tool_pairs", "externalized_payloads")
 def stored_counts(build: Path, manifest: dict[str, Any]) -> dict[str, int]:
     """The built store's counts the D9 row fixes against the reference copy (read-only)."""
     with closing(sqlite3.connect(rt.ro_uri(build / "store" / "lcm.db"), uri=True)) as conn:
-        rows, conversations, tools = conn.execute(
-            "SELECT COUNT(*), COUNT(DISTINCT conversation_id), SUM(role = 'tool') FROM messages").fetchone()
-    return {"rows": rows, "conversations": conversations, "tool_pairs": int(tools or 0),
-            "externalized_payloads": int(manifest.get("externalized_files") or 0)}
+        rows, conversations = conn.execute("SELECT COUNT(*), COUNT(DISTINCT conversation_id) FROM messages").fetchone()
+        # A pair = a distinct tool result (by conversation and call id) whose call an assistant row of the same
+        # conversation carries; copies and orphans add nothing. One pass, in memory (ids only).
+        calls: set[tuple[str, str]] = set()
+        results: set[tuple[str, str]] = set()
+        for conversation, role, call_id, tool_calls in conn.execute(
+                "SELECT conversation_id, role, tool_call_id, tool_calls FROM messages WHERE role IN ('tool', 'assistant')"):
+            if role == "tool" and call_id:
+                results.add((conversation, call_id))
+            elif role == "assistant" and tool_calls:
+                try:
+                    for item in json.loads(tool_calls):
+                        if isinstance(item, dict) and item.get("id"):
+                            calls.add((conversation, str(item["id"])))
+                except (ValueError, TypeError):
+                    continue
+        pairs = len(results & calls)
+    payloads = build / "store" / "externalized"
+    files = sum(1 for p in payloads.rglob("*") if p.is_file()) if payloads.exists() else 0  # on disk, not the manifest
+    return {"rows": rows, "conversations": conversations, "tool_pairs": int(pairs or 0),
+            "externalized_payloads": files}
 
 
 def qualify(kit: dict[str, Any], manifest: dict[str, Any], counts: dict[str, int], baseline: dict[str, Any],
@@ -76,8 +93,10 @@ def qualify(kit: dict[str, Any], manifest: dict[str, Any], counts: dict[str, int
         reasons.append("the v0.30.0 D9 receipt is missing, non-qualifying, or its lock watch saw unclassified answers")
     elif hold is None or hold <= kit["bars"]["d9_hold_s"]:
         reasons.append(f"v0.30.0 at defaults held {hold} s, not longer than {kit['bars']['d9_hold_s']} s")
-    if not planner or not planner.get("window_budget_exceeded"):
-        reasons.append("the v0.30.0 planner did not exceed the frozen window count")
+    over_statements = bool(planner) and frozen.get("planner_statements") is not None and \
+        (planner.get("statements") or 0) > frozen["planner_statements"]
+    if not planner or not (planner.get("window_budget_exceeded") or over_statements):
+        reasons.append("the v0.30.0 planner exceeded neither frozen count")
     return {"passed": not reasons, "reasons": reasons, "d9_v0300_hold_s": hold, "store_counts": counts,
             "minimums": minimums, "planner_v0300_windows": planner and planner.get("windows"),
             "planner_bound": frozen.get("planner_windows")}
@@ -145,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         qualification["passed"] = False
         qualification["reasons"].append("the kit's history step did not run on its pinned tree")
     result: dict[str, Any] = {"qualification": qualification, "kit_frozen": frozen,
-                              "census_disclosure": kit.get("census_disclosure")}
+                              "census_disclosure": kit.get("census_disclosure"),
+                              "verdicts": {name: "UNRUN" for name in ("D9", "D10", "D11", "D12", "L1-switch",
+                                                                      "L1-planner")}}
     if not args.skip_candidate:
         pinned = load(args.out / "build-manifest.json")["generated"]["target_list_rows"]
         d9 = {arm: cell(f"d9-{arm}", cand, "d9", "--arm", arm) for arm in ("uid_on", "default")}

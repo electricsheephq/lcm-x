@@ -68,13 +68,24 @@ def set_aside(path: Path) -> None:
         path.rename(path.with_name(f"{path.name}.stale-{time.time_ns()}"))
 
 
-def clear_working(work: Path) -> None:
-    """Before a build or a restore: no store, payload, host store or sidecar of another build stays in use."""
+def clear_working(work: Path, build: Path | None = None) -> None:
+    """Before a build or a restore: no store, payload, host store or sidecar of another build stays in use. A
+    payload folder holding only names the build also has is overwritten in place (no copy per run); one with any
+    other file is set aside. A host store the build replaces is overwritten in place; its sidecars are set aside."""
     for name in ("lcm.db", "lcm.db-wal", "lcm.db-shm", "lcm.db-journal", MARKER):
         (work / "current" / name).unlink(missing_ok=True)
-    set_aside(work / "current" / "externalized")
-    for name in ("state.db", "state.db-wal", "state.db-shm", "state.db-journal"):
+    payloads, source = work / "current" / "externalized", (build / "store" / "externalized") if build else None
+    if payloads.exists() and not payloads.is_symlink():
+        mine = {p.relative_to(payloads) for p in payloads.rglob("*") if p.is_file()}
+        theirs = {p.relative_to(source) for p in source.rglob("*") if p.is_file()} if source and source.exists() else set()
+        if not mine <= theirs:
+            set_aside(payloads)
+    else:
+        set_aside(payloads)
+    for name in ("state.db-wal", "state.db-shm", "state.db-journal"):
         set_aside(work / "home" / name)
+    if not (build and (build / "host" / "state.db").exists()):
+        set_aside(work / "home" / "state.db")
 
 
 def snapshot(work: Path, out: Path) -> None:
@@ -101,14 +112,14 @@ def restore(build: Path, work: Path) -> Path:
     current = work / "current"
     current.mkdir(parents=True, exist_ok=True)
     (work / "home").mkdir(parents=True, exist_ok=True)
-    clear_working(work)
+    clear_working(work, build)
     shutil.copyfile(build / "store" / "lcm.db", current / "lcm.db")
     if (build / "store" / "externalized").exists():
         shutil.copytree(build / "store" / "externalized", current / "externalized", dirs_exist_ok=True)
     if (build / "host" / "state.db").exists():
         shutil.copyfile(build / "host" / "state.db", work / "home" / "state.db")
     sha = json.loads((build / "build-manifest.json").read_text()).get("store_sha256")
-    if sha:
+    if sha and rt.sha256_file(current / "lcm.db") == sha:  # the copy is the store the manifest names
         (current / MARKER).write_text(sha)
     return current / "lcm.db"
 
@@ -141,7 +152,7 @@ def extend(args: argparse.Namespace) -> int:
         try:
             engine.ingest(copy.deepcopy(view))
             # Earlier passes after this start (the reference target's 33 summaries and non-zero frontier came from
-            # its own earlier compactions); the host list is not adopted, as a pass at an earlier start was not.
+            # its own earlier compactions).
             # Earlier passes as a host runs them: each is given the list the previous one returned (the host
             # adopts it), and a turn ends between them (a hold the product arms lasts until turn end). They stop
             # at the first pass that publishes nothing. The later restart's cold-rebuilt list is the kit's.
@@ -162,6 +173,9 @@ def extend(args: argparse.Namespace) -> int:
                                             turn_exit_reason="completed")
                 except TypeError:
                     engine.on_turn_complete(copy.deepcopy(current))
+                note = getattr(engine, "note_turn_complete", None)
+                if callable(note):  # the host's post-LLM-call hook ends turn-paced holds through this notification
+                    note()
                 with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
                     if conn.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0] == nodes_before:
                         break
@@ -201,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out is required unless --extend is given")
     args.out.mkdir(parents=True, exist_ok=False)
     kit = scaled(rt.load_kit(args.kit), args.scale)
-    work = rt.plain_dir((args.work or args.out / "work").absolute())
+    work = rt.plain_dir((args.work or args.out / "work").absolute()).resolve()  # recorded as runs compare it
     lock = run_lock(work)  # noqa: F841 - held until the process exits
     home = work / "home"
     rt.isolate(home)

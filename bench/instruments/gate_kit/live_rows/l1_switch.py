@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import sqlite3
 import sys
@@ -32,7 +33,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from bench.instruments.gate_kit.live_rows import rt  # noqa: E402
 from bench.instruments.gate_kit.live_rows.host import auxiliary_client as aux  # noqa: E402
-from bench.instruments.gate_kit.live_rows.run import key  # noqa: E402
 
 WINDOW = 32_000
 
@@ -68,7 +68,12 @@ def session_rows(db: Path, session: str) -> list[tuple[int, str]]:
     with closing(sqlite3.connect(rt.ro_uri(db), uri=True)) as conn:
         rows = conn.execute("SELECT store_id, role, content, tool_call_id FROM messages WHERE session_id = ? "
                             "ORDER BY store_id", (session,)).fetchall()
-    return [(sid, key(role, content, call)) for sid, role, content, call in rows]
+    return [(sid, full_key(role, content, call)) for sid, role, content, call in rows]
+
+
+def full_key(role: Any, content: Any, call: Any) -> str:
+    """Role, content and call id together: a tool result that loses its content while keeping its id differs."""
+    return hashlib.sha256(json.dumps([role, content, call], sort_keys=True, default=str).encode()).hexdigest()
 
 
 def rows_with(db: Path, keys: set[str]) -> list[tuple[str, str]]:
@@ -77,7 +82,7 @@ def rows_with(db: Path, keys: set[str]) -> list[tuple[str, str]]:
         rows = conn.execute("SELECT session_id, role, content, tool_call_id FROM messages ORDER BY store_id").fetchall()
     found = []
     for session, role, content, call in rows:
-        wanted = key(role, content, call)
+        wanted = full_key(role, content, call)
         if wanted in keys:
             found.append((session, wanted))
     return found
@@ -169,8 +174,8 @@ def main(argv: list[str] | None = None) -> int:
 
     stored_a, stored_b = session_rows(db, "switch-A"), session_rows(db, "switch-B")
     # Independent of the store: A's planned rows (each stored copy planted on purpose counts), B's planned rows.
-    planned_a = [key(r["role"], r["content"], r.get("tool_call_id")) for r in view]
-    planned_b_keys = [key(r["role"], r["content"], r.get("tool_call_id")) for r in planned_b]
+    planned_a = [full_key(r["role"], r["content"], r.get("tool_call_id")) for r in view]
+    planned_b_keys = [full_key(r["role"], r["content"], r.get("tool_call_id")) for r in planned_b]
     everywhere_b = rows_with(db, set(planned_b_keys))
     inside = (switched and trace["call_enter"] <= trace["switch_begin"] and trace["switch_end"] <= trace["call_exit"]
               and trace["pass_begin"] <= trace["call_enter"] and trace["call_exit"] <= trace["pass_end"])
