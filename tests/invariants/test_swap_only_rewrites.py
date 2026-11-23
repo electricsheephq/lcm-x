@@ -22,7 +22,9 @@ not necessarily the call that stored it, so a hidden-only pass (#904) followed b
 summaries passes. The one exception is a fault between a leaf's commit and its call's return: that call fails open
 and its own leaves may first show exactly one call late ("fault-late publication", F6). Any other first showing in
 a non-commit return fails as "deferred publication". A host-merged, non-canonical head re-rendered in a stub-only
-exit is the allowed "merged-head repair"; a canonical head rewritten there fails as "needless head rewrite".
+exit is the allowed "merged-head repair" only when the re-rendered head keeps its role, the head summary and the
+merged user content (otherwise "invalid merged-head repair"); a canonical head rewritten there fails as
+"needless head rewrite".
 """
 
 import hashlib
@@ -271,6 +273,7 @@ class Host:
             head, next_user = self.messages[:2]
             assert head["role"] == next_user["role"] == "user" and SUMMARY_MARKER in head["content"]
             merged = {**head, "content": head["content"] + "\n\n---\n\n" + next_user["content"]}
+            merged_user_text = next_user["content"]
             self.messages[:2] = [merged]
             supplied = [Row.capture(0, merged), *supplied[2:]]
         supplied_tools = {row["tool_call_id"]: (index, row["content"]) for index, row in enumerate(self.messages)
@@ -351,9 +354,21 @@ class Host:
                     and row["content"] != supplied_tools[row["tool_call_id"]][1]
                 )
                 if merge_head and diff[0] == 0:
-                    repair = dict(name="merged-head repair", row=0, kind=supplied[0].kind,
-                                  before=supplied[0].digest, after=returned_rows[0].digest)
-                    diff = first_diff(supplied, returned_rows, start=1)
+                    # The allowed repair re-renders the head; it must keep the role, the head summary (every node
+                    # visible at row 0) and the user content the host merged into it. Anything else is a FAIL.
+                    head_row = self.messages[0] if self.messages else {}
+                    head_text = head_row.get("content") if isinstance(head_row.get("content"), str) else ""
+                    kept = (head_row.get("role") == "user" and merged_user_text in head_text
+                            and any(index == 0 for index in visible.values())
+                            and all(summary_text(after_nodes[node_id]) in head_text
+                                    for node_id, index in visible.items() if index == 0))
+                    if kept:
+                        repair = dict(name="merged-head repair", row=0, kind=supplied[0].kind,
+                                      before=supplied[0].digest, after=returned_rows[0].digest)
+                        diff = first_diff(supplied, returned_rows, start=1)
+                    else:
+                        self.fail("invalid merged-head repair", diff)
+                        diff = first_diff(supplied, returned_rows, start=1)
             if diff and diff[0] < min(cuts, default=len(supplied)):
                 name = "needless head rewrite" if diff[1].kind in {"head", "summary", "carrier"} else "rule-1 change"
                 self.fail(name, diff)
