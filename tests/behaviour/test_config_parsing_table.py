@@ -89,6 +89,7 @@ CONFIG_ROWS = (
     ('l2_budget_ratio', 'LCM_L2_BUDGET_RATIO', 'float', 0.5),
     ('assertion_extraction_timeout_seconds', 'LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS', 'float', 30.0),
     ('survival_reserve', 'LCM_SURVIVAL_RESERVE', 'float', 0.15),
+    ('turn_start_defer_ceiling', 'LCM_TURN_START_DEFER_CEILING', 'float', 0.0),
     ('rerank_margin', 'LCM_RERANK_MARGIN', 'float', 0.0),
     ('recall_scan_budget_s', 'LCM_RECALL_SCAN_BUDGET_S', 'float', 0.0),
     ('proactive_recall_min_score', 'LCM_PROACTIVE_RECALL_MIN_SCORE', 'float', 0.01),
@@ -206,6 +207,7 @@ SPECIAL = {
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     "depth_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     "summary_prefix_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "turn_start_defer_ceiling": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
     "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
     "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),

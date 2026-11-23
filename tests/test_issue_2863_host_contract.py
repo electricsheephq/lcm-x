@@ -282,7 +282,12 @@ class Host:
         self.eng, self.steps, self.clock, self.cap = eng, steps, clock, cap
         self.thr = int(eng.threshold_tokens)
         self.attempts, self.blocked, self.last_pre, self.anchor = 0, False, None, None
-        self.verdicts, self.requests, self.passes = [], [], []
+        self.verdicts, self.requests, self.passes, self.gates = [], [], [], []
+
+    def gate(self, phase, pressure):
+        verdict = self.eng.should_compress(pressure)
+        self.gates.append((phase, pressure, verdict))
+        return verdict
 
     def compress(self, msgs, pressure, req):  # H6 + H2
         eng = self.eng
@@ -315,8 +320,11 @@ class Host:
             return a, True
         return host_rough(msgs) + ROUGH_OVERHEAD, False
 
-    def run(self):
-        eng, msgs = self.eng, [dict(USER)]
+    def run(self, initial_messages=None, *, start_pressure=None):
+        eng, msgs = self.eng, initial_messages if initial_messages is not None else [dict(USER)]
+        if start_pressure is not None and self.gate("turn_start", start_pressure):
+            self.attempts += 1
+            msgs = self.compress(msgs, start_pressure, 1)
         eng.should_compress_preflight(list(msgs))  # turn prologue (turn_context_compaction.py:436-460)
         r = 0
         for _guard in range(500):
@@ -327,7 +335,7 @@ class Host:
             if prev is not None and P >= self.thr and not (prev > 0 and P < prev * 0.95):
                 self.blocked = True
             defer = False if anchored else bool(getattr(eng, "should_defer_preflight_to_real_usage", lambda _t: False)(P))
-            if len(msgs) > 1 and self.attempts < self.cap and not self.blocked and not defer and eng.should_compress(P):
+            if len(msgs) > 1 and self.attempts < self.cap and not self.blocked and not defer and self.gate("pre_api", P):
                 self.attempts += 1
                 self.last_pre = P
                 msgs = self.compress(msgs, P, r + 1)
@@ -337,7 +345,8 @@ class Host:
             prompt = int(OVERHEAD + sum(real_msg_tokens(m) for m in msgs))
             verify_before = bool(getattr(eng, "_verify_compaction_cleared_threshold", False))
             eng.update_from_response({"prompt_tokens": prompt, "completion_tokens": COMPLETION,
-                                      "total_tokens": prompt + COMPLETION})
+                                      "total_tokens": prompt + COMPLETION,
+                                      "stop_reason": "tool_use" if r <= len(self.steps) else "end_turn"})
             self.anchor = Anchor(prompt, COMPLETION, msgs)
             if self.attempts and verify_before and 0 < prompt < self.thr:
                 self.attempts, self.blocked, self.last_pre = 0, False, None
@@ -353,9 +362,10 @@ class Host:
             P2 = self.anchor.tokens(msgs)
             if P2 is None:
                 P2 = max(int(eng.last_prompt_tokens or 0), 0)
-            if self.attempts < self.cap and eng.should_compress(P2):
+            if self.attempts < self.cap and self.gate("post_tool", P2):
                 self.attempts += 1
                 msgs = self.compress(msgs, P2, r + 1)
+        self.messages = msgs
         return self.requests
 
 

@@ -336,6 +336,7 @@
     "survival_fit": true,
     "survival_reserve": 0.15,
     "temporal_rollups_enabled": true,
-    "threshold_full_sweep_enabled": true
+    "threshold_full_sweep_enabled": true,
+    "turn_start_defer_ceiling": 0.0
   }
 }

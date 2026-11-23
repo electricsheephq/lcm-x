@@ -23,6 +23,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache, partial, wraps
 from inspect import signature
 from threading import get_ident
@@ -324,6 +325,16 @@ class CompactionMixin:
             return True
         if self.threshold_tokens <= 0:
             return False
+        ceiling = self._config.turn_start_defer_ceiling
+        if ceiling and self.context_length > 0 and tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+            ceiling_tokens = Decimal(str(ceiling)) * self.context_length
+            if tokens < ceiling_tokens:
+                logger.info(
+                    "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                    "prompt_tokens=%d ceiling_tokens=%s",
+                    ceiling, tokens, ceiling_tokens,
+                )
+                return False
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
