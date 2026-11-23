@@ -887,6 +887,7 @@
    "paths": [
     "scripts/lcm_longmemeval.py",
     "benchmarking/longmemeval.py",
+    "vector_store.py",
     "bench/tools/v1m-rebank/**",
     "bench/tools/d8_guard.py",
     "benchmarking/__init__.py",
@@ -1132,7 +1133,8 @@
     "M09"
    ],
    "paths": [
-    "bench/instruments/gate_kit/**"
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
    ],
    "inputs": [
     "baseline",
@@ -1157,7 +1159,8 @@
     "M16"
    ],
    "paths": [
-    "bench/instruments/gate_kit/**"
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
    ],
    "inputs": [
     "provider-route",
@@ -1198,7 +1201,8 @@
     "M01"
    ],
    "paths": [
-    "bench/instruments/gate_kit/**"
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
    ],
    "inputs": [
     "baseline",
@@ -1220,7 +1224,8 @@
     "M16"
    ],
    "paths": [
-    "bench/instruments/gate_kit/**"
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
    ],
    "inputs": [
     "instrument-pin"
@@ -1440,6 +1445,7 @@
     "tests/test_session_end_attribution_host.py",
     "tests/test_host_stub_parity.py",
     "tests/test_catalog_scanner_on.py",
+    ".github/workflows/ci.yml",
     "tests/test_issue_1186_host_dependencies.py",
     "tests/conftest.py",
     ".github/workflows/real-host.yml",
@@ -1528,6 +1534,7 @@
     "benchmarking/longmemeval.py",
     "scripts/lcm_d1_local.py",
     "bench/tools/d1-shard-check/**",
+    "chunking.py",
     ".github/workflows/d1-shard-identity.yml",
     "benchmarking/__init__.py",
     "benchmarking/standalone.py"
