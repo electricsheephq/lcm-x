@@ -885,6 +885,7 @@ class LCMEngine(
         self._emission_handle = None
         self._emission_handle_salt = None
         self._pending_refused_emissions = set()
+        self._pending_refusal_snapshots = {}
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
@@ -2504,7 +2505,7 @@ class LCMEngine(
         if self._bypasses_lcm_context_management():
             return
         snapshot = getattr(self, "_compress_refusal", None)
-        self._signal_emission_state("refused", self._session_id, require_conversation=True)
+        self._signal_emission_state("refused", self._session_id, require_conversation=True, refusal=snapshot)
         leaves = self._last_compress_leaves
         progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
@@ -2570,17 +2571,23 @@ class LCMEngine(
             changes[key] = (previous, value)
         return wrote
 
+    def _refusal_snapshot_matches(self, snapshot, store):
+        binding = snapshot["binding"]
+        return (
+            snapshot["call"] == self._compress_calls
+            and binding[0] is store and binding == self._compaction_refusal_binding()
+            and snapshot["output_proof"] is self._compress_commit_proof
+            and not (self._compress_commit_proof or {}).get("end_consumed")
+            and snapshot["identities"] is getattr(self, "_last_active_replay_source_identities", None)
+        )
+
     def _restore_refused_compaction(self, snapshot, store, *, deferred=False):
         if snapshot is not self._compress_refusal:
             return
-        binding = snapshot["binding"]
-        if (snapshot["call"] != self._compress_calls
-                or binding[0] is not store or binding != self._compaction_refusal_binding()
-                or snapshot["output_proof"] is not self._compress_commit_proof
-                or (self._compress_commit_proof or {}).get("end_consumed")
-                or snapshot["identities"] is not getattr(self, "_last_active_replay_source_identities", None)):
+        if not self._refusal_snapshot_matches(snapshot, store):
             self._compress_refusal = None
             return
+        binding = snapshot["binding"]
         if snapshot["metadata"] or snapshot["uids"]:
             with store.atomic(immediate=True):
                 proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX, binding[1])
@@ -2596,10 +2603,7 @@ class LCMEngine(
                     else:
                         store._conn.execute("UPDATE metadata SET value=? WHERE key=? AND value=?",
                                             (previous[0], key, written))
-                if snapshot["uids"]:
-                    store._conn.executemany(
-                        "DELETE FROM host_uid_bindings WHERE lineage_key=? AND uid=? AND created_at=? "
-                        "AND store_id=0 AND kind='engine'", snapshot["uids"])
+                self._discard_refused_engine_uids(store._conn, snapshot["uids"])
         self._ingest_cursor = snapshot["cursor"]
         self._ingest_cursor_needs_reconcile = snapshot["reconcile"] or self._ingest_cursor_needs_reconcile
         self._frontier_holder().refused_input = snapshot["identities"]
@@ -7244,9 +7248,19 @@ class LCMEngine(
             # attach the snapshot only to the proof that was validated above.
             same_proof = isinstance(raw, dict) and all(
                 raw.get(field) == payload.get(field) for field in ("created_at", "effective_sha256_v4"))
-            if (same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest
-                    and self._occurrence_snapshot_shape_valid(snapshot, payload)):
-                payload["output_metadata"] = snapshot["output_metadata"]
+            if same_proof and isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest:
+                refused = snapshot.get("refused_emission")
+                sid = session_id or self._session_id
+                if (isinstance(refused, dict) and ingest_ledger_mode() != "off"
+                        and isinstance(refused.get("lineage"), str) and type(refused.get("view_seq")) is int
+                        and ingest_ledger.emission_was_refused(
+                            self._store._conn, sid, refused["lineage"], refused["view_seq"])):
+                    attempt = getattr(self, "_ingest_ledger_attempt", None)
+                    if attempt is not None and sid == self._session_id and refused.get("admitted_input"):
+                        attempt["refused_input"] = (refused["admitted_input"], payload["last_store_id"], refused["view_seq"])
+                    return None
+                if self._occurrence_snapshot_shape_valid(snapshot, payload):
+                    payload["output_metadata"] = snapshot["output_metadata"]
         except Exception:
             logger.debug("LCM occurrence metadata load failed", exc_info=True)
         return payload
@@ -7913,10 +7927,12 @@ class LCMEngine(
                 if prepared.get("sender_update"):
                     sender_capture.try_update(self)
                 try:
-                    return finish()
+                    result = finish()
                 except Exception as exc:
                     self._record_ingest_failure("post-commit replay cache", exc)
                     return active
+                self._record_refusal_input(messages, ledger_prepared)
+                return result
             raise AssertionError("unreachable ingest retry state")
 
     @staticmethod
@@ -8144,6 +8160,32 @@ class LCMEngine(
         if dropped:
             self._ledger_count("ledger.emission_unproven_dropped")
 
+    @staticmethod
+    def _refusal_input_digest(salt, messages):
+        # Literal rows include timestamp, UID, and other host occurrence metadata.
+        if any(_has_lossy_redacted_identity(_emission_identity(row)) for row in messages):
+            return None
+        encoded = json.dumps(messages, sort_keys=True, allow_nan=False)
+        return ingest_ledger.ledger_digest(salt, "refused input", encoded).hex()
+
+    def _record_refusal_input(self, messages, ledger_prepared):
+        snapshot = getattr(self._thread_context, "compress_refusal", None)
+        if snapshot is None:
+            return
+        snapshot.pop("admitted_input", None)
+        try:
+            if (ledger_prepared is None or snapshot["binding"] != self._compaction_refusal_binding()
+                    or self._ingest_cursor_needs_reconcile or self._ingest_cursor != len(messages)):
+                return
+            head = next((row for row in messages if row.get("role") != "system"), {})
+            content = head.get("content")
+            if (head.get("role") == "user" and isinstance(content, str)
+                    and self._verified_lcm_summary_prefix_end(content)
+                    and (digest := self._refusal_input_digest(ledger_prepared["salt"], messages))):
+                snapshot["admitted_input"] = (len(messages), digest)
+        except Exception:
+            logger.debug("LCM refused compaction input fingerprint unavailable", exc_info=True)
+
     def _retry_pending_emissions(self, attempt, after_commit, token):
         succeeded = attempt["retried_emissions"] = []
         if not ingest_ledger.has_pending(self._store.db_identity):
@@ -8186,7 +8228,32 @@ class LCMEngine(
             ingest_ledger.settle_pending_emissions(token)
             self._ledger_count("ledger.emission_retry_failed", exc)
 
-    def _signal_emission_state(self, new_state, session_id, *, require_conversation=False):
+    @staticmethod
+    def _discard_refused_engine_uids(conn, uids):
+        if uids:
+            conn.executemany("DELETE FROM host_uid_bindings WHERE lineage_key=? AND uid=? AND created_at=? "
+                             "AND store_id=0 AND kind='engine'", uids)
+
+    def _mark_refused_occurrence_snapshot(self, conn, refusal, handle, proof_key):
+        """Attach the ledger sequence to the exact snapshot this pass wrote."""
+        snapshot_key = self._replay_snapshot_metadata_key("host_occurrence_snapshot", handle.session_id)
+        proof_write = refusal["metadata"].get(proof_key)
+        snapshot_write = refusal["metadata"].get(snapshot_key)
+        if proof_write is None or snapshot_write is None:
+            return None
+        previous, written = snapshot_write
+        snapshot = json.loads(written) or {}
+        snapshot["proof_sha256"] = hashlib.sha256(proof_write[1].encode()).hexdigest()
+        snapshot["refused_emission"] = dict(lineage=handle.lineage, view_seq=handle.view_seq,
+                                           admitted_input=refusal.get("admitted_input"))
+        marked = json.dumps(snapshot, sort_keys=True)
+        updated = conn.execute(
+            "UPDATE metadata SET value=? WHERE key=? AND value=? "
+            "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND value=?)",
+            (marked, snapshot_key, written, proof_key, proof_write[1])).rowcount
+        return (snapshot_key, (previous, marked)) if updated else None
+
+    def _signal_emission_state(self, new_state, session_id, *, require_conversation=False, refusal=None):
         if ingest_ledger_mode() == "off":
             return
         pending = self._pending_refused_emissions
@@ -8199,10 +8266,13 @@ class LCMEngine(
         target = (handle, self._emission_handle_salt)
         # The write below is this view's attempt; retrying it first as well would write and count it twice.
         self._retry_refused_emissions(skip=target)
-        if self._write_emission_state(*target, new_state):
+        if self._write_emission_state(*target, new_state, refusal=refusal, session_id=session_id):
             pending.discard(target)
+            self._pending_refusal_snapshots.pop(target, None)
         elif new_state == "refused":
             pending.add(target)
+            # The retry marks the refused pass's stored snapshot too (#3001), while that snapshot still matches.
+            self._pending_refusal_snapshots[target] = (refusal, session_id)
 
     def _retry_refused_emissions(self, skip=None):
         pending = self._pending_refused_emissions
@@ -8212,15 +8282,18 @@ class LCMEngine(
             if target == skip:
                 continue
             handle, salt = target
+            refusal, session_id = self._pending_refusal_snapshots.get(target, (None, None))
             if (handle.session_id, handle.conversation_key) != (self._session_id, self._hold_conversation_key()):
                 pending.discard(target)
-            elif self._write_emission_state(handle, salt, "refused"):
+                self._pending_refusal_snapshots.pop(target, None)
+            elif self._write_emission_state(handle, salt, "refused", refusal=refusal, session_id=session_id):
                 pending.discard(target)
+                self._pending_refusal_snapshots.pop(target, None)
                 self._ledger_count("ledger.refused_retry_ok")
             else:
                 self._ledger_count("ledger.refused_retry_failed")
 
-    def _write_emission_state(self, handle, original_salt, new_state):
+    def _write_emission_state(self, handle, original_salt, new_state, *, refusal=None, session_id=None):
         """Return false on a transient failure; a settled view ends the retry."""
         try:
             salt = self._store.ingest_ledger_salt()
@@ -8230,6 +8303,8 @@ class LCMEngine(
             if salt != original_salt:
                 self._ledger_count("ledger.salt_changed")
                 return True
+            marked_snapshot = None
+            refused_uids = ()
             with self._emission_owner(salt) as (conn, _reason):
                 if conn is None:
                     return False
@@ -8237,10 +8312,25 @@ class LCMEngine(
                 moved, _views = ingest_ledger.set_emission_state(conn, lineage, handle.view_seq, new_state)
                 if not moved and lineage != handle.lineage:
                     moved, _views = ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, new_state)
+                if (moved and new_state == "refused" and refusal and refusal is self._compress_refusal
+                        and self._refusal_snapshot_matches(refusal, self._store)):
+                    proof_key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id)
+                    marked_snapshot = self._mark_refused_occurrence_snapshot(conn, refusal, handle, proof_key)
+                    # These exact generated bindings belonged to the refused output. Retire them
+                    # with the durable signal so a restart cannot read them before ingest.
+                    if marked_snapshot or proof_key not in refusal["metadata"]:
+                        refused_uids = refusal["uids"]
+                        self._discard_refused_engine_uids(conn, refused_uids)
                 states = [] if moved else conn.execute(
                     "SELECT DISTINCT state FROM ledger_emissions WHERE lineage IN (?,?) AND view_seq=?",
                     (lineage, handle.lineage, handle.view_seq)).fetchall()
             if moved:
+                if marked_snapshot:
+                    key, change = marked_snapshot
+                    refusal["metadata"][key] = change
+                if refused_uids:
+                    self.__dict__.get("_engine_uids_recorded", set()).difference_update(
+                        uid for _lineage, uid, _created_at in refused_uids)
                 self._ledger_count("ledger.emission_" + new_state, amount=moved)
             elif new_state == "refused" and ("adopted",) in states:
                 self._ledger_count("ledger.refused_after_adopted")
@@ -8645,6 +8735,15 @@ class LCMEngine(
         ):
             raise error
 
+    def _refused_input_cursor(self, messages, attempt):
+        """Recover only the exact input that ingest admitted before the refused pass."""
+        (count, digest), last_store_id, view_seq = attempt["refused_input"]
+        if (type(count) is not int or not 0 < count <= len(messages)
+                or last_store_id != self._commit_proof_last_store_id()
+                or self._refusal_input_digest(attempt["salt"], messages[:count]) != digest):
+            return None
+        return dict(k=count, m=count, pairs={}, kind="refused input", view_seq=view_seq)
+
     def _ledger_cold_cursor(self, messages, ignored, today, session_count, after_commit):
         """Admit the read-only candidate only after the complete legacy choice."""
         attempt, store = getattr(self, "_ingest_ledger_attempt", None), self._store
@@ -8672,6 +8771,10 @@ class LCMEngine(
             else:
                 winner, delta = ingest_ledger.cold_cursor_candidate(
                     store._conn, session_id=self._session_id, attempt=attempt, ignored=ignored)
+                if today == 0 and winner["k"] == 0 and attempt.get("refused_input"):
+                    # The ordinary tail matcher may lack the host's exact folded replay.
+                    # A completed ingest of the kept prefix is independent of the refused output.
+                    winner = self._refused_input_cursor(attempt["refused_input_messages"], attempt) or winner
                 # A partial tool segment must be replayed with its opening assistant.
                 nxt = next((j for j in range(winner["k"], len(messages)) if not ignored[j]), winner["k"])
                 if 0 < winner["k"] < len(messages) and messages[nxt].get("role") == "tool":
@@ -8681,9 +8784,13 @@ class LCMEngine(
                 if winner["k"] > today:
                     # Pre-redaction ledger digests plus per-row occurrence evidence replace
                     # the legacy lossy fence / #1511 rewind for this proven run only.
+                    reason = {
+                        "ingest": "ledger durable cursor (ingest vector)",
+                        "emission": "ledger durable cursor (emission view)",
+                        "refused input": "replayed admitted input of refused compaction",
+                    }[winner["kind"]]
                     self._record_ingest_reconciliation(
-                        action="advanced cursor", reason="ledger durable cursor (" + (
-                            "ingest vector" if winner["kind"] == "ingest" else "emission view") + ")",
+                        action="advanced cursor", reason=reason,
                         cursor=winner["k"], incoming=len(messages), session_count=session_count,
                         stored_tail_count=len(winner["pairs"]))
                     self._last_ingest_reconciliation.update(
@@ -8943,6 +9050,9 @@ class LCMEngine(
                 session_counts=bind_session_counts, uid_fetched=uid_fetched,
             )
             today = self._ingest_cursor
+            attempt = getattr(self, "_ingest_ledger_attempt", None)
+            if attempt is not None and attempt.get("refused_input"):
+                attempt["refused_input_messages"] = messages
             ledger_run = self._ledger_cold_cursor(
                 reconcile_messages, ignored_original_messages, today,
                 bind_session_counts[0] if bind_session_counts else 0, after_commit)
@@ -13175,6 +13285,7 @@ class LCMEngine(
 
     def _shutdown_unlocked(self, *, deadline: float):
         self._pending_refused_emissions = set()
+        self._pending_refusal_snapshots = {}
         snapshot = getattr(self, "_compress_refusal", None)
         if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
             try:

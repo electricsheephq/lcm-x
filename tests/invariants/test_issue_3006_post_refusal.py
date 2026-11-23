@@ -25,10 +25,12 @@ from hermes_lcm.tokens import count_messages_tokens
 from tests.test_compression_boundary import _config, _stub_summarizer, _turn
 from tests.test_host_uid_shadow import _state_db
 from tests.test_refused_compaction_rollback import (
+    _assert_only_refusal_mark_changed,
     _compaction_records,
     _defer_rewriting_pass_refusal,
     _drain_session_end_maintenance,
     committed_host,  # noqa: F401
+    refusal_uid_mode,  # noqa: F401
 )
 
 SID = "S0"
@@ -342,7 +344,7 @@ def test_r4_automatic_refusal_recovery(
             engine.record_rejected_compaction()
         if deferred:
             assert engine._compress_refusal is snapshot and snapshot["refused"]
-            assert _compaction_records(engine) == refusal_records
+            _assert_only_refusal_mark_changed(engine, refusal_records)
         else:
             assert engine._compress_refusal is None and _compaction_records(engine) != refusal_records
         end_turn(engine)
@@ -418,18 +420,49 @@ def test_r4_automatic_refusal_recovery(
         assert not problems, "\n".join(problems)
 
 
-def test_crash_without_shutdown_leaves_deferred_refusal_residual(committed_host, monkeypatch):  # noqa: F811
-    """Without the shutdown hook, restart can still store the kept summary head again."""
-    engine, kept, binding = committed_host
-    _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+@pytest.mark.parametrize(("ledger_mode", "restamped"), [
+    pytest.param("shadow", False, id="ledger-on"),
+    pytest.param("off", False, id="ledger-off"),
+    pytest.param("shadow", True, id="new-user-occurrence"),
+])
+def test_crash_without_shutdown_honours_durable_refusal(
+    refusal_uid_mode, ledger_mode, restamped, request, monkeypatch,  # noqa: F811
+):
+    monkeypatch.setenv("LCM_INGEST_LEDGER", ledger_mode)
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    snapshot, _ = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    kept_uid = kept[0]["message_uid"]
+    refused_uids = {uid for _lineage, uid, _created_at in snapshot["uids"]}
+    assert refused_uids and kept_uid not in refused_uids
     before = _verified_user_heads(engine)
+    before_count = engine._store.get_session_count(SID)
+    new_turn = _turn(20)[1]
     # Open a new engine on the same durable state, bypassing shutdown of the old one.
     resumed = LCMEngine(config=engine._config, hermes_home=str(engine._hermes_home))
     try:
         resumed.on_session_start(SID, **binding)
-        resumed.ingest(kept + [_turn(20)[1]])
-        added = {key: value for key, value in _verified_user_heads(resumed).items() if key not in before}
-        assert list(added.values()) == [kept[0]["content"]]
+        proof = resumed._durable_commit_proof_payload()
+        engine_uids = resumed._host_uid_engine_uids(refused_uids | {kept_uid})
+        assert kept_uid in engine_uids
+        if restamped:
+            kept = [*kept[:-1], {**kept[-1], "timestamp": 1_760_000_000.0}]
+        resumed.ingest(kept + [new_turn])
+        heads = _verified_user_heads(resumed)
+        added = resumed._store.get_session_messages(SID)[before_count:]
+        assert (added[-1]["role"], added[-1]["content"]) == (new_turn["role"], new_turn["content"])
+        if ledger_mode == "shadow":
+            assert proof is None
+            assert engine_uids == {kept_uid}
+            if restamped:
+                assert any((row["role"], row["content"], row["observed_at"]) == (
+                    "user", kept[-1]["content"], kept[-1]["timestamp"]) for row in added)
+            else:
+                assert heads == before
+                assert len(added) == 1
+        else:
+            assert proof and proof["output_metadata"]
+            assert refused_uids <= engine_uids
+            assert [value for key, value in heads.items() if key not in before] == [kept[0]["content"]]
     finally:
         resumed.shutdown()
 
@@ -975,7 +1008,8 @@ def test_refused_emission_retry_respects_session_binding(request, monkeypatch, u
         assert _emission_state(engine, handle) == ("refused",)
         gate.assert_called_once_with()
         assert drops
-        write.assert_called_once_with(handle, engine._emission_handle_salt, "refused")
+        write.assert_called_once()
+        assert write.call_args.args == (handle, engine._emission_handle_salt, "refused")
     else:
         fresh = [row for i in range(30, 44) for row in _turn(i)]
         assert engine.compress(fresh, force=True) != fresh

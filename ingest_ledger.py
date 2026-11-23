@@ -564,6 +564,15 @@ def persisted_lineage(conn, session_id, fallback):
     return row[0] if row else fallback
 
 
+def emission_was_refused(conn, session_id, lineage, view_seq):
+    """Read the exact pass, accounting for provisional lineage adoption."""
+    # Provisional adoption can move the emission without changing its store-wide sequence.
+    return conn.execute(
+        "SELECT 1 FROM ledger_emissions WHERE view_seq=? AND state='refused' AND lineage IN ("
+        "?, (SELECT value FROM ledger_meta WHERE key=?)) LIMIT 1",
+        (view_seq, lineage, "session_lineage:" + str(session_id))).fetchone() is not None
+
+
 # Keep the partial-index predicate verbatim; a subset IN-list forces a sort.
 _COLD_WINDOW = ("SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists "
                 "FROM occurrence_bindings b LEFT JOIN messages m ON m.store_id=b.store_id "
