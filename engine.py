@@ -2586,6 +2586,22 @@ class LCMEngine(
         streak = self.__dict__.get("_zero_leaf_streaks", {}).get(self._hold_conversation_key())
         return dict(streak) if streak else None
 
+    def _hidden_only_streak_status(self) -> dict:
+        """#3081: this conversation's hidden-only streak and most recent pass."""
+        last_pass = self.__dict__.get("_hidden_only_streaks", {}).get(self._hold_conversation_key())
+        if not last_pass:
+            return {"hidden_only_streak": 0}
+        detail = dict(last_pass)
+        return {"hidden_only_streak": detail.pop("passes"), "hidden_only_last_pass": detail}
+
+    def _clear_compaction_streaks_below_threshold(self) -> None:
+        key = self._hold_conversation_key()
+        self.__dict__.get("_zero_leaf_streaks", {}).pop(key, None)  # #1162
+        try:
+            self.__dict__.get("_hidden_only_streaks", {}).pop(key, None)  # #3081
+        except Exception:
+            logger.debug("LCM hidden-only streak reset failed", exc_info=True)
+
     def record_rejected_compaction(self) -> None:
         """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
         without arguments inside an error-swallowing wrapper. #665: a refusal of a bypassed (auxiliary or
@@ -3438,6 +3454,8 @@ class LCMEngine(
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
             self._survival_overhead_observation = None
+        if self._conversation_id != state.conversation_id:
+            self.__dict__.pop("_hidden_only_streaks", None)
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._frontier_holder().bind_frontier(state.current_frontier_store_id)
@@ -3820,7 +3838,7 @@ class LCMEngine(
         observed = int(observed_tokens or 0)
         if observed < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
-            self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
+            self._clear_compaction_streaks_below_threshold()
             return False
         boundary = self._fresh_tail_boundary(messages)
         leading_anchor_count = self._leading_anchor_count(messages)
@@ -6637,6 +6655,7 @@ class LCMEngine(
             **({"background_leaf_prep": leaf_prep.status()}  # #787 D-13; absent while off
                if getattr(self._config, "background_leaf_prep_enabled", False) else {}),
             "zero_leaf_streak": self._zero_leaf_streak_status(),
+            **self._hidden_only_streak_status(),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,
             "last_ingest_error": self._last_ingest_error,
