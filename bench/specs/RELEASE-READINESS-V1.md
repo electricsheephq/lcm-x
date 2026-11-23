@@ -301,21 +301,25 @@ receipt is completed in L2 by the rest of its hands-on lane.
   included, is tested from a `main` checkout:
   1. Before the rc1 of each train or hotfix, the release manager pins one `main` revision for that
      release, and every candidate of it, respins included, runs from that revision. A release whose rc1
-     came before this rule pins one before its next candidate. The pinned revision's live-rows kit
+     was cut before this rule merged pins a revision before its next L1 run; each candidate of that
+     release, rc1 included, is scored only by runs from that pin, and a run made before the pin is kept
+     and recorded only. The pinned revision's live-rows kit
      (`kit.json`) holds the planner's two frozen counts (`frozen.planner_windows` and
      `frozen.planner_statements`), and the producer's dry-run receipt for that kit (posted on #2868)
      shows the v0.30.0 planner exceeding a count on the same fixture.
   2. From that checkout, run each instrument separately, with no argument other than these: `--tree` set
      to the exact candidate tree, a new `--work` directory and a new `--out` receipt path, and for
      `l1_planner` `--max-windows` and `--max-statements` set to the two frozen counts. Record the pinned
-     revision beside each receipt. Every run is kept, and the first run's receipt decides the check. A
-     `FAIL` is never re-run on the same tree. After any other verdict that is not `PASS`, the check may
-     be re-run once, with a new `--work` and `--out`, and that run's receipt decides.
+     revision beside each receipt. Every run is kept, and the first run's receipt (the earliest-created
+     `--work` directory) decides the check. A `FAIL` (the verdict the table below gives) is never re-run:
+     it binds every candidate of that release whose `tree_identity` equals the failed run's, and each
+     such candidate takes that `FAIL`. After any other verdict that is not `PASS`, the check may be
+     re-run once, with a new `--work` and `--out`, and that run's receipt decides.
   3. Score each check by its deciding receipt. The receipt is for the candidate's tree when its
      `tree_identity` equals the one `tree_identity` in `bench/instruments/busy_bar/driver.py` gives for
-     the exact candidate tree. It has the pinned settings when the planner's `max_windows` and
-     `max_statements` equal the two frozen counts, or when the switch's `control` is `none` and its
-     `a_planted_copies` is 0.
+     the exact candidate tree. It has the pinned settings when the revision recorded beside it is the
+     pin and its settings are the pinned ones: for the planner, `max_windows` and `max_statements` equal
+     the two frozen counts; for the switch, `control` is `none` and `a_planted_copies` is 0.
 
      | Observation | The check's raw verdict |
      |---|---|
