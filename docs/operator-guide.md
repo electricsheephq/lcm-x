@@ -550,7 +550,8 @@ include the token values and name the cap when it limits deferral. The first
 deferral in each episode logs at INFO and subsequent deferrals log at DEBUG.
 `/lcm status` shows the configured ceiling as a share and in tokens beside the
 trigger, plus `turn_start_deferred_checks`, the number of gate checks deferred
-in the current session.
+since the last session bind or reset (a side-channel session's bind resets it
+too).
 
 Useful environment variables:
 

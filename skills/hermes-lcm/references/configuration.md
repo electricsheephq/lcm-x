@@ -137,8 +137,8 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
   window-derived value. The first deferral in each episode logs at INFO and
   subsequent deferrals log at DEBUG. When enabled, `/lcm status` shows the
   configured ceiling as a share and in tokens beside the trigger, plus
-  `turn_start_deferred_checks`, the number of gate checks deferred in the
-  current session.
+  `turn_start_deferred_checks`, the number of gate checks deferred since the
+  last session bind or reset (a side-channel session's bind resets it too).
 
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;

@@ -955,8 +955,9 @@ retain their window-derived value. Both warnings show the effective ceiling and
 trigger in tokens and name the cap when it limits deferral. The first deferral
 in an episode logs at INFO and subsequent deferrals log at DEBUG. With the
 ceiling enabled, `/lcm status` shows the configured share and its token value
-alongside `turn_start_deferred_checks`, the number of gate checks deferred in
-the current session.
+alongside `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too).
 
 A reasonable first pass for a true 1M effective window is:
 
