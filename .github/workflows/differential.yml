@@ -47,6 +47,7 @@ jobs:
             extraction.py
             frontier_state.py
             fresh_tail.py
+            head_copy.py
             host_rewrite.py
             host_row_recovery.py
             host_uid.py

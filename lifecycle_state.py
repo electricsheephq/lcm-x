@@ -26,6 +26,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .sqlite_session import ConnectionPolicy, open_connection
+from .head_copy import known_head_copy_ids
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
@@ -1110,6 +1111,13 @@ class LifecycleStateStore:
         rows = [rows_by_store_id[store_id] for store_id in sorted(rows_by_store_id)]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
+        copies = known_head_copy_ids(conn, store_ids=sorted(
+            (rows_by_store_id.keys() - set(excluded_ids)) | set(all_covered_ids)
+        ))
+        # A copy a leaf already covers is published as covered, as v0.30.2 does; never a publication conflict,
+        # which would return the host list unchanged and stop every later pass on the same chunk.
+        copies -= set(all_covered_ids) | set(covered_ids)
+        authoritative_ids = [store_id for store_id in authoritative_ids if store_id not in copies]
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
                 _compaction_coverage_conflict_message(

@@ -151,7 +151,10 @@ from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
-from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
+from .reconcile import (
+    _commit_proof_identity_digest, _emitted_user_replay_digest, _has_lossy_redacted_identity,
+    _merge_append_cut, _proof_user_identity,
+)
 from . import compaction
 from .compaction import CompactionMixin, select_oldest_leaf_chunk
 from . import leaf_prep
@@ -187,6 +190,7 @@ from .sqlite_util import (
     _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
+from .head_copy import is_known_head_copy
 from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
 from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
@@ -7304,20 +7308,22 @@ class LCMEngine(
         session_id = getattr(self, "_session_id", "")
         if dag is None or not session_id:
             return None, []
+        return self._verify_summary_prefix(content, dag.get_node, lambda sid: sid == session_id, self._LCM_SUMMARY_PART_HEADER_RE)
+
+    @staticmethod
+    def _verify_summary_prefix(content, get_node, owns_session, header_re=_LCM_SUMMARY_PART_HEADER_RE):
         pos = 0
         node_ids: list[int] = []
         while True:
-            header = self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos)
+            header = header_re.match(content, pos)
             if header is None:
                 break
             try:
-                node = dag.get_node(int(header.group(2)))
+                node = get_node(int(header.group(2)))
             except Exception:
                 return None, []
-            # Only the bound session's own nodes: compress() renders them, and a
-            # rotation carries them to the child. A quoted part of another
-            # session's summary is content (#484 item 11j).
-            if node is None or node.session_id != session_id or int(node.depth) != int(header.group(1)):
+            # A quoted part of an unrelated session's summary is user content (#484 item 11j).
+            if node is None or not owns_session(node.session_id) or int(node.depth) != int(header.group(1)):
                 return None, []
             label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
             part = (
@@ -7328,7 +7334,7 @@ class LCMEngine(
                 return None, []
             pos += len(part)
             node_ids.append(int(node.node_id))
-            if content.startswith("\n\n---\n\n", pos) and self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos + 7):
+            if content.startswith("\n\n---\n\n", pos) and header_re.match(content, pos + 7):
                 pos += 7
                 continue
             break
@@ -9271,6 +9277,7 @@ class LCMEngine(
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
+        accepted_emitted_users = set()
         proof = stored_proof = getattr(self, "_compress_commit_proof", None)
         if proof and proof.get("durable") is False:
             metadata = proof.get("output_metadata")
@@ -9313,11 +9320,12 @@ class LCMEngine(
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
                 proven_cursor = self._ingest_cursor
+                output_metadata = proof.get("output_metadata", ())
                 new_prefix_occurrences = {
-                    idx for idx, previous in enumerate(proof.get("output_metadata", ()))
+                    idx for idx, previous in enumerate(output_metadata)
                     if self._host_occurrence_changed(messages[idx], previous)
                 }
-                restamp_metadata.update({idx: (self._session_id, proof["output_metadata"][idx])
+                restamp_metadata.update({idx: (self._session_id, output_metadata[idx])
                                          for idx in new_prefix_occurrences})
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -9326,6 +9334,11 @@ class LCMEngine(
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
                 accepted_compaction_prefix = cursor
+                if len(output_metadata) == proven_cursor:
+                    accepted_emitted_users = {
+                        idx for idx, digest in proof.get("emitted_user_digests", {}).items()
+                        if idx < accepted_compaction_prefix and digest == _emitted_user_replay_digest(messages[idx])
+                    }
                 self._compress_commit_proof = None
             elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
                 self._proof_replay_identity(m, strip_carrier=False, allow_pruned_tool_alias=idx not in recent_tools)
@@ -9374,6 +9387,10 @@ class LCMEngine(
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
+                if idx in accepted_emitted_users:
+                    # The host can stamp the exact new emission. The cached
+                    # timestamp belongs to the head before reassembly.
+                    continue
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
                 elif (messages[idx].get("content") == previous.get("content")
@@ -9597,12 +9614,16 @@ class LCMEngine(
                         self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]
                     ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
+                    cached_prefix = self._copy_active_replay_messages_preserving_generated_ids(
+                        cached_active_replay_messages[:cursor]
+                    )
+                    for idx in accepted_emitted_users:
+                        if idx < cursor:
+                            cached_prefix[idx] = fresh_replay_messages[idx]
                     replay_messages = (
                         self._keep_host_held_stubs(
                             messages[:cursor],
-                            self._copy_active_replay_messages_preserving_generated_ids(
-                                cached_active_replay_messages[:cursor]
-                            ),
+                            cached_prefix,
                             fresh_replay_messages[:cursor],
                         )
                         + replay_messages[cursor:]
@@ -9709,7 +9730,8 @@ class LCMEngine(
 
             def finish_no_new():
                 freeze_trip_witness(replay_messages)
-                cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+                cached_replay = (None if accepted_emitted_users else
+                                 self._cached_active_replay_messages(messages, fresh_replay_messages))
                 return cached_replay if cached_replay is not None else remember(replay_messages)
 
             return replay_messages, finish_no_new
@@ -10684,6 +10706,7 @@ class LCMEngine(
         on its own — merging there would force an all-or-nothing decision on a
         combined row and could drop a small tail turn glued to an oversized one.
         """
+        messages = self._without_known_head_copies(messages)
         cleaned: list[Dict[str, Any]] = []
         dropped_assistant_messages = 0
         stripped_assistant_messages = 0
@@ -11736,6 +11759,23 @@ class LCMEngine(
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
 
+    def _without_known_head_copies(self, messages):
+        """Filter store-backed occurrences while leaving the host's emitted head in place."""
+        kept = []
+        for row in messages:
+            if (row.get("role") == "user" and row.get("session_id")
+                    and type(row.get("store_id")) is int
+                    and not any(row.get(key) for key in ("api_content", "tool_calls", "tool_call_id", "name"))
+                    and (stored := self._store.get(row["store_id"]))
+                    and stored["session_id"] == row["session_id"] and stored["content"] == row.get("content")
+                    and stored.get("conversation_id") in ("", self._conversation_id)
+                    and (stored["session_id"] == self._session_id
+                         or self._identity_anchor_owned(stored, self._load_compression_carry_ranges()))
+                    and is_known_head_copy(self._store.connection, stored)):
+                continue
+            kept.append(row)
+        return messages if len(kept) == len(messages) else kept
+
     @payload_lookup_scope()
     def _assemble_context(
         self,
@@ -11758,6 +11798,7 @@ class LCMEngine(
           [highest-depth summary nodes first, then lower]
           [fresh tail messages]
         """
+        tail_messages = self._without_known_head_copies(tail_messages)
         result = []
         emission_candidates: list[dict[str, Any]] = []
         summary_candidate: Optional[dict[str, Any]] = None
@@ -12546,6 +12587,7 @@ class LCMEngine(
         assembly_cap_override: Optional[int] = None,
         retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        tail_messages = self._without_known_head_copies(tail_messages)
         if tail_messages:
             first = tail_messages[0]
             content = first.get("content") or ""
