@@ -56,26 +56,26 @@ SUMMARY_MARKER = "R-STABLE source "
 EVENTS = ("none", "cold-bind", "session-switch", "config-reload", "inbox")
 PASS_KINDS = ("leaf", "condensation", "stub-only", "stub-only-merged-head", "refused")
 KNOWN_FAILS = {
-    "stub-only/none/off": frozenset({"needless head rewrite"}),
-    "stub-only/none/on": frozenset({"needless head rewrite"}),
-    "stub-only/cold-bind/off": frozenset({"needless head rewrite"}),
-    "stub-only/cold-bind/on": frozenset({"needless head rewrite"}),
-    "stub-only/session-switch/off": frozenset({"needless head rewrite"}),
-    "stub-only/session-switch/on": frozenset({"needless head rewrite"}),
-    "stub-only/config-reload/off": frozenset({"needless head rewrite"}),
-    "stub-only/config-reload/on": frozenset({"needless head rewrite"}),
-    "stub-only/inbox/off": frozenset({"needless head rewrite"}),
-    "stub-only/inbox/on": frozenset({"needless head rewrite"}),
-    "refused/none/off": frozenset({"non-commit return"}),
-    "refused/none/on": frozenset({"non-commit return"}),
-    "refused/cold-bind/off": frozenset({"non-commit return"}),
-    "refused/cold-bind/on": frozenset({"non-commit return"}),
-    "refused/session-switch/off": frozenset({"non-commit return"}),
-    "refused/session-switch/on": frozenset({"non-commit return"}),
-    "refused/config-reload/off": frozenset({"non-commit return"}),
-    "refused/config-reload/on": frozenset({"non-commit return"}),
-    "refused/inbox/off": frozenset({"non-commit return"}),
-    "refused/inbox/on": frozenset({"non-commit return"}),
+    "stub-only/none/off": (("needless head rewrite", 7),),
+    "stub-only/none/on": (("needless head rewrite", 7),),
+    "stub-only/cold-bind/off": (("needless head rewrite", 7),),
+    "stub-only/cold-bind/on": (("needless head rewrite", 7),),
+    "stub-only/session-switch/off": (("needless head rewrite", 7),),
+    "stub-only/session-switch/on": (("needless head rewrite", 7),),
+    "stub-only/config-reload/off": (("needless head rewrite", 7),),
+    "stub-only/config-reload/on": (("needless head rewrite", 7),),
+    "stub-only/inbox/off": (("needless head rewrite", 7),),
+    "stub-only/inbox/on": (("needless head rewrite", 7),),
+    "refused/none/off": (("non-commit return", 7),),
+    "refused/none/on": (("non-commit return", 7),),
+    "refused/cold-bind/off": (("non-commit return", 7),),
+    "refused/cold-bind/on": (("non-commit return", 7),),
+    "refused/session-switch/off": (("non-commit return", 7),),
+    "refused/session-switch/on": (("non-commit return", 7),),
+    "refused/config-reload/off": (("non-commit return", 7),),
+    "refused/config-reload/on": (("non-commit return", 7),),
+    "refused/inbox/off": (("non-commit return", 7),),
+    "refused/inbox/on": (("non-commit return", 7),),
 }
 GUARDRAIL_LOG = "LCM assembly guardrail recovery:"
 FIT_LOG = "LCM survival fit applied ("
@@ -89,7 +89,7 @@ def swap_cell(uid_mode, event, pass_kind):
     baseline = KNOWN_FAILS.get(f"{pass_kind}/{event}/{uid_mode}")
     marks = []
     if baseline:
-        names = ", ".join(sorted(baseline))
+        names = ", ".join(f"{name} at call {call}" for name, call in baseline)
         marks.append(pytest.mark.xfail(
             strict=True, raises=KnownSwapRuleFailure,
             reason=f"R-STABLE baseline on f77d6ed9: {names}; ruling T1-555",
@@ -112,7 +112,7 @@ class Row:
     kind: str
 
     @classmethod
-    def capture(cls, index, message):
+    def capture(cls, index, message, leading=True):
         content = message.get("content")
         text = content if isinstance(content, str) else ""
         kind = message["role"]
@@ -120,7 +120,7 @@ class Row:
             kind = "stub"
         elif index == 0 and text.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             kind = "carrier"
-        elif SUMMARY_MARKER in text and ("Summary (" in text or "Summary[" in text):
+        elif leading and SUMMARY_MARKER in text and ("Summary (" in text or "Summary[" in text):
             kind = "summary"
         elif index == 0:
             kind = "head"
@@ -129,7 +129,13 @@ class Row:
 
 
 def capture(messages):
-    return [Row.capture(index, message) for index, message in enumerate(messages)]
+    """Label rows; only the leading prefix can hold summaries (a later byte-equal user paste stays a user row)."""
+    rows, leading = [], True
+    for index, message in enumerate(messages):
+        row = Row.capture(index, message, leading)
+        leading = leading and (message.get("role") == "system" or row.kind in {"summary", "carrier"})
+        rows.append(row)
+    return rows
 
 
 def first_diff(before, after, start=0):
@@ -334,7 +340,9 @@ class Host:
             self.fail("non-commit return" if ran else "rule-1 change", diff)
         repair = None
         if diff and kinds and not overflow:
-            cuts = changed_summary_start(after_nodes, new, old_visible, visible)
+            # A commit may first publish summaries an earlier hidden-only pass stored (T1-557); their rows are
+            # changes this commit makes, so they count as cut points too.
+            cuts = changed_summary_start(after_nodes, set(new) | set(newly_visible), old_visible, visible)
             if stop == "stub_first_exit":
                 cuts.extend(
                     supplied_tools[row["tool_call_id"]][0] for index, row in enumerate(self.messages)
@@ -550,7 +558,10 @@ def test_swap_only_rewrites(exercise):
     if baseline is None:
         assert not exercise.failures, details
         return
-    actual = frozenset(failure["name"] for failure in exercise.failures)
+    # The baseline pins each failure's name and call, so an extra failure at another call fails the cell. The row
+    # index and kind are reported but not pinned: refused/*/on first differs at row 15 on f77d6ed9 and 112e3035 and
+    # at row 0 on main, with the same name and call.
+    actual = tuple(sorted((failure["name"], failure["call"]) for failure in exercise.failures))
     if actual == baseline:
         raise KnownSwapRuleFailure(details)
     if actual:
