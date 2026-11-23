@@ -2111,12 +2111,14 @@ class CompactionMixin:
 
     def _splice_stub_replay(self, messages, assembled, summary, carried_tail):
         """Use the host's rows when assembly proved the same replay with tool stubs."""
+        head_index = 1 if messages and messages[0].get("role") == "system" else 0
         split = carried_tail is not None and len(messages) == len(assembled) + 1
         if split:
-            if (summary is None or not assembled or not self._is_verified_replay_scaffold_message(messages[0])
-                    or assembled[0].get("content") != f"{summary['content']}\n\n{carried_tail['content']}"):
+            if (summary is None or len(assembled) <= head_index
+                    or not self._is_verified_replay_scaffold_message(messages[head_index])
+                    or assembled[head_index].get("content") != f"{summary['content']}\n\n{carried_tail['content']}"):
                 return None
-            assembled = [summary, carried_tail, *assembled[1:]]
+            assembled = [*assembled[:head_index], summary, carried_tail, *assembled[head_index + 1:]]
         if len(messages) != len(assembled):
             return None
 
@@ -2126,8 +2128,12 @@ class CompactionMixin:
             if index == 0 and original.get("role") == "system" and rendered.get("role") == "system":
                 if rendered.get("content") == self._append_lcm_note_to_content(original.get("content")):
                     comparison = {**rendered, "content": original.get("content")}
-            if index == 0 and (split or carried_tail is not None):
-                # The renderer may have minted a UID for the generated row. Keep the host occurrence.
+            if index == head_index and (
+                carried_tail is not None
+                or (head_index == 1 and summary is not None and rendered.get("content") == summary["content"]
+                    and self._is_verified_replay_scaffold_message(original))
+            ):
+                # The renderer may use a different UID for the generated row. Keep the host occurrence.
                 comparison = {**comparison, "message_uid": original.get("message_uid")}
                 original_for_comparison = {**original, "message_uid": original.get("message_uid")}
             else:

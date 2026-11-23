@@ -11543,7 +11543,8 @@ class LCMEngine(
             if stub_replay is not None:
                 if len(stub_replay) > len(unmerged):
                     # The host kept the generated summary and following user in separate rows.
-                    head = stub_replay[0]
+                    head_index = 1 if stub_replay[0].get("role") == "system" else 0
+                    head = stub_replay[head_index]
                     summary_candidate.update(kind="summary", span=head["content"], retained_source=None,
                                              full_identity=_emission_identity(head), row=head)
                 result = stub_replay
