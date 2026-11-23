@@ -304,7 +304,8 @@
     "frontier_state.py",
     "lifecycle_state.py",
     "engine.py",
-    "compress_run.py"
+    "compress_run.py",
+    "fresh_tail.py"
    ],
    "symbols": [
     "compress",
@@ -336,7 +337,8 @@
     "compaction.py",
     "identity_anchor.py",
     "leaf_prep.py",
-    "engine.py"
+    "engine.py",
+    "fresh_tail.py"
    ],
    "symbols": [
     "StoreCompleteMixin",
@@ -365,7 +367,8 @@
     "compaction.py",
     "summary_input_clip.py",
     "extraction.py",
-    "config.py"
+    "config.py",
+    "fresh_tail.py"
    ],
    "symbols": [
     "summarize_leaf_chunk_with_rescue",
@@ -525,7 +528,8 @@
     "recall_session.py",
     "adaptive_retrieval.py",
     "selective_recall.py",
-    "rollup_periods.py"
+    "rollup_periods.py",
+    "ingest_policy.py"
    ],
    "symbols": [
     "lcm_recall",
@@ -556,7 +560,8 @@
     "companions/**",
     "chunking.py",
     "schema_families.py",
-    "config.py"
+    "config.py",
+    "ingest_policy.py"
    ],
    "symbols": [
     "VoyageProvider",
@@ -1290,6 +1295,8 @@
    "paths": [
     "@product",
     "bench/**",
+    "scripts/dev/ci_step.sh",
+    "scripts/dev/cloud_setup.sh",
     ".github/workflows/ci.yml",
     "@pytest"
    ],
