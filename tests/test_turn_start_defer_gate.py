@@ -1,5 +1,7 @@
 """Turn-start deferral uses the issue-2863 loop and a real LCM engine."""
 
+import builtins
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import sys
@@ -157,18 +159,69 @@ def test_turn_phase_fails_open(make_engine, monkeypatch, boundary):
     assert eng.should_compress(TRIGGER) is True
 
 
-def test_compression_rotation_keeps_phase_and_equal_ceiling_passes(make_engine):
+@pytest.mark.parametrize("session_id", ["rotated", "session"], ids=["rotation", "in-place"])
+def test_compression_rotation_keeps_phase_and_equal_ceiling_passes(make_engine, session_id):
     eng = make_engine()
     eng.update_from_response({"stop_reason": "tool_use"})
-    eng.on_session_start("rotated", boundary_reason="compression", old_session_id="session", platform="cli")
+    eng.on_session_start(session_id, boundary_reason="compression", old_session_id="session", platform="cli")
     assert eng.should_compress(CEILING - 1) is False
     assert eng.should_compress(CEILING) is True
+    eng.compress([dict(model.USER)], current_tokens=10)
+    eng.on_session_start(session_id, boundary_reason="compression", old_session_id=session_id, platform="cli")
+    assert eng.should_compress(CEILING - 1) is True
 
 
-@pytest.mark.parametrize("setting", ["0", "0.70"])
-def test_pinned_host_response_hook_tracks_only_its_turn(tmp_path, monkeypatch, setting):
+@pytest.mark.parametrize("bad_input", [False, True], ids=["normal", "canonicalization-error"])
+def test_compress_entry_reopens_gate_until_the_next_tool_response(make_engine, monkeypatch, bad_input):
+    eng = make_engine()
+    eng.update_from_response({"finish_reason": "tool_calls"})
+    assert eng.should_compress(TRIGGER) is False
+
+    if bad_input:
+        def fail_canonicalization(_messages):
+            raise ValueError("invalid host view")
+        monkeypatch.setattr(eng, "_canonical_host_view", fail_canonicalization)
+
+    msgs = [dict(model.USER)]
+    result = eng.compress(msgs, current_tokens=10)
+    if bad_input:
+        assert result is msgs
+    assert eng.should_compress(TRIGGER) is True
+
+    eng.update_from_response({"finish_reason": "tool_calls"})
+    assert eng.should_compress(TRIGGER) is False
+
+
+def test_provider_overflow_recheck_runs_and_turn_completes(make_engine, monkeypatch):
+    eng = make_engine()
+    clock = model.ModelClock(monkeypatch)
+    monkeypatch.setattr(model, "OVERHEAD", 510_000)
+    monkeypatch.setattr(model, "ROUGH_OVERHEAD", 300_000)
+    host = model.Host(eng, ["S", "S"], clock)
+    pre_pressure = host.pre_pressure
+    recheck = TRIGGER + 50_000
+
+    def pressure_after_rebuild(messages):
+        if len(host.verdicts) == 1 and host.anchor is None:
+            # The host's full rebuilt request counts system/tool overhead as well as messages.
+            return recheck, False
+        return pre_pressure(messages)
+
+    monkeypatch.setattr(host, "pre_pressure", pressure_after_rebuild)
+    requests = host.run(history() + [dict(model.USER)], reject_request=2)
+    assert host.verdicts[0][:2] == (2, "committed")
+    assert ("provider_overflow_recheck", recheck, True) in host.gates
+    assert not host.compression_exhausted
+    assert [v[0] for v in host.verdicts] == [2, 2]
+    assert [r["req"] for r in requests] == [1, 2, 3]
+    post_tool = [(tokens, verdict) for phase, tokens, verdict in host.gates if phase == "post_tool"]
+    assert len(post_tool) == 2
+    assert all(TRIGGER <= tokens < CEILING and verdict is False for tokens, verdict in post_tool)
+
+
+@pytest.fixture
+def pinned_response_hook(tmp_path, monkeypatch):
     plugin = _load_plugin_module("turn_start_defer_hook")
-    monkeypatch.setenv(ENV, setting)
     monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.50")
     monkeypatch.setenv("LCM_DATABASE_PATH", str(tmp_path / "hook.db"))
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "0")
@@ -177,34 +230,156 @@ def test_pinned_host_response_hook_tracks_only_its_turn(tmp_path, monkeypatch, s
     relay = SimpleNamespace(current_turn=lambda: current)
     monkeypatch.setitem(sys.modules, "agent.relay_runtime", relay)
 
-    ctx = SimpleNamespace(hooks={})
-    ctx.register_hook = lambda name, hook: ctx.hooks.__setitem__(name, hook)
-    ctx.register_context_engine = lambda engine: setattr(ctx, "engine", engine)
-    plugin.register(ctx)
-    eng = ctx.engine.clone_for_agent()
-    try:
+    def start(setting="0.70"):
+        monkeypatch.setenv(ENV, setting)
+        ctx = SimpleNamespace(hooks={})
+        ctx.register_hook = lambda name, hook: ctx.hooks.__setitem__(name, hook)
+        ctx.register_context_engine = lambda engine: setattr(ctx, "engine", engine)
+        plugin.register(ctx)
+        eng = ctx.engine.clone_for_agent()
+        engines.extend([eng, ctx.engine])
         eng.on_session_start("hook-session", platform="cli", context_length=WINDOW)
-        eng.update_from_response({"prompt_tokens": TRIGGER})
-        if setting == "0":
-            assert "post_api_request" not in ctx.hooks
-            assert eng.should_compress(TRIGGER) is True
-            return
+        return eng, current, ctx.hooks
 
-        hook = ctx.hooks["post_api_request"]
-        hook(session_id="foreign", turn_id=current.turn_id, finish_reason="tool_calls")
-        assert eng.should_compress(TRIGGER) is True
-        hook(session_id="hook-session", turn_id=current.turn_id, finish_reason="tool_calls")
-        assert eng.should_compress(TRIGGER) is False
-        assert eng.last_prompt_tokens == TRIGGER
-
-        # Simulate an early abort without either turn-complete callback or a new response.
-        current.turn_id = "turn-2"
-        assert eng.should_compress(TRIGGER) is True
-        hook(session_id="hook-session", turn_id="turn-1", finish_reason="tool_calls")
-        assert eng.should_compress(TRIGGER) is True
-    finally:
+    engines = []
+    yield start
+    for eng in engines:
         eng.shutdown()
-        ctx.engine.shutdown()
+
+
+@pytest.mark.parametrize("setting", ["0", "0.70"])
+def test_pinned_host_response_hook_tracks_only_its_turn(pinned_response_hook, setting):
+    eng, current, hooks = pinned_response_hook(setting)
+    eng.update_from_response({"prompt_tokens": TRIGGER})
+    if setting == "0":
+        assert "post_api_request" not in hooks
+        assert eng.should_compress(TRIGGER) is True
+        return
+
+    hook = hooks["post_api_request"]
+    hook(session_id="foreign", turn_id=current.turn_id, finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is True
+    hook(session_id="hook-session", turn_id=current.turn_id, finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is False
+    assert eng.last_prompt_tokens == TRIGGER
+
+    # Simulate an early abort without either turn-complete callback or a new response.
+    current.turn_id = "turn-2"
+    assert eng.should_compress(TRIGGER) is True
+    hook(session_id="hook-session", turn_id="turn-1", finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is True
+
+
+def test_closed_host_turn_fails_open(pinned_response_hook):
+    eng, current, hooks = pinned_response_hook()
+    hooks["post_api_request"](session_id="hook-session", turn_id=current.turn_id, finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is False
+    current.closed = True
+    assert eng.should_compress(TRIGGER) is True
+
+
+def test_empty_hook_turn_id_fails_open(pinned_response_hook, monkeypatch):
+    eng, current, hooks = pinned_response_hook()
+    current.turn_id = ""
+
+    def unexpected_lease(*_args, **_kwargs):
+        pytest.fail("an empty hook turn ID must be dropped before taking a lease")
+
+    monkeypatch.setattr(eng, "_run_stably", unexpected_lease)
+    hooks["post_api_request"](session_id="hook-session", turn_id="", finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is True
+
+
+def test_busy_hook_lease_drops_observation_and_fails_open(pinned_response_hook, monkeypatch):
+    eng, current, hooks = pinned_response_hook()
+    hook = hooks["post_api_request"]
+    event = dict(session_id="hook-session", turn_id=current.turn_id, finish_reason="tool_calls")
+    hook(**event)
+    assert eng.should_compress(TRIGGER) is False
+    eng.update_from_response({"prompt_tokens": TRIGGER})
+    attempts = []
+    run_stably = eng._run_stably
+
+    def record_lease(*args, **kwargs):
+        result = run_stably(*args, **kwargs)
+        attempts.append((kwargs["timeout"], result.status.name))
+        return result
+
+    monkeypatch.setattr(eng, "_run_stably", record_lease)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        with eng._stable_use_lock:
+            worker.submit(hook, **event).result(timeout=2)
+    assert attempts == [(0, "BUSY")]
+    assert eng.should_compress(TRIGGER) is True
+    hook(**event)
+    assert eng.should_compress(TRIGGER) is False
+
+
+def test_reversed_response_order_fails_open(pinned_response_hook):
+    eng, current, hooks = pinned_response_hook()
+    hooks["post_api_request"](session_id="hook-session", turn_id=current.turn_id, finish_reason="tool_calls")
+    assert eng.should_compress(TRIGGER) is False
+    eng.update_from_response({"prompt_tokens": TRIGGER})
+    assert eng.should_compress(TRIGGER) is True
+
+
+@pytest.mark.parametrize("binding", ["ignored", "stateless", "auxiliary"])
+@pytest.mark.parametrize("entry", ["response", "note_turn_complete", "on_turn_complete", "compress"])
+def test_bypassed_entry_preserves_foreground_phase(make_engine, monkeypatch, binding, entry):
+    eng = make_engine()
+    eng.update_from_response({"finish_reason": "tool_calls"})
+    assert eng.should_compress(TRIGGER) is False
+
+    with monkeypatch.context() as patch:
+        if binding == "auxiliary":
+            eng._mark_thread_context_stateless("child")
+        else:
+            patch.setattr(eng, f"_session_{binding}", True)
+        try:
+            if entry == "response":
+                eng.update_from_response({"finish_reason": "stop"})
+            elif entry == "note_turn_complete":
+                eng.note_turn_complete()
+            elif entry == "on_turn_complete":
+                eng.on_turn_complete([])
+            else:
+                eng.compress([dict(model.USER)], current_tokens=10)
+        finally:
+            if binding == "auxiliary":
+                eng._clear_thread_context_stateless("child")
+    assert eng.should_compress(TRIGGER) is False
+
+
+def test_late_auxiliary_compress_preserves_foreground_phase(make_engine, monkeypatch):
+    eng = make_engine()
+    eng.update_from_response({"finish_reason": "tool_calls"})
+    assert eng.should_compress(TRIGGER) is False
+    monkeypatch.setattr(eng, "_maybe_reclassify_late_auxiliary_before_compaction_write",
+                        lambda: eng._mark_thread_context_stateless("child"))
+    try:
+        eng.compress([dict(model.USER)], current_tokens=10)
+        assert eng._thread_context_stateless()
+    finally:
+        eng._clear_thread_context_stateless("child")
+    assert eng.should_compress(TRIGGER) is False
+
+
+def test_missing_relay_import_is_cached(make_engine, monkeypatch):
+    eng = make_engine()
+    imports = []
+    import_module = builtins.__import__
+
+    def missing_relay(name, *args, **kwargs):
+        if name == "agent.relay_runtime":
+            imports.append(name)
+            raise ModuleNotFoundError(name)
+        return import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_relay)
+    for _ in range(2):
+        eng.update_from_response({"finish_reason": "tool_calls"})
+        assert eng.should_compress(TRIGGER) is False
+    assert imports == ["agent.relay_runtime"]
 
 
 def test_forced_overflow_matches_off_below_the_defer_ceiling(make_engine):

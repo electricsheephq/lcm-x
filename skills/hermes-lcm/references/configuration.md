@@ -125,6 +125,7 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
   finish reason through `post_api_request` with a verifiable current turn ID. Without a phase
   signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
   at or above the ceiling and during forced overflow.
+  Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;

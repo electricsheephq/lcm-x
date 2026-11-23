@@ -21,7 +21,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache, wraps
+from functools import cached_property, lru_cache, wraps
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -1872,11 +1872,18 @@ class LCMEngine(
 
     # -- ContextEngine required methods ------------------------------------
 
-    @staticmethod
-    def _host_turn_id_for_deferral() -> str:
+    @cached_property
+    def _relay_current_turn(self):
         try:
             from agent.relay_runtime import current_turn
-            turn = current_turn()
+        except ImportError:
+            return None
+        return current_turn
+
+    def _host_turn_id_for_deferral(self) -> str:
+        try:
+            current_turn = self._relay_current_turn
+            turn = current_turn() if current_turn is not None else None
             return str(turn.turn_id or "") if turn is not None and not turn.closed else ""
         except Exception:
             return ""
