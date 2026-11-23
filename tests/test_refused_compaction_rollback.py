@@ -59,9 +59,30 @@ def committed_host(tmp_path, monkeypatch, request):
         engine.shutdown()
 
 
+@pytest.fixture(params=["unset", "on"])
+def refusal_uid_mode(request, monkeypatch):
+    if request.param == "unset":
+        monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    else:
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    # Supply a capable Hermes host and a resolved root to exercise actual UID records.
+    monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
+    monkeypatch.setattr(LCMEngine, "_host_uid_lineage_key", lambda *_args, **_kwargs: ("test:S0", None))
+
+
 def _compaction_records(engine):
     return dict(engine._store._conn.execute(
         "SELECT key,value FROM metadata WHERE key IN ('compaction_commit_proof:S0','host_occurrence_snapshot:S0')"))
+
+
+def _assert_only_refusal_mark_changed(engine, previous):
+    records = _compaction_records(engine)
+    key = "host_occurrence_snapshot:S0"
+    snapshot = json.loads(records[key])
+    mark = snapshot.pop("refused_emission")
+    assert (mark["lineage"], mark["view_seq"]) == (engine._emission_handle.lineage, engine._emission_handle.view_seq)
+    records[key] = json.dumps(snapshot, sort_keys=True)
+    assert records == previous
 
 
 def _rewriting_pass(engine, kept):
@@ -389,7 +410,7 @@ def test_refusal_defers_restore_when_compaction_gate_is_busy(committed_host, mon
 
     assert ingest_ledger.emission_candidate(engine._store._conn, handle.lineage) == (None, "refused")
     assert engine._compress_refusal is snapshot
-    assert _compaction_records(engine) == output
+    _assert_only_refusal_mark_changed(engine, output)
     before = engine._store.get_session_count("S0")
     reply = _turn(20)[1]
     engine.ingest(kept + [reply])
@@ -417,7 +438,7 @@ def test_refusal_defers_restore_when_lifecycle_wait_times_out(committed_host, mo
     assert ingest_ledger.emission_candidate(engine._store._conn, handle.lineage) == (None, "refused")
     assert engine._compress_refusal is snapshot
     assert engine._compress_commit_proof is proof and engine._ingest_cursor == cursor
-    assert _compaction_records(engine) == records
+    _assert_only_refusal_mark_changed(engine, records)
     assert engine._no_progress_hold[1] == "host_rejected_progress"
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING
                 and "compaction refusal" in record.getMessage() and "lifecycle" in record.getMessage()]
@@ -544,8 +565,8 @@ def test_session_end_retries_deferred_refusal_after_store_busy(committed_host, m
     )
 
 
-def test_clean_restart_applies_deferred_refusal_at_shutdown(committed_host, monkeypatch):
-    engine, kept, binding = committed_host
+def test_clean_restart_applies_deferred_refusal_at_shutdown(refusal_uid_mode, request, monkeypatch):
+    engine, kept, binding = request.getfixturevalue("committed_host")
     _, prior = _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
     before = engine._store.get_session_count("S0")
     reply = _turn(20)[1]
@@ -554,9 +575,45 @@ def test_clean_restart_applies_deferred_refusal_at_shutdown(committed_host, monk
     resumed = LCMEngine(config=config, hermes_home=home)
     try:
         resumed.on_session_start("S0", **binding)
+        restored = resumed._durable_commit_proof_payload()
+        assert restored and restored["output_metadata"]
         resumed.ingest(kept + [reply])
         _assert_only_reply(resumed, before, kept[0]["content"], reply)
         assert _compaction_records(resumed) == prior
+    finally:
+        resumed.shutdown()
+
+
+def test_cold_bind_uses_later_adopted_proof_after_refusal(refusal_uid_mode, request, monkeypatch):
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    session_id = engine._session_id
+    _defer_rewriting_pass_refusal(engine, kept, monkeypatch)
+    refused = engine._emission_handle
+    continued = kept + [_turn(20)[1]] + [row for i in range(21, 25) for row in _turn(i)]
+    adopted = _rewriting_pass(engine, continued)
+    _drain_session_end_maintenance(engine)
+    engine.on_session_end(session_id, continued)
+    engine.on_session_start(session_id, boundary_reason="compression", old_session_id=session_id, **binding)
+    committed = engine._emission_handle
+    assert refused.view_seq < committed.view_seq and refused.lineage == committed.lineage
+    states = set(engine._store._conn.execute(
+        "SELECT DISTINCT view_seq,state FROM ledger_emissions WHERE lineage=? AND view_seq IN (?,?)",
+        (refused.lineage, refused.view_seq, committed.view_seq)))
+    assert states == {(refused.view_seq, "refused"), (committed.view_seq, "adopted")}
+    expected = engine._durable_commit_proof_payload()
+    assert expected and expected["output_metadata"]
+
+    before = engine._store.get_session_count(session_id)
+    new_turn = _turn(25)[0]
+    resumed = LCMEngine(config=engine._config, hermes_home=str(engine._hermes_home))
+    try:
+        resumed.on_session_start(session_id, **binding)
+        assert resumed._durable_commit_proof_payload() == expected
+        assert resumed._cursor_from_durable_commit_proof(adopted + [new_turn]) == len(adopted)
+        adopted_uid = adopted[0]["message_uid"]
+        assert adopted_uid in resumed._host_uid_engine_uids([adopted_uid])
+        resumed.ingest(adopted + [new_turn])
+        _assert_only_reply(resumed, before, adopted[0]["content"], new_turn)
     finally:
         resumed.shutdown()
 
