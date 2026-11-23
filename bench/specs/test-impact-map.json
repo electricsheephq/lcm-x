@@ -529,7 +529,8 @@
     "adaptive_retrieval.py",
     "selective_recall.py",
     "rollup_periods.py",
-    "ingest_policy.py"
+    "ingest_policy.py",
+    "ingest_protection.py"
    ],
    "symbols": [
     "lcm_recall",
@@ -561,7 +562,9 @@
     "chunking.py",
     "schema_families.py",
     "config.py",
-    "ingest_policy.py"
+    "ingest_policy.py",
+    "command.py",
+    "ingest_protection.py"
    ],
    "symbols": [
     "VoyageProvider",
@@ -574,7 +577,9 @@
     "run_chunk_knn",
     "_lcm_grep_semantic",
     "_lcm_grep_hybrid",
-    "_schedule_embedding_maintenance"
+    "_schedule_embedding_maintenance",
+    "_embedding_backfill_summary_run",
+    "_chunk_backfill_run"
    ]
   },
   {
