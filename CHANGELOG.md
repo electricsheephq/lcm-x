@@ -24,6 +24,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   saved in the same row as a summary head, can be left out of store-backed assembly; it stays stored (#3061, new in
   v0.30.3). The head-copy check looks up stored content without an index (#3062). With `LCM_HOST_MESSAGE_UID=on`, a
   stub-first exit can return a summary together with the raw rows it covers, as on v0.30.2 (#3048).
+- Two crash-path fault cells still show their v0.30.2 behaviour, with no fix release set: a crash after a compaction
+  rotation over ACP on upstream Hermes can store one user turn twice (#2507), and a crash during an upgrade from
+  v0.27.0 keeps a composite row beside its replayed parts (#1506).
 
 ## v0.30.2 (the merged-reply loss fix)
 
