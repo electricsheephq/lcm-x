@@ -64,32 +64,42 @@ def is_known_head_copy(conn, row) -> bool:
 
 def _carrier_remainder_is_replay(conn, row, remainder, node_ids):
     stamp = row.get("observed_at")
-    matches = conn.execute(
-        """WITH RECURSIVE sources(kind, id) AS (
-               SELECT n.source_type, source.value FROM summary_nodes n, json_each(n.source_ids) source
-               WHERE n.node_id IN (SELECT value FROM json_each(?))
+    matches = dict(conn.execute(
+        """SELECT store_id, observed_at=? FROM messages
+           WHERE session_id=? AND store_id<? AND role='user'
+             AND COALESCE(conversation_id, '') IN ('', ?) AND content=?""",
+        (stamp, row["session_id"], row["store_id"], row.get("conversation_id") or "", remainder),
+    ))
+    if not matches:
+        return False
+
+    uncovered = conn.execute(
+        """WITH RECURSIVE sources(kind, id) AS MATERIALIZED (
+               SELECT 'nodes', value FROM json_each(?)
                UNION
                SELECT n.source_type, source.value FROM sources s JOIN summary_nodes n ON n.node_id=s.id,
                    json_each(n.source_ids) source WHERE s.kind='nodes'
+           ), matches(id) AS MATERIALIZED (
+               SELECT value FROM json_each(?)
+           ), covered(id) AS MATERIALIZED (
+               SELECT id FROM sources WHERE kind='messages' AND id IN (SELECT id FROM matches)
            )
-           SELECT m.store_id FROM messages m
-           WHERE m.session_id=? AND m.store_id<? AND m.role='user'
-             AND COALESCE(m.conversation_id, '') IN ('', ?) AND m.content=?
-             AND (? IS NULL OR m.observed_at=?)
-             AND EXISTS (SELECT 1 FROM sources WHERE kind='messages')
+           SELECT m.id FROM matches m
+           WHERE EXISTS (SELECT 1 FROM sources WHERE kind='messages')
              AND NOT EXISTS (
                  SELECT 1 FROM sources s LEFT JOIN summary_nodes n ON n.node_id=s.id
-                 WHERE (s.kind='messages' AND s.id=m.store_id) OR (s.kind='nodes' AND n.node_id IS NULL)
+                 WHERE s.kind='nodes' AND n.node_id IS NULL
              )
-           LIMIT 2""",
-        (json.dumps(node_ids), row["session_id"], row["store_id"], row.get("conversation_id") or "",
-         remainder, stamp, stamp),
+             AND NOT EXISTS (SELECT 1 FROM covered c WHERE c.id=m.id)""",
+        (json.dumps(node_ids), json.dumps(list(matches))),
     ).fetchall()
-    return len(matches) == 1 and (stamp is not None or _recorded_carrier_emission(conn, row))
+    if stamp is not None and sum(matches[store_id] == 1 for store_id, in uncovered) == 1:
+        return True
+    return len(uncovered) == 1 and _recorded_carrier_emission(conn, row)
 
 
 def _recorded_carrier_emission(conn, row):
-    """An unstamped text match needs evidence that LCM itself emitted this carrier."""
+    """A text-only match needs an emission that predates any binding for this row."""
     from .ingest_ledger import identity_digest
 
     try:
