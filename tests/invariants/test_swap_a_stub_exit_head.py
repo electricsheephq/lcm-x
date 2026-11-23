@@ -32,8 +32,8 @@ class KnownStubPairCopy(AssertionError):
     """Cold bind stored exactly the five known stub pairs again."""
 
 
-@pytest.fixture
-def split_head_stub_exit(uid_mode, make_engine, summaries, monkeypatch, caplog):  # noqa: F811
+@pytest.fixture(params=[False, True], ids=["no-system", "leading-system"])
+def split_head_stub_exit(request, uid_mode, make_engine, summaries, monkeypatch, caplog):  # noqa: F811
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
     pin_char_counter(monkeypatch)
@@ -48,9 +48,13 @@ def split_head_stub_exit(uid_mode, make_engine, summaries, monkeypatch, caplog):
                        for row in stamped]
         return stamped
 
-    first = run(engine, stamp(text_view()[1:]), caplog)
+    head_index = int(request.param)
+    initial = text_view()
+    first = run(engine, stamp(initial if request.param else initial[1:]), caplog)
     assert stop_line(caplog).group(2) == "1"
-    head, next_user = first[:2]
+    if request.param:
+        assert first[0]["role"] == "system"
+    head, next_user = first[head_index:head_index + 2]
     assert head["role"] == next_user["role"] == "user"
     assert engine._is_verified_replay_scaffold_message(head)
     supplied = stamp([*first, *tool_view()[1:]])
@@ -115,8 +119,9 @@ def test_split_stub_exit_survives_rotation_with_host_merge(uid_mode, split_head_
     turn = [{"role": "user", "content": "New request after rotation."},
             {"role": "assistant", "content": "Reply after rotation."}]
     live = stamp(_host_merge_consecutive_users([*returned, *turn]))
-    summary, retained = supplied[:2]
-    assert live[0]["content"] == summary["content"] + "\n\n" + retained["content"]
+    head_index = int(supplied[0]["role"] == "system")
+    summary, retained = supplied[head_index:head_index + 2]
+    assert live[head_index]["content"] == summary["content"] + "\n\n" + retained["content"]
     engine.ingest(live)
 
     after = _stored_rows(engine)
@@ -128,7 +133,7 @@ def test_split_stub_exit_survives_rotation_with_host_merge(uid_mode, split_head_
     ], "replay copied a row or failed to store the new turn once in the child"
     engine.ingest(deepcopy(live))
     assert _stored_rows(engine) == after, "retry copied or lost a durable row"
-    assert returned[:2] == supplied[:2], "stub-only exit rewrote the split head before rotation"
+    assert returned[:head_index + 2] == supplied[:head_index + 2], "stub-only exit rewrote the split head before rotation"
 
 
 @pytest.mark.parametrize("uid_mode", ["off", "on"])
@@ -138,7 +143,8 @@ def test_canonical_stub_exit_preserves_head_on_replay(bind, uid_mode, replayed_s
     if bind == "warm":
         assert not extras, "warm replay copied a row"
     else:
-        summary = supplied[0]["content"]
+        head_index = int(supplied[0]["role"] == "system")
+        summary = supplied[head_index]["content"]
         assert not any(
             role == "user" and summary in content for _, _, role, content, _, _ in extras
         ), "cold replay stored the summary or a folded carrier"
