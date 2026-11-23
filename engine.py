@@ -11307,6 +11307,7 @@ class LCMEngine(
         persist: bool = True,
         _reply_rejected: tuple = (),
         _prepared_tail: Optional[List[Dict[str, Any]]] = None,
+        _choose_stub_replay: Callable | None = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
         trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
@@ -11488,7 +11489,8 @@ class LCMEngine(
             # Without a replacement prefix, rerun selection with the original carrier intact.
             return self._assemble_context(
                 system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
-                stub_over_cap_tool_results, persist, _reply_rejected, _prepared_tail=assembly_tail_messages)
+                stub_over_cap_tool_results, persist, _reply_rejected, _prepared_tail=assembly_tail_messages,
+                **({"_choose_stub_replay": _choose_stub_replay} if _choose_stub_replay is not None else {}))
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -11531,7 +11533,22 @@ class LCMEngine(
         # ── Active-context cleanup / tool-pair guardrail ──
         # Drop assistant turns that carry only blank/internal structured content,
         # then ensure provider-valid tool-call/result sequencing.
-        result = self._sanitize_active_context_messages(result, generated_rows=generated_rows)
+        stub_replay = None
+        if _choose_stub_replay is not None:
+            # Compare against the host before coalescing adjacent assistant rows.
+            # Tool pairing and the other cleanup checks still apply to the splice.
+            unmerged = self._sanitize_active_context_messages(result, merge_adjacent_assistants=False)
+            if leading_msg is not None or not unmerged or unmerged[0].get("role") not in {"assistant", "tool"}:
+                stub_replay = _choose_stub_replay(unmerged, summary_message, carried_tail)
+            if stub_replay is not None:
+                if len(stub_replay) > len(unmerged):
+                    # The host kept the generated summary and following user in separate rows.
+                    head = stub_replay[0]
+                    summary_candidate.update(kind="summary", span=head["content"], retained_source=None,
+                                             full_identity=_emission_identity(head), row=head)
+                result = stub_replay
+        if stub_replay is None:
+            result = self._sanitize_active_context_messages(result, generated_rows=generated_rows)
         if leading_msg is None:
             while result and result[0].get("role") in {"assistant", "tool"}:
                 result = result[1:]
@@ -11550,10 +11567,12 @@ class LCMEngine(
             return self._assemble_context(  # #1162 E: the next step, or the base output with the residual log
                 system_msg, tail_messages, assembly_cap_override, include_lcm_note, retained_user_message,
                 stub_over_cap_tool_results, persist, (*kept_reply["rejected"], f"step{kept_reply['step']}={why}"),
-                _prepared_tail=_prepared_tail)
+                _prepared_tail=_prepared_tail,
+                **({"_choose_stub_replay": _choose_stub_replay} if _choose_stub_replay is not None else {}))
 
         if not persist:
-            _stamp_generated_model_only(result, generated_rows)
+            if stub_replay is None:
+                _stamp_generated_model_only(result, generated_rows)
             return result
 
         result = self._persist_folded_lineage(
@@ -11562,7 +11581,8 @@ class LCMEngine(
 
         # Decide only after the final cleanup, including fold recovery. Trial
         # assemblies above use the same decision without publishing proof.
-        _stamp_generated_model_only(result, generated_rows)
+        if stub_replay is None or result is not stub_replay:
+            _stamp_generated_model_only(result, generated_rows)
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
         self._remember_compacted_active_replay_snapshot(result)

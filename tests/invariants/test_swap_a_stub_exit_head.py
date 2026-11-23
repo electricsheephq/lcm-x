@@ -1,0 +1,143 @@
+"""A stub-only commit preserves the canonical head through replay (I1, I2)."""
+
+import json
+from collections import Counter
+from contextlib import ExitStack
+from copy import deepcopy
+
+import pytest
+
+from hermes_lcm import host_uid_emit
+from hermes_lcm.tokens import count_messages_tokens
+from tests.behaviour.test_ingest_trace import reopen
+from tests.harness import pin_char_counter
+from tests.invariants.test_hotfix_host_shaped_passes import _stored_rows
+from tests.invariants.test_issue_3006_post_refusal import _host_flush
+from tests.test_issue_671_stub_first_exit import (
+    STUB,
+    exit_engine,
+    make_engine,  # noqa: F401
+    run,
+    stop_line,
+    summaries,  # noqa: F401
+    text_view,
+    tool_pair,
+    tool_view,
+)
+
+
+class KnownStubPairCopy(AssertionError):
+    """Cold bind stored exactly the five known stub pairs again."""
+
+
+@pytest.fixture
+def replayed_stub_exit(bind, uid_mode, make_engine, summaries, monkeypatch, tmp_path, caplog):  # noqa: F811
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
+    pin_char_counter(monkeypatch)
+    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False, l3_truncate_tokens=1)
+    assert engine._uid_recognition_enabled() == (uid_mode == "on")
+    flush = _host_flush()
+
+    def stamp(rows):
+        stamped = flush(rows)
+        if uid_mode == "on":
+            stamped = [{**row, "message_uid": row.get("message_uid", f"{row['_row_id']:032x}")}
+                       for row in stamped]
+        return stamped
+
+    first = run(engine, stamp(text_view()[1:]), caplog)
+    assert stop_line(caplog).group(2) == "1"
+    head, next_user = first[:2]
+    assert head["role"] == next_user["role"] == "user"
+    assert engine._is_verified_replay_scaffold_message(head)
+    supplied = stamp([*first, *tool_view()[1:]])
+    engine.ingest(supplied)
+    engine.note_turn_complete()
+    before = _stored_rows(engine)
+    nodes = engine._dag.get_session_nodes(engine._session_id)
+    returned = run(engine, supplied, caplog)
+    assert stop_line(caplog).group(1, 2) == ("stub_first_exit", "0")
+    assert engine._dag.get_session_nodes(engine._session_id) == nodes
+    assert _stored_rows(engine) == before, "stub-only pass copied or lost a durable row"
+    assert engine._ingest_cursor == len(returned)
+    assert engine._load_generated_ignored_placeholder_hash_counts() == (
+        engine._generated_placeholder_digest_budget_for_active_replay(returned)
+    )
+    assert engine._load_generated_ignored_placeholder_hash_ordinals() == (
+        engine._generated_placeholder_digest_ordinals_for_active_replay(returned)
+    )
+    status = engine._last_stub_first_exit
+    assert status["tokens_after"] == count_messages_tokens(returned) <= status["target_tokens"]
+
+    new_rows = [{"role": "user", "content": "Check the final account."},
+                *tool_pair("next-account", "final account result"),
+                {"role": "assistant", "content": "The final account balances."}]
+    with ExitStack() as engines:
+        if bind == "cold":
+            engine = reopen(engine, tmp_path, engines)
+        live = stamp([*returned, *new_rows])
+        engine.ingest(live)
+        stored = _stored_rows(engine)
+        assert stored[:len(before)] == before, "replay changed or lost a durable row"
+        appended = stored[len(before):]
+        assert [row[2:5] for row in appended[-len(new_rows):]] == [
+            (row["role"], row["content"], row.get("tool_call_id")) for row in new_rows
+        ], "replay lost, changed, or reordered the new rows"
+        engine.ingest(deepcopy(live))
+        assert _stored_rows(engine) == stored, "retry copied or lost a durable row"
+
+    return supplied, returned, appended[:-len(new_rows)]
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("bind", ["warm", "cold"])
+def test_canonical_stub_exit_preserves_head_on_replay(bind, uid_mode, replayed_stub_exit):
+    supplied, returned, extras = replayed_stub_exit
+    if bind == "warm":
+        assert not extras, "warm replay copied a row"
+    else:
+        summary = supplied[0]["content"]
+        assert not any(
+            role == "user" and summary in content for _, _, role, content, _, _ in extras
+        ), "cold replay stored the summary or a folded carrier"
+
+    assert len(returned) == len(supplied)
+    expected = deepcopy(supplied)
+    stubs = 0
+    for index, (original, output) in enumerate(zip(supplied, returned)):
+        if original.get("role") == "tool" and output.get("content", "").startswith(STUB):
+            expected[index]["content"] = output["content"]
+            stubs += 1
+    assert stubs > 0
+    assert returned == expected
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("bind", ["cold"])
+@pytest.mark.xfail(
+    strict=True,
+    raises=KnownStubPairCopy,
+    reason="pre-existing cold-bind stub-pair copy (stub tier vs stored originals), tracked separately by the release manager",
+)
+def test_cold_stub_exit_copies_only_known_stub_pairs(bind, uid_mode, replayed_stub_exit):
+    _, _, extras = replayed_stub_exit
+    if not extras:
+        return  # A repair must remove the strict xfail.
+
+    observed = Counter()
+    for _, _, role, content, tool_call_id, tool_calls in extras:
+        if role == "assistant":
+            call_ids = tuple(call["id"] for call in json.loads(tool_calls or "[]"))
+        elif role == "tool" and content.startswith(STUB):
+            call_ids = (tool_call_id,)
+        else:
+            pytest.fail(f"unexpected cold replay extra row with role {role} and tool call {tool_call_id}")
+        observed[role, call_ids] += 1
+
+    expected = Counter(
+        (role, (f"call-{index}",)) for index in range(5) for role in ("assistant", "tool")
+    )
+    if observed != expected:
+        pytest.fail(f"unexpected cold replay stub pairs: {observed}")
+    raise KnownStubPairCopy("cold replay stored five assistant calls and their five tool stubs")
