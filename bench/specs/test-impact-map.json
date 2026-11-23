@@ -1,0 +1,1811 @@
+{
+ "version": 1,
+ "glob_rules": "'**/' matches zero or more whole directories; any other '**' matches any characters including '/'; '*' and '?' never match '/'. '@name' expands path_sets[name]. A path is mapped only by a literal glob (in a mechanism, a suite's own paths, fail_closed_paths or ignored_paths); a glob reached through '@name' runs its suite but does not map the path.",
+ "inputs": {
+  "hermes-host": "The Hermes host version or host build under test changes (a host pin, the supported floor, or upstream main).",
+  "provider-route": "A summary, reader, judge or embedding provider route or model that the suite calls changes.",
+  "baseline": "The comparison arm changes: the previous GA tree, a control tree, or a stored baseline snapshot.",
+  "instrument-pin": "The pinned instrument commit that the release rows run from moves.",
+  "board-claim": "A release or post is about to claim a board gain.",
+  "monthly-drift": "The monthly drift run for the boards."
+ },
+ "path_sets": {
+  "any": [
+   "**"
+  ],
+  "python": [
+   "**/*.py"
+  ],
+  "pytest": [
+   "tests/**",
+   "pytest.ini"
+  ],
+  "tests_read": [
+   "*",
+   ".agents/**",
+   ".github/*",
+   ".github/actions/**",
+   ".github/workflows/**",
+   ".github/ISSUE_TEMPLATE/**",
+   "access_context/**",
+   "access_policy/**",
+   "adapters/**",
+   "bench/**",
+   "benchmarking/**",
+   "benchmarks/**",
+   "companions/**",
+   "docs/**",
+   "release/**",
+   "scripts/**",
+   "skills/**",
+   "teams/**",
+   "tests/**"
+  ],
+  "product": [
+   "*.py",
+   "access_context/**",
+   "access_policy/**",
+   "adapters/**",
+   "companions/**",
+   "skills/**",
+   "teams/**",
+   "plugin.yaml",
+   "requirements-semantic.txt"
+  ],
+  "turn_path": [
+   "__init__.py",
+   "assembly_plan.py",
+   "aux_session.py",
+   "bypass.py",
+   "codex_routing.py",
+   "compaction.py",
+   "compaction_policy.py",
+   "compaction_request.py",
+   "compress_run.py",
+   "config.py",
+   "dag.py",
+   "db_bootstrap.py",
+   "diagnostics.py",
+   "emission_projection.py",
+   "engine.py",
+   "engine_registry.py",
+   "escalation.py",
+   "expand_tools.py",
+   "externalize.py",
+   "extraction.py",
+   "frontier_state.py",
+   "fresh_tail.py",
+   "head_copy.py",
+   "host_rewrite.py",
+   "host_row_recovery.py",
+   "host_uid.py",
+   "host_uid_emit.py",
+   "identity_anchor.py",
+   "ingest_content.py",
+   "ingest_integrity.py",
+   "ingest_ledger.py",
+   "ingest_pem_model.py",
+   "ingest_pem_scan.py",
+   "ingest_persisted.py",
+   "ingest_policy.py",
+   "ingest_protection.py",
+   "leaf_prep.py",
+   "lifecycle_state.py",
+   "maintenance_scheduler.py",
+   "message_analysis.py",
+   "message_content.py",
+   "message_patterns.py",
+   "model_routing.py",
+   "placeholder_ledger.py",
+   "plugin_identity.py",
+   "prefix_matching.py",
+   "recognition_matching.py",
+   "reconcile.py",
+   "reset_state.py",
+   "retrieval_core.py",
+   "rollup_builder.py",
+   "rollup_periods.py",
+   "rollup_store.py",
+   "sender_capture.py",
+   "sanitize.py",
+   "schemas.py",
+   "search_query.py",
+   "session_patterns.py",
+   "sqlite_util.py",
+   "store.py",
+   "store_complete.py",
+   "summary_attempt.py",
+   "summary_input_clip.py",
+   "summary_outcome.py",
+   "survival_codec.py",
+   "survival_fit.py",
+   "tokens.py",
+   "tool_pairs.py",
+   "tool_registry.py",
+   "tools.py",
+   "unended_catchup.py"
+  ]
+ },
+ "fail_closed_paths": [
+  "message_content.py",
+  "message_analysis.py",
+  "sanitize.py",
+  "session_patterns.py",
+  "tokens.py",
+  "db_bootstrap.py",
+  "store.py",
+  "ingest_protection.py",
+  "externalize.py",
+  "sqlite_session.py",
+  "sqlite_util.py",
+  "reconcile.py",
+  "embedding_provider.py",
+  "escalation.py",
+  "answer_contract.py",
+  "assertion_*.py",
+  "cloud_*.py",
+  "codex_routing.py",
+  "command_auth.py",
+  "command_router.py",
+  "command_status.py",
+  "cpu_capacity.py",
+  "engine_registry.py",
+  "entity_*.py",
+  "evidence_compiler.py",
+  "evidence_pack.py",
+  "expansion_evidence.py",
+  "inactive_record.py",
+  "ingest_classifier.py",
+  "maintenance.py",
+  "mcp_reader.py",
+  "model_routing.py",
+  "occurrence_time.py",
+  "presets.py",
+  "query_view_store.py",
+  "readonly_store.py",
+  "reasoning.py",
+  "recorder.py",
+  "recorder_read.py",
+  "requirements_compiler.py",
+  "scope_storage.py",
+  "selective_compiler.py",
+  "sender_capture.py",
+  "trajectory_store.py",
+  "access_context/**",
+  "access_policy/**",
+  "teams/**",
+  "skills/**",
+  "bench/specs/test-impact-map.json",
+  "bench/specs/test-impact-map.md",
+  "scripts/release/suite_impact.py"
+ ],
+ "ignored_paths": [
+  ".agents/**",
+  ".github/ISSUE_TEMPLATE/**",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/CODEOWNERS",
+  ".github/dependabot.yml",
+  ".gitignore"
+ ],
+ "mechanisms": [
+  {
+   "id": "M01",
+   "name": "Host-row recognition",
+   "behaviour": "Recognises host rows by replay identity, host UID or identity anchor on bind, cold start and replay, so each handed row is stored once: no duplicates, no wrong-session rows, cursor in the right place.",
+   "paths": [
+    "reconcile.py",
+    "host_uid.py",
+    "identity_anchor.py",
+    "engine.py",
+    "ingest_ledger.py",
+    "host_rewrite.py",
+    "host_uid_emit.py",
+    "prefix_matching.py",
+    "placeholder_ledger.py",
+    "config.py",
+    "ingest_persisted.py",
+    "emission_projection.py",
+    "recognition_matching.py",
+    "message_patterns.py"
+   ],
+   "symbols": [
+    "ReconcileMixin",
+    "HostUidShadowMixin",
+    "IdentityAnchorMixin",
+    "bind_session_state",
+    "_on_session_start_unlocked",
+    "_ingest_messages_transaction",
+    "_build_ingest_replay",
+    "_ingest_filter_rows",
+    "_ledger_adopt",
+    "_write_ingest_ledger",
+    "_ledger_cold_cursor",
+    "plan_ordinals",
+    "cold_cursor_candidate",
+    "prove",
+    "host_rewrite_match",
+    "PrefixMatchingMixin",
+    "PlaceholderLedgerMixin",
+    "host_message_uid_mode",
+    "ingest_ledger_mode",
+    "identity_anchor_enabled"
+   ]
+  },
+  {
+   "id": "M02",
+   "name": "Session lifecycle and recovery",
+   "behaviour": "Session start, end, reset, rotation and rollover keep lineage and store every tail; cold or off-current tails are retried; an interrupted turn's rows are recovered from an abandoned compaction child.",
+   "paths": [
+    "engine.py",
+    "host_row_recovery.py",
+    "unended_catchup.py",
+    "reset_state.py",
+    "lifecycle_state.py",
+    "store.py",
+    "maintenance_scheduler.py"
+   ],
+   "symbols": [
+    "on_session_end",
+    "_on_session_end_unlocked",
+    "queue_off_current_busy_tail",
+    "_retry_off_current_fallback",
+    "_finalize_foreground_session_end_unlocked",
+    "on_session_reset",
+    "_record_rotation_predecessor",
+    "rollover_session",
+    "rotate_active_session",
+    "_queue_cold_session_tail",
+    "_retry_cold_tail",
+    "_retry_pending_session_tails",
+    "_shutdown_unlocked",
+    "HostRowRecoveryMixin",
+    "UnendedCatchupMixin",
+    "ResetStateMixin",
+    "bind_session",
+    "finalize_session",
+    "record_rollover",
+    "record_session_lineage"
+   ]
+  },
+  {
+   "id": "M03",
+   "name": "Compaction trigger and cadence",
+   "behaviour": "Decides when a compaction pass runs: thresholds, preflight, leaf-candidate status, and the cooldown, sweep-budget and no-progress holds that block automatic passes.",
+   "paths": [
+    "compaction.py",
+    "compaction_policy.py",
+    "engine.py",
+    "tokens.py",
+    "compaction_request.py",
+    "config.py"
+   ],
+   "symbols": [
+    "should_compress",
+    "should_compress_preflight",
+    "_leaf_compaction_candidate_status",
+    "_context_aware_leaf_cap",
+    "resolve_threshold",
+    "threshold_tokens",
+    "_effective_threshold_tokens",
+    "_compression_boundary_cooldown_active",
+    "_sweep_budget_hold_active",
+    "_no_progress_hold_active",
+    "_automatic_compression_blocked",
+    "count_tokens",
+    "count_messages_tokens",
+    "CompactionRequest"
+   ]
+  },
+  {
+   "id": "M04",
+   "name": "Compaction progress and frontier",
+   "behaviour": "A pass selects a leaf, publishes it and advances the frontier, and reports progress to the host; a refused or rejected pass rolls back cleanly; a no-progress hold arms only when it should.",
+   "paths": [
+    "compaction.py",
+    "frontier_state.py",
+    "lifecycle_state.py",
+    "engine.py",
+    "compress_run.py",
+    "fresh_tail.py"
+   ],
+   "symbols": [
+    "compress",
+    "_compress_owned",
+    "_compress_impl",
+    "_select_leaf_candidate",
+    "_publish_selected_leaf",
+    "_advance_after_leaf",
+    "_finish_without_leaf",
+    "_finish_with_leaf",
+    "_made_progress",
+    "_reports_progress",
+    "stage_frontier",
+    "FrontierState",
+    "advance_frontier",
+    "_start_no_progress_hold",
+    "record_rejected_compaction",
+    "_restore_refused_compaction",
+    "_persist_frontier_marker",
+    "CompressRun"
+   ]
+  },
+  {
+   "id": "M05",
+   "name": "Nothing lost across compaction",
+   "behaviour": "Every row leaving the returned list is covered by a byte-equal or fuller stored copy under a node in the head; hidden backlog and host-pruned output are accounted for; the commit proof matches the stored rows.",
+   "paths": [
+    "store_complete.py",
+    "compaction.py",
+    "identity_anchor.py",
+    "leaf_prep.py",
+    "engine.py",
+    "fresh_tail.py",
+    "head_copy.py"
+   ],
+   "symbols": [
+    "StoreCompleteMixin",
+    "_record_compress_commit_proof",
+    "_rekey_durable_commit_proof",
+    "_leaf_consumption",
+    "_committed_replay_drops",
+    "_match_refused_assistant_replay",
+    "_filter_leaf_backlog",
+    "_identity_anchor_audit",
+    "excluded_from_summary_input",
+    "coverage_digest",
+    "_prepare_compress_commit_proof"
+   ]
+  },
+  {
+   "id": "M06",
+   "name": "Summary generation route",
+   "behaviour": "Produces leaf summaries through the configured summary route, with rescue chunks, contract checks, circuit breaker, spend guard and background leaf preparation.",
+   "paths": [
+    "engine.py",
+    "escalation.py",
+    "summary_attempt.py",
+    "summary_outcome.py",
+    "leaf_prep.py",
+    "compaction.py",
+    "summary_input_clip.py",
+    "extraction.py",
+    "config.py",
+    "fresh_tail.py",
+    "head_copy.py"
+   ],
+   "symbols": [
+    "summarize_leaf_chunk_with_rescue",
+    "_summary_route_available",
+    "_prepare_leaves_after_turn",
+    "SummaryCircuitBreaker",
+    "SummarySpendGuard",
+    "_check_summary_contract",
+    "_call_llm_for_summary",
+    "SummaryAttempt",
+    "classify_summary_outcome",
+    "_LeafPrep",
+    "_summarize_selected_leaf"
+   ]
+  },
+  {
+   "id": "M07",
+   "name": "Condensation, level-3 rollups and publication",
+   "behaviour": "Condenses summary nodes into higher depths, keeps level-3 nodes untruncated, builds temporal rollups, and refuses publications that conflict with lifecycle coverage.",
+   "paths": [
+    "engine.py",
+    "compaction.py",
+    "dag.py",
+    "level3_repair.py",
+    "rollup_builder.py",
+    "rollup_store.py",
+    "lifecycle_state.py",
+    "head_copy.py"
+   ],
+   "symbols": [
+    "_maybe_condense",
+    "_condense_summary_nodes",
+    "_run_threshold_sweep_condensation",
+    "_condense_before_leaves",
+    "_condense_after_leaves",
+    "SummaryDAG",
+    "CondensationPublicationRejected",
+    "scan_level3_fragments",
+    "build_day",
+    "RollupStore",
+    "stage_compaction_publication"
+   ]
+  },
+  {
+   "id": "M08",
+   "name": "Survival fit",
+   "behaviour": "Fits the assembled list under the host's window. Judged as zero survival-fit events and zero rows dropped by a fit.",
+   "paths": [
+    "survival_fit.py",
+    "survival_codec.py",
+    "engine.py",
+    "assembly_plan.py",
+    "config.py"
+   ],
+   "symbols": [
+    "SurvivalFitMixin",
+    "_survival_fit",
+    "_plan_survival_fit",
+    "_survival_cut",
+    "_survival_projection",
+    "_apply_survival_fit",
+    "project_message",
+    "projection_mark_candidates",
+    "_resolve_survival_prefix_budget",
+    "default_prefix_budget"
+   ]
+  },
+  {
+   "id": "M09",
+   "name": "Returned-list assembly and tool pairs",
+   "behaviour": "Builds the returned list from the head, carrier and fresh tail with no split tool groups, no orphan results and no unneeded repair stubs, including overflow recovery and the no-leaf return.",
+   "paths": [
+    "engine.py",
+    "tool_pairs.py",
+    "fresh_tail.py",
+    "assembly_plan.py",
+    "compaction.py",
+    "head_copy.py"
+   ],
+   "symbols": [
+    "_assemble_context",
+    "_select_tail_forced_recovery",
+    "_assemble_overflow_recovery_context",
+    "_sanitize_tool_pairs",
+    "_get_session_fresh_tail",
+    "repair_tool_pairs",
+    "resolve_fresh_tail_boundary",
+    "select_prefix",
+    "select_tail",
+    "_assemble_committed_compaction_context",
+    "_stub_first_exit"
+   ]
+  },
+  {
+   "id": "M10",
+   "name": "Payload protection",
+   "behaviour": "Externalizes large tool output to payload files with placeholders, redacts sensitive text and quarantines suspicious assistant output on ingest.",
+   "paths": [
+    "externalize.py",
+    "ingest_protection.py",
+    "engine.py",
+    "store.py",
+    "tools.py",
+    "ingest_policy.py",
+    "ingest_content.py",
+    "ingest_integrity.py",
+    "ingest_pem_model.py",
+    "ingest_pem_scan.py",
+    "config.py"
+   ],
+   "symbols": [
+    "_write_externalized_payload",
+    "_build_externalized_placeholder",
+    "protect_embedding_text",
+    "redact_sensitive_text",
+    "protect_message_for_ingest",
+    "quarantine_suspicious_assistant_message",
+    "_protect_ingest_rows",
+    "_maybe_stub_active_tool_result",
+    "gc_externalized_tool_result",
+    "_get_externalized_payload"
+   ]
+  },
+  {
+   "id": "M11",
+   "name": "Auxiliary and delegated child sessions",
+   "behaviour": "Classifies auxiliary and subagent sessions and stores a delegated child's saved results once per handed row.",
+   "paths": [
+    "aux_session.py",
+    "__init__.py",
+    "engine.py",
+    "compaction.py"
+   ],
+   "symbols": [
+    "AuxiliarySessionMixin",
+    "DelegateChildMixin",
+    "record_subagent_start",
+    "_on_live_delegate_child_list",
+    "_store_delegate_child",
+    "_maybe_reclassify_late_auxiliary_before_compaction_write"
+   ]
+  },
+  {
+   "id": "M12",
+   "name": "Recall search and delivery",
+   "behaviour": "lcm_recall and lcm_grep find, fuse and deliver stored history under the response and deadline caps.",
+   "paths": [
+    "tools.py",
+    "recall_delivery.py",
+    "retrieval_core.py",
+    "search_query.py",
+    "store.py",
+    "dag.py",
+    "engine.py",
+    "__init__.py",
+    "guidance.py",
+    "config.py",
+    "retrieval_context.py",
+    "recall_session.py",
+    "adaptive_retrieval.py",
+    "selective_recall.py",
+    "rollup_periods.py",
+    "ingest_policy.py",
+    "ingest_protection.py"
+   ],
+   "symbols": [
+    "lcm_recall",
+    "lcm_grep",
+    "_lcm_grep_full_text",
+    "deliver_recall",
+    "rrf_fuse",
+    "fuse_candidates",
+    "sanitize_fts5_query",
+    "build_recall_or_query",
+    "MessageStore.search",
+    "_build_proactive_recall_message",
+    "_pre_llm_context",
+    "get_recall_policy"
+   ]
+  },
+  {
+   "id": "M13",
+   "name": "Embedding provider and vectors",
+   "behaviour": "Embeds nodes and chunks through the supported providers, publishes vectors under a profile identity, runs incremental catch-up, and serves semantic or hybrid KNN.",
+   "paths": [
+    "embedding_provider.py",
+    "vector_store.py",
+    "embedding_maintenance.py",
+    "retrieval_core.py",
+    "tools.py",
+    "engine.py",
+    "companions/**",
+    "chunking.py",
+    "schema_families.py",
+    "config.py",
+    "ingest_policy.py",
+    "command.py",
+    "ingest_protection.py"
+   ],
+   "symbols": [
+    "VoyageProvider",
+    "OllamaProvider",
+    "OpenAICompatibleProvider",
+    "FastembedProvider",
+    "VectorStore",
+    "run_incremental_embedding_pass",
+    "run_knn",
+    "run_chunk_knn",
+    "_lcm_grep_semantic",
+    "_lcm_grep_hybrid",
+    "_schedule_embedding_maintenance",
+    "_embedding_backfill_summary_run",
+    "_chunk_backfill_run"
+   ]
+  },
+  {
+   "id": "M14",
+   "name": "Store schema, indexes and migrations",
+   "behaviour": "Creates, upgrades and verifies the store schema, its tables, columns and indexes, and refuses newer schemas.",
+   "paths": [
+    "db_bootstrap.py",
+    "store.py",
+    "dag.py",
+    "vector_store.py",
+    "lifecycle_state.py",
+    "rollup_store.py",
+    "command.py",
+    "docs/store-contract.md"
+   ],
+   "symbols": [
+    "SCHEMA_VERSION",
+    "refuse_schema_version_too_new",
+    "classify_version_mismatch",
+    "set_schema_version",
+    "MessageStore._init_db",
+    "_ensure_identity_anchor_schema",
+    "_ensure_ingest_ledger_schema",
+    "_ensure_host_uid_schema",
+    "_ensure_embedding_schema"
+   ]
+  },
+  {
+   "id": "M15",
+   "name": "Write lock and busy database",
+   "behaviour": "Holds the SQLite write lock briefly, retries busy or snapshot errors and times lock waits; transaction scope inside the ingest and compaction commits.",
+   "paths": [
+    "sqlite_util.py",
+    "db_bootstrap.py",
+    "store.py",
+    "sqlite_session.py",
+    "engine.py",
+    "config.py"
+   ],
+   "symbols": [
+    "_run_sqlite_write_with_snapshot_retry",
+    "_sqlite_savepoint",
+    "_TimedLock",
+    "configure_connection",
+    "SQLITE_BUSY_TIMEOUT_MS",
+    "ingest_atomic",
+    "_timed_atomic",
+    "atomic",
+    "ConnectionPolicy",
+    "TransactionOwner",
+    "_record_ingest_lock",
+    "_raise_ingest_busy",
+    "_exclusive_lifecycle",
+    "_ingest_messages_transaction",
+    "find_session_rows_by_content"
+   ]
+  },
+  {
+   "id": "M16",
+   "name": "Turn latency and pass time",
+   "behaviour": "Keeps foreground compaction inside its soft and hard budget, records compaction telemetry, and keeps per-turn ingest and hook cost low. New work on the ingest or compress path counts.",
+   "paths": [
+    "escalation.py",
+    "engine.py",
+    "compaction.py",
+    "store.py",
+    "leaf_prep.py",
+    "tokens.py",
+    "config.py"
+   ],
+   "symbols": [
+    "ForegroundEstimates",
+    "ForegroundBudget",
+    "_foreground_call_budget",
+    "_record_turn_compaction_telemetry",
+    "_new_foreground_budget",
+    "increment_compaction_telemetry",
+    "start_encoder_load"
+   ]
+  },
+  {
+   "id": "M17",
+   "name": "Tool registry, schemas and handlers",
+   "behaviour": "Registers every lcm_* tool with its schema and dormancy rule, dispatches calls, and each handler meets its postconditions in local and cloud postures.",
+   "paths": [
+    "tool_registry.py",
+    "schemas.py",
+    "engine.py",
+    "__init__.py",
+    "expand_tools.py",
+    "inspect_tools.py",
+    "recent.py",
+    "memory_tools.py",
+    "evidence_tools.py",
+    "expand_query_tools.py",
+    "tools.py",
+    "plugin.yaml"
+   ],
+   "symbols": [
+    "ToolSpec",
+    "TOOL_REGISTRY",
+    "recall_guidance_schemas",
+    "get_tool_schemas",
+    "handle_tool_call",
+    "register",
+    "_make_wrapped_handler",
+    "lcm_load_session",
+    "lcm_status"
+   ]
+  },
+  {
+   "id": "M18",
+   "name": "Hermes host integration",
+   "behaviour": "Plugs into Hermes hosts from the supported floor through upstream main: hook registration, capability probes, the host-fallback compressor and Hermes config reads.",
+   "paths": [
+    "plugin.yaml",
+    "__init__.py",
+    "compaction.py",
+    "engine.py",
+    "bypass.py",
+    "plugin_identity.py",
+    "config.py"
+   ],
+   "symbols": [
+    "requires_hermes",
+    "provides_hooks",
+    "_host_forwards_registered_tool_messages",
+    "register",
+    "_on_pre_llm_call",
+    "_on_post_llm_call",
+    "_bind_and_ingest",
+    "_host_has_post_tool_reanchor",
+    "BypassMixin",
+    "load_hermes_config",
+    "_hermes_compression_threshold_with_source"
+   ]
+  },
+  {
+   "id": "M19",
+   "name": "Install and doctor",
+   "behaviour": "The plugin and its local-embeddings companion install from the published payload, and lcm_doctor reports no failed checks and only the allowed warnings.",
+   "paths": [
+    "command_doctor.py",
+    "tools.py",
+    "diagnostics.py",
+    "command.py",
+    "host_uid.py",
+    "store.py",
+    "__init__.py",
+    "plugin.yaml",
+    "requirements-semantic.txt",
+    "companions/**",
+    "runtime_identity.py"
+   ],
+   "symbols": [
+    "DoctorFacts",
+    "collect_doctor",
+    "survival_fit_observation",
+    "render_doctor",
+    "lcm_doctor",
+    "fresh_sqlite_check",
+    "host_uid_doctor_lines",
+    "records_doctor"
+   ]
+  },
+  {
+   "id": "M20",
+   "name": "Release notes and docs",
+   "behaviour": "Release notes, changelog fragments and docs text. No runtime behaviour.",
+   "paths": [
+    ".github/release-notes/**",
+    "changelog.d/**",
+    "**/*.md",
+    "docs/**"
+   ],
+   "symbols": []
+  }
+ ],
+ "suites": [
+  {
+   "id": "c1a",
+   "name": "L1 C1a reliability matrix, retained-store pair",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M04",
+    "M05",
+    "M08",
+    "M18"
+   ],
+   "paths": [
+    "@product",
+    "bench/instruments/reliability/**",
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
+   ],
+   "inputs": [
+    "hermes-host",
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release L1, after the tag",
+   "note": "Exports the whole plugin tree, so any product file is an input.",
+   "catch_log": []
+  },
+  {
+   "id": "respin",
+   "name": "Pre-tag respin reliability matrix (final head and previous GA)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M04",
+    "M05",
+    "M08",
+    "M18"
+   ],
+   "paths": [
+    "@product",
+    "bench/instruments/reliability/**",
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
+   ],
+   "inputs": [
+    "hermes-host",
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release, before the tag",
+   "note": "Same instrument and inputs as C1a.",
+   "catch_log": []
+  },
+  {
+   "id": "c1b",
+   "name": "L1 C1b crash-and-restart cells",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M04",
+    "M14"
+   ],
+   "paths": [],
+   "inputs": [
+    "hermes-host",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "c2",
+   "name": "L1 C2 tool matrix, local and cloud postures",
+   "kind": "mapped",
+   "mechanisms": [
+    "M17",
+    "M12",
+    "M13",
+    "M19",
+    "M10"
+   ],
+   "paths": [],
+   "inputs": [
+    "provider-route",
+    "hermes-host",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "c3",
+   "name": "L1 C3 upgrade and rollback roundtrip",
+   "kind": "mapped",
+   "mechanisms": [
+    "M14",
+    "M13"
+   ],
+   "paths": [],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "c4",
+   "name": "L1 C4 LongMemEval D1, embeddings off",
+   "kind": "mapped",
+   "mechanisms": [
+    "M12",
+    "M10"
+   ],
+   "paths": [
+    "scripts/lcm_longmemeval.py",
+    "benchmarking/longmemeval.py",
+    "vector_store.py",
+    "bench/tools/v1m-rebank/**",
+    "bench/tools/d8_guard.py",
+    "benchmarking/__init__.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "c5",
+   "name": "L1 C5 review sweep of the release diff",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@any"
+   ],
+   "inputs": [
+    "provider-route"
+   ],
+   "when": "Release L1",
+   "note": "Reviews the diff itself, docs and notes included, so any change is an input.",
+   "catch_log": []
+  },
+  {
+   "id": "probes",
+   "name": "L1 paired probes (stored rows against handed rows)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M10",
+    "M11",
+    "M14",
+    "M15"
+   ],
+   "paths": [
+    "tests/test_issue_2482_interrupted_child.py",
+    "tests/test_issue_1931_delegate_children.py",
+    "tests/invariants/test_issue_2539_offcurrent_marker_end.py",
+    "tests/test_f3_spillover_redacted_preview.py",
+    "tests/test_issue_10_persisted_output_spillover.py"
+   ],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "m2",
+   "name": "L1 M2 LongMemEval-S mini with the reader",
+   "kind": "mapped",
+   "mechanisms": [
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "benchmarks/qa-harness/**",
+    "benchmarking/longmemeval.py",
+    "benchmarking/__init__.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "provider-route",
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "m3",
+   "name": "L1 M3 Track S, one seed",
+   "kind": "mapped",
+   "mechanisms": [
+    "M03",
+    "M04",
+    "M06",
+    "M08",
+    "M16"
+   ],
+   "paths": [],
+   "inputs": [
+    "provider-route",
+    "instrument-pin",
+    "baseline"
+   ],
+   "when": "Release L1",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "probe-matrix",
+   "name": "L2 probe matrix (stored-row identity against the previous GA)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M05"
+   ],
+   "paths": [
+    "ingest_classifier.py"
+   ],
+   "inputs": [
+    "instrument-pin",
+    "baseline"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "host-suite",
+   "name": "L2 host-suite pair (whole tests/ on pinned host Pythons)",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@product",
+    "@tests_read",
+    ".github/release-notes/**",
+    "tests/**",
+    ".github/workflows/host-suite.yml",
+    ".github/actions/**",
+    "bench/instruments/reliability/ci.py",
+    "bench/instruments/reliability/hosts.ci.json"
+   ],
+   "inputs": [
+    "hermes-host"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "phase-c",
+   "name": "L2 soaks and install cells",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M04",
+    "M05",
+    "M07",
+    "M12",
+    "M13",
+    "M16",
+    "M18",
+    "M19"
+   ],
+   "paths": [
+    "companions/**",
+    "requirements-semantic.txt",
+    "docs/embeddings-setup.md",
+    "plugin.yaml"
+   ],
+   "inputs": [
+    "hermes-host",
+    "provider-route",
+    "instrument-pin"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "d5b",
+   "name": "L2 older-host cells",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M05",
+    "M14",
+    "M16",
+    "M18",
+    "M19"
+   ],
+   "paths": [],
+   "inputs": [
+    "hermes-host",
+    "provider-route",
+    "instrument-pin"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "d7",
+   "name": "L2 Track S, three seeds",
+   "kind": "mapped",
+   "mechanisms": [
+    "M03",
+    "M04",
+    "M05",
+    "M06",
+    "M08",
+    "M16"
+   ],
+   "paths": [],
+   "inputs": [
+    "provider-route",
+    "instrument-pin",
+    "baseline"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "busy-bar",
+   "name": "L2 busy-bar (busy events and write-lock hold times)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M15"
+   ],
+   "paths": [],
+   "inputs": [
+    "instrument-pin",
+    "baseline"
+   ],
+   "when": "Release L2",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-copy",
+   "name": "Gate cells: copy checks",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M04",
+    "M05",
+    "M08",
+    "M09"
+   ],
+   "paths": [
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
+   ],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release gate sheet",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-walks",
+   "name": "Gate cells: walks",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M03",
+    "M04",
+    "M05",
+    "M07",
+    "M08",
+    "M09",
+    "M16"
+   ],
+   "paths": [
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
+   ],
+   "inputs": [
+    "provider-route",
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release gate sheet",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-timing",
+   "name": "Gate cells: timing (index build, cold ingest, cold starts)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M14",
+    "M16",
+    "M01",
+    "M04",
+    "M08"
+   ],
+   "paths": [],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release gate sheet",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-reversibility",
+   "name": "Gate cells: reversibility and refusal replay",
+   "kind": "mapped",
+   "mechanisms": [
+    "M14",
+    "M04",
+    "M01"
+   ],
+   "paths": [
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
+   ],
+   "inputs": [
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release gate sheet",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-crossing",
+   "name": "Gate cells: crossing rehearsal",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M04",
+    "M07",
+    "M08",
+    "M16"
+   ],
+   "paths": [
+    "bench/instruments/gate_kit/**",
+    "bench/instruments/reliability/scorers/**"
+   ],
+   "inputs": [
+    "instrument-pin"
+   ],
+   "when": "Release gate sheet",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "gate-live",
+   "name": "Gate cells: live stand-in and field read",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M04",
+    "M05",
+    "M06",
+    "M07",
+    "M08",
+    "M09",
+    "M13",
+    "M15",
+    "M16"
+   ],
+   "paths": [
+    "@product"
+   ],
+   "inputs": [
+    "hermes-host",
+    "provider-route"
+   ],
+   "when": "Release, after the tag",
+   "note": "Measures the tagged install.",
+   "catch_log": []
+  },
+  {
+   "id": "ci-tests",
+   "name": "CI test shards (required)",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@any",
+    "tests/**",
+    "scripts/**",
+    ".github/workflows/ci.yml",
+    ".github/actions/**",
+    "pytest.ini",
+    ".github/tests-ran-allowlist.txt"
+   ],
+   "inputs": [],
+   "when": "Every pull request",
+   "note": "Tests read files across the repo, one release-notes file included, so any change is an input. Branch protection runs it on every pull request whatever the map says.",
+   "catch_log": []
+  },
+  {
+   "id": "ci-lint",
+   "name": "CI lint, golden outcomes and store contract (required)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M04",
+    "M09",
+    "M14"
+   ],
+   "paths": [
+    "@python",
+    ".github/workflows/**",
+    ".github/actionlint.yaml",
+    "ruff.toml",
+    "tests/fixtures/*_trace.json"
+   ],
+   "inputs": [],
+   "when": "Every pull request",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "ci-bench",
+   "name": "CI bench-tests (instrument self-tests)",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@product",
+    "bench/**",
+    "scripts/dev/ci_step.sh",
+    "scripts/dev/cloud_setup.sh",
+    ".github/workflows/ci.yml",
+    "@pytest"
+   ],
+   "inputs": [],
+   "when": "Every pull request",
+   "note": "Instrument tests call real product handlers, so the whole product tree is an input.",
+   "catch_log": []
+  },
+  {
+   "id": "ci-session-cost",
+   "name": "CI session-end attribution cost (advisory)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M16",
+    "M02"
+   ],
+   "paths": [
+    "@product",
+    "tests/fixtures/session_end_attribution_cost/**",
+    "tests/conftest.py",
+    ".github/workflows/ci.yml",
+    "@pytest"
+   ],
+   "inputs": [],
+   "when": "Every pull request",
+   "note": "Its measurement program imports tests/conftest.py, which registers the product modules.",
+   "catch_log": []
+  },
+  {
+   "id": "differential",
+   "name": "Differential against older GA trees",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@turn_path",
+    "tests/differential/**",
+    ".github/workflows/differential.yml",
+    ".github/actions/**"
+   ],
+   "inputs": [],
+   "when": "Pull request and nightly",
+   "note": "Same file filter as the workflow's own relevance step.",
+   "catch_log": []
+  },
+  {
+   "id": "nightly-matrix",
+   "name": "Reliability nightly matrix",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M04",
+    "M05",
+    "M08",
+    "M18"
+   ],
+   "paths": [
+    "@product",
+    "bench/instruments/reliability/**",
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
+   ],
+   "inputs": [
+    "hermes-host"
+   ],
+   "when": "Nightly",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "nightly-compare",
+   "name": "Reliability nightly compare, alarm and publish",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M02",
+    "M04",
+    "M05",
+    "M08",
+    "M18"
+   ],
+   "paths": [
+    "@product",
+    "bench/instruments/reliability/**",
+    ".github/workflows/reliability-nightly.yml",
+    ".github/actions/**"
+   ],
+   "inputs": [
+    "hermes-host",
+    "baseline"
+   ],
+   "when": "Nightly",
+   "note": "Scores the matrix tables, so it has the matrix's inputs.",
+   "catch_log": []
+  },
+  {
+   "id": "nightly-latency",
+   "name": "Reliability nightly latency tests",
+   "kind": "mapped",
+   "mechanisms": [
+    "M16"
+   ],
+   "paths": [
+    "@tests_read",
+    "tests/**",
+    "pytest.ini",
+    ".github/actions/**"
+   ],
+   "inputs": [],
+   "when": "Nightly",
+   "note": "Any test file can carry the latency marker, and tests read files across the repo.",
+   "catch_log": []
+  },
+  {
+   "id": "real-host",
+   "name": "Real host regression files (advisory)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M18",
+    "M01",
+    "M08"
+   ],
+   "paths": [
+    "@product",
+    "tests/test_real_*.py",
+    "tests/test_issue_524_gen2_replay.py",
+    "tests/test_issue_559_tool_group_boundary.py",
+    "tests/test_issue_631_not_a_pm_member.py",
+    "tests/test_issue_1306_cli_new.py",
+    "tests/invariants/test_issue_1438_cli_new.py",
+    "tests/test_session_end_attribution_host.py",
+    "tests/test_host_stub_parity.py",
+    "tests/test_catalog_scanner_on.py",
+    ".github/workflows/ci.yml",
+    "tests/test_issue_1186_host_dependencies.py",
+    "tests/conftest.py",
+    ".github/workflows/real-host.yml",
+    "bench/instruments/reliability/**",
+    "@pytest"
+   ],
+   "inputs": [
+    "hermes-host"
+   ],
+   "when": "Every pull request",
+   "note": "Loads the whole plugin under a real Hermes.",
+   "catch_log": []
+  },
+  {
+   "id": "long-soak",
+   "name": "Opt-in long real-host soak",
+   "kind": "mapped",
+   "mechanisms": [
+    "M18",
+    "M01",
+    "M04"
+   ],
+   "paths": [
+    "@product",
+    "tests/test_real_turn_loop_acp_override.py",
+    "@pytest"
+   ],
+   "inputs": [
+    "hermes-host"
+   ],
+   "when": "By hand",
+   "note": "No workflow sets the switch; run it by hand when the map says RUN.",
+   "catch_log": []
+  },
+  {
+   "id": "invariants",
+   "name": "Invariants nightly (property tests)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M01",
+    "M05",
+    "M08"
+   ],
+   "paths": [
+    "@product",
+    "tests/invariants/**",
+    "tests/conftest.py",
+    ".github/workflows/invariants-nightly.yml",
+    ".github/actions/**",
+    "@pytest"
+   ],
+   "inputs": [],
+   "when": "Nightly",
+   "note": "Runs every property test under tests/invariants/, and those import product modules freely.",
+   "catch_log": []
+  },
+  {
+   "id": "floor-1586",
+   "name": "Local catch-up floor surrogate and covered-store stage",
+   "kind": "mapped",
+   "mechanisms": [
+    "M13",
+    "M12"
+   ],
+   "paths": [
+    "bench/instruments/local_catchup/**",
+    ".github/workflows/lcmx-1586-floor.yml",
+    ".github/workflows/lcmx-1586-covered-store.yml"
+   ],
+   "inputs": [
+    "provider-route"
+   ],
+   "when": "By dispatch",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "d1-identity",
+   "name": "D1 shard identity",
+   "kind": "mapped",
+   "mechanisms": [
+    "M10"
+   ],
+   "paths": [
+    "benchmarking/d1_cache.py",
+    "benchmarking/longmemeval.py",
+    "scripts/lcm_d1_local.py",
+    "bench/tools/d1-shard-check/**",
+    "chunking.py",
+    ".github/workflows/d1-shard-identity.yml",
+    "benchmarking/__init__.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [],
+   "when": "Pull request, path filter",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "cc-smoke",
+   "name": "Claude Code release smoke",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@product",
+    "claude_code_audit.py",
+    "claude_code_capture.py",
+    "claude_code_store.py",
+    "adapters/claude-code/**",
+    "scripts/build_claude_code_unit.py",
+    "scripts/claude_code_*",
+    "scripts/lcm_x_capture.py",
+    "scripts/lcm_x_mcp.py",
+    ".github/workflows/claude-code-release.yml"
+   ],
+   "inputs": [],
+   "when": "claude-code tags only",
+   "note": "The unit bundles the root core files.",
+   "catch_log": []
+  },
+  {
+   "id": "d4-d8",
+   "name": "D4/D8 judged QA rows",
+   "kind": "mapped",
+   "mechanisms": [
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "benchmarks/qa-harness/**",
+    "bench/tools/d4_health_rerun.py",
+    "bench/tools/d8_guard.py",
+    "scripts/lcm_longmemeval.py",
+    "benchmarking/longmemeval.py",
+    "benchmarking/__init__.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "provider-route",
+    "baseline",
+    "instrument-pin"
+   ],
+   "when": "Release, first rc",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "d1-flips",
+   "name": "D1 recall flips (full row)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "scripts/lcm_d1_local.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/longmemeval.py",
+    "scripts/lcm_longmemeval.py",
+    "bench/tools/v1m-rebank/**",
+    "benchmarking/__init__.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "baseline",
+    "provider-route",
+    "instrument-pin"
+   ],
+   "when": "Release rc",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "track-s",
+   "name": "D2/D3/D7 Track S rows",
+   "kind": "mapped",
+   "mechanisms": [
+    "M03",
+    "M04",
+    "M05",
+    "M06",
+    "M08",
+    "M16"
+   ],
+   "paths": [],
+   "inputs": [
+    "provider-route",
+    "instrument-pin",
+    "baseline"
+   ],
+   "when": "Release rc",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "boards",
+   "name": "Board rows (BEAM, LongMemEval, LoCoMo and the other shared-reader boards)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M06",
+    "M07",
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "benchmarks/qa-harness/**",
+    "benchmarking/longmemeval.py",
+    "benchmarking/__init__.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "provider-route",
+    "board-claim",
+    "monthly-drift"
+   ],
+   "when": "On a recall or summary change, before a claimed gain, monthly",
+   "note": "Boards are targets, not release gates.",
+   "catch_log": []
+  },
+  {
+   "id": "aml",
+   "name": "AML board cycle",
+   "kind": "mapped",
+   "mechanisms": [
+    "M06",
+    "M07",
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "bench/aml/**"
+   ],
+   "inputs": [
+    "provider-route",
+    "board-claim",
+    "monthly-drift"
+   ],
+   "when": "On a recall or summary change, before a claimed gain, monthly",
+   "note": "Boards are targets, not release gates.",
+   "catch_log": []
+  },
+  {
+   "id": "fmp",
+   "name": "FMP frontier-reader screen and dev loop",
+   "kind": "mapped",
+   "mechanisms": [
+    "M10",
+    "M12",
+    "M13"
+   ],
+   "paths": [
+    "bench/fmp/**",
+    "benchmarking/longmemeval.py",
+    "benchmarking/__init__.py",
+    "benchmarking/d1_cache.py",
+    "benchmarking/standalone.py"
+   ],
+   "inputs": [
+    "provider-route"
+   ],
+   "when": "By hand",
+   "note": "Not a gate.",
+   "catch_log": []
+  },
+  {
+   "id": "other-instruments",
+   "name": "Other instruments (MCP recall, scale, occurrence fuzz, clone, probe drivers)",
+   "kind": "manual",
+   "mechanisms": [],
+   "paths": [
+    "bench/instruments/cc_mcp_recall/**",
+    "bench/instruments/scale389/**",
+    "bench/instruments/occurrence_fuzz/**",
+    "bench/instruments/d5_clone/**",
+    "bench/instruments/compaction_probe/**"
+   ],
+   "inputs": [],
+   "when": "By hand",
+   "note": "Product reach is not mapped.",
+   "catch_log": []
+  },
+  {
+   "id": "replay-stress",
+   "name": "Deterministic replay and stress harnesses",
+   "kind": "manual",
+   "mechanisms": [],
+   "paths": [
+    "benchmarking/**",
+    "benchmarks/**",
+    "scripts/lcm_benchmark.py",
+    "scripts/lcm_stress_check.py",
+    "scripts/lcm_steady_state_bench.py",
+    "scripts/benchmark_threshold_full_sweep.py"
+   ],
+   "inputs": [],
+   "when": "By hand",
+   "note": "Calls compress, so it reaches compaction, but its product reach is not mapped.",
+   "catch_log": []
+  },
+  {
+   "id": "historical",
+   "name": "Historical rows (recorded results only)",
+   "kind": "manual",
+   "mechanisms": [],
+   "paths": [],
+   "inputs": [],
+   "when": "Never",
+   "note": "Retired: recorded results only.",
+   "catch_log": []
+  },
+  {
+   "id": "release-yml",
+   "name": "release.yml (needs the tag's release notes)",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    ".github/release-notes/**",
+    ".github/workflows/release.yml"
+   ],
+   "inputs": [],
+   "when": "Every v* tag",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "plugin-payload",
+   "name": "plugin-payload.yml (catalog payload publish)",
+   "kind": "mapped",
+   "mechanisms": [
+    "M19"
+   ],
+   "paths": [
+    "@product",
+    "scripts/build_plugin_payload.py",
+    "scripts/payload/**",
+    "release/**",
+    "LICENSE",
+    ".github/workflows/plugin-payload.yml"
+   ],
+   "inputs": [],
+   "when": "Every v* tag",
+   "note": "",
+   "catch_log": []
+  },
+  {
+   "id": "maintainability",
+   "name": "Maintainability report (advisory)",
+   "kind": "mapped",
+   "mechanisms": [],
+   "paths": [
+    "@python",
+    "scripts/maintainability/**",
+    ".github/workflows/maintainability-report.yml"
+   ],
+   "inputs": [],
+   "when": "Every pull request",
+   "note": "",
+   "catch_log": []
+  }
+ ]
+}
