@@ -191,8 +191,9 @@ from .sqlite_util import (
     _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
 )
-from .head_copy import is_known_head_copy
+from .head_copy import has_head_copy_shape, is_known_head_copy
 from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
+from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, _summary_part_text, verify_summary_prefix
 from .tokens import _get_encoder, count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
 from .frontier_state import FrontierState
@@ -341,22 +342,6 @@ class SummaryResultRejected(RuntimeError):
 def _condensation_source_text(nodes) -> str:
     """The summariser source of one same-depth condensation."""
     return "\n\n---\n\n".join(node.summary for node in nodes)
-
-
-_SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
-_LCM_SUMMARY_PART_HEADER_RE = re.compile(
-    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
-)
-
-
-def _summary_part_text(node) -> str:
-    """One frontier node as context assembly renders it in the summary prefix."""
-    label = _SUMMARY_DEPTH_LABELS.get(node.depth, f"Depth-{node.depth}")
-    return (
-        f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
-        f"{node.summary}\n"
-        f"[Expand for details: {node.expand_hint}]"
-    )
 
 
 def _visible_reply_text(message: Any) -> str:
@@ -6959,33 +6944,7 @@ class LCMEngine(
 
     @staticmethod
     def _verify_summary_prefix(content, get_node, owns_session, header_re=_LCM_SUMMARY_PART_HEADER_RE):
-        pos = 0
-        node_ids: list[int] = []
-        while True:
-            header = header_re.match(content, pos)
-            if header is None:
-                break
-            try:
-                node = get_node(int(header.group(2)))
-            except Exception:
-                return None, []
-            # A quoted part of an unrelated session's summary is user content (#484 item 11j).
-            if node is None or not owns_session(node.session_id) or int(node.depth) != int(header.group(1)):
-                return None, []
-            label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
-            part = (
-                f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
-                f"{node.summary}\n[Expand for details: {node.expand_hint}]"
-            )
-            if not content.startswith(part, pos):
-                return None, []
-            pos += len(part)
-            node_ids.append(int(node.node_id))
-            if content.startswith("\n\n---\n\n", pos) and header_re.match(content, pos + 7):
-                pos += 7
-                continue
-            break
-        return (pos, node_ids) if node_ids else (None, [])
+        return verify_summary_prefix(content, get_node, owns_session, header_re)
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
         """Return the real row glued behind a verified LCM summary prefix, else None.
@@ -11322,15 +11281,16 @@ class LCMEngine(
         """Filter store-backed occurrences while leaving the host's emitted head in place."""
         kept = []
         for row in messages:
-            if (row.get("role") == "user" and row.get("session_id")
+            content = row.get("content")
+            if (row.get("role") == "user" and has_head_copy_shape(content) and row.get("session_id")
                     and type(row.get("store_id")) is int
                     and not any(row.get(key) for key in ("api_content", "tool_calls", "tool_call_id", "name"))
                     and (stored := self._store.get(row["store_id"]))
-                    and stored["session_id"] == row["session_id"] and stored["content"] == row.get("content")
+                    and stored["session_id"] == row["session_id"] and stored["content"] == content
                     and stored.get("conversation_id") in ("", self._conversation_id)
                     and (stored["session_id"] == self._session_id
                          or self._identity_anchor_owned(stored, self._load_compression_carry_ranges()))
-                    and is_known_head_copy(self._store.connection, stored)):
+                    and is_known_head_copy(getattr(self._store, "connection", None), stored)):
                 continue
             kept.append(row)
         return messages if len(kept) == len(messages) else kept

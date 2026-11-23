@@ -83,6 +83,7 @@ jobs:
             summary_attempt.py
             summary_input_clip.py
             summary_outcome.py
+            summary_prefix.py
             survival_codec.py
             survival_fit.py
             tokens.py

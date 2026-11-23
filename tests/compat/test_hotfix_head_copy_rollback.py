@@ -153,7 +153,7 @@ def test_v0302_rollback_after_reading_known_head_copy(tmp_path, old_tree, host_r
         assert assembled and all(row.get("store_id") != copy_id for row in assembled)
         hits = json.loads(tools.lcm_grep(GREP, engine=hotfix))["results"]
         assert any(hit.get("store_id") for hit in hits)
-        # v0.30.3 leaves recall unchanged: lcm_grep may still return the copy (recall exclusion follows in v0.30.4).
+        assert all(hit.get("store_id") != copy_id for hit in hits)
     finally:
         hotfix.shutdown()
 
