@@ -13,6 +13,7 @@ from tests.behaviour.test_ingest_trace import reopen
 from tests.harness import pin_char_counter
 from tests.invariants.test_hotfix_host_shaped_passes import _stored_rows
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
+from tests.test_compression_boundary import _host_merge_consecutive_users
 from tests.test_issue_671_stub_first_exit import (
     STUB,
     exit_engine,
@@ -24,6 +25,7 @@ from tests.test_issue_671_stub_first_exit import (
     tool_pair,
     tool_view,
 )
+from tests.test_refused_compaction_rollback import _drain_session_end_maintenance
 
 
 class KnownStubPairCopy(AssertionError):
@@ -31,7 +33,7 @@ class KnownStubPairCopy(AssertionError):
 
 
 @pytest.fixture
-def replayed_stub_exit(bind, uid_mode, make_engine, summaries, monkeypatch, tmp_path, caplog):  # noqa: F811
+def split_head_stub_exit(uid_mode, make_engine, summaries, monkeypatch, caplog):  # noqa: F811
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
     pin_char_counter(monkeypatch)
@@ -69,6 +71,12 @@ def replayed_stub_exit(bind, uid_mode, make_engine, summaries, monkeypatch, tmp_
     )
     status = engine._last_stub_first_exit
     assert status["tokens_after"] == count_messages_tokens(returned) <= status["target_tokens"]
+    return engine, stamp, supplied, returned, before
+
+
+@pytest.fixture
+def replayed_stub_exit(bind, split_head_stub_exit, tmp_path):
+    engine, stamp, supplied, returned, before = split_head_stub_exit
 
     new_rows = [{"role": "user", "content": "Check the final account."},
                 *tool_pair("next-account", "final account result"),
@@ -88,6 +96,37 @@ def replayed_stub_exit(bind, uid_mode, make_engine, summaries, monkeypatch, tmp_
         assert _stored_rows(engine) == stored, "retry copied or lost a durable row"
 
     return supplied, returned, appended[:-len(new_rows)]
+
+
+@pytest.mark.parametrize("uid_mode", ["off"])
+def test_split_stub_exit_survives_rotation_with_host_merge(uid_mode, split_head_stub_exit):
+    engine, stamp, supplied, returned, before = split_head_stub_exit
+    parent, child = engine._session_id, "split-head-rotation-child"
+    _drain_session_end_maintenance(engine)
+    engine.on_session_end(parent, supplied)
+    assert engine._compress_commit_proof["end_consumed"]
+    engine.on_session_start(child, boundary_reason="compression", old_session_id=parent,
+                            platform="cli", conversation_id=engine._conversation_id, context_length=200_000)
+    assert engine._session_id == child
+    assert _stored_rows(engine) == before, "rotation copied, changed, or lost a durable row"
+
+    turn = [{"role": "user", "content": "New request after rotation."},
+            {"role": "assistant", "content": "Reply after rotation."}]
+    live = stamp(_host_merge_consecutive_users([*returned, *turn]))
+    summary, retained = supplied[:2]
+    assert live[0]["content"] == summary["content"] + "\n\n" + retained["content"]
+    engine.ingest(live)
+
+    after = _stored_rows(engine)
+    assert after[:len(before)] == before, "replay changed or lost a durable row"
+    assert not any(role == "user" and summary["content"] in content
+                   for _, _, role, content, _, _ in after), "replay stored summary text as a user row"
+    assert [row[1:5] for row in after[len(before):]] == [
+        (child, row["role"], row["content"], None) for row in turn
+    ], "replay copied a row or failed to store the new turn once in the child"
+    engine.ingest(deepcopy(live))
+    assert _stored_rows(engine) == after, "retry copied or lost a durable row"
+    assert returned[:2] == supplied[:2], "stub-only exit rewrote the split head before rotation"
 
 
 @pytest.mark.parametrize("uid_mode", ["off", "on"])
