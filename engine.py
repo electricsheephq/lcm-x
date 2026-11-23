@@ -780,6 +780,10 @@ class LCMEngine(
         self._config = config or LCMConfig.from_env()
         # None is turn start. An empty ID denotes a direct response from a host without turn IDs.
         self._turn_start_defer_mid_turn_id: str | None = None
+        self._turn_start_defer_logged = False
+        self._turn_start_deferrals = 0
+        self._turn_start_defer_warned: set[tuple[int, int, float]] = set()
+        self._absolute_threshold_active = False
         self._absolute_threshold_tokens = getattr(
             self._config, "_absolute_threshold_tokens", None
         )
@@ -1669,6 +1673,7 @@ class LCMEngine(
             # config.yaml lcm.context_threshold_tokens, resolved by LCMConfig.from_env()
             # with LCM_ABSOLUTE_THRESHOLD_TOKENS taking precedence (#48).
             absolute_threshold_tokens = int(getattr(self._config, "absolute_threshold_tokens", 0) or 0)
+        self._absolute_threshold_active = absolute_threshold_tokens > 0
         if absolute_threshold_tokens > 0:
             self.threshold_tokens = absolute_threshold_tokens
             # Keep route-specific ratio auto-raise from re-climbing the
@@ -1676,6 +1681,31 @@ class LCMEngine(
             # above, but disabling auto-raise keeps status/percent honest.
             self._config.codex_gpt55_autoraise_enabled = False
         return True
+
+    def _warn_turn_start_defer_ceiling(self) -> None:
+        ceiling = self._config.turn_start_defer_ceiling
+        context_length, trigger = self.context_length, self.threshold_tokens
+        if not ceiling or context_length <= 0 or trigger <= 0:
+            return
+        ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling)
+        if ceiling_tokens <= trigger:
+            reason = "inert: the defer ceiling is at or below the compaction trigger; the gate never defers"
+        elif self._absolute_threshold_active or self._context_threshold_source.startswith("model_thresholds:"):
+            reason = "unanchored: the defer ceiling follows the model window and the trigger is absolute or per-model"
+        else:
+            return
+        key = (context_length, trigger, ceiling)
+        with self._compaction_gate:
+            if key in self._turn_start_defer_warned:
+                return
+            self._turn_start_defer_warned.add(key)
+        try:
+            logger.warning(
+                "LCM defer ceiling is %s (ceiling_tokens=%s threshold_tokens=%d context_length=%d)",
+                reason, ceiling_tokens, trigger, context_length,
+            )
+        except Exception:
+            pass  # A diagnostic handler cannot interrupt model or session binding.
 
     def _session_metadata_matches_active_runtime(
         self,
@@ -1897,6 +1927,8 @@ class LCMEngine(
         # A direct ContextEngine response is already scoped to this engine. A hook
         # observation must match the active host turn so an early exit fails open.
         self._turn_start_defer_mid_turn_id = active_turn_id if reason in ("tool_use", "tool_calls") else None
+        if self._turn_start_defer_mid_turn_id is None:
+            self._end_turn_start_defer_episode()
 
     def _turn_start_defer_is_mid_turn(self) -> bool:
         turn_id = self._turn_start_defer_mid_turn_id
@@ -2696,6 +2728,7 @@ class LCMEngine(
         try:
             if not self._bypasses_lcm_context_management():
                 self._turn_start_defer_mid_turn_id = None
+                self._end_turn_start_defer_episode()
             if (self._sweep_budget_hold_turn_paced and (strike := self._hung_summary_strike) is not None
                     and strike[0] == self._hold_conversation_key()
                     and self._sweep_budget_hold_conversation == self._hold_conversation_key()
@@ -3044,6 +3077,7 @@ class LCMEngine(
             # Stopped turns can skip post_llm_call and stopped-tail ingest.
             if not self._bypasses_lcm_context_management():
                 self._turn_start_defer_mid_turn_id = None
+                self._end_turn_start_defer_episode()
             base = getattr(super(), "on_turn_complete", None)
             if callable(base):
                 base(messages, usage=usage, **meta)
@@ -3383,6 +3417,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._warn_turn_start_defer_ceiling()
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
@@ -4452,6 +4487,7 @@ class LCMEngine(
         if frontier > int(state.current_frontier_store_id or 0):
             state = self._lifecycle.advance_frontier(self._conversation_id, session_id, frontier) or state
         self._apply_session_start_metadata(session_id, kwargs)
+        self._warn_turn_start_defer_ceiling()
         self._frontier_holder().publish_frontier(int(state.current_frontier_store_id or 0))
         proof = self._compress_commit_proof
         if (
@@ -4775,6 +4811,9 @@ class LCMEngine(
 
         self._apply_session_start_metadata(session_id, kwargs)
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
+        if session_id != previous_session_id:
+            # A compression continuation can retain the tool-turn phase across session IDs.
+            self._reset_turn_start_deferrals()
         for digest in boundary_native_recovery_snapshot_digests:
             self._remember_native_recovery_replay_snapshot_digest(digest)
         commit_proof = getattr(self, "_compress_commit_proof", None)
@@ -5267,6 +5306,7 @@ class LCMEngine(
         self._clear_thread_context_stateless()
         if not (boundary_reason == "compression" and old_session_id == session_id == previous_session_id):
             self._turn_start_defer_mid_turn_id = None
+            self._end_turn_start_defer_episode()
         if previous_session_id and previous_session_id != session_id:
             self._finalize_pending_reset_boundary(previous_session_id)
             self._reset_session_scoped_runtime_state()
@@ -6596,6 +6636,13 @@ class LCMEngine(
             "config_source_warnings": list(getattr(self._config, "config_source_warnings", []) or []),
             "ignored_config_yaml_lcm_keys": list(getattr(self._config, "ignored_config_yaml_lcm_keys", []) or []),
         })
+        if ceiling := self._config.turn_start_defer_ceiling:
+            status.update(
+                turn_start_defer_ceiling=ceiling,
+                turn_start_defer_ceiling_tokens=format(self._turn_start_defer_ceiling_tokens(ceiling).normalize(), "f")
+                if self.context_length > 0 else None,
+                turn_start_deferrals=self._turn_start_deferrals,
+            )
         with self._assertion_extraction_metrics_lock:
             status["assertion_extraction"] = {
                 "store_enabled": self._assertions is not None,
@@ -6756,6 +6803,7 @@ class LCMEngine(
         self.provider = str(provider or "")
         self.api_mode = str(api_mode or "")
         self._set_context_length(context_length, source="update_model")
+        self._warn_turn_start_defer_ceiling()
         self._update_model_pending_session_start = True
 
     def _refresh_session_filters(self) -> None:

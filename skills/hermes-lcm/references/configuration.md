@@ -126,6 +126,13 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
   signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
   at or above the ceiling and during forced overflow.
   Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
+
+  LCM-X warns when the ceiling is at or below the effective trigger (inert) or
+  above an absolute or per-model trigger (unanchored), with both token values.
+  The first deferral in each episode logs at INFO and subsequent deferrals log
+  at DEBUG. When enabled, `/lcm status` shows the ceiling as a share and in tokens
+  beside the trigger, plus the session's deferral count.
+
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;

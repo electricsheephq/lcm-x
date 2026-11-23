@@ -539,6 +539,13 @@ compaction summarises is set by `LCM_LEAF_CHUNK_TOKENS`, and how long it may tak
 `LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`; the summary DAG depth
 is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
 
+With `LCM_TURN_START_DEFER_CEILING` enabled, LCM-X warns if the ceiling is at or
+below the effective compaction trigger (inert) or above an absolute or per-model
+trigger (unanchored). Both warnings include the token values. The first deferral
+in each episode logs at INFO and subsequent deferrals log at DEBUG. `/lcm status`
+shows the ceiling as a share and in tokens beside the trigger, along with the
+current session's deferral count.
+
 Useful environment variables:
 
 | Variable | Default | Use |

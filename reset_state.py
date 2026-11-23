@@ -11,6 +11,10 @@ import uuid
 
 
 class ResetStateMixin:
+    def _reset_turn_start_deferrals(self) -> None:
+        with self._compaction_gate:
+            self._turn_start_deferrals = 0
+
     def _reset_session_counters(self) -> None:
         """Reset session-scoped counters and token tracking.
 
@@ -55,6 +59,8 @@ class ResetStateMixin:
         """
         # Each boundary exit counts its own outcome (#2055); a reset only drops the handle.
         self._turn_start_defer_mid_turn_id = None
+        self._end_turn_start_defer_episode()
+        self._reset_turn_start_deferrals()
         self._emission_handle = None
         self._reset_session_counters()
         self._reset_compaction_progress()
