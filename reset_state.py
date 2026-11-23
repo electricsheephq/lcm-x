@@ -12,7 +12,11 @@ import uuid
 
 class ResetStateMixin:
     def _reset_turn_start_deferrals(self) -> None:
-        with self._compaction_gate:
+        gate = getattr(self, "_compaction_gate", None)  # Absent on a half-built engine, which has no gate hits to race.
+        if gate is None:
+            self._turn_start_deferrals = 0
+            return
+        with gate:
             self._turn_start_deferrals = 0
 
     def _reset_session_counters(self) -> None:

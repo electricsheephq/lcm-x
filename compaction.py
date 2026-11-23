@@ -302,7 +302,8 @@ class CompactionMixin:
         return Decimal(str(ceiling)) * self.context_length
 
     def _end_turn_start_defer_episode(self) -> None:
-        if self._turn_start_defer_logged:
+        # Reset sites also run on half-built engines (tests/test_frontier_state.py); only a gate hit sets the flag.
+        if getattr(self, "_turn_start_defer_logged", False):
             with self._compaction_gate:
                 self._turn_start_defer_logged = False
 
