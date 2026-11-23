@@ -328,7 +328,7 @@ receipt is completed in L2 by the rest of its hands-on lane.
      | the receipt is not for the candidate's tree | `INCONCLUSIVE`, with the cause recorded |
      | the receipt is for the candidate's tree and records `UNRUN` (the planner records it when a count bound was not passed) | `UNRUN` |
      | the receipt is for the candidate's tree, has the pinned settings, and records `PASS`, `FAIL` or `INCONCLUSIVE` | the recorded verdict |
-     | the receipt is for the candidate's tree and records `PASS`, `FAIL` or `INCONCLUSIVE` without the pinned settings, or records any other verdict or none | `INCONCLUSIVE`, with the cause recorded |
+     | the receipt is for the candidate's tree and records `PASS`, `FAIL` or `INCONCLUSIVE` without the pinned settings, or records a verdict other than `PASS`, `FAIL`, `INCONCLUSIVE` or `UNRUN`, or none | `INCONCLUSIVE`, with the cause recorded |
 
   An instrument can exit 0 with a receipt that is not `PASS`, so its exit code never decides a check.
   Both checks first gate at v0.30.2's first release candidate, subject to the decisions this spec
