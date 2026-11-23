@@ -932,6 +932,8 @@ Examples, as math rather than universal recommendations:
 | `200000` | `140000` | `0.70` |
 | `400000` | `240000` | `0.60` |
 | `1000000` | `250000` | `0.25` |
+| `1000000` | `400000` | `0.40` |
+| `1000000` | `600000` | `0.60` |
 
 With a host that passes response stop reasons, this profile example defers
 eligible mid-turn passes from 500,000 up to 700,000 prompt tokens on a
@@ -942,8 +944,6 @@ the normal gates decide whether to compact.
 LCM_CONTEXT_THRESHOLD=0.50
 LCM_TURN_START_DEFER_CEILING=0.70
 ```
-| `1000000` | `400000` | `0.40` |
-| `1000000` | `600000` | `0.60` |
 
 A reasonable first pass for a true 1M effective window is:
 

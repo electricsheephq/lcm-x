@@ -443,3 +443,16 @@ def test_invalid_direct_ceiling_is_disabled_with_one_warning(value):
     assert cfg.turn_start_defer_ceiling == 0
     assert len(cfg.config_source_warnings) == 1
     assert f"turn_start_defer_ceiling={value!r}" in cfg.config_source_warnings[0]
+
+
+def test_ceiling_field_is_appended_last_for_positional_construction():
+    # LCMConfig keeps positional-constructor compatibility: a field added later goes after every earlier field.
+    import dataclasses
+
+    names = [f.name for f in dataclasses.fields(LCMConfig)]
+    assert names[-1] == "turn_start_defer_ceiling"
+    assert names[names.index("context_threshold") + 1] == "model_thresholds"
+    positional = [getattr(LCMConfig(), name) for name in names[: names.index("model_thresholds")]]
+    config = LCMConfig(*positional, {"glm": 0.5})
+    assert config.model_thresholds == {"glm": 0.5}
+    assert config.turn_start_defer_ceiling == 0.0

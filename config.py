@@ -1184,8 +1184,6 @@ class LCMConfig:
     leaf_chunk_tokens: int = 24_000
     # Fraction of context window that triggers compaction (0.0–1.0)
     context_threshold: float = 0.75
-    # Below this share of the model window, wait until turn start to compact. Zero disables deferral.
-    turn_start_defer_ceiling: float = 0.0
     # Per-model threshold overrides. Keys are matched as substrings against
     # the model name (longest match wins). When a key matches, its value
     # replaces context_threshold for that model. Loaded from
@@ -1613,6 +1611,10 @@ class LCMConfig:
     # Loader provenance only, not a user setting. Manual configs are explicit.
     embeddings_enabled_explicit: bool = True
     _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
+
+    # Below this share of the model window, wait until turn start to compact. Zero disables deferral.
+    # Appended last so positional LCMConfig(...) construction keeps every earlier field's position.
+    turn_start_defer_ceiling: float = 0.0
 
     def __post_init__(self):
         self.turn_start_defer_ceiling = _parse_turn_start_defer_ceiling(
