@@ -51,7 +51,8 @@ def _run(tmp_path, monkeypatch, trip, returning):
     trips = _trips(monkeypatch, engine)
     pair = returning(rows[at:at + 2])
     engine.ingest([*rows[:at], *pair, *rows[at + 2:], leave, _a("a new reply", 1600)])
-    assert trips, "setup: the presence lookup tripped"
+    if not trips:  # pytest.fail raises Failed, not AssertionError, so the strict xfail cannot absorb it
+        pytest.fail("setup: the presence lookup did not trip")
     return engine, before, pair
 
 
@@ -63,8 +64,9 @@ def test_a_returning_stored_pair_is_not_stored_again(tmp_path, monkeypatch, trip
     engine, before, pair = _run(tmp_path, monkeypatch, trip, lambda stored: stored)
     try:
         stored = _counts(engine)
+        if before - stored:  # checked first, and as Failed, so a loss can never count as the expected failure
+            pytest.fail(f"a stored row was lost: {sorted(before - stored)}")
         assert [stored[_key(row)] for row in pair] == [before[_key(row)] for row in pair] == [1, 1]
-        assert not before - stored, "no stored row is lost"
     finally:
         engine.shutdown()
 
