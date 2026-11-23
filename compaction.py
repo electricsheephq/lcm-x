@@ -2434,7 +2434,8 @@ class CompactionMixin:
             start + offset: int(row["store_id"])
             for offset, row in enumerate(rows)
             if int(row["store_id"]) in lineage
-            or (int(row["store_id"]) > low and str(row.get("role") or "") in replies)
+            # After a refusal, consume only rows leaf lineage covers (#3006), never an uncovered reply.
+            or (not refused_replay and int(row["store_id"]) > low and str(row.get("role") or "") in replies)
         }
         dropped_ids = set(dropped.values()) | merged_ids
         covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}

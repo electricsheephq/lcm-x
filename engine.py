@@ -3335,10 +3335,6 @@ class LCMEngine(
             timeout=timeout,
         )
 
-    def _reset_session_scoped_runtime_state(self) -> None:
-        self._pending_refused_emissions = set()
-        super()._reset_session_scoped_runtime_state()
-
     def _bind_lifecycle_state(
         self,
         session_id: str,
@@ -3346,7 +3342,6 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
-        self._pending_refused_emissions = set()
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
                 self._survival_overhead_observation[0] != state.conversation_id:
@@ -4361,7 +4356,6 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
-        self._pending_refused_emissions = set()
         self._ledger_count("ledger.emission_boundary_unadopted")
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:

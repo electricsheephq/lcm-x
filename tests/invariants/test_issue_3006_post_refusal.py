@@ -544,12 +544,14 @@ def _tool_reply(turn, suffix=""):
 @pytest.mark.parametrize("uid_mode", ["off", "on"])
 @pytest.mark.parametrize("shape,uncovered", [
     ("three-way", None), ("three-way", 0),
+    ("three-way-with-exact", None), ("three-way-with-exact", 3),
     ("tool-separated", None), ("tool-separated", 1),
     ("two-tool-separated", None), ("two-tool-separated", 4),
     ("cleanup-middle", None), ("cleanup-middle", 1),
     ("ignored-marker-middle", None), ("ignored-marker-middle", 1),
 ], ids=[
     "three-way-covered", "three-way-uncovered-end",
+    "following-exact-covered", "following-exact-uncovered",
     "tool-separated-covered", "tool-separated-uncovered-tool",
     "two-tool-separated-covered", "two-tool-separated-uncovered-tool",
     "cleanup-middle-covered", "cleanup-middle-uncovered-middle",
@@ -563,6 +565,7 @@ def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monke
     right = {"role": "assistant", "content": "Last reply."}
     by_shape = {
         "three-way": [left, middle, right],
+        "three-way-with-exact": [left, middle, right],
         "tool-separated": [*_tool_reply(1), right],
         "two-tool-separated": [*_tool_reply(1), *_tool_reply(1, "b"), right],
         "cleanup-middle": [left, {"role": "assistant", "content": "<think>Internal-only narration.</think>"}, right],
@@ -573,9 +576,17 @@ def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monke
         row["content"].strip() for i, row in enumerate(run)
         if row["role"] == "assistant" and not (i == 1 and shape.endswith("-middle"))
     )
+    messages = [{"role": "assistant", "content": joined}]
+    store_ids = {}
+    if shape == "three-way-with-exact":
+        exact = {"role": "assistant", "content": "Separate exact reply."}
+        messages.append(exact)
+        run.append({**exact, "store_id": 14})
+        store_ids[id(exact)] = 14
     frontier = run[-1]["store_id"]
     successor = {"role": "user", "content": "Next request.", "store_id": frontier + 1}
-    messages = [{"role": "assistant", "content": joined}, successor]
+    messages.append(successor)
+    store_ids[id(successor)] = successor["store_id"]
     engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
     try:
         engine.on_session_start(SID, platform="acp", conversation_id="refusal-test")
@@ -595,15 +606,21 @@ def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monke
         monkeypatch.setattr(engine._store, "get_session_rows_through", lambda _, end, limit:
                             [row for row in run if row["store_id"] <= end][-limit:] if limit else [])
         monkeypatch.setattr(engine._store, "get_session_messages_after", lambda *_args, **_kwargs: [successor])
-        monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda *_args, **_kwargs:
-                            {id(successor): successor["store_id"]})
+        monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda *_args, **_kwargs: store_ids)
         monkeypatch.setattr(engine, "_latest_compaction_was_refused", lambda: True)
         sources = [(i + 1, 3, row["store_id"]) for i, row in enumerate(run) if i != uncovered]
         monkeypatch.setattr(engine._dag, "get_leaf_sources_through", lambda *_: sources)
 
         drops, _, tokens, kept = engine._committed_replay_drops(messages, 0)
-        covered = uncovered is None and shape != "ignored-marker-middle"
-        assert (drops, tokens, kept) == (([0], 3 * len(run), 0) if covered else ([], 0, 0))
+        if shape == "three-way-with-exact":
+            remaining = [message for i, message in enumerate(messages) if i not in drops]
+            if uncovered is None:
+                assert (remaining, tokens, kept) == ([successor], 12, 0)
+            else:
+                assert (remaining, tokens, kept) == ([exact, successor], 9, 1)
+        else:
+            covered = uncovered is None and shape != "ignored-marker-middle"
+            assert (drops, tokens, kept) == (([0], 3 * len(run), 0) if covered else ([], 0, 0))
     finally:
         engine.shutdown()
 
@@ -805,6 +822,52 @@ def test_refused_emission_write_retries_original_view(committed_host, monkeypatc
     assert gate_outcomes[0] == ((False, ("adopted",)) if adopted else (True, ("refused",)))
     if not adopted:
         assert _r3_frontier(engine) > frontier and len(returned) < len(live)
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("next_session", [SID, "S1"], ids=["same-session", "session-switch"])
+def test_refused_emission_retry_respects_session_binding(request, monkeypatch, uid_mode, next_session):
+    """I1, I2, I11. An ordinary bind preserves a retry only for its own session."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    assert _emission_state(engine, handle) == ("proposed",)
+
+    @contextmanager
+    def unavailable(_salt):
+        yield None, "in_transaction"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_emission_owner", unavailable)
+        engine.record_rejected_compaction()
+    assert _emission_state(engine, handle) == ("proposed",)
+    assert (handle, engine._emission_handle_salt) in engine._pending_refused_emissions
+    engine.note_turn_complete()
+
+    write = Mock(wraps=engine._write_emission_state)
+    monkeypatch.setattr(engine, "_write_emission_state", write)
+    engine.on_session_start(next_session, **binding)
+    assert (engine._session_id, engine._conversation_id) == (next_session, binding["conversation_id"])
+    if next_session == SID:
+        gate = Mock(wraps=engine._latest_compaction_was_refused)
+        monkeypatch.setattr(engine, "_latest_compaction_was_refused", gate)
+        drops, _, _, _ = engine._committed_replay_drops(kept, 0)
+        assert _emission_state(engine, handle) == ("refused",)
+        gate.assert_called_once_with()
+        assert drops
+        write.assert_called_once_with(handle, engine._emission_handle_salt, "refused")
+    else:
+        fresh = [row for i in range(30, 44) for row in _turn(i)]
+        assert engine.compress(fresh, force=True) != fresh
+        new_handle = engine._emission_handle
+        assert new_handle is not None and new_handle.session_id == next_session
+        assert _emission_state(engine, new_handle) == ("proposed",)
+        assert not engine._latest_compaction_was_refused()
+        assert _emission_state(engine, new_handle) == _emission_state(engine, handle) == ("proposed",)
+        write.assert_not_called()
+    assert not engine._pending_refused_emissions
 
 
 @pytest.mark.parametrize("case", ["later-accepted", "session-switch", "ledger-off"])
