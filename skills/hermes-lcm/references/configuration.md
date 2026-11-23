@@ -126,7 +126,8 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
   signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
   at or above the ceiling and during forced overflow.
   Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
-  So if a pass forced at or above the ceiling leaves the prompt above the trigger, the host's next
+  So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the
+  trigger, the host's next
   pre-API check in the same turn can start another pass, as with the setting off. The host's progress
   latch and attempt cap bound it; that pass logs no deferral line and does not move
   `turn_start_deferred_checks`.
