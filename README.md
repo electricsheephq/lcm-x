@@ -141,11 +141,11 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-[`v0.29.2`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
-at `261d41ea928eec3dc5b8db13c70f044392adf124`, released 2026-11-09 (plugin `hermes-lcm-x`, engine `lcm-x`).
-Compaction retries past a contiguity stop at the scan limit and keeps its exit
-headroom, shutdown waits for a running compaction, and a profile's storage opens
-only when that profile is used. See [project status](docs/project-status.md) for the release summary,
+[`v0.30.3`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.3),
+released 2026-11-23 (plugin `hermes-lcm-x`, engine `lcm-x`), a hotfix on v0.30.2.
+A same-length compaction pass no longer makes the next ingest store LCM-X's own
+summary head again as an extra user row, and a copy already stored stays out of
+the prompt and out of compaction. See [project status](docs/project-status.md) for the release summary,
 the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
@@ -162,7 +162,7 @@ installed stable product.
 
 v0.30.0 was cut on the `release/v0.30.x` maintenance branch (its candidates from rc4 on),
 not from `main`; v0.30.x patch releases are cut from that line. Its first patch release, v0.30.1 (the first v0.30.x release train),
-carries `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`. The `v0.30.0` tag carries
+carries `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`, and the `v0.30.3` hotfix carries `hermes-lcm-x v0.30.3` (its fix was first tagged as `v0.30.3-rc1`, under the v0.30.2 identity). The `v0.30.0` tag carries
 `hermes-lcm-x v0.30.0`, and the `main` line keeps that identity in `plugin.yaml` until its
 own next release.
 An identity is never a restamp of any past commit's own recorded identity
@@ -342,11 +342,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-Example output for v0.30.2 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
+Example output for v0.30.3 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.2 (16 tools)
+  ✓ hermes-lcm-x v0.30.3 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -1347,7 +1347,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.2` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.30.3` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

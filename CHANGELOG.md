@@ -6,6 +6,19 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.30.3 (2026-11-23)
+
+- Fix: a same-length compaction pass (a stub-first exit, or a pass whose only leaf covers hidden rows) no longer
+  makes the next ingest store LCM-X's own summary head again as an extra user row. For that pass LCM-X records, in
+  memory only, exact digests of the user rows it emitted (summary, carrier and objective); the next ingest trusts a
+  row that matches its digest byte for byte, whatever its timestamp.
+- Fix: a summary-head copy already stored stays in the store unchanged, but is left out of prompt assembly and out
+  of compaction input. A stored user row counts as LCM-X's own head only when every summary part verifies byte for
+  byte against this session's summary nodes, it carries the existing `generated_unproven` relation, and any carrier
+  remainder is already stored as an earlier user row. No setting change, no schema change and no new store write.
+  Recall can still return a stored copy (planned for v0.30.4). The transcript repair planned for v0.30.3 (#3022)
+  moved to the next train.
+
 ## v0.30.2 (the merged-reply loss fix)
 
 - Fix: on both reproduced routes, an assistant reply that calls tools, at the start of a turn whose two user
