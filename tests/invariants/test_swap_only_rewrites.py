@@ -59,19 +59,6 @@ SUMMARY_MARKER = "R-STABLE source "
 EVENTS = ("none", "cold-bind", "session-switch", "config-reload", "inbox")
 PASS_KINDS = ("leaf", "condensation", "stub-only", "stub-only-merged-head", "refused")
 KNOWN_FAILS = {
-    # Without fix (a) the stub-only exit re-assembles: the head is rewritten at row 0 and the list comes back
-    # shorter than the host's (adjacent rows merged), so the check stops at the first row and these pins say
-    # nothing about the later rows. Fix (a) turns all ten green.
-    "stub-only/none/off": (("stub-only rewrite", 7),),
-    "stub-only/none/on": (("stub-only rewrite", 7),),
-    "stub-only/cold-bind/off": (("stub-only rewrite", 7),),
-    "stub-only/cold-bind/on": (("stub-only rewrite", 7),),
-    "stub-only/session-switch/off": (("stub-only rewrite", 7),),
-    "stub-only/session-switch/on": (("stub-only rewrite", 7),),
-    "stub-only/config-reload/off": (("stub-only rewrite", 7),),
-    "stub-only/config-reload/on": (("stub-only rewrite", 7),),
-    "stub-only/inbox/off": (("stub-only rewrite", 7),),
-    "stub-only/inbox/on": (("stub-only rewrite", 7),),
     "stub-only-merged-head/none/off": (("adjacent-assistant merge", 7, 23),),
     "stub-only-merged-head/none/on": (("adjacent-assistant merge", 7, 23),),
     "stub-only-merged-head/cold-bind/off": (("adjacent-assistant merge", 7, 23),),

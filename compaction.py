@@ -40,7 +40,7 @@ from .escalation import (
     UnattributedRescueRefused,
     _summary_call,
 )
-from .externalize import ingest_payload_writes, payload_lookup_scope
+from .externalize import ingest_payload_writes, is_externalized_placeholder, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import redact_sensitive_value
 from . import ingest_ledger, leaf_prep
@@ -2059,6 +2059,7 @@ class CompactionMixin:
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
         persist: bool = True,
+        choose_stub_replay: Callable | None = None,
     ) -> List[Dict[str, Any]]:
         """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -2071,6 +2072,7 @@ class CompactionMixin:
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
                 **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
+                **({"_choose_stub_replay": choose_stub_replay} if choose_stub_replay is not None else {}),
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -2081,6 +2083,60 @@ class CompactionMixin:
             self._pending_context_anchor_messages = None
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
+
+    def _splice_stub_replay(self, messages, assembled, summary, carried_tail):
+        """Use the host's rows when assembly proved the same replay with tool stubs."""
+        head_index = 1 if messages and messages[0].get("role") == "system" else 0
+        split = carried_tail is not None and len(messages) == len(assembled) + 1
+        if split:
+            if (summary is None or len(assembled) <= head_index
+                    or not self._is_verified_replay_scaffold_message(messages[head_index])
+                    or assembled[head_index].get("content") != f"{summary['content']}\n\n{carried_tail['content']}"):
+                return None
+            assembled = [*assembled[:head_index], summary, carried_tail, *assembled[head_index + 1:]]
+        if len(messages) != len(assembled):
+            return None
+
+        spliced = []
+        for index, (original, rendered) in enumerate(zip(messages, assembled)):
+            comparison = rendered
+            if index == 0 and original.get("role") == "system" and rendered.get("role") == "system":
+                if rendered.get("content") == self._append_lcm_note_to_content(original.get("content")):
+                    comparison = {**rendered, "content": original.get("content")}
+            if index == head_index and (
+                carried_tail is not None
+                or (head_index == 1 and summary is not None and rendered.get("content") == summary["content"]
+                    and self._is_verified_replay_scaffold_message(original))
+            ):
+                # The renderer may use a different UID for the generated row. Keep the host occurrence.
+                comparison = {**comparison, "message_uid": original.get("message_uid")}
+                original_for_comparison = {**original, "message_uid": original.get("message_uid")}
+            else:
+                original_for_comparison = original
+            if self._compression_rows_equal(comparison, original_for_comparison):
+                spliced.append(original)
+                continue
+            content = rendered.get("content")
+            if (
+                original.get("role") != "tool"
+                or not is_externalized_placeholder(text_content_for_pattern_matching(content) or "")
+                or is_externalized_placeholder(text_content_for_pattern_matching(original.get("content")) or "")
+            ):
+                return None
+            replacement = {**original, "content": content}
+            if rendered != replacement:
+                return None
+            spliced.append(replacement)
+        return spliced if any(a is not b for a, b in zip(spliced, messages)) else None
+
+    def _choose_stub_replay(self, messages, cap, overhead, target, reserve, assembled, summary, carried_tail):
+        replay = self._splice_stub_replay(messages, assembled, summary, carried_tail)
+        if (
+            replay is None or self._survival_measure(replay) + overhead + reserve > target
+            or (cap is not None and count_messages_tokens(replay) + reserve > cap)
+        ):
+            return None
+        return replay
 
     @payload_lookup_scope()
     def _stub_first_exit(
@@ -2133,9 +2189,15 @@ class CompactionMixin:
         # writes nothing and runs no proactive recall (its block is reserved at its budget); a taken exit assembles
         # once more with the writes and the recall a final assembly makes.
         override = None if cap is None else sys.maxsize
-        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override, persist=False)
         recall = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
         overhead = self._survival_host_overhead(messages, observed_tokens)
+        # Prefer a splice that fits the depth target. If the regular rendering fits there instead,
+        # it can exit now. Otherwise keep the existing, less restrictive zero-leaf fallback.
+        trial_target = min(target, depth_target_tokens) if fallback_state is not None else target
+        candidate = self._assemble_committed_compaction_context(
+            rows, anchor_source_messages, override, persist=False,
+            choose_stub_replay=partial(self._choose_stub_replay, messages, cap, overhead, trial_target, recall),
+        )
         trial_tokens = self._survival_measure(candidate) + overhead + recall
         if (
             trial_tokens > target
@@ -2147,14 +2209,18 @@ class CompactionMixin:
             # Keep the validated free cuts; write their assembly only if no leaf lands.
             fallback_state.stub_first_fallback = partial(
                 self._finalize_stub_first_exit, rows, anchor_source_messages, observed_tokens, cap, overhead, target,
+                messages=messages,
             )
             if trial_tokens > depth_target_tokens:
                 return None
             target = depth_target_tokens
-        return self._finalize_stub_first_exit(rows, anchor_source_messages, observed_tokens, cap, overhead, target)
+        return self._finalize_stub_first_exit(
+            rows, anchor_source_messages, observed_tokens, cap, overhead, target, messages=messages,
+        )
 
     @payload_lookup_scope()
-    def _finalize_stub_first_exit(self, rows, anchor_source_messages, observed_tokens, cap, overhead, target):
+    def _finalize_stub_first_exit(self, rows, anchor_source_messages, observed_tokens, cap, overhead, target, *,
+                                  messages):
         if self._compress_binding_changed():
             return None
         override = None if cap is None else sys.maxsize
@@ -2162,7 +2228,10 @@ class CompactionMixin:
         keys = [self._folded_tail_lineage_metadata_key(), self._active_replay_snapshot_metadata_key()]
         saved = [self._store.read_metadata_json(key) for key in keys]
         pending = list(getattr(self, "_pending_emission_candidates", None) or [])
-        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override)
+        candidate = self._assemble_committed_compaction_context(
+            rows, anchor_source_messages, override,
+            choose_stub_replay=partial(self._choose_stub_replay, messages, cap, overhead, target, 0),
+        )
         after = self._survival_measure(candidate) + overhead
         if after > target or (cap is not None and count_messages_tokens(candidate) > cap):
             for key, value in zip(keys, saved):
