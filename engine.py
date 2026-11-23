@@ -8236,22 +8236,28 @@ class LCMEngine(
     def _signal_emission_state(self, new_state, session_id, *, require_conversation=False):
         if ingest_ledger_mode() == "off":
             return
-        self._retry_refused_emissions()
         pending = self._pending_refused_emissions
         handle = self._emission_handle
         if (handle is None or handle.compress_call != self._compress_calls or handle.session_id != session_id
                 or require_conversation and handle.conversation_key != self._hold_conversation_key()):
+            self._retry_refused_emissions()
             self._ledger_count("ledger.emission_signal_unmatched")
             return
         target = (handle, self._emission_handle_salt)
-        if not self._write_emission_state(*target, new_state) and new_state == "refused":
+        # The write below is this view's attempt; retrying it first as well would write and count it twice.
+        self._retry_refused_emissions(skip=target)
+        if self._write_emission_state(*target, new_state):
+            pending.discard(target)
+        elif new_state == "refused":
             pending.add(target)
 
-    def _retry_refused_emissions(self):
+    def _retry_refused_emissions(self, skip=None):
         pending = self._pending_refused_emissions
         if not pending or ingest_ledger_mode() == "off":
             return
         for target in tuple(pending):
+            if target == skip:
+                continue
             handle, salt = target
             if (handle.session_id, handle.conversation_key) != (self._session_id, self._hold_conversation_key()):
                 pending.discard(target)
