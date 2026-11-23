@@ -1,12 +1,12 @@
 {
-  "source_sha": "f77d6ed98c8f2e896851b31720876e4c9d10f7b4",
-  "tooling_sha": "f77d6ed98c8f2e896851b31720876e4c9d10f7b4",
+  "source_sha": "112e3035eb1716a1f847d0953514df120174f5b3",
+  "tooling_sha": "112e3035eb1716a1f847d0953514df120174f5b3",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
   "readme_omitted_links": [],
-  "file_count": 124,
-  "total_bytes": 5056471,
+  "file_count": 125,
+  "total_bytes": 5064957,
   "files": [
     {
       "path": "LICENSE",
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "93d261b0b831dabc9ce4937f999391eac3078e805aff3dd7110b5b125dd3b5d8"
+      "sha256": "ce3020af309253b63b12f9dfe601c9d110136b05cc4aede96bc4673cb8e01b00"
     },
     {
       "path": "__init__.py",
@@ -105,8 +105,8 @@
     },
     {
       "path": "compaction.py",
-      "bytes": 253167,
-      "sha256": "e8f055483cd1665f65f91783732b7897105b85b3f324875ba373ce2ec0badc8a"
+      "bytes": 254105,
+      "sha256": "7a99e8b875fb9f463f8a1559a98e09452ceea1214e8eb9e21f2df290e2a9e2b0"
     },
     {
       "path": "compaction_policy.py",
@@ -165,8 +165,8 @@
     },
     {
       "path": "engine.py",
-      "bytes": 709537,
-      "sha256": "6ac53e9128f5a1929a7cab2e3ad40425e7bd63269ecdc3aa7e36ce23b2d4ce8a"
+      "bytes": 711890,
+      "sha256": "52042256e930f50a8e3f0807307236d76d5a5b2afc2e249b8db576e49dc8688b"
     },
     {
       "path": "engine_registry.py",
@@ -237,6 +237,11 @@
       "path": "guidance.py",
       "bytes": 1030,
       "sha256": "4e155aed152032319c5d24ec0f39805aa06e6807a0c09ea8b75679849d628770"
+    },
+    {
+      "path": "head_copy.py",
+      "bytes": 4086,
+      "sha256": "5b303af3e3c2da7b0fa4a36fc271e64be6fa64926612455fe27ff08385d6429e"
     },
     {
       "path": "host_rewrite.py",
@@ -315,8 +320,8 @@
     },
     {
       "path": "leaf_prep.py",
-      "bytes": 33460,
-      "sha256": "25a2bdebd1a1dac89a98bf29efcfb79364170e3bda9a797d68cf2aa6c3ac1992"
+      "bytes": 33562,
+      "sha256": "ac0620a83b686eadabc8353aecb8771c12ff61e266194c6c6100082fe2afa6f1"
     },
     {
       "path": "level3_repair.py",
@@ -325,8 +330,8 @@
     },
     {
       "path": "lifecycle_state.py",
-      "bytes": 48655,
-      "sha256": "db57a1370b181cd0ca20b220b0cf457cc61241c90f3e0720d7cc6e4f74a252d5"
+      "bytes": 49217,
+      "sha256": "dd2ffcda2cf398624adf2e24a68d4fd89eff2d34ceabfa3d02af8b351eafa9d9"
     },
     {
       "path": "maintenance.py",
@@ -425,8 +430,8 @@
     },
     {
       "path": "reconcile.py",
-      "bytes": 251241,
-      "sha256": "51b046e837503e2496725053ffe7b2bbb5eb4cd96f53b6653b8f9a98d1c02a99"
+      "bytes": 251535,
+      "sha256": "a9ce27a31770b4ed84c558af550d0528d285bf75a6762ad3b24033e48201ff45"
     },
     {
       "path": "recorder.py",
@@ -565,8 +570,8 @@
     },
     {
       "path": "store_complete.py",
-      "bytes": 60090,
-      "sha256": "9f992f1963ab9f485b0dc54693e5c85f2d58396f6253dedb66e50daa0a07c152"
+      "bytes": 60241,
+      "sha256": "7f81a08620057586c033257bf31183b802adec7f15e8a0bbcb7d6f5ac9334f2c"
     },
     {
       "path": "summary_attempt.py",
