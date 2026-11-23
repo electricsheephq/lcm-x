@@ -2594,6 +2594,14 @@ class LCMEngine(
         detail = dict(last_pass)
         return {"hidden_only_streak": detail.pop("passes"), "hidden_only_last_pass": detail}
 
+    def _clear_compaction_streaks_below_threshold(self) -> None:
+        key = self._hold_conversation_key()
+        self.__dict__.get("_zero_leaf_streaks", {}).pop(key, None)  # #1162
+        try:
+            self.__dict__.get("_hidden_only_streaks", {}).pop(key, None)  # #3081
+        except Exception:
+            logger.debug("LCM hidden-only streak reset failed", exc_info=True)
+
     def record_rejected_compaction(self) -> None:
         """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
         without arguments inside an error-swallowing wrapper. #665: a refusal of a bypassed (auxiliary or
@@ -3830,7 +3838,7 @@ class LCMEngine(
         observed = int(observed_tokens or 0)
         if observed < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
-            self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
+            self._clear_compaction_streaks_below_threshold()
             return False
         boundary = self._fresh_tail_boundary(messages)
         leading_anchor_count = self._leading_anchor_count(messages)

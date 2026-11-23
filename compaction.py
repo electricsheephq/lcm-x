@@ -392,7 +392,7 @@ class CompactionMixin:
         self._no_progress_observed_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
-            self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
+            self._clear_compaction_streaks_below_threshold()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
         pre_ingest_placeholder_cleanup_requested = False
@@ -1049,18 +1049,21 @@ class CompactionMixin:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
                                              persist=self._no_progress_proof_complete)
-            if budget.leaves:
-                streaks, key = self.__dict__.setdefault("_hidden_only_streaks", {}), self._hold_conversation_key()
-                if hidden_only:
-                    streaks[key] = {
-                        "passes": streaks.get(key, {}).get("passes", 0) + 1,
-                        # The last committed leaf already advanced this marker.
-                        "frontier_store_id": self._last_compacted_store_id,
-                        "leaves": budget.leaves,
-                        "hidden_rows": self._compress_hidden_rows_consumed,
-                    }
-                elif self._compress_host_rows_consumed > 0:
-                    streaks.pop(key, None)
+            try:
+                if budget.leaves:
+                    streaks, key = self.__dict__.setdefault("_hidden_only_streaks", {}), self._hold_conversation_key()
+                    if hidden_only:
+                        streaks[key] = {
+                            "passes": streaks.get(key, {}).get("passes", 0) + 1,
+                            # The last committed leaf already advanced this marker.
+                            "frontier_store_id": self._last_compacted_store_id,
+                            "leaves": budget.leaves,
+                            "hidden_rows": self._compress_hidden_rows_consumed,
+                        }
+                    elif self._compress_host_rows_consumed > 0:
+                        streaks.pop(key, None)
+            except Exception:
+                logger.debug("LCM hidden-only streak update failed", exc_info=True)
             returned = result
             return result
         except BaseException as exc:
