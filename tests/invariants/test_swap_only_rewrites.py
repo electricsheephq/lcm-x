@@ -168,9 +168,8 @@ def adjacent_assistant_merge(supplied, returned, index):
     first, second, merged = (json.loads(row.data) for row in (supplied[index], supplied[index + 1], returned[index]))
     if not (first.get("role") == second.get("role") == merged.get("role") == "assistant"):
         return False
-    ids = [[call.get("id") for call in (row.get("tool_calls") or [])] for row in (first, second, merged)]
-    if ids[2] != ids[0] + ids[1]:
-        return False
+    if (merged.get("tool_calls") or []) != (first.get("tool_calls") or []) + (second.get("tool_calls") or []):
+        return False  # every call, with its id, name and arguments, kept in order
     texts = [text_content_for_pattern_matching(row.get("content")) or "" for row in (first, second, merged)]
     if not (texts[0] and texts[1] and texts[0] in texts[2] and texts[1] in texts[2]):
         return False
@@ -386,7 +385,9 @@ class Host:
                 kept = (head_row.get("role") == "user" and merged_user_text in head_text
                         and any(index == 0 for index in visible.values())
                         and all(summary_text(after_nodes[node_id]) in head_text
-                                for node_id, index in visible.items() if index == 0))
+                                for node_id, index in visible.items() if index == 0)
+                        and all(node_id in before_nodes and summary_text(before_nodes[node_id]) in head_text
+                                for node_id, index in old_visible.items() if index == 0))
                 if kept:
                     repair = dict(name="merged-head repair", row=0, kind=supplied[0].kind,
                                   before=supplied[0].digest, after=returned_rows[0].digest)
@@ -406,9 +407,10 @@ class Host:
                     # Pre-existing on f77d6ed9 (ruling T1-588): the merged-head fallback merges two adjacent
                     # assistant rows the host holds. Recorded under its own name so the baseline pins exactly it.
                     self.fail("adjacent-assistant merge", (index, before, after))
-                else:
-                    self.fail("stub-only rewrite", (index, before, after))
-                break
+                    break  # the merge predicate already checked every later row, shifted by one
+                self.fail("stub-only rewrite", (index, before, after))
+                if len(supplied) != len(returned_rows):
+                    break  # the lists differ in length, so later rows no longer line up; one failure is enough
         elif diff and kinds and not overflow:
             cuts = changed_summary_start(after_nodes, new, old_visible, visible)
             if diff and diff[0] < min(cuts, default=len(supplied)):
