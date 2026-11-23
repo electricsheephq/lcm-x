@@ -11309,6 +11309,7 @@ class LCMEngine(
         pass_budget: int,
         deadline: float,
         focus_topic: Optional[str] = None,
+        on_stored: Callable[[int, int], None] | None = None,
     ) -> tuple[int, str]:
         """Condense an oversized summary frontier within the remaining sweep budget."""
         passes = 0
@@ -11366,6 +11367,10 @@ class LCMEngine(
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
                 raise
+            if on_stored is not None:
+                on_stored(before, after)
+                if budget is not None:
+                    deadline = budget.step_deadline
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"

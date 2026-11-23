@@ -25,7 +25,7 @@ from .model_routing import apply_lcm_model_route, apply_lcm_reasoning_effort
 from .summary_attempt import SummaryAttempt, SummaryContentFilterError, SummaryTiming
 # Re-exported for existing callers.
 from .summary_attempt import is_summary_content_filter_error, is_summary_context_length_error, is_summary_route_config_error  # noqa: F401
-from .summary_outcome import SummaryOutcomeFacts, SummaryOutcomeKind, classify_summary_outcome
+from .summary_outcome import SummaryOutcomeFacts, SummaryOutcomeKind, classify_summary_outcome, is_budget_cut
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,9 @@ _DEFAULT_ROUTE_KEY = "<task-default>"
 
 # #608: a threshold sweep does not start a summariser call with less time than this left.
 _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+_DEPTH_CATCHUP_SECONDS = 210.0
+_DEPTH_CATCHUP_MIN_RESERVE = 20.0
+_DEPTH_CATCHUP_TIMEOUT_SHARE = 0.85
 
 _summary_call = threading.local()  # #682: the last summary call's error and host route, per thread
 _route_info_support: dict[int, tuple[object, bool]] = {}
@@ -134,6 +137,8 @@ class ForegroundBudget:
     interrupt a step already running. ``progress`` names the first stored leaf or condensed node of this
     compaction ("leaf" or "condensation"; empty before it); ``slot_taken`` its one spend-guard slot."""
 
+    catchup_open = catchup_ended = False
+
     def __init__(self, *, soft: float, hard: float, configured_timeout: float, estimates: ForegroundEstimates):
         self.t0 = time.monotonic()
         self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
@@ -156,18 +161,42 @@ class ForegroundBudget:
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
 
+    @property
+    def step_deadline(self) -> float:
+        if self.catchup_open:
+            return self.t0 + _DEPTH_CATCHUP_SECONDS - max(self.reserve, _DEPTH_CATCHUP_MIN_RESERVE)
+        return self.t0 + self.hard
+
+    def end_catchup(self) -> None:
+        self.catchup_open, self.catchup_ended = False, True
+
     def admit(self, route_key: str) -> float:
-        """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
+        """Check admission before preparing a leaf or condensation group."""
+        timeout_limit, _ = self.admit_attempt(route_key)
+        return timeout_limit
+
+    def admit_attempt(self, route_key: str) -> tuple[float, str]:
+        """Return the timeout limit and, for a catch-up admit, the reason the base budget refused."""
         now = time.monotonic()
         estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
+        refusal = ""
         if not self.progress:  # the progress call (an over-target condensation, else the first leaf): no estimate
             if usable_left < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise self.stop()
         elif estimate > usable_left:
-            raise self.stop()
+            refusal = "time_budget_exhausted"
         elif self.soft > 0 and now + estimate > self.t0 + self.soft:
+            refusal = "soft_target_reached"
+        if not refusal:
+            return usable_left, ""
+        if self.catchup_open:
+            catchup_left = self.step_deadline - self.leaf_reserve - now
+            catchup_timeout = _DEPTH_CATCHUP_TIMEOUT_SHARE * min(self.configured_timeout, catchup_left)
+            if estimate <= catchup_timeout:
+                return catchup_timeout, refusal
+        if refusal == "soft_target_reached":
             raise self.stop("foreground soft target reached", reason="soft_target_reached")
-        return usable_left
+        raise self.stop()
 
     def stop(self, message="threshold full sweep time budget exhausted",
              reason="time_budget_exhausted") -> SweepBudgetExhausted:
@@ -175,8 +204,9 @@ class ForegroundBudget:
         self.stop_reason = reason
         return SweepBudgetExhausted(message, reason=reason)
 
-    def record_call(self, route_key: str, started: float, ended: float) -> None:
-        self.estimates.record_call(route_key, ended - started)
+    def record_call(self, route_key: str, started: float, ended: float, *, sample: bool = True) -> None:
+        if sample:
+            self.estimates.record_call(route_key, ended - started)
         if self.first_call_started is None:
             self.first_call_started = started
         self.last_call_ended = ended
@@ -781,6 +811,9 @@ def _invoke_summary_attempt(
     _summary_call.route, _summary_call.error = {}, None  # #682: filled by _call_llm_for_summary
     _summary_call.contract = ""
     _summary_call.stream_deadline = budget.usable_deadline if budget is not None else None
+    catchup_deadline = getattr(budget, "catchup_call_deadline", None)
+    if catchup_deadline is not None:
+        _summary_call.stream_deadline = catchup_deadline
     deadline_installed = budget is not None and _host_stream_deadline_seam()
     started = time.monotonic()
     try:
@@ -1108,10 +1141,14 @@ def _invoke_summary_llm_routes(
             )
             continue
         call_timeout, budget_bound = timeout, False
+        catchup_refusal, catchup_deadline = "", None
         if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
-            usable_left = budget.admit(route_key)
-            budget_bound = timeout is None or usable_left < timeout
-            call_timeout = usable_left if budget_bound else timeout
+            if getattr(budget, "catchup_open", False):
+                timeout_limit, catchup_refusal = budget.admit_attempt(route_key)
+            else:
+                timeout_limit = budget.admit(route_key)
+            budget_bound = bool(catchup_refusal) or timeout is None or timeout_limit < timeout
+            call_timeout = timeout_limit if budget_bound else timeout
         elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
             if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
@@ -1129,23 +1166,39 @@ def _invoke_summary_llm_routes(
                 break
             if budget is not None:
                 budget.slot_taken = True
-        attempt = _invoke_summary_attempt(
-            prompt, max_tokens, model=candidate_model, timeout=call_timeout,
-            reasoning_effort=reasoning_effort, budget=budget,
-        )
+        if catchup_refusal:
+            catchup_deadline = min(budget.step_deadline - budget.leaf_reserve, time.monotonic() + call_timeout)
+            budget.catchup_call_deadline = catchup_deadline
+        try:
+            attempt = _invoke_summary_attempt(
+                prompt, max_tokens, model=candidate_model, timeout=call_timeout,
+                reasoning_effort=reasoning_effort, budget=budget,
+            )
+        finally:
+            if catchup_refusal:
+                del budget.catchup_call_deadline
         result, route, error = attempt.text, attempt.route, attempt.error
         started, ended = attempt.timing.started, attempt.timing.ended
-        if error is not None:
+        if error is not None and not catchup_refusal:
             note_error(error)
-        if budget is not None:
+        if catchup_refusal:
+            budget.record_call(route_key, started, ended, sample=False)
+        elif budget is not None:
             budget.record_call(route_key, started, ended)
         # Non-empty results consult the acceptance callback after route bookkeeping.
         # A missing result may be a budget cut, which must stop before note_route.
         if result is not None and circuit_breaker is not None and route:
             circuit_breaker.note_route(route_key, route)
         accepted = bool(result) and (accepts_result is None or accepts_result(result))
+        now = time.monotonic() if budget is not None and result is None and error is not None else 0.0
+        if catchup_refusal and result is None and is_budget_cut(
+            error, budget_bound=True, wall=ended - started, call_timeout=call_timeout,
+            deadline_installed=attempt.timing.deadline_installed, now=now, usable_deadline=catchup_deadline,
+        ):
+            budget.end_catchup()
+            raise budget.stop("summariser call cut by the foreground budget")
         outcome = classify_summary_outcome(attempt, SummaryOutcomeFacts(
-            budget_present=budget is not None,
+            budget_present=budget is not None and not catchup_refusal,
             budget_bound=budget_bound,
             call_timeout=call_timeout,
             configured_timeout=budget.configured_timeout if budget is not None else 0.0,
@@ -1153,7 +1206,7 @@ def _invoke_summary_llm_routes(
             reserve=budget.reserve if budget is not None else 0.0,
             leaf_reserve=budget.leaf_reserve if budget is not None else 0.0,
             usable_deadline=budget.usable_deadline if budget is not None else 0.0,
-            now=time.monotonic() if budget is not None and result is None and error is not None else 0.0,
+            now=now,
             breaker_present=circuit_breaker is not None,
             accepts_result=accepted,
             verbatim_small_source=verbatim_small_source,
@@ -1162,6 +1215,14 @@ def _invoke_summary_llm_routes(
                            and source_tokens is not None else 0),
             context_length_rescue=context_length_rescue,
         ))
+        if catchup_refusal:
+            if outcome.kind is SummaryOutcomeKind.FAILURE:
+                budget.end_catchup()
+                if catchup_refusal == "soft_target_reached":
+                    raise budget.stop("foreground soft target reached", reason=catchup_refusal)
+                raise budget.stop()
+            if error is not None:
+                note_error(error)
         if outcome.kind is SummaryOutcomeKind.BUDGET_CUT:
             if outcome.record_hang:
                 circuit_breaker.record_hang(route_key)
