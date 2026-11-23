@@ -217,6 +217,13 @@ def _measure(engine, view, stop, target, shape, temperature, cut_budget, monkeyp
         assert any(search["cut_budget"] == cut_budget for search in searches)
         assert exhausted
     if unchanged_copies:
+        # Bound the known #2910 shape with plain asserts (not _UnchangedHostCopy), so more copies fail the cell
+        # instead of counting as the expected failure: 2 copies, 1 of them the unchanged call row before the stop.
+        assert shape == "persisted-output" and temperature == "cold", (shape, temperature, len(unchanged_copies))
+        assert len(added_copies) == 2, [row["store_id"] for row in added_copies]
+        assert len(unchanged_copies) == 1, [row["store_id"] for row in unchanged_copies]
+        copied = unchanged_copies[0]
+        assert copied["role"] == "assistant" and host_indices[_stored_identity(engine, copied)] == stop - 1
         raise _UnchangedHostCopy(f"Saved {len(unchanged_copies)} extra unchanged host row(s)")
     if shape == "changed-version":
         if not version_count:
