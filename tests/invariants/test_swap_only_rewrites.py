@@ -22,7 +22,9 @@ not necessarily the call that stored it, so a hidden-only pass (#904) followed b
 summaries passes. The one exception is a fault between a leaf's commit and its call's return: that call fails open
 and its own leaves may first show exactly one call late ("fault-late publication", F6). Any other first showing in
 a non-commit return fails as "deferred publication". A host-merged, non-canonical head re-rendered in a stub-only
-exit is the allowed "merged-head repair"; a canonical head rewritten there fails as "needless head rewrite".
+exit is the allowed "merged-head repair" only when the re-rendered head keeps its role, the head summary and the
+merged user content (otherwise "invalid merged-head repair"). Every other difference in a stub-only return
+must be a content-only tool stub replacement at the same row.
 """
 
 import hashlib
@@ -40,6 +42,7 @@ import pytest
 from hermes_lcm import engine as engine_module, host_uid_emit
 from hermes_lcm.config import LCMConfig, host_message_uid_mode
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
+from hermes_lcm.message_content import text_content_for_pattern_matching
 from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from hermes_lcm.tokens import count_messages_tokens
 from tests.behaviour.test_ingest_trace import reopen
@@ -56,6 +59,16 @@ SUMMARY_MARKER = "R-STABLE source "
 EVENTS = ("none", "cold-bind", "session-switch", "config-reload", "inbox")
 PASS_KINDS = ("leaf", "condensation", "stub-only", "stub-only-merged-head", "refused")
 KNOWN_FAILS = {
+    "stub-only-merged-head/none/off": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/none/on": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/cold-bind/off": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/cold-bind/on": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/session-switch/off": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/session-switch/on": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/config-reload/off": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/config-reload/on": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/inbox/off": (("adjacent-assistant merge", 7, 23),),
+    "stub-only-merged-head/inbox/on": (("adjacent-assistant merge", 7, 23),),
     "refused/none/off": frozenset({"non-commit return"}),
     "refused/none/on": frozenset({"non-commit return"}),
     "refused/cold-bind/off": frozenset({"non-commit return"}),
@@ -79,7 +92,8 @@ def swap_cell(uid_mode, event, pass_kind):
     baseline = KNOWN_FAILS.get(f"{pass_kind}/{event}/{uid_mode}")
     marks = []
     if baseline:
-        names = ", ".join(sorted(baseline))
+        names = (", ".join(f"{name} at call {call}, row {row}" for name, call, row in baseline)
+                 if isinstance(baseline, tuple) else ", ".join(sorted(baseline)))
         marks.append(pytest.mark.xfail(
             strict=True, raises=KnownSwapRuleFailure,
             reason=f"R-STABLE baseline on f77d6ed9: {names}; ruling T1-555",
@@ -120,6 +134,47 @@ class Row:
 
 def capture(messages):
     return [Row.capture(index, message) for index, message in enumerate(messages)]
+
+
+SUMMARY_KINDS = frozenset({"summary", "head", "carrier"})
+
+def stub_swap(before, after):
+    """A content-only replacement of a tool row's payload by an eligible stub, all other fields unchanged."""
+    if before is None or after is None:
+        return False
+    original, replacement = json.loads(before.data), json.loads(after.data)
+    content = replacement.get("content")
+    if not (
+        original.get("role") == "tool"
+        and original.get("tool_call_id")
+        and content != original.get("content")
+        # Active stubbing preserves the original text-block wrapper when present.
+        and (isinstance(content, str) or isinstance(content, list) and len(content) == 1)
+    ):
+        return False
+    old_text = text_content_for_pattern_matching(original.get("content")) or ""
+    if old_text == CLEARED or old_text.startswith(STUB):
+        return False  # a row that already is a stub must not change again (the splice rejects it too)
+    text = text_content_for_pattern_matching(content) or ""
+    original["content"] = content
+    return (text == CLEARED or text.startswith(STUB)) and encode(original) == after.data
+
+
+def adjacent_assistant_merge(supplied, returned, index):
+    """Exactly one merge of host rows index and index + 1 (both assistant) into returned[index]; every later
+    returned row equals the host row one place further on, up to eligible stub swaps; the list is one row shorter."""
+    if len(returned) != len(supplied) - 1 or index + 1 >= len(supplied) or index >= len(returned):
+        return False
+    first, second, merged = (json.loads(row.data) for row in (supplied[index], supplied[index + 1], returned[index]))
+    if not (first.get("role") == second.get("role") == merged.get("role") == "assistant"):
+        return False
+    ids = [[call.get("id") for call in (row.get("tool_calls") or [])] for row in (first, second, merged)]
+    if ids[2] != ids[0] + ids[1]:
+        return False
+    texts = [text_content_for_pattern_matching(row.get("content")) or "" for row in (first, second, merged)]
+    if not (texts[0] and texts[1] and texts[0] in texts[2] and texts[1] in texts[2]):
+        return False
+    return all(host == out or stub_swap(host, out) for host, out in zip(supplied[index + 2:], returned[index + 1:]))
 
 
 def first_diff(before, after, start=0):
@@ -255,10 +310,9 @@ class Host:
             head, next_user = self.messages[:2]
             assert head["role"] == next_user["role"] == "user" and SUMMARY_MARKER in head["content"]
             merged = {**head, "content": head["content"] + "\n\n---\n\n" + next_user["content"]}
+            merged_user_text = next_user["content"]
             self.messages[:2] = [merged]
             supplied = [Row.capture(0, merged), *supplied[2:]]
-        supplied_tools = {row["tool_call_id"]: (index, row["content"]) for index, row in enumerate(self.messages)
-                          if row["role"] == "tool"}
         self.caplog.clear()
         engine.ingest(self.messages)
         engine.note_turn_complete()
@@ -323,19 +377,40 @@ class Host:
         elif diff and not kinds:
             self.fail("non-commit return" if ran else "rule-1 change", diff)
         repair = None
-        if diff and kinds and not overflow:
-            cuts = changed_summary_start(after_nodes, new, old_visible, visible)
-            if stop == "stub_first_exit":
-                cuts.extend(
-                    supplied_tools[row["tool_call_id"]][0] for index, row in enumerate(self.messages)
-                    if row["role"] == "tool" and row["tool_call_id"] in supplied_tools
-                    and returned_rows[index].kind == "stub"
-                    and row["content"] != supplied_tools[row["tool_call_id"]][1]
-                )
-                if merge_head and diff[0] == 0:
+        if diff and stop == "stub_first_exit" and not overflow:
+            start = 0
+            if merge_head and diff[0] == 0:
+                # The allowed repair must keep the role, summary and merged user content.
+                head_row = self.messages[0] if self.messages else {}
+                head_text = head_row.get("content") if isinstance(head_row.get("content"), str) else ""
+                kept = (head_row.get("role") == "user" and merged_user_text in head_text
+                        and any(index == 0 for index in visible.values())
+                        and all(summary_text(after_nodes[node_id]) in head_text
+                                for node_id, index in visible.items() if index == 0))
+                if kept:
                     repair = dict(name="merged-head repair", row=0, kind=supplied[0].kind,
                                   before=supplied[0].digest, after=returned_rows[0].digest)
-                    diff = first_diff(supplied, returned_rows, start=1)
+                    start = 1
+                else:
+                    self.fail("invalid merged-head repair", diff)
+                    start = 1  # reported once; the rest of the list is still compared
+            # T1-557: rows showing summary nodes this commit publishes for the first time are this commit's change.
+            published_rows = {visible[node_id] for node_id in newly_visible if node_id in visible}
+            for index, (before, after) in enumerate(zip_longest(supplied[start:], returned_rows[start:]), start):
+                if before == after or stub_swap(before, after) or (
+                    index in published_rows and before is not None and after is not None
+                    and before.kind in SUMMARY_KINDS and after.kind in SUMMARY_KINDS
+                ):
+                    continue
+                if adjacent_assistant_merge(supplied, returned_rows, index):
+                    # Pre-existing on f77d6ed9 (ruling T1-588): the merged-head fallback merges two adjacent
+                    # assistant rows the host holds. Recorded under its own name so the baseline pins exactly it.
+                    self.fail("adjacent-assistant merge", (index, before, after))
+                else:
+                    self.fail("stub-only rewrite", (index, before, after))
+                break
+        elif diff and kinds and not overflow:
+            cuts = changed_summary_start(after_nodes, new, old_visible, visible)
             if diff and diff[0] < min(cuts, default=len(supplied)):
                 name = "needless head rewrite" if diff[1].kind in {"head", "summary", "carrier"} else "rule-1 change"
                 self.fail(name, diff)
@@ -540,7 +615,11 @@ def test_swap_only_rewrites(exercise):
     if baseline is None:
         assert not exercise.failures, details
         return
-    actual = frozenset(failure["name"] for failure in exercise.failures)
+    if isinstance(baseline, tuple):
+        # T1-588: a pin may name the call and row as well (the merged-head adjacent-assistant merge at row 23).
+        actual = tuple(sorted((failure["name"], failure["call"], failure["row"]) for failure in exercise.failures))
+    else:
+        actual = frozenset(failure["name"] for failure in exercise.failures)
     if actual == baseline:
         raise KnownSwapRuleFailure(details)
     if actual:

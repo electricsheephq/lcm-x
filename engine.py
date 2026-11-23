@@ -11537,8 +11537,12 @@ class LCMEngine(
         if _choose_stub_replay is not None:
             # Compare against the host before coalescing adjacent assistant rows.
             # Tool pairing and the other cleanup checks still apply to the splice.
-            unmerged = self._sanitize_active_context_messages(result, merge_adjacent_assistants=False)
+            unmerged_generated_rows = generated_rows.copy()
+            unmerged = self._sanitize_active_context_messages(
+                result, merge_adjacent_assistants=False, generated_rows=unmerged_generated_rows,
+            )
             if leading_msg is not None or not unmerged or unmerged[0].get("role") not in {"assistant", "tool"}:
+                _stamp_generated_model_only(unmerged, unmerged_generated_rows, copy_rows=True)
                 stub_replay = _choose_stub_replay(unmerged, summary_message, carried_tail)
             if stub_replay is not None:
                 if len(stub_replay) > len(unmerged):

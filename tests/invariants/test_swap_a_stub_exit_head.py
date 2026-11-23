@@ -7,7 +7,7 @@ from copy import deepcopy
 
 import pytest
 
-from hermes_lcm import host_uid_emit
+from hermes_lcm import engine as engine_module, host_uid_emit
 from hermes_lcm.tokens import count_messages_tokens
 from tests.behaviour.test_ingest_trace import reopen
 from tests.harness import pin_char_counter
@@ -37,7 +37,9 @@ def split_head_stub_exit(request, uid_mode, make_engine, summaries, monkeypatch,
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
     monkeypatch.setattr(host_uid_emit, "_host_uid_capability", True)
     pin_char_counter(monkeypatch)
-    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False, l3_truncate_tokens=1)
+    model_only = request.param == "model-only"
+    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False, l3_truncate_tokens=1,
+                         fresh_tail_count=4 if model_only else 2)
     assert engine._uid_recognition_enabled() == (uid_mode == "on")
     flush = _host_flush()
 
@@ -48,15 +50,23 @@ def split_head_stub_exit(request, uid_mode, make_engine, summaries, monkeypatch,
                        for row in stamped]
         return stamped
 
-    head_index = int(request.param)
+    head_index = int(bool(request.param))
     initial = text_view()
+    if model_only:
+        monkeypatch.setattr(engine_module, "_model_only_display_metadata_key", lambda: "model_only")
+        initial[-4:-2] = tool_pair("seed-tool", "seed tool result")
     first = run(engine, stamp(initial if request.param else initial[1:]), caplog)
     assert stop_line(caplog).group(2) == "1"
     if request.param:
         assert first[0]["role"] == "system"
-    head, next_user = first[head_index:head_index + 2]
-    assert head["role"] == next_user["role"] == "user"
+    head = first[head_index]
     assert engine._is_verified_replay_scaffold_message(head)
+    if model_only:
+        assert head["content"].startswith("[Recent Summary (")
+        assert head["display_metadata"] == {"model_only": True}
+        assert [row["role"] for row in first[head_index + 1:head_index + 3]] == ["assistant", "tool"]
+    else:
+        assert head["role"] == first[head_index + 1]["role"] == "user"
     supplied = stamp([*first, *tool_view()[1:]])
     engine.ingest(supplied)
     engine.note_turn_complete()
@@ -188,3 +198,24 @@ def test_cold_stub_exit_copies_only_known_stub_pairs(bind, uid_mode, replayed_st
     if observed != expected:
         pytest.fail(f"unexpected cold replay stub pairs: {observed}")
     raise KnownStubPairCopy("cold replay stored five assistant calls and their five tool stubs")
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("bind", ["warm", "cold"])
+@pytest.mark.parametrize("split_head_stub_exit", ["model-only"], indirect=True)
+def test_model_only_stub_exit_preserves_head_on_replay(bind, uid_mode, replayed_stub_exit, record_property):
+    supplied, returned, extras = replayed_stub_exit
+    head = supplied[1]
+    assert "timestamp" in head and "_row_id" in head
+    record_property("head_preserved", returned[1] == head)
+    record_property("head_keys", ",".join(sorted(returned[1])))
+    record_property("extra_rows", len(extras))
+    record_property("extra_roles", ",".join(row[2] for row in extras))
+    assert returned[1] == head, "stub-only exit regenerated the model-only summary head"
+    # The base already restores these four aged stub pairs on a cold bind.
+    expected_calls = [f"call-{index}" for index in range(4)] if bind == "cold" else []
+    assert [row[2] for row in extras] == ["assistant", "tool"] * len(expected_calls)
+    assert [row[4] for row in extras[1::2]] == expected_calls
+    assert [[call["id"] for call in json.loads(row[5])] for row in extras[::2]] == [
+        [call_id] for call_id in expected_calls
+    ]
