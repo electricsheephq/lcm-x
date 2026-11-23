@@ -45,7 +45,7 @@ from .host_uid import _uid_recognition_pass
 from .ingest_protection import redact_sensitive_value
 from . import ingest_ledger, leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from .message_analysis import _is_codex_interim
+from .message_analysis import _is_codex_interim, _tool_call_id
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
@@ -61,7 +61,7 @@ from .reconcile import (
     _project_emitted_occurrences,
     _proof_user_identity,
 )
-from .sanitize import _contains_sensitive_redaction
+from .sanitize import _clean_active_assistant_message, _contains_sensitive_redaction
 from .sqlite_util import PhaseSqlTrace, _is_sqlite_locked_error
 from .store_complete import _UID_COPY_SOURCES, _UID_DROP_INPUT, _UidDropState
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
@@ -2240,24 +2240,63 @@ class CompactionMixin:
     def _plain_assistant_replay_text(row, *, stored_row=False):
         content = row.get("content")
         if (row.get("role") != "assistant" or not isinstance(content, str)
-                or row.get("tool_calls") or row.get("tool_call_id") or _is_codex_interim(row)):
-            return ""
+                or (not stored_row and row.get("tool_calls")) or row.get("tool_call_id") or _is_codex_interim(row)):
+            return None
         text = content.strip()
         if _contains_sensitive_redaction(text):
-            return ""
+            return None
         # The store serializes structured content as JSON.
         if stored_row and text.startswith(("[", "{")):
             try:
                 if isinstance(json.loads(text), (list, dict)):
-                    return ""
+                    return None
             except json.JSONDecodeError:
                 pass
             except (ValueError, RecursionError):
-                return ""
+                return None
+        if stored_row:
+            cleaned = _clean_active_assistant_message(row)
+            if cleaned is None and row.get("api_content"):
+                return None
+            return cleaned["content"].strip() if cleaned is not None else ""
         return text
 
+    def _refused_assistant_run_start(self, text, raw_tail, upper):
+        """Walk the assembly join backwards, retaining its contiguous raw span."""
+        remaining = len(text)
+        tool_results = set()
+        seen_text = False
+        for lower in range(upper - 1, -1, -1):
+            row = raw_tail[lower]
+            if row.get("role") == "tool":
+                tool_results.add(str(row.get("tool_call_id") or "").strip())
+                continue
+            part = self._plain_assistant_replay_text(row, stored_row=True)
+            calls = row.get("tool_calls") or ()
+            # A stripped call must be part of a dropped tool group. At the end
+            # of the run, tool results must belong to its last assistant row.
+            if part is None or (calls and (not isinstance(calls, list) or any(
+                not (call_id := _tool_call_id(call)) or call_id not in tool_results for call in calls
+            ))) or (not seen_text and tool_results and not calls):
+                break
+            tool_results.clear()
+            if not part and seen_text:
+                continue
+            if not part or not text.endswith(part, 0, remaining):
+                break
+            remaining -= len(part)
+            if not remaining:
+                return lower if seen_text else None
+            # _merge_adjacent_assistant_messages joins the stripped nonempty
+            # parts with a single newline. Empty parts add no separator.
+            if text[remaining - 1] != "\n":
+                break
+            remaining -= 1
+            seen_text = True
+        return None
+
     def _match_refused_assistant_replay(self, working, raw_tail, *, carrier):
-        """Match the suffix through the frontier, retaining both ids for each merged reply."""
+        """Match the suffix through the frontier, retaining every id a reply absorbed."""
         self._load_host_rewrite_overrides(raw_tail)
         upper = len(raw_tail)
         merged_ids = set()
@@ -2272,14 +2311,12 @@ class CompactionMixin:
                 return [], set()
             if exact:
                 upper -= 1
-            elif upper >= 2 and self._plain_assistant_replay_text(message):
-                base = raw_tail[upper - 2]
-                left = self._plain_assistant_replay_text(base, stored_row=True)
-                right = self._plain_assistant_replay_text(row, stored_row=True)
-                if not (left and right and message["content"] == left + "\n" + right):
+            elif self._plain_assistant_replay_text(message):
+                lower = self._refused_assistant_run_start(message["content"], raw_tail, upper)
+                if lower is None:
                     return [], set()
-                merged_ids.update((int(base["store_id"]), int(row["store_id"])))
-                upper -= 2
+                merged_ids.update(int(source["store_id"]) for source in raw_tail[lower:upper])
+                upper = lower
             else:
                 return [], set()
             matched.append(row)
@@ -2289,6 +2326,7 @@ class CompactionMixin:
         # The existing emission mark survives a clean restart. It gates only
         # this compaction fallback and never changes cold ingest's proof.
         try:
+            self._retry_refused_emissions()
             if ingest_ledger_mode() == "off" or self._store.ingest_ledger_state() != "ready":
                 return False
             conn = self._store._conn
@@ -2341,6 +2379,7 @@ class CompactionMixin:
             len(working),
         )
         merged_ids: set[int] = set()
+        refused_replay = False
         for collapse in (False, True):  # #535: raw rows first, then a stored merge-append pair as one row
             raw_tail = rows = self._store.get_session_rows_through(self._session_id, frontier, (1 + collapse) * (end - start))
             rows = self._collapse_merge_append_bases(rows)[-(end - start):] if collapse and end > start else rows
@@ -2370,14 +2409,20 @@ class CompactionMixin:
             )
             if not has_joined_reply or not self._latest_compaction_was_refused():
                 return [], ids, 0, 0
-            rows, merged_ids = self._match_refused_assistant_replay(replay, raw_tail, carrier=carrier)
-            if not merged_ids:
-                return [], ids, 0, 0
+            refused_replay = True
         after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
         if [int(row["store_id"]) for row in after] != ([ids[id(working[end])]] if end < len(working) else []):
             return [], ids, 0, 0
         leaf_sources = self._dag.get_leaf_sources_through(self._session_id, frontier)
         lineage = {store_id for _node, _tokens, store_id in leaf_sources}
+        if refused_replay:
+            # Extra rows are admissible only inside a fully covered merge.
+            limit = len(replay) + len(lineage)
+            if limit > 2 * len(replay):
+                raw_tail = self._store.get_session_rows_through(self._session_id, frontier, limit)
+            rows, merged_ids = self._match_refused_assistant_replay(replay, raw_tail, carrier=carrier)
+            if not merged_ids:
+                return [], ids, 0, 0
         replies = {"assistant", "tool"}
         low, high = (min(lineage), max(lineage)) if lineage else (0, 0)
         if not lineage or not merged_ids <= lineage or any(
@@ -2389,7 +2434,8 @@ class CompactionMixin:
             start + offset: int(row["store_id"])
             for offset, row in enumerate(rows)
             if int(row["store_id"]) in lineage
-            or (int(row["store_id"]) > low and str(row.get("role") or "") in replies)
+            # After a refusal, consume only rows leaf lineage covers (#3006), never an uncovered reply.
+            or (not refused_replay and int(row["store_id"]) > low and str(row.get("role") or "") in replies)
         }
         dropped_ids = set(dropped.values()) | merged_ids
         covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}

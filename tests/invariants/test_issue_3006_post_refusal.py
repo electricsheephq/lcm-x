@@ -6,8 +6,11 @@ import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, contextmanager
+from copy import deepcopy
 from itertools import count
+from pathlib import Path
+from runpy import run_path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,9 +19,11 @@ import pytest
 import hermes_lcm.engine as engine_module
 from hermes_lcm import rollup_builder
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.message_analysis import _merge_adjacent_assistant_messages
 from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_compression_boundary import _config, _stub_summarizer, _turn
+from tests.test_host_uid_shadow import _state_db
 from tests.test_refused_compaction_rollback import (
     _assert_only_refusal_mark_changed,
     _compaction_records,
@@ -115,9 +120,9 @@ def _r3_fit_coverage(engine, before, plan):
     return uncovered, unknown
 
 
-def _r3_threshold_pass(engine, live, caplog, summarizer, monkeypatch):
+def _r3_threshold_pass(engine, live, caplog, summarizer, monkeypatch, *, overhead=R3_OVERHEAD):
     estimate = count_messages_tokens(live)
-    prompt_tokens = estimate + R3_OVERHEAD
+    prompt_tokens = estimate + overhead
     frontier = _r3_frontier(engine)
     record = {
         "gate": "below threshold", "stop": "—", "noop": "", "leaves": 0, "condensations": 0,
@@ -561,3 +566,517 @@ def test_merged_replay_requires_exact_covered_pair(tmp_path, monkeypatch, uid_mo
         assert (drops, tokens, kept) == (([0], 12, 0) if case in ("covered", "json-join") else ([], 0, 0))
     finally:
         engine.shutdown()
+
+
+def _tool_reply(turn, suffix=""):
+    call_id = f"call-{turn}{suffix}"
+    return [
+        {"role": "assistant", "content": f"Looking up turn {turn}{suffix}. ", "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "content": f"Result for turn {turn}{suffix}.", "tool_call_id": call_id},
+    ]
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("shape,uncovered", [
+    ("three-way", None), ("three-way", 0),
+    ("three-way-with-exact", None), ("three-way-with-exact", 3),
+    ("tool-separated", None), ("tool-separated", 1),
+    ("two-tool-separated", None), ("two-tool-separated", 4),
+    ("cleanup-middle", None), ("cleanup-middle", 1),
+    ("ignored-marker-middle", None), ("ignored-marker-middle", 1),
+], ids=[
+    "three-way-covered", "three-way-uncovered-end",
+    "following-exact-covered", "following-exact-uncovered",
+    "tool-separated-covered", "tool-separated-uncovered-tool",
+    "two-tool-separated-covered", "two-tool-separated-uncovered-tool",
+    "cleanup-middle-covered", "cleanup-middle-uncovered-middle",
+    "ignored-marker-middle-covered-negative", "ignored-marker-middle-uncovered-negative",
+])
+def test_refused_replay_requires_coverage_for_every_absorbed_row(tmp_path, monkeypatch, uid_mode, shape, uncovered):
+    """I2, I11. A merged reply replays only when its entire durable run was summarised."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    left = {"role": "assistant", "content": " First reply. "}
+    middle = {"role": "assistant", "content": " Second reply. "}
+    right = {"role": "assistant", "content": "Last reply."}
+    by_shape = {
+        "three-way": [left, middle, right],
+        "three-way-with-exact": [left, middle, right],
+        "tool-separated": [*_tool_reply(1), right],
+        "two-tool-separated": [*_tool_reply(1), *_tool_reply(1, "b"), right],
+        "cleanup-middle": [left, {"role": "assistant", "content": "<think>Internal-only narration.</think>"}, right],
+        "ignored-marker-middle": [left, {"role": "assistant", "content": "Visible narration."}, right],
+    }
+    run = [{**row, "store_id": 11 + i} for i, row in enumerate(by_shape[shape])]
+    joined = "\n".join(
+        row["content"].strip() for i, row in enumerate(run)
+        if row["role"] == "assistant" and not (i == 1 and shape.endswith("-middle"))
+    )
+    messages = [{"role": "assistant", "content": joined}]
+    store_ids = {}
+    if shape == "three-way-with-exact":
+        exact = {"role": "assistant", "content": "Separate exact reply."}
+        messages.append(exact)
+        run.append({**exact, "store_id": 14})
+        store_ids[id(exact)] = 14
+    frontier = run[-1]["store_id"]
+    successor = {"role": "user", "content": "Next request.", "store_id": frontier + 1}
+    messages.append(successor)
+    store_ids[id(successor)] = successor["store_id"]
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start(SID, platform="acp", conversation_id="refusal-test")
+        if shape == "cleanup-middle":
+            assert [row["content"] for row in engine._sanitize_active_context_messages(run)] == [joined]
+        if shape == "ignored-marker-middle":
+            engine._remember_generated_ignored_dependent_reply(run[1], run[1]["content"])
+            # The store-scoped marker can prove EOF cleanup. Between replies
+            # it does not prove that the visible narration was omitted.
+            assert engine._drop_preexisting_generated_ignored_dependent_eof_replies(
+                run, engine._load_generated_ignored_dependent_reply_records(),
+            ) == run
+        engine._last_compacted_store_id = frontier
+        monkeypatch.setattr(engine._lifecycle, "get_by_conversation", lambda _: SimpleNamespace(
+            current_session_id=SID, current_frontier_store_id=frontier,
+        ))
+        monkeypatch.setattr(engine._store, "get_session_rows_through", lambda _, end, limit:
+                            [row for row in run if row["store_id"] <= end][-limit:] if limit else [])
+        monkeypatch.setattr(engine._store, "get_session_messages_after", lambda *_args, **_kwargs: [successor])
+        monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda *_args, **_kwargs: store_ids)
+        monkeypatch.setattr(engine, "_latest_compaction_was_refused", lambda: True)
+        sources = [(i + 1, 3, row["store_id"]) for i, row in enumerate(run) if i != uncovered]
+        monkeypatch.setattr(engine._dag, "get_leaf_sources_through", lambda *_: sources)
+
+        drops, _, tokens, kept = engine._committed_replay_drops(messages, 0)
+        if shape == "three-way-with-exact":
+            remaining = [message for i, message in enumerate(messages) if i not in drops]
+            if uncovered is None:
+                assert (remaining, tokens, kept) == ([successor], 12, 0)
+            else:
+                assert (remaining, tokens, kept) == ([exact, successor], 9, 1)
+        else:
+            covered = uncovered is None and shape != "ignored-marker-middle"
+            assert (drops, tokens, kept) == (([0], 3 * len(run), 0) if covered else ([], 0, 0))
+    finally:
+        engine.shutdown()
+
+
+@pytest.fixture
+def tool_refusal_host(tmp_path, monkeypatch, request):
+    """I1, I2, I11. Seed a kept host view with one real stored tool group projected to text."""
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", _stub_summarizer())
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    config = _config(tmp_path)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    binding = dict(platform="acp", context_length=R3_WINDOW, conversation_id="refusal-test")
+    try:
+        engine.on_session_start(SID, **binding)
+        pre = [row for i in range(1, 12) for row in _turn(i)]
+        group = [*_tool_reply(12), _turn(12)[1]]
+        pre.extend([_turn(12)[0], *group, _turn(13)[0]])
+        left = {key: value for key, value in group[0].items() if key != "tool_calls"}
+        merged = left["content"].strip() + "\n" + group[2]["content"]
+        stored_projection = getattr(request, "param", "projected") == "stored-projection"
+        sanitize = engine._sanitize_active_context_messages
+
+        def project_stored_group(messages, **kwargs):
+            # Exercise the host's text-only assembly shape before the engine
+            # records the initial output, so the refused input stays that shape.
+            if kwargs.get("generated_rows") is not None and all(row in messages for row in group):
+                group_text = {row["content"] for row in group}
+                stored = engine._store.get_session_messages(SID)
+                raw = [row for row in stored if row["content"] in group_text]
+                assert [row["role"] for row in raw] == ["assistant", "tool", "assistant"]
+                assert raw[0]["tool_calls"] and all(row["content"] != merged for row in stored)
+                projected, = _merge_adjacent_assistant_messages([
+                    {"role": row["role"], "content": row["content"]}
+                    for row in raw if row["role"] != "tool"
+                ])
+                start = messages.index(group[0])
+                assert messages[start:start + len(group)] == group
+                messages = [*messages[:start], projected, *messages[start + len(group):]]
+            return sanitize(messages, **kwargs)
+
+        with monkeypatch.context() as patch:
+            if stored_projection:
+                patch.setattr(engine, "_sanitize_active_context_messages", project_stored_group)
+            emitted = engine.compress(pre, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        # The kept host list carries narration after it discards the tool payload
+        # and call metadata. Send that projection through the real merge funnel.
+        kept = emitted
+        if not stored_projection:
+            assert all(row in emitted for row in group)
+            kept = engine._sanitize_active_context_messages([
+                left if row == group[0] else row for row in emitted if row != group[1]
+            ])
+        assert any(row["content"] == merged for row in kept)
+        _drain_session_end_maintenance(engine)
+        engine.on_session_end(SID, pre)
+        engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, **binding)
+        kept += [_turn(13)[1], *(row for i in range(14, 20) for row in _turn(i)), _turn(20)[0]]
+        yield engine, kept, binding, group, merged
+    finally:
+        engine.shutdown()
+
+
+def _emission_state(engine, handle=None):
+    handle = handle or engine._emission_handle
+    if handle is None:
+        return None
+    conn = engine._store._conn
+    lineage = engine_module.ingest_ledger.persisted_lineage(conn, handle.session_id, handle.lineage)
+    return conn.execute(
+        "SELECT state FROM ingest_views WHERE lineage IN (?,?) AND view_seq=? AND kind='emission'",
+        (lineage, handle.lineage, handle.view_seq),
+    ).fetchone()
+
+
+def _real_leaf_refusal(engine, kept, binding):
+    engine.on_session_start(SID, **binding)
+    before = _r3_frontier(engine)
+    refused = engine.compress(kept, force=True)
+    frontier = _r3_frontier(engine)
+    assert engine._last_compress_leaves[1] == 1 and frontier > before and refused != kept
+    _drain_session_end_maintenance(engine)
+    return refused, frontier
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"], ids=["uid-off", "uid-on"])
+def test_post_refusal_host_rows_are_append_only_until_next_compaction(request, tmp_path, monkeypatch, uid_mode):
+    """I1, I2, I11. Three completed host turns keep the refused view's prefix byte-stable."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    home = tmp_path / "home"
+    home.mkdir()
+    _state_db(home, [(SID, None, None)])
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    flush = _host_flush()
+    live = flush([*kept, _turn(20)[1]])
+
+    def snapshot(rows):
+        return [json.dumps(row, sort_keys=True) for row in rows]
+
+    def stored_rows():
+        cursor = engine._store.connection.execute("SELECT * FROM messages WHERE session_id=? ORDER BY store_id", (SID,))
+        columns = [column[0] for column in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor]
+
+    def assert_bytes(actual, expected, where):
+        for index, (row, before) in enumerate(zip(actual, expected)):
+            if json.dumps(row, sort_keys=True) != before:
+                previous = json.loads(before)
+                changed = sorted(key for key in previous.keys() | row.keys()
+                                 if json.dumps({key: previous[key]} if key in previous else {}, sort_keys=True)
+                                 != json.dumps({key: row[key]} if key in row else {}, sort_keys=True))
+                pytest.fail(f"{where}: row {index} ({previous['role']}, store_id={previous.get('store_id')}) "
+                            f"changed fields {changed}")
+        assert len(actual) == len(expected), f"{where}: row count {len(expected)} -> {len(actual)}"
+
+    visible = snapshot(live)
+    _, frontier = _real_leaf_refusal(engine, live, binding)
+    refused_handle = engine._emission_handle
+    engine.record_rejected_compaction()
+    assert engine._compress_refusal is None
+    assert _emission_state(engine, refused_handle) == ("refused",)
+    engine.note_turn_complete()
+    assert_bytes(live, visible, "refused compaction input")
+    stored = snapshot(stored_rows())
+    calls, commit_records = engine._compress_calls, _compaction_records(engine)
+
+    # Capture the actual plugin callbacks from a minimal host registry.
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("LCM_DATABASE_PATH", str(tmp_path / "registry.db"))
+    hooks, registered = {}, []
+    plugin = run_path(str(Path(__file__).resolve().parents[2] / "__init__.py"), run_name="hermes_lcm._post_refusal")
+    with ExitStack() as cleanup:
+        def register_engine(prototype):
+            registered.append(prototype)
+            cleanup.callback(prototype.shutdown)
+
+        plugin["register"](SimpleNamespace(register_context_engine=register_engine, register_hook=hooks.__setitem__))
+        assert len(registered) == 1
+        for call in range(1, 4):
+            user, reply = flush(_turn(20 + call))
+            for row in (user, reply):
+                row["message_uid"] = f"{row['_row_id']:032x}"
+            user_bytes, reply_bytes = snapshot([user, reply])
+            live.append(user)
+            payload = dict(session_id=SID, conversation_id=binding["conversation_id"], platform=binding["platform"],
+                           turn_id=f"append-{call}", user_message=user["content"])
+
+            def check(phase, expected_visible):
+                where = f"ordinary call {call} {phase}"
+                assert_bytes(live, expected_visible, f"{where} host list")
+                assert_bytes(stored_rows()[:len(stored)], stored, f"{where} stored prefix")
+                assert engine._compress_calls == calls and _r3_frontier(engine) == frontier, where
+                assert _compaction_records(engine) == commit_records, where
+                assert _emission_state(engine, refused_handle) == ("refused",), where
+
+            prompt = visible + [user_bytes]
+            tokens = count_messages_tokens(live)
+            assert not engine.should_compress(tokens), f"ordinary call {call} threshold requested compaction"
+            preflight = engine.should_compress_preflight(live)
+            check("preflight", prompt)
+            assert not preflight, f"ordinary call {call} preflight requested compaction"
+            assert hooks["pre_llm_call"](**payload, conversation_history=list(live)) is None
+            assert hooks["pre_api_request"](**payload, conversation_history=list(live)) is None
+            request_rows = deepcopy(live)
+            if select := getattr(engine, "select_context", None):
+                selected = select(request_rows, conversation_messages=deepcopy(live),
+                                  incoming_message=request_rows[-1], budget_tokens=binding["context_length"])
+                assert_bytes(request_rows if selected is None else selected, prompt, f"ordinary call {call} selection")
+            check("request hooks", prompt)
+
+            usage = dict(prompt_tokens=tokens, completion_tokens=count_messages_tokens([reply]))
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            engine.update_from_response(usage)
+            assert not engine.should_compress_info()[0], f"ordinary call {call} response requested compaction"
+            if prune := getattr(engine, "prune_tool_results_only", None):
+                pruned, count_pruned = prune(live, current_tokens=tokens)
+                assert_bytes(pruned, prompt, f"ordinary call {call} tool pruning")
+                assert count_pruned == 0
+            check("response", prompt)
+            live.append(reply)
+            visible = prompt + [reply_bytes]
+            assert hooks["post_llm_call"](**payload, conversation_history=list(live), context_compressor=engine) is None
+            check("post_llm_call ingest", visible)
+            engine.on_turn_complete(deepcopy(live), usage=usage, turn_id=payload["turn_id"], interrupted=False)
+            check("on_turn_complete", visible)
+            durable = stored_rows()
+            assert [(row["role"], row["content"]) for row in durable[len(stored):]] == [
+                (user["role"], user["content"]), (reply["role"], reply["content"]),
+            ], f"ordinary call {call} appended different stored rows"
+            stored = snapshot(durable)
+
+    returned = engine.compress(live, force=True)
+    assert_bytes(live, visible, "next compaction input")
+    assert_bytes(stored_rows(), stored, "next compaction stored rows")
+    assert snapshot(returned) != visible and len(returned) < len(live)
+    assert engine._compress_calls == calls + 1
+
+
+def test_tool_separated_refusal_recovers_with_covered_survival_fit(tool_refusal_host, monkeypatch, caplog):
+    """I1, I2, I11. A refused leaf already covering a merged tool reply lets the next pass advance."""
+    engine, kept, binding, group, merged = tool_refusal_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    engine.record_rejected_compaction()
+    assert _emission_state(engine) == ("refused",)
+    engine.note_turn_complete()
+    live = kept + [_turn(20)[1]]
+    engine.ingest(live)
+    sources = {sid for _, _, sid in engine._dag.get_leaf_sources_through(SID, frontier)}
+    group_ids = {row["store_id"] for row in engine._store.get_session_messages(SID)
+                 if row["content"] in {msg["content"] for msg in group}}
+    assert len(group_ids) == len(group) and group_ids <= sources
+    before = engine._store.get_session_messages(SID)
+    caplog.set_level(logging.INFO, logger="hermes_lcm")
+    summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+    replay = engine._committed_replay_drops
+    replayed = []
+
+    def observe_replay(working, *args, **kwargs):
+        result = replay(working, *args, **kwargs)
+        replayed.extend(working[position]["content"] for position in result[0])
+        return result
+
+    monkeypatch.setattr(engine, "_committed_replay_drops", observe_replay)
+    returned, record = _r3_threshold_pass(
+        engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+    )
+    assert record["gate"] == "ran" and LINEAGE_STOP not in (record["stop"], record["noop"]), record
+    assert record["leaves"] and _r3_frontier(engine) > frontier and len(returned) < len(live), record
+    assert record["uncovered"] == record["unknown_coverage"] == 0, record
+    assert all(row["content"] != merged for row in returned)
+    assert engine._store.get_session_messages(SID) == before
+    assert merged in replayed, record
+
+
+@pytest.mark.parametrize("tool_refusal_host", ["stored-projection"], indirect=True)
+def test_refused_tool_reply_reconstructs_original_stored_rows(tool_refusal_host, monkeypatch, caplog):
+    """I1, I2, I11. A refused leaf can cover a host merge that has no exact stored row."""
+    engine, kept, binding, group, merged = tool_refusal_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    engine.record_rejected_compaction()
+    assert _emission_state(engine) == ("refused",)
+    engine.note_turn_complete()
+
+    stored = engine._store.get_session_messages(SID)
+    group_text = {row["content"] for row in group}
+    stored_group = [row for row in stored if row["content"] in group_text]
+    assert [row["role"] for row in stored_group] == ["assistant", "tool", "assistant"]
+    assert stored_group[0]["tool_calls"] and all(row["content"] != merged for row in stored)
+    covered = {store_id for _, _, store_id in engine._dag.get_leaf_sources_through(SID, frontier)}
+    assert {row["store_id"] for row in stored_group} <= covered
+    live = kept + [_turn(20)[1]]
+    replay = engine._committed_replay_drops
+    replayed = []
+
+    def observe_replay(working, start, **kwargs):
+        result = replay(working, start, **kwargs)
+        replayed.extend(working[position]["content"] for position in result[0])
+        return result
+
+    monkeypatch.setattr(engine, "_committed_replay_drops", observe_replay)
+    caplog.set_level(logging.INFO, logger="hermes_lcm")
+    summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+    returned, record = _r3_threshold_pass(
+        engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+    )
+    assert LINEAGE_STOP not in (record["stop"], record["noop"]), record
+    assert record["leaves"] and _r3_frontier(engine) > frontier and len(returned) < len(live), record
+    assert record["uncovered"] == record["unknown_coverage"] == 0, record
+    assert merged in replayed and all(row["content"] != merged for row in returned)
+    after = engine._store.get_session_messages(SID)
+    assert after[:-1] == stored and after[-1]["content"] == live[-1]["content"]
+
+
+@pytest.mark.parametrize("adopted", [False, True], ids=["retry-before-gate", "already-adopted"])
+def test_refused_emission_write_retries_original_view(committed_host, monkeypatch, adopted):  # noqa: F811
+    """I1, I2, I11. A skipped refusal follows the original proposal, even across compress calls."""
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    engine, kept, binding = committed_host
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    assert _emission_state(engine, handle) == ("proposed",)
+
+    @contextmanager
+    def unavailable(_salt):
+        yield None, "in_transaction"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_emission_owner", unavailable)
+        engine.record_rejected_compaction()
+    assert _emission_state(engine, handle) == ("proposed",)
+    if adopted:
+        with engine._emission_owner(engine._store.ingest_ledger_salt()) as (conn, _):
+            moved, _ = engine_module.ingest_ledger.set_emission_state(conn, handle.lineage, handle.view_seq, "adopted")
+        assert moved > 0
+    engine.note_turn_complete()
+
+    gate_outcomes = []
+    gate = engine._latest_compaction_was_refused
+
+    def observe_gate():
+        result = gate()
+        gate_outcomes.append((result, _emission_state(engine, handle)))
+        return result
+
+    monkeypatch.setattr(engine, "_latest_compaction_was_refused", observe_gate)
+    # Leave compactable input beyond the fresh tail after the retry drops the covered prefix.
+    live = kept + [_turn(20)[1], *(row for i in range(21, 28) for row in _turn(i))]
+    returned = engine.compress(live, force=True)
+    assert engine._compress_calls > handle.compress_call and gate_outcomes
+    assert gate_outcomes[0] == ((False, ("adopted",)) if adopted else (True, ("refused",)))
+    if not adopted:
+        assert _r3_frontier(engine) > frontier and len(returned) < len(live)
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"])
+@pytest.mark.parametrize("next_session", [SID, "S1"], ids=["same-session", "session-switch"])
+def test_refused_emission_retry_respects_session_binding(request, monkeypatch, uid_mode, next_session):
+    """I1, I2, I11. An ordinary bind preserves a retry only for its own session."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    assert _emission_state(engine, handle) == ("proposed",)
+
+    @contextmanager
+    def unavailable(_salt):
+        yield None, "in_transaction"
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_emission_owner", unavailable)
+        engine.record_rejected_compaction()
+    assert _emission_state(engine, handle) == ("proposed",)
+    assert (handle, engine._emission_handle_salt) in engine._pending_refused_emissions
+    engine.note_turn_complete()
+
+    write = Mock(wraps=engine._write_emission_state)
+    monkeypatch.setattr(engine, "_write_emission_state", write)
+    engine.on_session_start(next_session, **binding)
+    assert (engine._session_id, engine._conversation_id) == (next_session, binding["conversation_id"])
+    if next_session == SID:
+        gate = Mock(wraps=engine._latest_compaction_was_refused)
+        monkeypatch.setattr(engine, "_latest_compaction_was_refused", gate)
+        drops, _, _, _ = engine._committed_replay_drops(kept, 0)
+        assert _emission_state(engine, handle) == ("refused",)
+        gate.assert_called_once_with()
+        assert drops
+        write.assert_called_once()
+        assert write.call_args.args == (handle, engine._emission_handle_salt, "refused")
+    else:
+        fresh = [row for i in range(30, 44) for row in _turn(i)]
+        assert engine.compress(fresh, force=True) != fresh
+        new_handle = engine._emission_handle
+        assert new_handle is not None and new_handle.session_id == next_session
+        assert _emission_state(engine, new_handle) == ("proposed",)
+        assert not engine._latest_compaction_was_refused()
+        assert _emission_state(engine, new_handle) == _emission_state(engine, handle) == ("proposed",)
+        write.assert_not_called()
+    assert not engine._pending_refused_emissions
+
+
+@pytest.mark.parametrize("case", ["later-accepted", "session-switch", "ledger-off"])
+def test_real_refusal_gate_boundaries(request, monkeypatch, caplog, case):
+    """I1, I2, I11. The replay gate is scoped to a genuine host refusal and the bound frontier."""
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    if case == "ledger-off":
+        monkeypatch.setenv("LCM_INGEST_LEDGER", "off")
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    _, frontier = _real_leaf_refusal(engine, kept, binding)
+    handle = engine._emission_handle
+    engine.record_rejected_compaction()
+    if case == "ledger-off":
+        assert handle is None and not engine._latest_compaction_was_refused()
+    else:
+        assert _emission_state(engine, handle) == ("refused",)
+        assert engine._latest_compaction_was_refused()
+        assert engine._committed_replay_drops(kept, 0)[0]
+    engine.note_turn_complete()
+    if case == "later-accepted":
+        # Route backoff permits a no-leaf replay to re-emit the summaries.
+        # Carry out the later host commit in its normal end/start order.
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "_summary_route_stop_applies", lambda *_args, **_kwargs: True)
+            # This synthetic route refusal has no real circuit cooldown.
+            patch.setattr(engine, "_start_sweep_budget_hold", lambda *_args, **_kwargs: None)
+            accepted = engine.compress(kept, force=True)
+        assert _r3_frontier(engine) == frontier and engine._last_compress_leaves[1] == 0
+        assert len(accepted) < len(kept) and engine._emission_handle.view_seq > handle.view_seq
+        _drain_session_end_maintenance(engine)
+        engine.on_session_end(SID, kept)
+        engine.on_session_start(SID, boundary_reason="compression", old_session_id=SID, **binding)
+        assert _emission_state(engine) == ("adopted",)
+        assert _emission_state(engine, handle) == ("refused",)
+        assert not engine._latest_compaction_was_refused()
+        covered = {store_id for _, _, store_id in engine._dag.get_leaf_sources_through(SID, frontier)}
+        ids = engine._get_store_id_map_for_messages(accepted)
+        scaffold_end, carrier = engine._replay_head(accepted, 0, frontier)
+        for i, row in enumerate(accepted):
+            if i < scaffold_end or (i == scaffold_end and carrier):
+                continue
+            store_id = ids.get(id(row))
+            assert store_id and (store_id > frontier or store_id in covered), row
+        assert engine._committed_replay_drops(accepted, 0)[0] == []
+        caplog.set_level(logging.INFO, logger="hermes_lcm")
+        summarizer = Mock(wraps=engine_module.summarize_with_escalation)
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", summarizer)
+        live = accepted + [_turn(20)[1], *_turn(21)]
+        _, record = _r3_threshold_pass(
+            engine, live, caplog, summarizer, monkeypatch, overhead=engine.threshold_tokens - count_messages_tokens(live),
+        )
+        assert record["gate"] == "ran" and LINEAGE_STOP not in (record["stop"], record["noop"]), record
+        return
+    elif case == "session-switch":
+        engine.on_session_start("S1", **binding)
+        assert engine._lifecycle.get_by_conversation(engine._conversation_id).current_session_id != SID
+
+    drops, store_map, _, _ = engine._committed_replay_drops(kept, 0)
+    assert drops == []
+    assert (store_map is None) == (case == "session-switch")
