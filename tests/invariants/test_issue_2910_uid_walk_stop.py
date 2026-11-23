@@ -207,9 +207,8 @@ def _measure(engine, view, stop, target, shape, temperature, cut_budget, monkeyp
 
     lost_store_rows = missing_ids or len(after) < len(before)
     if temperature == "cold" and (lost_store_rows or missing_new_host_indices):
-        pytest.exit(
-            f"#2910 release stop: cold-{shape}, cut budget override {cut_budget}; see the cell just printed",
-            returncode=1,
+        pytest.fail(  # Failed is not an AssertionError, so the xfail marks cannot absorb a loss
+            f"#2910 release stop: cold-{shape}, cut budget override {cut_budget}; see the cell just printed"
         )
 
     assert not lost_store_rows
