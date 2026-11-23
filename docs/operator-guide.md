@@ -541,13 +541,16 @@ is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
 
 With `LCM_TURN_START_DEFER_CEILING` enabled, LCM-X checks the ceiling against the
 live compaction trigger, including after Hermes or the LCM assembly cap lowers
-it. It warns when the ceiling is at or below the trigger (inert) or above an
-absolute or lowered trigger (unanchored). Global and per-model ratio triggers
-below the ceiling are quiet while they retain their window-derived value. Both
-warnings include the token values. The first deferral in each episode logs at
-INFO and subsequent deferrals log at DEBUG. `/lcm status` shows the ceiling as a
-share and in tokens beside the trigger, plus `turn_start_deferred_checks`, the
-number of gate checks deferred in the current session.
+it. The effective ceiling is the lower of the configured ceiling and any
+assembly cap, where forced overflow takes over. LCM-X warns when the effective
+ceiling is at or below the trigger (inert) or above an absolute or lowered
+trigger (unanchored). Global and per-model ratio triggers below the effective
+ceiling are quiet while they retain their window-derived value. Both warnings
+include the token values and name the cap when it limits deferral. The first
+deferral in each episode logs at INFO and subsequent deferrals log at DEBUG.
+`/lcm status` shows the configured ceiling as a share and in tokens beside the
+trigger, plus `turn_start_deferred_checks`, the number of gate checks deferred
+in the current session.
 
 Useful environment variables:
 

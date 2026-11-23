@@ -782,7 +782,7 @@ class LCMEngine(
         self._turn_start_defer_mid_turn_id: str | None = None
         self._turn_start_defer_logged = False
         self._turn_start_deferred_checks = 0
-        self._turn_start_defer_warned: set[tuple[int, int, float]] = set()
+        self._turn_start_defer_seen: set[tuple[int, int, float, bool]] = set()
         self._window_anchored_trigger: tuple[int, int] | None = None
         self._absolute_threshold_tokens = getattr(
             self._config, "_absolute_threshold_tokens", None
@@ -1689,25 +1689,36 @@ class LCMEngine(
         context_length, trigger = self.context_length, self.threshold_tokens
         if not ceiling or context_length <= 0 or trigger <= 0:
             return
-        key = (context_length, trigger, ceiling)
-        if key in self._turn_start_defer_warned:
-            return
-        ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, context_length)
-        if ceiling_tokens <= trigger:
-            reason = "inert: the defer ceiling is at or below the compaction trigger; the gate never defers"
-        elif self._window_anchored_trigger != (context_length, trigger):
-            reason = "unanchored: the defer ceiling follows the model window with an absolute or adjusted compaction trigger"
-        else:
-            # The same numbers can become unanchored after a model switch and host clamp.
+        # A host clamp can land on the same numbers as a different model's quiet ratio.
+        anchored = self._window_anchored_trigger == (context_length, trigger)
+        key = (context_length, trigger, ceiling, anchored)
+        if key in self._turn_start_defer_seen:
             return
         with self._compaction_gate:
-            if key in self._turn_start_defer_warned:
+            if key in self._turn_start_defer_seen:
                 return
-            self._turn_start_defer_warned.add(key)
+            ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, context_length)
+            # Use the same cap calculation as forced overflow recovery.
+            assembly_cap, _ = assembly_token_cap(
+                context_length, self._config.max_assembly_tokens, self._config.reserve_tokens_floor,
+            )
+            bound = ""
+            if assembly_cap is not None and assembly_cap < ceiling_tokens:
+                bound = f"; assembly_cap={assembly_cap} limits deferral (configured_ceiling_tokens={ceiling_tokens})"
+                ceiling_tokens = assembly_cap
+            self._turn_start_defer_seen.add(key)
+            if ceiling_tokens <= trigger:
+                # An inert ceiling stays inert for these numbers regardless of the anchor.
+                self._turn_start_defer_seen.add((context_length, trigger, ceiling, not anchored))
+                reason = "inert: the defer ceiling is at or below the compaction trigger; the gate never defers"
+            elif anchored:
+                return
+            else:
+                reason = "unanchored: the defer ceiling follows the model window with an absolute or adjusted compaction trigger"
         try:
             logger.warning(
-                "LCM defer ceiling is %s (ceiling_tokens=%s threshold_tokens=%d context_length=%d)",
-                reason, ceiling_tokens, trigger, context_length,
+                "LCM defer ceiling is %s (ceiling_tokens=%s threshold_tokens=%d context_length=%d)%s",
+                reason, ceiling_tokens, trigger, context_length, bound,
             )
         except Exception:
             pass  # A diagnostic handler cannot interrupt binding or the gate decision.

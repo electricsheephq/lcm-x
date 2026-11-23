@@ -94,7 +94,7 @@ def test_c_window_anchored_ratio_is_quiet(make_engine, caplog, model, trigger):
 
 
 @pytest.mark.parametrize("model", ["ordinary", "special"])
-def test_assembly_cap_makes_a_ratio_trigger_unanchored(make_engine, caplog, model):
+def test_assembly_cap_at_the_ratio_trigger_makes_the_ceiling_inert(make_engine, caplog, model):
     eng = make_engine(model_thresholds={"special": 0.6}, max_assembly_tokens=400_000)
     eng.update_model(model, WINDOW)
     bind(eng, model=model)
@@ -103,8 +103,35 @@ def test_assembly_cap_makes_a_ratio_trigger_unanchored(make_engine, caplog, mode
     assert eng.should_compress(399_999) is False
     assert eng.should_compress(400_000) is True  # The assembly cap forces overflow recovery.
     message, = warnings(caplog)
-    assert "unanchored" in message
-    assert "ceiling_tokens=700000" in message and "threshold_tokens=400000" in message
+    assert "is inert:" in message
+    assert "(ceiling_tokens=400000 threshold_tokens=400000" in message
+    assert "assembly_cap=400000 limits deferral" in message
+
+
+def test_assembly_cap_below_the_absolute_trigger_makes_the_ceiling_inert(make_engine, caplog):
+    eng = make_engine(absolute_threshold_tokens=500_000, max_assembly_tokens=400_000)
+    bind(eng)
+    eng.update_from_response({"stop_reason": "tool_use"})
+    assert eng.should_compress(399_999) is False
+    assert eng.should_compress(400_000) is True
+    message, = warnings(caplog)
+    assert "is inert:" in message
+    assert "(ceiling_tokens=400000 threshold_tokens=500000" in message
+    assert "assembly_cap=400000 limits deferral" in message
+
+
+def test_assembly_cap_between_a_lowered_trigger_and_the_ceiling_limits_deferral(make_engine, caplog):
+    eng = make_engine(max_assembly_tokens=650_000, reserve_tokens_floor=400_000)
+    bind(eng)
+    assert warnings(caplog) == []
+    eng.threshold_tokens = 128_000  # Hermes lowers the trigger after bind.
+    eng.update_from_response({"stop_reason": "tool_use"})
+    assert eng.should_compress(599_999) is False
+    assert eng.should_compress(600_000) is True
+    message, = warnings(caplog)
+    assert "is unanchored:" in message
+    assert "(ceiling_tokens=600000 threshold_tokens=128000" in message
+    assert "assembly_cap=600000 limits deferral" in message
 
 
 def test_host_auxiliary_clamp_after_bind_warns_once_at_the_lowered_trigger(make_engine, caplog):
@@ -166,6 +193,21 @@ def test_seen_warning_key_skips_the_lock(make_engine, caplog, monkeypatch):
         patch.setattr(eng, "_compaction_gate", None)
         eng._warn_turn_start_defer_ceiling()
     assert warnings(caplog) == [message]
+
+
+def test_seen_quiet_key_skips_classification_and_the_lock(make_engine, caplog, monkeypatch):
+    eng = make_engine()
+    bind(eng)
+    assert warnings(caplog) == []
+
+    def unexpected_classification(*args):
+        pytest.fail("a seen quiet key recalculated the ceiling")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(eng, "_turn_start_defer_ceiling_tokens", unexpected_classification)
+        patch.setattr(eng, "_compaction_gate", None)
+        assert eng.should_compress(TRIGGER - 1) is False
+    assert warnings(caplog) == []
 
 
 def test_bind_rechecks_trigger_after_host_auxiliary_clamp(make_engine, caplog):
