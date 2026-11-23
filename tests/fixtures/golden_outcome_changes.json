@@ -842,6 +842,14 @@
       "outcome_sha": "8c120e5031d2786085658d5773f48b5bdbe7b871f0195d3805b81779c1a76dd8",
       "reason": "#2895: head no longer nests the summary prefix: the re-assembled head carries the summary prefix once, not twice; no other outcome changed"
     },
+    "stub-first-exit": {
+      "outcome_sha": "53a294c5cd980bb9f375840fbd0f627ca0ebc1608c347334088bbb5a864e6bec",
+      "reason": "Fix (a) preserves the host head and stubs eligible tool results. The ingest cursor follows the returned rows."
+    },
+    "sweep-stub-first-exit": {
+      "outcome_sha": "53a294c5cd980bb9f375840fbd0f627ca0ebc1608c347334088bbb5a864e6bec",
+      "reason": "Fix (a) preserves the host head and stubs eligible tool results. The ingest cursor follows the returned rows."
+    },
     "transcript-gc-locked": {
       "outcome_sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "reason": "#1246 v0.30.0 removes transcript GC behavior and its writer/lock scenario."

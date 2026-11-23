@@ -56,16 +56,6 @@ SUMMARY_MARKER = "R-STABLE source "
 EVENTS = ("none", "cold-bind", "session-switch", "config-reload", "inbox")
 PASS_KINDS = ("leaf", "condensation", "stub-only", "stub-only-merged-head", "refused")
 KNOWN_FAILS = {
-    "stub-only/none/off": (("needless head rewrite", 7),),
-    "stub-only/none/on": (("needless head rewrite", 7),),
-    "stub-only/cold-bind/off": (("needless head rewrite", 7),),
-    "stub-only/cold-bind/on": (("needless head rewrite", 7),),
-    "stub-only/session-switch/off": (("needless head rewrite", 7),),
-    "stub-only/session-switch/on": (("needless head rewrite", 7),),
-    "stub-only/config-reload/off": (("needless head rewrite", 7),),
-    "stub-only/config-reload/on": (("needless head rewrite", 7),),
-    "stub-only/inbox/off": (("needless head rewrite", 7),),
-    "stub-only/inbox/on": (("needless head rewrite", 7),),
     "refused/none/off": (("non-commit return", 7),),
     "refused/none/on": (("non-commit return", 7),),
     "refused/cold-bind/off": (("non-commit return", 7),),

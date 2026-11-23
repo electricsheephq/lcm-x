@@ -87,7 +87,10 @@ try:
         assert host_uid_emit.identity_emit_enabled()
     assert len(result) == len(original), (len(result), len(original))
     assert engine._last_compress_leaves[1] == engine._compress_host_rows_consumed == 0
-    assert head["role"] == "user" and "timestamp" not in head
+    if preserve_head:
+        assert head == original[0], "fix (a): the candidate preserves the host's carrier row"
+    else:
+        assert head["role"] == "user" and "timestamp" not in head
     assert engine._verified_lcm_summary_prefix_end(head["content"])
     assert engine._generated_context_carrier_remainder(head)
     assert engine._compress_commit_publication == "local"
@@ -157,7 +160,8 @@ def test_hotfix_session_switch(tmp_path, old_tree, host_root):
                 directory = tmp_path / f"{shape}-{mode}-{arm}"
                 directory.mkdir()
                 try:
-                    arms[arm] = run_old(tree, directory, host_root, SESSION_SWITCH, mode=mode, data=shape)
+                    script = f"preserve_head = {arm == 'CAND'}\n" + SESSION_SWITCH
+                    arms[arm] = run_old(tree, directory, host_root, script, mode=mode, data=shape)
                 except (AssertionError, TimeoutExpired) as exc:
                     report["errors"][f"{shape}/{mode}/{arm}"] = str(exc)
             if {"BASE", "CAND"} <= arms.keys():
