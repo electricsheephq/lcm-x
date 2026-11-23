@@ -313,7 +313,10 @@ receipt is completed in L2 by the rest of its hands-on lane.
      revision beside each receipt. Every run is kept, and the first run's receipt (the earliest-created
      `--work` directory) decides the check. A `FAIL` (the verdict the table below gives) is never re-run:
      it binds every candidate of that release whose `tree_identity` equals the failed run's, and each
-     such candidate takes that `FAIL`. After any other verdict that is not `PASS`, the check may be
+     such candidate takes that `FAIL`. The one exception is a `FAIL` that the release manager traces to a defect in the
+     instrument: it stays recorded, the release re-pins to the `main` revision that merges a reviewed fix to that
+     instrument, and the runs from the new pin are new runs, scored as above; a `FAIL` that the reviewed fix does not
+     explain stands. After any other verdict that is not `PASS`, the check may be
      re-run once, with a new `--work` and `--out`, and that run's receipt decides.
   3. Score each check by its deciding receipt. The receipt is for the candidate's tree when its
      `tree_identity` equals the one `tree_identity` in `bench/instruments/busy_bar/driver.py` gives for
