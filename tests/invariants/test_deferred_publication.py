@@ -106,8 +106,12 @@ class Host:
         return returned
 
     def assert_no_deferred(self):
+        # T1-557 (clarifying T1-555): a node may first become visible only in the return of a call that itself
+        # commits (stores a node). It need not be the call that stored it, so a hidden-only pass whose leaf first
+        # shows in the next committing pass is fine; a node first shown by a call that stored nothing is deferred.
         deferred = {node_id: (self.stored_at[node_id], published)
-                    for node_id, published in self.published_at.items() if self.stored_at[node_id] < published}
+                    for node_id, published in self.published_at.items()
+                    if self.stored_at[node_id] < published and not self.calls[published - 1][0]}
         if deferred:
             raise DeferredPublication(
                 f"node: (stored call, first returned call) = {deferred}; "
@@ -147,7 +151,6 @@ def hosts(tmp_path, monkeypatch, record_property):
     return open_host
 
 
-@pytest.mark.xfail(strict=True, reason="deferred publication F3, swap rule (b)", raises=DeferredPublication)
 def test_f3_hidden_only_leaf(hosts):
     with hosts() as host:
         history = host.rows_for_turns(0, 6)
