@@ -338,7 +338,8 @@
     "identity_anchor.py",
     "leaf_prep.py",
     "engine.py",
-    "fresh_tail.py"
+    "fresh_tail.py",
+    "head_copy.py"
    ],
    "symbols": [
     "StoreCompleteMixin",
@@ -368,7 +369,8 @@
     "summary_input_clip.py",
     "extraction.py",
     "config.py",
-    "fresh_tail.py"
+    "fresh_tail.py",
+    "head_copy.py"
    ],
    "symbols": [
     "summarize_leaf_chunk_with_rescue",
@@ -395,7 +397,8 @@
     "level3_repair.py",
     "rollup_builder.py",
     "rollup_store.py",
-    "lifecycle_state.py"
+    "lifecycle_state.py",
+    "head_copy.py"
    ],
    "symbols": [
     "_maybe_condense",
@@ -444,7 +447,8 @@
     "tool_pairs.py",
     "fresh_tail.py",
     "assembly_plan.py",
-    "compaction.py"
+    "compaction.py",
+    "head_copy.py"
    ],
    "symbols": [
     "_assemble_context",
