@@ -12,6 +12,8 @@ from tests.message_store_callback_audit import METHODS, ROOT
 ALLOWLIST = (
     ('bench/fmp/tests/test_switches.py', 'make_store.frozen_connect', 'create_function', 'instrument, not product: connection is the instrumented connection'),
     ('bench/instruments/busy_bar/holds.py', 'probe.traced_connect', 'set_trace_callback', 'instrument, not product: conn is the instrumented connection'),
+    ('bench/instruments/gate_kit/live_rows/l1_planner.py', 'main.traced_connect', 'set_trace_callback', 'instrument, not product: conn is the instrumented connection; counts the L1 planner check statements executed'),
+    ('bench/instruments/gate_kit/live_rows/run.py', 'trace_transactions.connect', 'set_trace_callback', 'instrument, not product: conn is the instrumented connection; the --trace-txn diagnostic'),
     ('bench/instruments/local_catchup/tests/test_1653.py', 'test_08_audit_reads_one_snapshot.concurrent', 'set_trace_callback', 'instrument, not product: c is the instrumented connection'),
     ('bench/instruments/local_catchup/tests/test_i2_fix1.py', 'test_cheap_counts_ignore_new_trace_and_foreign_identity.connect', 'set_trace_callback', 'instrument, not product: c is the instrumented connection'),
     ('bench/instruments/reliability/test_reply_held_fault.py', 'test_kill_exit_checks_rollback_order', 'set_trace_callback', 'instrument, not product: held.reservation is the instrumented connection'),

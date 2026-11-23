@@ -52,6 +52,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
     _carrier_emission_key,
     _commit_proof_identity_digest,
+    _emitted_user_replay_digest,
     _emission_identity,
     _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
@@ -74,6 +75,9 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 _EXTRACTION_HEADROOM_SECONDS = 2.0  # overhead between the extraction timeout and the next admit
 _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE = 0.25
+# Bound host row savings between the local count and four times that count.
+_DEPTH_TOKEN_SCALE_MIN = 1.0
+_DEPTH_TOKEN_SCALE_MAX = 4.0
 _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "pass_budget_exhausted",
     "time_budget_exhausted",
@@ -173,6 +177,7 @@ class _CompressionState:
     sweep_summary_prefix_before: int = 0
     depth_target_tokens: int = 0
     depth_load_addend: int = 0
+    depth_token_scale: float = 1.0
     stub_first_fallback: Callable[[], Optional[List[Dict[str, Any]]]] | None = None
     critical_budget_pressure: bool = False
     deferred_maintenance_active: bool = False
@@ -683,6 +688,7 @@ class CompactionMixin:
         so the pressure-yield gate judges tail blockage from the numbers the
         compaction pass would actually see.
         """
+        messages = self._without_known_head_copies(messages)
         if not messages:
             return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
@@ -1387,6 +1393,15 @@ class CompactionMixin:
             # #671: a stub-first exit hands the host a rewritten list (summary prefix re-emitted from the DAG, stubs);
             # once the host commits it, the durable proof must describe that list, or a cold rebind reads a stale one.
             proof["stub_first"] = bool(getattr(self, "_stub_first_exit_now", None))
+            if len(result) == len(messages) and (proof["stub_first"] or (
+                    proof["published"] and getattr(self, "_compress_host_rows_consumed", None) == 0)):
+                # A same-length reassembly can replace the occurrence at the old
+                # head's index. Keep literal identities of its fresh user emissions
+                # for the warm ingest check, separate from the normalized replay keys.
+                for item in fresh:
+                    if item["role"] == "user" and item["kind"] in {"summary", "carrier", "objective"}:
+                        index = item["output_occurrence"]["index"]
+                        proof.setdefault("emitted_user_digests", {})[index] = _emitted_user_replay_digest(result[index])
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
             # not identity (a gateway may send only a new turn), so the proof binds each row's host key
@@ -1840,7 +1855,8 @@ class CompactionMixin:
 
     def _match_prepared_leaf(self, candidate_raw, working_messages, accounted_ids, dependent_reply_message_ids,
                              estimated_active_tokens: int, raw_tokens_outside_tail: int, *,
-                             depth_target_tokens: int = 0, depth_load_addend: int = 0):
+                             depth_target_tokens: int = 0, depth_load_addend: int = 0,
+                             depth_recall_reserve: int = 0):
         """#787 (amendment M-1): the prepared leaf at the durable frontier and the host range ``candidate_raw[:k]``
         whose consumption, derived exactly as the leaf loop derives it (claims included), equals the leaf's covered
         rows at a tool-group-safe end: (leaf, chunk, L). None when nothing is ready, the conversation is at or
@@ -1854,6 +1870,8 @@ class CompactionMixin:
                                   self._working_leaf_chunk_tokens(raw_tokens_outside_tail))
         if not chain or bounds is None:
             return None
+        if depth_target_tokens:
+            estimated_active_tokens += depth_recall_reserve
         if estimated_active_tokens + depth_load_addend <= (depth_target_tokens or bounds[1]):
             return None
         leaf = chain[0]
@@ -2164,7 +2182,8 @@ class CompactionMixin:
                 or self._compress_binding_changed() or self._compaction_is_closing()):
             return None
         stub_first_sweep = self._last_threshold_full_sweep.copy()
-        exited = state.stub_first_fallback()
+        fallback, state.stub_first_fallback = state.stub_first_fallback, None
+        exited = fallback()
         if exited is not None:
             self._no_progress_candidate = self._compress_dropped_ignored_rows = state.budget.selected = False
             if state.budget.hung_route is not None:
@@ -2489,6 +2508,7 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
+        state.working_messages = self._without_known_head_copies(state.working_messages)
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow
@@ -2594,7 +2614,7 @@ class CompactionMixin:
                 or not state.threshold_full_sweep_active or force or state.force_overflow or recovery_attempt
                 or state.observed_prompt_tokens < self.threshold_tokens):
             return 0
-        target = int(ratio * self.context_length)
+        target = int(round(ratio * self.context_length, 6))
         if target >= self.threshold_tokens:
             logger.info("LCM depth target is at or above the trigger: target=%d trigger=%d",
                         target, self.threshold_tokens)
@@ -2607,6 +2627,35 @@ class CompactionMixin:
                 )):
             return 0
         return target
+
+    def _depth_target_reached(self, state: _CompressionState, estimate: int | None = None) -> bool:
+        if not state.depth_target_tokens:
+            return False
+        if estimate is None:
+            estimate = state.estimated_active_tokens
+        recall_reserve = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
+        return estimate + state.depth_load_addend + recall_reserve <= state.depth_target_tokens
+
+    def _update_depth_catchup(self, state: _CompressionState) -> None:
+        budget = state.budget
+        if (state.depth_target_tokens <= 0 or (budget.soft, budget.hard) != (60.0, 120.0)
+                or budget.catchup_ended):
+            return
+        strike = self._hung_summary_strike
+        if strike is not None and strike[0] == self._hold_conversation_key():
+            budget.end_catchup()
+            return
+        if not budget.progress:
+            return
+        if self._depth_target_reached(state):
+            budget.end_catchup()
+        else:
+            budget.catchup_open = True
+
+    @staticmethod
+    def _credit_condensation_saving(state: _CompressionState, before: int, after: int) -> None:
+        saving = int(round(max(0, before - after) * state.depth_token_scale))
+        state.estimated_active_tokens = max(0, state.estimated_active_tokens - saving)
 
     def _prepare_compression_sweep(self, state: _CompressionState,
                                    messages: List[Dict[str, Any]],
@@ -2640,17 +2689,25 @@ class CompactionMixin:
             fixed_load = self._survival_host_overhead(state.host_messages, state.observed_prompt_tokens)
             # A host observation already includes the fixed load. The list-only fallback needs it added.
             state.depth_load_addend = 0 if self._survival_pass_observed else fixed_load
+            if state.observed_prompt_tokens > 0 and self._survival_pass_observed:
+                counted = count_messages_tokens(state.host_messages)
+                if counted > 0:
+                    rows_host = max(0, state.observed_prompt_tokens - fixed_load)
+                    scale = rows_host / counted
+                    state.depth_token_scale = max(_DEPTH_TOKEN_SCALE_MIN, min(_DEPTH_TOKEN_SCALE_MAX, scale))
             depth_status = {
                 "depth_target_tokens": state.depth_target_tokens,
                 "fixed_load_tokens": fixed_load,
                 "whole_prompt_tokens_after": state.estimated_active_tokens + state.depth_load_addend,
                 "depth_target_met": False,
+                "depth_token_scale": round(state.depth_token_scale, 4),
             }
         # #605: one clock from compress() entry; the hard bound keeps today's step checks.
         state.budget = self._foreground_budget or self._new_foreground_budget()
         state.budget.sweep_active = state.threshold_full_sweep_active
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
+        self._update_depth_catchup(state)
         state.sweep_deadline = state.budget.t0 + state.budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         if configured_sweep_target > 0:
@@ -2738,6 +2795,12 @@ class CompactionMixin:
             and self._summary_route_available()
         ):
             state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
+            frontier_after = state.sweep_summary_prefix_before
+
+            def record_frontier(_before: int, after: int) -> None:
+                nonlocal frontier_after
+                frontier_after = after
+
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (
@@ -2746,6 +2809,7 @@ class CompactionMixin:
                         pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES - 1,
                         deadline=state.sweep_deadline,
                         focus_topic=focus_topic,
+                        **({"on_stored": record_frontier} if state.depth_target_tokens else {}),
                     )
                 )
             except Exception as exc:
@@ -2760,9 +2824,15 @@ class CompactionMixin:
                         pre_leaf_condensation_stop_reason="sqlite_publication_locked",
                     )
                     self._store.rollback_pending_write()
-                    exited = self._use_stub_first_fallback(state)
-                    if exited is not None:
-                        return "return", exited
+                    try:
+                        exited = self._use_stub_first_fallback(state)
+                    except Exception as fallback_exc:
+                        logger.warning("LCM stub-first fallback failed after condensation lock (%s)",
+                                       type(fallback_exc).__name__)
+                        self._store.rollback_pending_write()
+                    else:
+                        if exited is not None:
+                            return "return", exited
                 return "return", self._fail_open_after_publication_failure(
                     state.working_messages,
                     exc,
@@ -2776,6 +2846,8 @@ class CompactionMixin:
                 state.budget.leaf_reserve = 0.0
                 self._pre_leaf_span("condensation", span_started)
             state.max_leaf_passes -= state.pre_leaf_condensation_passes
+            if state.depth_target_tokens and state.pre_leaf_condensation_passes:
+                self._credit_condensation_saving(state, state.sweep_summary_prefix_before, frontier_after)
         if self._compress_binding_changed() or self._compaction_is_closing():
             return "return", state.host_messages
         if state.threshold_full_sweep_active:
@@ -2794,7 +2866,8 @@ class CompactionMixin:
         """Admit one leaf pass and adopt already committed replay."""
         if self._compaction_is_closing():
             return "return", state.host_messages
-        if state.threshold_full_sweep_active and time.monotonic() >= state.sweep_deadline:
+        self._update_depth_catchup(state)
+        if state.threshold_full_sweep_active and time.monotonic() >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if state.budget.progress:
@@ -2827,7 +2900,7 @@ class CompactionMixin:
         leaf.publication_excluded_store_ids = self._get_store_ids_for_messages(
             state.working_messages[:leaf.leading_anchor_count]
         ) if leaf.leading_anchor_count else []  # #608: an empty slice maps to nothing
-        if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.sweep_deadline:
+        if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         leaf.filter_exclusion_proofs: Dict[int, Any] = {}
@@ -2847,7 +2920,7 @@ class CompactionMixin:
                 return "continue", None
             step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
             leaf.hidden_backlog = self._store_complete_backlog(state.working_messages, leaf.leading_anchor_count, leaf.copy_lookup)
-            if state.threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
         if leaf.fresh_tail_start <= leaf.leading_anchor_count and not leaf.hidden_backlog and not adopt_before_stop:
@@ -2868,12 +2941,13 @@ class CompactionMixin:
         # those with the scaffold, keeping any row committed lineage does not hold.
         # Reuse the map when the pass maps this same list.
         drops, leaf.premapped_store_ids, kept = set(range(leaf.leading_anchor_count, leaf.candidate_start)), None, 0
+        resumed = []
         if leaf_passes == 0 and not state.resumed_prefix and not leaf.hidden_backlog:
             step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
             resumed, store_ids, summary_tokens, kept = self._committed_replay_drops(
                 state.working_messages, leaf.candidate_start
             )
-            if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
             state.resumed_prefix = bool(resumed)
@@ -2881,7 +2955,13 @@ class CompactionMixin:
             leaf.premapped_store_ids = None if drops or resumed else store_ids
             if resumed:  # the committed summary replaces the dropped rows in the estimate
                 resumed_tokens = count_messages_tokens([state.working_messages[index] for index in resumed])
-                state.estimated_active_tokens = max(0, state.estimated_active_tokens - resumed_tokens + summary_tokens)
+                if state.depth_target_tokens:
+                    freed = resumed_tokens - summary_tokens
+                    if freed > 0:
+                        freed = int(round(freed * state.depth_token_scale))
+                    state.estimated_active_tokens = max(0, state.estimated_active_tokens - freed)
+                else:
+                    state.estimated_active_tokens = max(0, state.estimated_active_tokens - resumed_tokens + summary_tokens)
             drops.update(resumed)
         if adopt_before_stop and not state.resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
             if leaf.fresh_tail_start <= leaf.leading_anchor_count:  # a full tail stops here, as before the no-call source
@@ -2907,6 +2987,10 @@ class CompactionMixin:
         if adopt_before_stop:  # #640: the committed summary is adopted; no new leaf while every route is refused
             state.sweep_stop_reason = "summary_route_unavailable"
             return "break", None
+        if resumed and state.depth_target_tokens and self._depth_target_reached(state):
+            state.sweep_stop_reason = "depth_target_reached"
+            self._last_threshold_full_sweep["depth_target_met"] = True
+            return "break", None
         return "next", None
 
     def _filter_leaf_backlog(
@@ -2921,7 +3005,7 @@ class CompactionMixin:
                 if leaf.premapped_store_ids is not None
                 else self._get_store_id_map_for_messages(state.working_messages[leaf.leading_anchor_count:])
             )
-            if state.threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
             compactable_pairs = list(
@@ -3300,14 +3384,29 @@ class CompactionMixin:
                         0,
                         _THRESHOLD_FULL_SWEEP_MAX_PASSES - state.leaf_passes - state.pre_leaf_condensation_passes,
                     )
-                    state.condensation_passes, state.sweep_stop_reason = (
+                    self._update_depth_catchup(state)
+
+                    def credit_group(before: int, after: int) -> None:
+                        self._credit_condensation_saving(state, before, after)
+                        self._update_depth_catchup(state)
+                        if self._depth_target_reached(state):
+                            self._last_threshold_full_sweep["depth_target_met"] = True
+
+                    state.condensation_passes, condensation_reason = (
                         self._run_threshold_sweep_condensation(
                             target_tokens=state.sweep_target_tokens,
                             pass_budget=remaining_passes,
-                            deadline=state.sweep_deadline,
+                            deadline=state.budget.step_deadline,
                             focus_topic=focus_topic,
+                            **({"on_stored": credit_group} if state.depth_target_tokens else {}),
                         )
                     )
+                    preserve_depth_stop = state.sweep_stop_reason == "depth_target_reached" and (
+                        condensation_reason == "time_budget_exhausted"
+                        or (not state.condensation_passes and condensation_reason == "summary_prefix_target_reached")
+                    )
+                    if not preserve_depth_stop:
+                        state.sweep_stop_reason = condensation_reason
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
@@ -3432,6 +3531,7 @@ class CompactionMixin:
                 in {"pass_budget_exhausted", "time_budget_exhausted"},
                 **({key: running_sweep[key] for key in (
                     "depth_target_tokens", "fixed_load_tokens", "whole_prompt_tokens_after", "depth_target_met",
+                    "depth_token_scale",
                 )} if state.depth_target_tokens else {}),
                 **self._hidden_backlog_status(),
             }
@@ -3646,9 +3746,15 @@ class CompactionMixin:
                 raise
             if _is_sqlite_locked_error(exc) and not state.leaf_passes and state.stub_first_fallback:
                 self._store.rollback_pending_write()
-                exited = self._use_stub_first_fallback(state)
-                if exited is not None:
-                    return "return", exited
+                try:
+                    exited = self._use_stub_first_fallback(state)
+                except Exception as fallback_exc:
+                    logger.warning("LCM stub-first fallback failed after leaf publication lock (%s)",
+                                   type(fallback_exc).__name__)
+                    self._store.rollback_pending_write()
+                else:
+                    if exited is not None:
+                        return "return", exited
             fallback = state.working_messages
             context_is_assembled = False
             if state.leaf_passes or state.dropped_replayed_scaffold_messages:
@@ -3710,11 +3816,17 @@ class CompactionMixin:
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
-        state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
-        if state.depth_target_tokens and state.estimated_active_tokens + state.depth_load_addend <= state.depth_target_tokens:
-            state.sweep_stop_reason = "depth_target_reached"
-            self._last_threshold_full_sweep["depth_target_met"] = True
-            return "break", None
+        if state.depth_target_tokens:
+            freed = leaf.source_tokens - leaf.summary_tokens
+            if freed > 0:
+                freed = int(round(freed * state.depth_token_scale))
+            state.estimated_active_tokens = max(0, state.estimated_active_tokens - freed)
+            if self._depth_target_reached(state):
+                state.sweep_stop_reason = "depth_target_reached"
+                self._last_threshold_full_sweep["depth_target_met"] = True
+                return "break", None
+        else:
+            state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
         if leaf.prepared is not None:
             if not state.depth_target_tokens and state.estimated_active_tokens <= state.prep_low_water:
                 state.sweep_stop_reason = "prepared_leaves_promoted"
@@ -3894,10 +4006,14 @@ class CompactionMixin:
         leaf.to_compact = self._identity_anchor_extend_chunk(leaf.to_compact, candidate_raw)  # #563
         leaf.prepared = None
         if state.prep_enabled and leaf.to_compact and not (leaf.hidden_backlog or state.force_overflow or state.no_call_only):
+            recall_reserve = (
+                int(self._config.proactive_recall_budget_tokens)
+                if state.depth_target_tokens and self._config.proactive_recall_enabled else 0
+            )
             match = self._match_prepared_leaf(candidate_raw, state.working_messages, leaf.publication_excluded_store_ids,
                                               dependent_reply_message_ids, state.estimated_active_tokens,
                                               raw_tokens_outside_tail, depth_target_tokens=state.depth_target_tokens,
-                                              depth_load_addend=state.depth_load_addend)
+                                              depth_load_addend=state.depth_load_addend, depth_recall_reserve=recall_reserve)
             if match is not None:
                 leaf.prepared, leaf.to_compact, state.prep_low_water = match
         return "next", None
@@ -3922,7 +4038,7 @@ class CompactionMixin:
             budget=max(1, int(self._config.leaf_chunk_tokens)), accounted_ids=leaf.publication_excluded_store_ids,
             copy_lookup=leaf.copy_lookup[0] if leaf.copy_lookup else None,
         )
-        if state.threshold_full_sweep_active and sweep_step_done("identity_anchor", step_started) >= state.sweep_deadline:
+        if state.threshold_full_sweep_active and sweep_step_done("identity_anchor", step_started) >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if leaf.anchored_input == []:
@@ -4031,6 +4147,7 @@ class CompactionMixin:
         action, result = self._condense_before_leaves(state, focus_topic)
         if action == "return":
             return result
+        estimated_active_tokens = state.estimated_active_tokens
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes

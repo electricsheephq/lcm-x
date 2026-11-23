@@ -246,6 +246,13 @@ def _commit_proof_identity_digest(identity) -> str:
     ).hexdigest()
 
 
+def _emitted_user_replay_digest(message) -> str:
+    """Literal user emission identity, including the carrier's host occurrence keys."""
+    return _commit_proof_identity_digest((
+        *_emission_identity(message), message.get("message_uid"), message.get("_absorbed_message_uids"),
+    ))
+
+
 def _contains_identity_window(
     haystack: list[tuple[str, str, str, str, str]],
     needle: list[tuple[str, str, str, str, str]],

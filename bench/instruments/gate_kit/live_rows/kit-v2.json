@@ -1,0 +1,276 @@
+{
+ "kit_version": 2,
+ "status": "DRAFT v2: target conversation fitted to the census of the kept copy final-20261118T1105Z (counts only, inbox 053b73f4 / 8f354890); NOT frozen until the release manager accepts that stand-in copy",
+ "seed": 2868,
+ "start_epoch": 1763000000.0,
+ "stamp_share": 0.97,
+ "uid_share": 0.9,
+ "externalization_threshold_chars": 12000,
+ "lengths": {
+  "user": {
+   "normal": [
+    20,
+    300
+   ]
+  },
+  "assistant_call": {
+   "normal": [
+    10,
+    120
+   ]
+  },
+  "assistant": {
+   "normal": [
+    40,
+    500
+   ]
+  },
+  "tool_result": {
+   "normal": [
+    50,
+    900
+   ],
+   "large_share": 0.08,
+   "large": [
+    3100,
+    4500
+   ]
+  }
+ },
+ "tools": {
+  "names": [
+   "terminal",
+   "read_file",
+   "web_search",
+   "write_file",
+   "browser"
+  ],
+  "calls_per_turn_weights": [
+   0.35,
+   0.3,
+   0.2,
+   0.1,
+   0.05
+  ],
+  "name_only_share": 0.5
+ },
+ "target": {
+  "turns": 317,
+  "hidden_turn_share": 0.44,
+  "hidden_keep_every": 4,
+  "stored_tail_turns": 1,
+  "cold_restarts": 26,
+  "session_id": "live-rows-target",
+  "conversation_id": "live-rows-target-conv",
+  "platform": "telegram",
+  "context_length": 400000,
+  "lengths": {
+   "user": {
+    "mix": [
+     [
+      10,
+      60,
+      0.5
+     ],
+     [
+      60,
+      300,
+      0.4
+     ],
+     [
+      300,
+      1500,
+      0.1
+     ]
+    ]
+   },
+   "assistant_call": {
+    "mix": [
+     [
+      6,
+      24,
+      0.697
+     ],
+     [
+      25,
+      99,
+      0.171
+     ],
+     [
+      100,
+      399,
+      0.074
+     ],
+     [
+      400,
+      1599,
+      0.056
+     ],
+     [
+      1600,
+      2999,
+      0.0013
+     ],
+     [
+      3000,
+      6000,
+      0.0009
+     ]
+    ]
+   },
+   "assistant": {
+    "mix": [
+     [
+      6,
+      24,
+      0.697
+     ],
+     [
+      25,
+      99,
+      0.171
+     ],
+     [
+      100,
+      399,
+      0.074
+     ],
+     [
+      400,
+      1599,
+      0.056
+     ],
+     [
+      1600,
+      2999,
+      0.0013
+     ],
+     [
+      3000,
+      6000,
+      0.0009
+     ]
+    ]
+   },
+   "tool_result": {
+    "mix": [
+     [
+      6,
+      24,
+      0.697
+     ],
+     [
+      25,
+      99,
+      0.171
+     ],
+     [
+      100,
+      399,
+      0.074
+     ],
+     [
+      400,
+      1599,
+      0.056
+     ],
+     [
+      1600,
+      2999,
+      0.0013
+     ],
+     [
+      3000,
+      6000,
+      0.0009
+     ]
+    ]
+   }
+  },
+  "tools": {
+   "calls_per_turn_weights": [
+    0.1,
+    0.15,
+    0.2,
+    0.2,
+    0.15,
+    0.1,
+    0.1
+   ]
+  },
+  "census": {
+   "rows": 37249,
+   "copies": 34927,
+   "user": 317,
+   "assistant": 17493,
+   "tool": 19439,
+   "sessions": 1,
+   "mean_chars": 333.7,
+   "host_list_rows": 1767,
+   "store_rows": 599763,
+   "conversations": 483,
+   "payload_files": 8548,
+   "store_copies": 469360
+  }
+ },
+ "others": {
+  "conversations": 470,
+  "turns": 290,
+  "lengths": {
+   "tool_result": {
+    "normal": [
+     50,
+     900
+    ],
+    "large_share": 0.055,
+    "large": [
+     3100,
+     4500
+    ]
+   }
+  },
+  "source": "total stored rows at least 602,663 (the reference store at the rc1 install, ruling T1-529) with the payload folder near the 8,559-file synthetic folder #2888 measured (cited in #2856)"
+ },
+ "restart_form": {
+  "unstamp_roles": [
+   "assistant",
+   "tool"
+  ],
+  "tool_name_as_name_share": 1.0,
+  "source": "#1674 (cold-rebuilt assistant and tool rows carry no timestamps), #2886 and the #2931 note (tool rows with name and no tool_name)"
+ },
+ "summary_route": {
+  "floor_s": 44.4,
+  "rate_tps": 2970.0,
+  "ratio": 0.1,
+  "source": "#2869: 6,707 tokens in 44.4 s and 112,867 tokens in 38.0 s (2,970 = 112,867 / 38.0); stand-in pending a ruling"
+ },
+ "budgets": {
+  "default": {},
+  "60s": {
+   "LCM_FOREGROUND_HARD_SECONDS": "60"
+  },
+  "120s": {
+   "LCM_FOREGROUND_HARD_SECONDS": "120"
+  }
+ },
+ "arms": {
+  "default": {},
+  "uid_on": {
+   "LCM_HOST_MESSAGE_UID": "on"
+  }
+ },
+ "bars": {
+  "d9_hold_s": 30,
+  "d10_hold_s": 300,
+  "d10_compaction_return_s": 1.0,
+  "d10_turn_wait_s": 30,
+  "d11_passes": 8,
+  "d12_extra_passes": 3
+ },
+ "frozen": {
+  "target_rows_examined": null,
+  "planner_windows": null,
+  "planner_statements": null
+ }
+}

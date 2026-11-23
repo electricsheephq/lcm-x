@@ -497,7 +497,8 @@ class IdentityAnchorMixin:
                 self._note_identity_anchor_version(None, message)
                 logger.info("LCM host-rewrite replay: arm=%s parts=%s consumed=%s session=%s",
                             match.arm, match.k, list(match.consumed), self._session_id)
-        self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
+        self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched,
+                                            set(plan.get("positional", ())) | plan.get("kept_results", set()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
@@ -638,7 +639,14 @@ class IdentityAnchorMixin:
                     plan.setdefault("matched", {})[idx] = [copies[-1]]  # host-uid shadow only
                     continue
                 missed.append(idx)
-        if missed:
+        # Topic 9 (T1-479..486): an index the audit has not proven stored is never marked stored. The call-id scan
+        # also runs when every audited row is accounted for (route C: a host merge before the cursor), because the
+        # audit never examines call and result rows.
+        unproven_tools = [idx for idx in range(start, cursor)
+                          if idx not in excluded and idx not in audited and idx not in plan["replayed"]
+                          and idx not in matched and idx not in plan.get("matched", {})
+                          and _trip_key(messages[idx]) is not None]
+        if missed or unproven_tools:
             # Class A (#2071 rule): the cursor resumes only behind rows that are accounted for. A position no longer
             # proves a row stored once the host changed the list, and the audit above never examines tool rows.
             # A host object this process stored and now sees rewritten in place (R6) is never credited as present nor
@@ -648,20 +656,91 @@ class IdentityAnchorMixin:
             found = self._identity_anchor_unaccounted(
                 messages, identity_messages, cursor, start, identity_at, held, capped, consumed, plan, matched,
                 set(excluded) | rewritten, missed)
-            if found is None:  # the presence check tripped (logged there): main's plan exactly (#2466 review)
-                plan["cursor"] = min(missed)
-                plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
-                plan["replayed"].update(plan["positional"])
+            tripped = found is None
+            if tripped:  # the presence check tripped (logged there): witness the unproven call and result rows
+                found = self._identity_anchor_trip_unproven(
+                    messages, start, cursor, plan, matched, set(excluded), set(missed), rewritten)
+            missed = sorted({*missed, *found})
+            if not missed:
+                return
+            plan["cursor"] = min(missed)
+            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed
+                                  and idx not in rewritten and idx not in plan["remainders"]}
+            plan["replayed"].update(plan["positional"])
+            # A call the audit adds below the cursor splits its segment: its results at or past the old cursor that
+            # are already proven stored stay replayed, so restoring the call never stores them again.
+            added_ids = {call_id for idx in found for key in (_trip_key(messages[idx]),) if key and key[0] == "call"
+                         for call_id in key[1]}
+            plan["kept_results"] = {idx for idx in plan["replayed"] if idx >= cursor
+                                    for key in (_trip_key(messages[idx]),)  # string ids only, never a raw value
+                                    if key and key[0] == "result" and key[1] in added_ids}
+            if tripped:  # the presence check tripped (logged there): the same line main logs
                 logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: "
                             "session=%s", len(missed), min(missed), self._session_id)
-                return
-            missed = sorted({*missed, *found})
-            plan["cursor"] = min(missed)
-            plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed and idx not in rewritten}
-            plan["replayed"].update(plan["positional"])
-            logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are neither "
-                           "stored nor compaction outputs; storing them: session=%s",
-                           len(missed), min(missed), self._session_id)
+            else:
+                logger.warning("LCM identity-anchor: host changed its list before the cursor; %d row(s) from %d are "
+                               "neither stored nor compaction outputs; storing them: session=%s",
+                               len(missed), min(missed), self._session_id)
+
+    def _identity_anchor_trip_unproven(self, messages, start, cursor, plan, matched, excluded, missed,
+                                       rewritten) -> list[int]:
+        """Topic 9: on a tripped presence window, the unproven call and result rows in ``[start, cursor)`` that
+        this session's previous completed ingest never held (F8: the witness frozen when it finished, F3: as
+        immutable keys; ignored rows are never witnesses, F4). A witnessed row keeps today's credit; one witness key
+        credits one view row. An id that is ambiguous in the view or the witness keeps main's result (F6). A result
+        joins only with its call: added now, fresh at or past the cursor, in the accepted prefix before ``start``
+        and held by the witness, or a non-ignored view row that is proven or witnessed (F1). A result id repeated in
+        the view is ambiguous too. A result whose call is ignored or absent keeps main's result (no orphan; tool pairs, I8)."""
+        witness = Counter(getattr(self, "_trip_witness_for_audit", None) or ())
+        witness_all = Counter(witness)
+        keys = {idx: _trip_key(message) for idx, message in enumerate(messages)}
+        call_ids = Counter(call_id for key in keys.values() if key and key[0] == "call" for call_id in key[1])
+        witness_ids = Counter()
+        for key, count in witness.items():
+            for call_id in (key[1] if key[0] == "call" else ()):
+                witness_ids[call_id] += count
+        result_ids = Counter(key[1] for key in keys.values() if key and key[0] == "result")
+        ambiguous = {call_id for call_id, count in call_ids.items() if count > 1}
+        ambiguous |= {call_id for call_id, count in witness_ids.items() if count > 1}
+        ambiguous |= {call_id for call_id, count in result_ids.items() if count > 1}  # repeated result ids
+
+        def ignored(idx):
+            try:
+                return bool(self._matches_ignore_message_patterns(messages[idx]))
+            except Exception:
+                return True
+
+        def proven(idx):
+            return (idx in matched or idx in plan.get("matched", {}) or idx in plan["replayed"]
+                    or idx in excluded or idx in missed or idx in plan["remainders"] or idx in rewritten)
+
+        added, witnessed, results = [], set(), []
+        for idx in range(start, cursor):
+            key = keys.get(idx)
+            if key is None or proven(idx) or ignored(idx):
+                continue
+            ids = key[1] if key[0] == "call" else (key[1],)
+            if any(call_id in ambiguous for call_id in ids):
+                continue
+            if witness[key] > 0:
+                witness[key] -= 1
+                witnessed.add(idx)
+            elif key[0] == "call":
+                added.append(idx)
+            else:
+                results.append(idx)
+        call_at = {call_id: idx for idx, key in keys.items() if key and key[0] == "call" for call_id in key[1]}
+        added_calls = set(added)
+        for idx in results:
+            call = call_at.get(keys[idx][1])
+            if call is None or ignored(call):
+                continue  # an absent or ignored call: main's result, never an orphan result
+            # Its call is stored or written now: added here, fresh at or past the cursor, in the accepted prefix
+            # before ``start``, or a proven or witnessed view row (F1).
+            prefix_call = call < start and witness_all[keys[call]] > 0  # held by the previous ingest's list
+            if call in added_calls or call >= cursor or prefix_call or call in witnessed or proven(call):
+                added.append(idx)
+        return sorted(added)
 
     def _identity_anchor_unaccounted(self, messages, identity_messages, cursor, start, identity_at, held, capped,
                                      consumed, plan, matched, excluded, missed) -> Optional[list[int]]:
@@ -2026,6 +2105,29 @@ def _composite_relation(group, stamp) -> list:
     """One composite relation group, keyed by the constituent whose host stamp the composite carries."""
     head = next((row for row in group if row.get("observed_at") == stamp), group[0])
     return [(int(head["store_id"]), "composite", int(row["store_id"]), ordinal, stamp) for ordinal, row in enumerate(group)]
+
+
+def _trip_key(message) -> Optional[tuple]:
+    """Topic-9 trip witness key: ("call", sorted string ids) for an assistant tool-call row, ("result", id) for a
+    tool row, else None (text rows, unreadable or non-string ids: those keep main's result)."""
+    try:
+        role = message.get("role")
+        if role == "tool":
+            call_id = message.get("tool_call_id")
+            return ("result", call_id) if isinstance(call_id, str) and call_id else None
+        if role != "assistant":
+            return None
+        calls = message.get("tool_calls")
+        if isinstance(calls, str):
+            calls = json.loads(calls)
+        if not isinstance(calls, list) or not calls:
+            return None
+        ids = [call.get("id") if isinstance(call, dict) else None for call in calls]
+        if not all(isinstance(call_id, str) and call_id for call_id in ids):
+            return None
+        return ("call", tuple(sorted(ids)))
+    except Exception:
+        return None
 
 
 def _distinct_from_predecessor(identity_at, idx: int) -> bool:
