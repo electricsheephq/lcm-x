@@ -82,7 +82,8 @@ def _carrier_remainder_is_replay(conn, row, remainder, node_ids):
            ), matches(id) AS MATERIALIZED (
                SELECT value FROM json_each(?)
            ), covered(id) AS MATERIALIZED (
-               SELECT id FROM sources WHERE kind='messages' AND id IN (SELECT id FROM matches)
+               SELECT CAST(id AS INTEGER) FROM sources
+               WHERE kind='messages' AND CAST(id AS INTEGER) IN (SELECT id FROM matches)
            )
            SELECT m.id FROM matches m
            WHERE EXISTS (SELECT 1 FROM sources WHERE kind='messages')
@@ -99,7 +100,7 @@ def _carrier_remainder_is_replay(conn, row, remainder, node_ids):
 
 
 def _recorded_carrier_emission(conn, row):
-    """A text-only match needs an emission that predates any binding for this row."""
+    """Require a pre-binding emission and evidence that ingest inserted the carrier before an older row."""
     from .ingest_ledger import identity_digest
 
     try:
@@ -109,12 +110,18 @@ def _recorded_carrier_emission(conn, row):
         session_id = row["session_id"]
         return conn.execute(
             """SELECT 1 FROM ledger_emissions e
+               JOIN occurrence_bindings b ON b.store_id=? AND b.lineage=e.lineage
+                 AND EXISTS (SELECT 1 FROM occurrence_bindings successor JOIN messages m USING (store_id)
+                             WHERE successor.lineage=b.lineage AND successor.view_seq<b.view_seq
+                               AND successor.ordinal>b.ordinal AND successor.store_id<b.store_id
+                               AND m.session_id=?)
                WHERE e.lineage IN (?, (SELECT value FROM ledger_meta WHERE key=?))
                  AND e.descriptor_digest=? AND e.kind='carrier' AND e.state!='refused'
-                 AND NOT EXISTS (SELECT 1 FROM occurrence_bindings b
-                                 WHERE b.store_id=? AND b.view_seq<=e.view_seq)
+                 AND NOT EXISTS (SELECT 1 FROM occurrence_bindings prior
+                                 WHERE prior.store_id=? AND prior.view_seq<=e.view_seq)
                LIMIT 1""",
-            (f"provisional:{session_id}", f"session_lineage:{session_id}", identity_digest(bytes(salt[0]), row),
+            (row["store_id"], session_id, f"provisional:{session_id}", f"session_lineage:{session_id}",
+             identity_digest(bytes(salt[0]), row),
              row["store_id"]),
         ).fetchone() is not None
     except sqlite3.OperationalError as exc:

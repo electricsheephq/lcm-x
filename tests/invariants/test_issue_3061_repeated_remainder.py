@@ -14,7 +14,7 @@ from hermes_lcm.head_copy import is_known_head_copy
 from hermes_lcm.store import MessageStore
 from tests.invariants.test_hotfix_host_shaped_passes import uid_mode  # noqa: F401
 from tests.invariants.test_hotfix_stored_summary_head import (
-    NEW_TURN, _append, _view as _engine_store_view,
+    NEW_TURN, _append, _append_bound_carrier, _view as _engine_store_view,
 )
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_host_uid_shadow import _state_db
@@ -211,6 +211,48 @@ def test_fresh_repeat_with_an_uncovered_twin_stays_visible(session, stamped):
     assert target in _assembled_ids(host)
 
 
+@pytest.mark.parametrize("stamped", [True, False], ids=["stamped", "unstamped"])
+def test_new_repeat_of_emitted_carrier_survives(session, stamped):
+    host = session
+    head, _ = _commit_head(host, "continue")
+    engine = host.engine
+    store = engine._store
+    emitted = host.live[0]
+    remainder = engine._generated_context_carrier_remainder(emitted)
+    assert remainder and emitted["content"] == head + "\n\n" + remainder
+    own_row, = [row for row in store.get_session_messages(host.sid) if row["content"] == remainder]
+    assert own_row["store_id"] not in _head_sources(engine, head)
+
+    target = _append_user(host, head + "\n\n" + remainder, stamped=stamped)
+    row = _assert_carrier(host, target, head, remainder)
+    assert (row["observed_at"] is not None) == stamped
+    assert row["observed_at"] != own_row["observed_at"]
+    digest = ingest_ledger.identity_digest(store.ingest_ledger_salt(), row)
+    conn = store.connection
+    (lineage, ordinal, view), = conn.execute(
+        "SELECT lineage, ordinal, view_seq FROM occurrence_bindings WHERE store_id=?", (target,),
+    )
+    assert ordinal is not None
+    assert conn.execute(
+        "SELECT 1 FROM ledger_emissions WHERE lineage=? AND descriptor_digest=? AND kind='carrier'"
+        " AND state!='refused' AND view_seq<?", (lineage, digest, view),
+    ).fetchone()
+    assert conn.execute(
+        "SELECT 1 FROM occurrence_bindings WHERE lineage=? AND view_seq<? AND ordinal>?",
+        (lineage, view, ordinal),
+    ).fetchone() is None
+
+    assert target in _assembled_ids(host)
+    # Move the repeated turn outside the protected fresh tail before one compaction pass.
+    for _ in range(3):
+        host.turn(tool_words=1_900)
+    assert target not in _leaf_sources(host)
+    frontier = host.frontier()
+    _compact_store_view(host)
+    assert host.frontier() > frontier
+    assert target in _leaf_sources(host)
+
+
 def test_unstamped_replay_without_emission_evidence_stays_visible(session):
     host = session
     remainder = "continue"
@@ -226,7 +268,7 @@ def test_unstamped_replay_without_emission_evidence_stays_visible(session):
 
 @pytest.mark.parametrize("stamped", [False, True], ids=["unstamped", "flush-stamped"])
 def test_flushed_emission_matches_clean_twin(stamped, uid_mode, make_engine, summaries, caplog):  # noqa: F811
-    # The review probe seeds the stored v0.30.2 shape after exercising host flush.
+    # Exercise host flush and seed the v0.30.2 copy with its ledger placement.
     twins = []
     for with_copy in (False, True):
         engine = exit_engine(make_engine, threshold_full_sweep_enabled=False, l3_truncate_tokens=1)
@@ -242,7 +284,7 @@ def test_flushed_emission_matches_clean_twin(stamped, uid_mode, make_engine, sum
         flush = _host_flush()
         engine.ingest(flush(returned + NEW_TURN))
         copy_row = flush([head])[0] if stamped else head
-        copy_id = _append(engine, copy_row, RELATION) if with_copy else None
+        copy_id = _append_bound_carrier(engine, copy_row) if with_copy else None
         if not with_copy:
             _append(engine, NEW_TURN[0], session="unrelated")
         engine._config.large_output_active_replay_stubbing_enabled = False
@@ -307,26 +349,35 @@ def _guard_carrier(store, node_id, remainder="continue"):
     return store.get(store_id)
 
 
-def _record_guard_emission(store, row, *, kind="carrier", state="adopted", bind_before=False):
+def _record_guard_emission(store, row, successor_id, *, kind, state, binding):
     store.ensure_ingest_ledger()
     conn = store.connection
     lineage = "provisional:guard"
-    digest = ingest_ledger.identity_digest(store.ingest_ledger_salt(), row)
+    salt = store.ingest_ledger_salt()
+    digest = ingest_ledger.identity_digest(salt, row)
+    successor = store.get(successor_id)
+    carrier_binding = {
+        "ordinal": 1, "store_id": row["store_id"], "identity_digest": digest,
+        "stamp": ingest_ledger.stamp_text(row["observed_at"]), "disposition": "stored",
+    }
     with store.atomic():
-        if bind_before:
-            ingest_ledger.insert_bindings(conn, lineage, [{
-                "ordinal": 1, "store_id": row["store_id"], "identity_digest": digest,
-                "stamp": ingest_ledger.stamp_text(row["observed_at"]), "disposition": "stored",
-                "view_seq": ingest_ledger.next_view_seq(conn),
-            }])
-        seq = ingest_ledger.next_view_seq(conn)
-        ingest_ledger.insert_emissions(conn, lineage, seq, [
-            {"output_index": 0, "descriptor_digest": digest, "kind": kind},
-        ])
-        ingest_ledger.set_emission_state(conn, lineage, seq, state)
+        ingest_ledger.insert_bindings(conn, lineage, [{
+            "ordinal": 2, "store_id": successor_id, "identity_digest": ingest_ledger.identity_digest(salt, successor),
+            "disposition": "stored", "view_seq": ingest_ledger.next_view_seq(conn),
+        }])
+        if binding == "before":
+            ingest_ledger.insert_bindings(conn, lineage, [dict(carrier_binding, view_seq=ingest_ledger.next_view_seq(conn))])
+        if kind is not None:
+            seq = ingest_ledger.next_view_seq(conn)
+            ingest_ledger.insert_emissions(conn, lineage, seq, [
+                {"output_index": 0, "descriptor_digest": digest, "kind": kind},
+            ])
+            ingest_ledger.set_emission_state(conn, lineage, seq, state)
+        if binding == "after":
+            ingest_ledger.insert_bindings(conn, lineage, [dict(carrier_binding, view_seq=ingest_ledger.next_view_seq(conn))])
 
 
-@pytest.mark.parametrize("case", ["covered", "empty-sources", "multiple", "missing-node"])
+@pytest.mark.parametrize("case", ["covered", "string-source-id", "empty-sources", "multiple", "missing-node"])
 def test_unproven_coverage_keeps_carrier(guard_store, case):
     store = guard_store
     conn = store.connection
@@ -335,31 +386,42 @@ def test_unproven_coverage_keeps_carrier(guard_store, case):
     if case == "multiple":
         _append_guard_user(store, "continue", 30)
     with store.atomic():
-        sources = {"covered": [first], "empty-sources": []}.get(case, [unrelated])
+        sources = {"covered": [first], "string-source-id": [str(first)], "empty-sources": []}.get(case, [unrelated])
         node = _add_sources(conn, "messages", sources)
         if case == "missing-node":
             node = _add_sources(conn, "nodes", [node, 999_999])
     assert not is_known_head_copy(conn, _guard_carrier(store, node))
 
 
-@pytest.mark.parametrize("case", ["fresh-binding", "ambiguous", "wrong-kind", "refused", "no-record", "no-ledger"])
+@pytest.mark.parametrize("case", [
+    "fresh-binding", "ambiguous", "wrong-kind", "refused", "no-record", "no-ledger", "no-binding",
+])
 def test_unproven_emission_keeps_stamped_carrier(guard_store, case):
     store = guard_store
     other = _append_guard_user(store, "different message", 20)
     _append_guard_user(store, "continue", 25)
     if case == "ambiguous":
         _append_guard_user(store, "continue", 26)
+    successor = _append_guard_user(store, "retained message", 27)
     with store.atomic():
         node = _add_sources(store.connection, "messages", [other])
     row = _guard_carrier(store, node)
-    if case == "no-record":
-        store.ensure_ingest_ledger()
-    elif case != "no-ledger":
+    if case != "no-ledger":
         _record_guard_emission(
-            store, row, kind="summary" if case == "wrong-kind" else "carrier",
-            state="refused" if case == "refused" else "adopted", bind_before=case == "fresh-binding",
+            store, row, successor, kind={"wrong-kind": "summary", "no-record": None}.get(case, "carrier"),
+            state="refused" if case == "refused" else "adopted",
+            binding={"fresh-binding": "before", "no-binding": None}.get(case, "after"),
         )
     assert not is_known_head_copy(store.connection, row)
+
+
+def test_unbound_carrier_with_remainder_stamp_is_known_copy(guard_store):
+    store = guard_store
+    other = _append_guard_user(store, "different message", 20)
+    _append_guard_user(store, "continue", 30)
+    with store.atomic():
+        node = _add_sources(store.connection, "messages", [other])
+    assert is_known_head_copy(store.connection, _guard_carrier(store, node))
 
 
 def test_zero_match_cost_stays_near_rc1(guard_store):
