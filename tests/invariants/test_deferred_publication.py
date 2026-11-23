@@ -215,6 +215,7 @@ def test_f6_exception_after_leaf_commit(hosts, monkeypatch):
     """
     with hosts() as host:
         history = host.rows_for_turns(0, 6)
+        original = deepcopy(history)
 
         def locked_after_leaf(*_args, **_kwargs):
             assert host.engine._dag.get_session_nodes(SID), "the injected fault must follow a durable leaf"
@@ -224,6 +225,7 @@ def test_f6_exception_after_leaf_commit(hosts, monkeypatch):
             patch.setattr(host.engine, "_assemble_committed_compaction_context", locked_after_leaf)
             returned = host.call(history)
         assert host.engine.last_compression_status == "error"
+        assert returned == original, "fail-open must return the caller's list unchanged"
         assert host.calls[0][0], "the fail-open pass must have kept its committed leaf"
 
         host.call(returned)
