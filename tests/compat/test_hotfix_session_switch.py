@@ -2,13 +2,11 @@
 
 import json
 from pathlib import Path
-from subprocess import TimeoutExpired
+from subprocess import TimeoutExpired, check_output
 
 from tests.compat.helpers import run_old
 from tests.compat.test_hotfix_head_copy_rollback import PINS
 
-
-CANDIDATE = "8ed5afc407aed67ca8527f817a69e5cc39f0d8af"
 
 SESSION_SWITCH = r'''
 from dataclasses import replace
@@ -142,7 +140,8 @@ def _ordered_rows(observation):
 def test_hotfix_session_switch(tmp_path, old_tree, host_root):
     base = old_tree("v0.30.2", PINS)
     candidate = Path(__file__).resolve().parents[2]
-    report = dict(revisions={"BASE": PINS["v0.30.2"], "CAND": CANDIDATE}, cells={}, failures=[], errors={})
+    revision = check_output(["git", "rev-parse", "HEAD"], cwd=candidate, text=True).strip()
+    report = dict(revisions={"BASE": PINS["v0.30.2"], "CAND": revision}, cells={}, failures=[], errors={})
     for shape in ("rotation", "plain"):
         report["cells"][shape] = {}
         for mode in ("unset", "on"):

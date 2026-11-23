@@ -17,6 +17,7 @@ import re
 import time
 from typing import Any, Callable, Mapping, Sequence
 
+from .store import get_recall_message
 from .occurrence_time import resolve_occurrence_time
 from .reasoning import (
     EvidencePlan,
@@ -331,7 +332,7 @@ def _resolve_candidate(
     if parsed is None:
         return None, "invalid_exact_ref"
     store_id, declared_start, declared_end = parsed
-    row = engine._store.get(store_id)
+    row = get_recall_message(engine._store, store_id)
     if row is None:
         return None, "missing_source_row"
     if store_id in (carried_ids if carried_ids is not None else engine._store.get_carried_stamp_ids([store_id])):

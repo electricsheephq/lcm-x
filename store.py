@@ -19,6 +19,7 @@ import threading
 import time
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
@@ -64,6 +65,14 @@ from .sqlite_util import (
     _run_sqlite_write_with_snapshot_retry,
     _sqlite_savepoint,
     _temporary_sqlite_busy_timeout,
+)
+from .head_copy import (
+    _could_be_head_copy,
+    _head_copy_candidate,
+    _head_copy_shape_sql,
+    exclude_head_copies,
+    is_known_head_copy,
+    known_head_copy_ids,
 )
 from .tokens import count_message_tokens
 
@@ -115,6 +124,28 @@ _MESSAGE_SELECT_COLUMNS = (
 )
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
+
+
+class _HeadCopySearchNeeded(Exception):
+    """Restart search with copy proofs and ranking on one SQLite snapshot."""
+
+
+def _search_with_head_copy_filter(search):
+    @wraps(search)
+    def run(self, *args, **kwargs):
+        try:
+            return search(self, *args, **kwargs)
+        except _HeadCopySearchNeeded as candidate:
+            with self._read_snapshot():
+                copies = known_head_copy_ids(self._conn, candidate.args[0])
+                return search(self, *args, **kwargs, _copy_ids=copies)
+
+    return run
+
+
+def get_recall_message(store, store_id):
+    row = store.get(store_id)
+    return None if row and is_known_head_copy(getattr(store, "connection", None), row) else row
 
 
 class _ObservedAtRows(list):
@@ -1162,12 +1193,33 @@ class MessageStore:
             time_from=time_from,
             time_to=time_to,
         )
+        with self._read_snapshot():
+            exclude_head_copies(where, args, self._session_load_copy_ids(session_id, roles, where, args))
+            return self._count_session_rows(where, args)
+
+    def _session_load_copy_ids(self, session_id, roles, where, args):
+        if roles and "user" not in roles:
+            return set()
+        has_candidate = self._conn.execute(
+            f"SELECT 1 FROM messages WHERE {' AND '.join(where)} AND {_head_copy_shape_sql()} LIMIT 1", args
+        ).fetchone()
+        return known_head_copy_ids(self._conn, session_id) if has_candidate else set()
+
+    def _count_session_rows(self, where, args):
         return int(
             self._conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE {' AND '.join(where)}",
                 args,
             ).fetchone()[0]
         )
+
+    def load_recall_session_page(self, session_id, *, after_store_id, limit, roles, time_from, time_to):
+        """Return the recallable row count and page from one read snapshot."""
+        where, args = self._session_load_where(session_id, roles=roles, time_from=time_from, time_to=time_to)
+        with self._read_snapshot():
+            exclude_head_copies(where, args, self._session_load_copy_ids(session_id, roles, where, args))
+            total = self._count_session_rows(where, args)
+            return total, self._load_session_page(where, args, after_store_id, limit)
 
     def load_session_page(
         self,
@@ -1190,6 +1242,9 @@ class MessageStore:
             time_from=time_from,
             time_to=time_to,
         )
+        return self._load_session_page(where, args, after_store_id, limit)
+
+    def _load_session_page(self, where, args, after_store_id, limit):
         where.append("store_id > ?")
         args.extend([after_store_id, limit])
         rows = self._conn.execute(
@@ -1207,26 +1262,33 @@ class MessageStore:
         anchor_store_id: int,
         before: int = 2,
         after: int = 3,
+        _snapshot_copy_ids: Callable[[], set[int]] | None = None,
     ) -> List[Dict[str, Any]]:
         """Load one bounded ordered window around an exact message anchor."""
         before = min(12, max(0, int(before)))
         after = min(12, max(0, int(after)))
-        prior = self._conn.execute(
-            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                FROM messages
-                WHERE session_id = ? AND store_id < ?
-                ORDER BY store_id DESC LIMIT ?""",
-            (session_id, anchor_store_id, before),
-        ).fetchall()
-        following = self._conn.execute(
-            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                FROM messages
-                WHERE session_id = ? AND store_id >= ?
-                ORDER BY store_id LIMIT ?""",
-            (session_id, anchor_store_id, after + 1),
-        ).fetchall()
-        rows = list(reversed(prior)) + list(following)
-        return [self._row_to_dict(row) for row in rows]
+
+        def read_window(copies=()):
+            where, args = ["session_id = ?"], [session_id]
+            exclude_head_copies(where, args, copies)
+            sql = f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)}"
+            prior = self._conn.execute(
+                f"{sql} AND store_id < ? ORDER BY store_id DESC LIMIT ?",
+                (*args, anchor_store_id, before),
+            ).fetchall()
+            following = self._conn.execute(
+                f"{sql} AND store_id >= ? ORDER BY store_id LIMIT ?",
+                (*args, anchor_store_id, after + 1),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in [*reversed(prior), *following]]
+
+        rows = read_window()
+        if any(_head_copy_candidate(row) for row in rows):
+            with self._read_snapshot():
+                copies = (_snapshot_copy_ids() if _snapshot_copy_ids is not None
+                          else known_head_copy_ids(self._conn, session_id))
+                return read_window(copies)
+        return rows
 
     def get_session_messages(self, session_id: str,
                              limit: int = 10000) -> List[Dict[str, Any]]:
@@ -2442,6 +2504,7 @@ class MessageStore:
             results = self._search_fts(query, *args, stemmed=False, **kwargs)
         return results
 
+    @_search_with_head_copy_filter
     def _search_fts(self, query: str, session_id: str | None = None,
                     limit: int = 20, sort: str | None = None,
                     source: str | None = None,
@@ -2454,7 +2517,7 @@ class MessageStore:
                     agent_operators: bool = False,
                     stemmed: bool = False,
                     matching_names: Collection[str] | None = None,
-                    _include_like_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
+                    _include_like_excerpt: bool = False, _memory=None, *, _copy_ids=None) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -2513,10 +2576,12 @@ class MessageStore:
         offset = 0
         scanned_rows = 0
         results: list[Dict[str, Any]] = []
+        copy_where, copy_args = [], []
+        exclude_head_copies(copy_where, copy_args, _copy_ids, "m.store_id")
         while True:
             try:
-                where = [f"{fts_table} MATCH ?"]
-                args: list[Any] = [safe_query]
+                where = [f"{fts_table} MATCH ?", *copy_where]
+                args: list[Any] = [safe_query, *copy_args]
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
@@ -2571,10 +2636,20 @@ class MessageStore:
                        ORDER BY keys.ordinal""",
                     [*args, safe_query],
                 )
+                memory_rows = []
                 if _memory is not None and offset == 0:
-                    _memory['rows'] = [dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)) for r in self._conn.execute(
-                        f"SELECT m.store_id,m.session_id,m.timestamp,m.observed_at FROM {fts_table} fts "
-                        f"JOIN messages m ON m.store_id=fts.rowid WHERE {' AND '.join(where)}", args[:-2])]
+                    memory_rows = self._conn.execute(
+                        f"SELECT m.store_id,m.session_id,m.timestamp,m.observed_at,({_head_copy_shape_sql('m.')}) "
+                        f"FROM {fts_table} fts JOIN messages m ON m.store_id=fts.rowid WHERE {' AND '.join(where)}",
+                        args[:-2],
+                    ).fetchall()
+                if _copy_ids is None and (
+                    any(_could_be_head_copy(row[3], row[4]) for row in rows) or any(r[4] for r in memory_rows)
+                ):
+                    raise _HeadCopySearchNeeded(session_id)
+                if _memory is not None and offset == 0:
+                    _memory['rows'] = [dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r))
+                                       for r in memory_rows]
                 self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
@@ -2639,6 +2714,7 @@ class MessageStore:
                 return results[:limit]
             fetch_limit = min(fetch_limit * 2, remaining)
 
+    @_search_with_head_copy_filter
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
                      source: str | None = None,
@@ -2648,7 +2724,7 @@ class MessageStore:
                      time_to: float | None = None,
                      exclude_session_ids: Collection[str] | None = None, *,
                      matching_names: Collection[str] | None = None,
-                     _include_excerpt: bool = False, _memory=None) -> List[Dict[str, Any]]:
+                     _include_excerpt: bool = False, _memory=None, _copy_ids=None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         if _memory is not None:
@@ -2661,6 +2737,7 @@ class MessageStore:
 
         where: list[str] = ["content IS NOT NULL"]
         args: list[Any] = []
+        exclude_head_copies(where, args, _copy_ids)
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
@@ -2693,7 +2770,6 @@ class MessageStore:
             like_clauses.append("content LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
-        base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
         results: List[Dict[str, Any]] = []
         collapse_risky_repeats = contains_risky_fts_ascii(query)
@@ -2770,6 +2846,8 @@ class MessageStore:
 
         def add_rows(rows: Iterable[sqlite3.Row]) -> None:
             for row in rows:
+                if _copy_ids is None and _could_be_head_copy(row[3], row[4]):
+                    raise _HeadCopySearchNeeded(session_id)
                 result = self._row_to_dict(row)
                 content = result.get("content") or ""
                 score = sum(
@@ -2797,7 +2875,7 @@ class MessageStore:
                     WHERE {' AND '.join(where)}
                     {order_by}
                     LIMIT ? OFFSET ?""",
-                [*base_args, *order_args, candidate_cap, 0],
+                [*args, *order_args, candidate_cap, 0],
             ).fetchall()
             add_rows(rows)
             if len(rows) == candidate_cap:
@@ -2811,7 +2889,7 @@ class MessageStore:
                         FROM messages
                         WHERE {' AND '.join(where)} AND timestamp = ? AND ({role_bias}) = ?
                         {order_by}""",
-                    [*base_args, boundary_timestamp, boundary_role_bias, *order_args],
+                    [*args, boundary_timestamp, boundary_role_bias, *order_args],
                 )
                 add_rows(tie_row for tie_row in tie_rows if tie_row[0] not in window_ids)
         else:
@@ -2851,14 +2929,20 @@ class MessageStore:
             sql = f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {' AND '.join(where)}"
             rows = self._conn.execute(
                 f"{sql} {order_by} LIMIT ? OFFSET ?",
-                [*base_args, *order_args, *exact_args, candidate_cap, 0]).fetchall()
+                [*args, *order_args, *exact_args, candidate_cap, 0],
+            ).fetchall()
+            add_rows(rows)
             if _memory is not None:
+                memory_rows = []
                 for r in self._conn.execute(
-                        f"SELECT store_id,session_id,timestamp,observed_at,content FROM messages WHERE {' AND '.join(where)}", base_args):
+                        f"SELECT store_id,session_id,timestamp,observed_at,content,role FROM messages "
+                        f"WHERE {' AND '.join(where)}", args):
+                    if _copy_ids is None and _could_be_head_copy(r[5], r[4]):
+                        raise _HeadCopySearchNeeded(session_id)
                     score = sum(min(count_term_matches(r[4], t), 1) if collapse_risky_repeats else count_term_matches(r[4], t) for t in terms)
                     if score > 0:
-                        _memory['rows'].append(dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)))
-            add_rows(rows)
+                        memory_rows.append(dict(zip(('store_id', 'session_id', 'timestamp', 'observed_at'), r)))
+                _memory['rows'].extend(memory_rows)
 
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))
         for result in results:

@@ -4,7 +4,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
-from subprocess import TimeoutExpired
+from subprocess import TimeoutExpired, check_output
 
 import pytest
 
@@ -30,7 +30,6 @@ SETTINGS = dict(
 )
 PASS_THRESHOLD = 85_000
 PASS_LEAF_CEILING = 26_000
-CANDIDATE = "8ed5afc407aed67ca8527f817a69e5cc39f0d8af"
 
 
 PAIRED_PASSES = r'''
@@ -179,6 +178,7 @@ def _bar_failures(mode, base, candidate):
 def test_hotfix_paired_three_passes(tmp_path, old_tree, host_root, caplog):
     base_tree = old_tree("v0.30.2", PINS)
     worktree = Path(__file__).resolve().parents[2]
+    revision = check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
     home = tmp_path / "seed-home"
     seed_path = tmp_path / "lcm.db"
     seed = LCMEngine(config=LCMConfig(database_path=str(seed_path), **SETTINGS), hermes_home=str(home))
@@ -205,7 +205,7 @@ def test_hotfix_paired_three_passes(tmp_path, old_tree, host_root, caplog):
     seed_files = [path for path in (seed_path, tmp_path / "lcm.db-wal", tmp_path / "lcm.db-shm") if path.exists()]
     seed_hashes = {path.name: sha256(path.read_bytes()).hexdigest() for path in seed_files}
     report = dict(
-        revisions={"BASE": PINS["v0.30.2"], "CAND": CANDIDATE},
+        revisions={"BASE": PINS["v0.30.2"], "CAND": revision},
         seed=dict(copy_id=copy_id, known_copy_ids=known_copy_ids, frontier=frontier,
                   rows_after_frontier_before_copy=window_ids.index(copy_id),
                   window_first=window_ids[0], window_last=window_ids[-1], sha256=seed_hashes),
