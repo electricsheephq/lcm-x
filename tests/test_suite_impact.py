@@ -1,11 +1,24 @@
+import importlib.util
 from itertools import takewhile
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 import pytest
 
-from scripts.release.suite_impact import MAP, ROOT, MapError, compile_glob, decide, literal_globs, load_map, main
+# Load the script from its file. host-suite.yml puts a Hermes source tree on PYTHONPATH, and Hermes ships
+# scripts/release.py, a module that wins over this repo's scripts/release/ folder in `import scripts.release...`.
+_SPEC = importlib.util.spec_from_file_location(
+    "lcmx_suite_impact", Path(__file__).resolve().parents[1] / "scripts" / "release" / "suite_impact.py"
+)
+_SUITE_IMPACT = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _SUITE_IMPACT
+_SPEC.loader.exec_module(_SUITE_IMPACT)
+MAP, ROOT, MapError, load_map, main = (
+    _SUITE_IMPACT.MAP, _SUITE_IMPACT.ROOT, _SUITE_IMPACT.MapError, _SUITE_IMPACT.load_map, _SUITE_IMPACT.main
+)
+compile_glob, decide, literal_globs = _SUITE_IMPACT.compile_glob, _SUITE_IMPACT.decide, _SUITE_IMPACT.literal_globs
 
 REAL = load_map(MAP)
 MAPPED = {s["id"] for s in REAL["suites"] if s["kind"] == "mapped"}
