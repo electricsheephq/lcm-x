@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from hermes_lcm import tools
+from hermes_lcm import ingest_ledger, tools
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_issue_671_stub_first_exit import (
     THRESHOLD,
@@ -41,6 +41,35 @@ def _append(engine, row, relation=None, *, session=None):
     return store_id
 
 
+def _append_bound_carrier(engine, row):
+    """Seed a v0.30.2-style copy inserted ahead of already bound host rows."""
+    store = engine._store
+    conn = store.connection
+    sid = engine._session_id
+    lineage = ingest_ledger.persisted_lineage(conn, sid, ingest_ledger.lineage_key(None, sid))
+    remainder = engine._generated_context_carrier_remainder(row)
+    own_id, = [r["store_id"] for r in store.get_session_messages(sid) if r["content"] == remainder]
+    right = conn.execute(
+        "SELECT min(b.ordinal) FROM occurrence_bindings b JOIN messages m USING (store_id) "
+        "WHERE b.lineage=? AND m.session_id=? AND m.store_id>?", (lineage, sid, own_id),
+    ).fetchone()[0]
+    assert right is not None
+    existing = ingest_ledger.lineage_ordinals(conn, lineage)
+    left = max((ordinal for ordinal in existing if ordinal < right), default=None)
+    ordinals, respace = ingest_ledger.plan_ordinals(existing, [ingest_ledger.Placement(left, right)])
+    copy_id = _append(engine, row, RELATION)
+    stored = store.get(copy_id)
+    digest = ingest_ledger.identity_digest(store.ingest_ledger_salt(), stored)
+    with store.atomic():
+        ingest_ledger.apply_respace(conn, lineage, respace)
+        ingest_ledger.insert_bindings(conn, lineage, [{
+            "ordinal": ordinals[0], "store_id": copy_id, "identity_digest": digest,
+            "stamp": ingest_ledger.stamp_text(stored["observed_at"]), "disposition": "stored",
+            "view_seq": ingest_ledger.next_view_seq(conn),
+        }])
+    return copy_id
+
+
 @pytest.fixture
 def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
     engines = []
@@ -66,8 +95,8 @@ def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
         assert not any(
             r["content"] == head["content"]
             for r in engine._store.get_session_messages_after(engine._session_id, old_top)
-        )  # This synthetic warm ingest leaves the copy out. Seed the stored shape through the ingest writer.
-        copy_id = (_append(engine, head, RELATION) if with_copy else None)
+        )  # Warm ingest skips the copy. Seed the legacy row with its ledger placement.
+        copy_id = _append_bound_carrier(engine, head) if with_copy else None
         if not with_copy:
             # Occupy the same global ID outside this conversation's session, so leaf IDs are directly comparable.
             _append(engine, NEW_TURN[0], session="unrelated")
