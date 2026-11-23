@@ -295,23 +295,30 @@ receipt is completed in L2 by the rest of its hands-on lane.
   if it runs it, the result is recorded only).
 
   These two checks run through the instruments of their producer (#2868), which has merged and passed
-  its dry run: `l1_switch` and `l1_planner` in `bench/instruments/gate_kit/live_rows/`. Each instrument
-  takes the candidate tree and builds its own synthetic session with a stand-in summariser. It needs no
-  live session and no other row's producer, so every candidate runs both checks, a hotfix candidate
-  included:
-  1. Run each instrument on the candidate tree with the live-rows kit's arguments. The planner's two
-     count bounds are the kit's, frozen before the train's rc1.
-  2. Read each run's outcome:
+  its dry run: `l1_switch` and `l1_planner` in `bench/instruments/gate_kit/live_rows/` on `main`. Each
+  loads the product code from the tree it is given, builds its own synthetic session with a stand-in
+  summariser, and needs no live session. So a candidate whose own tree predates the producer, a hotfix
+  included, is tested from a `main` checkout:
+  1. Before the train's rc1, the release manager pins one `main` revision for the train. Its live-rows
+     kit (`kit.json`) holds the planner's two frozen counts (`frozen.planner_windows` and
+     `frozen.planner_statements`), and the producer's dry-run receipt for that kit shows the v0.30.0
+     planner exceeding a count on the same fixture.
+  2. From that checkout, run each instrument separately, with `--tree` set to the exact candidate tree,
+     a new `--work` directory and a new `--out` receipt path. `l1_planner` also takes `--max-windows`
+     and `--max-statements` from the two frozen counts.
+  3. Score each check by its own receipt:
 
-     | Instrument run | The check's raw verdict |
+     | Observation | The check's raw verdict |
      |---|---|
-     | its receipt says `PASS` | `PASS` |
-     | its receipt says `FAIL` | `FAIL` |
-     | its receipt says `INCONCLUSIVE`, or the run ends without a receipt (the release manager records the cause) | `INCONCLUSIVE` |
-     | not run on this candidate | `UNRUN` |
+     | the check was not run on this candidate | `UNRUN` |
+     | the receipt is for this candidate's tree and records `PASS`, `FAIL`, `INCONCLUSIVE` or `UNRUN` (the planner records `UNRUN` when a count bound is missing) | the recorded verdict |
+     | the receipt is absent or unreadable, is for another tree, or records no verdict from that list | `INCONCLUSIVE`, with the cause recorded |
 
-  From v0.30.2's first release candidate, L1 does not pass while either check's verdict is anything
-  but `PASS`;
+  An instrument can exit 0 with a receipt that is not `PASS`, so its exit code never decides a check.
+  Both checks first gate at v0.30.2's first release candidate, subject to the decisions this spec
+  records for single releases; a result from an earlier candidate is recorded only. From then on they
+  run on every candidate, hotfixes and respins included; no carry applies to them. L1 does not pass
+  unless both checks are `PASS`;
 - the Phase B review sweep, alongside the checks above.
 
 **Mini rows,** only for rows the selection puts in L2:
