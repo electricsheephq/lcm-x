@@ -1,8 +1,8 @@
 """Recognise a stored copy of LCM-X's own summary head (v0.30.3 hotfix).
 
 A stored user row is a known head copy when every leading summary part verifies byte for byte against this
-session's summary nodes, it carries the ``generated_unproven`` relation, and any carrier remainder is already stored
-as an earlier user row. Such a row stays in the store unchanged; assembly and compaction input leave it out.
+session's summary nodes, it carries the ``generated_unproven`` relation, and any carrier remainder binds to
+an earlier user occurrence outside those nodes' own source coverage. The store retains the original row.
 Read-only: nothing here writes.
 """
 
@@ -51,19 +51,67 @@ def is_known_head_copy(conn, row) -> bool:
             "SELECT 1 FROM lineage WHERE owner=? LIMIT 1", (owner, session_id),
         ).fetchone() is not None
 
-    end, _ = LCMEngine._verify_summary_prefix(content, get_node, owns_node)
+    end, node_ids = LCMEngine._verify_summary_prefix(content, get_node, owns_node)
     if end is None or end == len(content):
         return end is not None
     suffix = content[end:]
     for separator in ("\n\n---\n\n", "\n\n"):
         if suffix.startswith(separator):
             remainder = suffix[len(separator):]
-            return bool(remainder.strip() and conn.execute(
-                "SELECT 1 FROM messages WHERE session_id=? AND store_id<? AND role='user' "
-                "AND COALESCE(conversation_id, '') IN ('', ?) AND content=? LIMIT 1",
-                (session_id, store_id, row.get("conversation_id") or "", remainder),
-            ).fetchone())
+            return bool(remainder.strip() and _carrier_remainder_is_replay(conn, row, remainder, node_ids))
     return False
+
+
+def _carrier_remainder_is_replay(conn, row, remainder, node_ids):
+    stamp = row.get("observed_at")
+    matches = conn.execute(
+        """WITH RECURSIVE sources(kind, id) AS (
+               SELECT n.source_type, source.value FROM summary_nodes n, json_each(n.source_ids) source
+               WHERE n.node_id IN (SELECT value FROM json_each(?))
+               UNION
+               SELECT n.source_type, source.value FROM sources s JOIN summary_nodes n ON n.node_id=s.id,
+                   json_each(n.source_ids) source WHERE s.kind='nodes'
+           )
+           SELECT m.store_id FROM messages m
+           WHERE m.session_id=? AND m.store_id<? AND m.role='user'
+             AND COALESCE(m.conversation_id, '') IN ('', ?) AND m.content=?
+             AND (? IS NULL OR m.observed_at=?)
+             AND EXISTS (SELECT 1 FROM sources WHERE kind='messages')
+             AND NOT EXISTS (
+                 SELECT 1 FROM sources s LEFT JOIN summary_nodes n ON n.node_id=s.id
+                 WHERE (s.kind='messages' AND s.id=m.store_id) OR (s.kind='nodes' AND n.node_id IS NULL)
+             )
+           LIMIT 2""",
+        (json.dumps(node_ids), row["session_id"], row["store_id"], row.get("conversation_id") or "",
+         remainder, stamp, stamp),
+    ).fetchall()
+    return len(matches) == 1 and (stamp is not None or _recorded_carrier_emission(conn, row))
+
+
+def _recorded_carrier_emission(conn, row):
+    """An unstamped text match needs evidence that LCM itself emitted this carrier."""
+    from .ingest_ledger import identity_digest
+
+    try:
+        salt = conn.execute("SELECT value FROM ledger_meta WHERE key='digest_salt'").fetchone()
+        if salt is None:
+            return False
+        session_id = row["session_id"]
+        return conn.execute(
+            """SELECT 1 FROM ledger_emissions e
+               WHERE e.lineage IN (?, (SELECT value FROM ledger_meta WHERE key=?))
+                 AND e.descriptor_digest=? AND e.kind='carrier' AND e.state!='refused'
+                 AND NOT EXISTS (SELECT 1 FROM occurrence_bindings b
+                                 WHERE b.store_id=? AND b.view_seq<=e.view_seq)
+               LIMIT 1""",
+            (f"provisional:{session_id}", f"session_lineage:{session_id}", identity_digest(bytes(salt[0]), row),
+             row["store_id"]),
+        ).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if str(exc) not in {"no such table: ledger_meta", "no such table: ledger_emissions",
+                            "no such table: occurrence_bindings"}:
+            raise
+        return False
 
 
 def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
