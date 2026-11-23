@@ -1,4 +1,6 @@
-"""T1-555 (b): publish committed leaves in the compress call that stores them."""
+"""Swap rule (b) (#904): a summary node may first become visible only in the return of a compress call that itself
+commits (stores a node). It need not be the call that stored it: a hidden-only pass whose leaf first shows in the
+next committing pass is fine, while a node first shown by a call that stored nothing is a deferred publication."""
 
 import hashlib
 import sqlite3
@@ -105,13 +107,14 @@ class Host:
         self.record_property(f"call_{number}", f"stored={new}, first returned={first}, rows={rows}, lost=0, duplicated=0")
         return returned
 
+    def deferred(self):
+        """Nodes first returned by a call that stored nothing, as {node: (stored call, first returned call)}."""
+        return {node_id: (self.stored_at[node_id], published)
+                for node_id, published in self.published_at.items()
+                if self.stored_at[node_id] < published and not self.calls[published - 1][0]}
+
     def assert_no_deferred(self):
-        # T1-557 (clarifying T1-555): a node may first become visible only in the return of a call that itself
-        # commits (stores a node). It need not be the call that stored it, so a hidden-only pass whose leaf first
-        # shows in the next committing pass is fine; a node first shown by a call that stored nothing is deferred.
-        deferred = {node_id: (self.stored_at[node_id], published)
-                    for node_id, published in self.published_at.items()
-                    if self.stored_at[node_id] < published and not self.calls[published - 1][0]}
+        deferred = self.deferred()
         if deferred:
             raise DeferredPublication(
                 f"node: (stored call, first returned call) = {deferred}; "
@@ -167,7 +170,13 @@ def test_f3_hidden_only_leaf(hosts):
         host.assert_no_deferred()
 
 
-def test_f4_uid_guard(hosts):
+def test_f4_uid_replay(hosts):
+    """A uid-covered prefix replayed with a new turn publishes each leaf in the call that stores it.
+
+    The audit's F4 names a uid guard on the v0.30.x line (`_guard_uid_covered_drop`) that main does not have. This
+    cell does not drive that guard's rewriting branch: it passes on v0.30.2 too, where the guard runs in both
+    committing calls and returns its input unchanged. On main it pins the uid replay path.
+    """
     with hosts(with_uids=True) as host:
         history = host.rows_for_turns(0, 6)
         assert host_message_uid_mode() == "on" and host_uid_emit.identity_emit_enabled()
@@ -199,8 +208,11 @@ def test_f5_refused_pass(hosts):
         host.assert_no_deferred()
 
 
-@pytest.mark.xfail(strict=True, reason="deferred publication F6, swap rule (b)", raises=DeferredPublication)
 def test_f6_exception_after_leaf_commit(hosts, monkeypatch):
+    """Exempt from swap rule (b). A fault between a leaf's commit and the call's return fails open (the caller's list
+    comes back unchanged), so the committed leaf first shows in the next call, the earliest safe moment. Publishing it
+    from the failing call is the shape #2945 flags, and summarizing those rows again would repeat committed work.
+    """
     with hosts() as host:
         history = host.rows_for_turns(0, 6)
 
@@ -216,4 +228,5 @@ def test_f6_exception_after_leaf_commit(hosts, monkeypatch):
 
         host.call(returned)
         assert not host.calls[1][0], "the retry must use the committed prefix"
-        host.assert_no_deferred()
+        # Only the fault's own leaves show late, each in the very next call; nothing else is deferred.
+        assert host.deferred() == {node_id: (1, 2) for node_id in host.calls[0][0]}
