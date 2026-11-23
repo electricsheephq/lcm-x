@@ -1016,9 +1016,10 @@ class CompactionMixin:
                                                                   and self._last_compression_status != "error"))
             if binding_changed():
                 return caller_messages
-            if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
-                    and len(result) >= len(messages)
-                    and count_messages_tokens(result) >= count_messages_tokens(messages)):
+            hidden_only = (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
+                           and len(result) >= len(messages)
+                           and count_messages_tokens(result) >= count_messages_tokens(messages))
+            if hidden_only:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
@@ -1048,6 +1049,18 @@ class CompactionMixin:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
                                              persist=self._no_progress_proof_complete)
+            if budget.leaves:
+                streaks, key = self.__dict__.setdefault("_hidden_only_streaks", {}), self._hold_conversation_key()
+                if hidden_only:
+                    streaks[key] = {
+                        "passes": streaks.get(key, {}).get("passes", 0) + 1,
+                        # The last committed leaf already advanced this marker.
+                        "frontier_store_id": self._last_compacted_store_id,
+                        "leaves": budget.leaves,
+                        "hidden_rows": self._compress_hidden_rows_consumed,
+                    }
+                elif self._compress_host_rows_consumed > 0:
+                    streaks.pop(key, None)
             returned = result
             return result
         except BaseException as exc:
