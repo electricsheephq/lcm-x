@@ -7,7 +7,10 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from contextlib import ExitStack, closing, contextmanager
+from copy import deepcopy
 from itertools import count
+from pathlib import Path
+from runpy import run_path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -20,6 +23,7 @@ from hermes_lcm.message_analysis import _merge_adjacent_assistant_messages
 from hermes_lcm.message_content import normalize_content_value
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_compression_boundary import _config, _stub_summarizer, _turn
+from tests.test_host_uid_shadow import _state_db
 from tests.test_refused_compaction_rollback import (
     _compaction_records,
     _defer_rewriting_pass_refusal,
@@ -704,6 +708,120 @@ def _real_leaf_refusal(engine, kept, binding):
     assert engine._last_compress_leaves[1] == 1 and frontier > before and refused != kept
     _drain_session_end_maintenance(engine)
     return refused, frontier
+
+
+@pytest.mark.parametrize("uid_mode", ["off", "on"], ids=["uid-off", "uid-on"])
+def test_post_refusal_host_rows_are_append_only_until_next_compaction(request, tmp_path, monkeypatch, uid_mode):
+    """I1, I2, I11. Three completed host turns keep the refused view's prefix byte-stable."""
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", uid_mode)
+    monkeypatch.setattr(rollup_builder, "summarize_with_escalation", _stub_summarizer())
+    home = tmp_path / "home"
+    home.mkdir()
+    _state_db(home, [(SID, None, None)])
+    engine, kept, binding = request.getfixturevalue("committed_host")
+    flush = _host_flush()
+    live = flush([*kept, _turn(20)[1]])
+
+    def snapshot(rows):
+        return [json.dumps(row, sort_keys=True) for row in rows]
+
+    def stored_rows():
+        cursor = engine._store.connection.execute("SELECT * FROM messages WHERE session_id=? ORDER BY store_id", (SID,))
+        columns = [column[0] for column in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor]
+
+    def assert_bytes(actual, expected, where):
+        for index, (row, before) in enumerate(zip(actual, expected)):
+            if json.dumps(row, sort_keys=True) != before:
+                previous = json.loads(before)
+                changed = sorted(key for key in previous.keys() | row.keys()
+                                 if json.dumps({key: previous[key]} if key in previous else {}, sort_keys=True)
+                                 != json.dumps({key: row[key]} if key in row else {}, sort_keys=True))
+                pytest.fail(f"{where}: row {index} ({previous['role']}, store_id={previous.get('store_id')}) "
+                            f"changed fields {changed}")
+        assert len(actual) == len(expected), f"{where}: row count {len(expected)} -> {len(actual)}"
+
+    visible = snapshot(live)
+    _, frontier = _real_leaf_refusal(engine, live, binding)
+    refused_handle = engine._emission_handle
+    engine.record_rejected_compaction()
+    assert engine._compress_refusal is None
+    assert _emission_state(engine, refused_handle) == ("refused",)
+    engine.note_turn_complete()
+    assert_bytes(live, visible, "refused compaction input")
+    stored = snapshot(stored_rows())
+    calls, commit_records = engine._compress_calls, _compaction_records(engine)
+
+    # Capture the actual plugin callbacks from a minimal host registry.
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("LCM_DATABASE_PATH", str(tmp_path / "registry.db"))
+    hooks, registered = {}, []
+    plugin = run_path(str(Path(__file__).resolve().parents[2] / "__init__.py"), run_name="hermes_lcm._post_refusal")
+    with ExitStack() as cleanup:
+        def register_engine(prototype):
+            registered.append(prototype)
+            cleanup.callback(prototype.shutdown)
+
+        plugin["register"](SimpleNamespace(register_context_engine=register_engine, register_hook=hooks.__setitem__))
+        assert len(registered) == 1
+        for call in range(1, 4):
+            user, reply = flush(_turn(20 + call))
+            for row in (user, reply):
+                row["message_uid"] = f"{row['_row_id']:032x}"
+            user_bytes, reply_bytes = snapshot([user, reply])
+            live.append(user)
+            payload = dict(session_id=SID, conversation_id=binding["conversation_id"], platform=binding["platform"],
+                           turn_id=f"append-{call}", user_message=user["content"])
+
+            def check(phase, expected_visible):
+                where = f"ordinary call {call} {phase}"
+                assert_bytes(live, expected_visible, f"{where} host list")
+                assert_bytes(stored_rows()[:len(stored)], stored, f"{where} stored prefix")
+                assert engine._compress_calls == calls and _r3_frontier(engine) == frontier, where
+                assert _compaction_records(engine) == commit_records, where
+                assert _emission_state(engine, refused_handle) == ("refused",), where
+
+            prompt = visible + [user_bytes]
+            tokens = count_messages_tokens(live)
+            assert not engine.should_compress(tokens), f"ordinary call {call} threshold requested compaction"
+            preflight = engine.should_compress_preflight(live)
+            check("preflight", prompt)
+            assert not preflight, f"ordinary call {call} preflight requested compaction"
+            assert hooks["pre_llm_call"](**payload, conversation_history=list(live)) is None
+            assert hooks["pre_api_request"](**payload, conversation_history=list(live)) is None
+            request_rows = deepcopy(live)
+            if select := getattr(engine, "select_context", None):
+                selected = select(request_rows, conversation_messages=deepcopy(live),
+                                  incoming_message=request_rows[-1], budget_tokens=binding["context_length"])
+                assert_bytes(request_rows if selected is None else selected, prompt, f"ordinary call {call} selection")
+            check("request hooks", prompt)
+
+            usage = dict(prompt_tokens=tokens, completion_tokens=count_messages_tokens([reply]))
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            engine.update_from_response(usage)
+            assert not engine.should_compress_info()[0], f"ordinary call {call} response requested compaction"
+            if prune := getattr(engine, "prune_tool_results_only", None):
+                pruned, count_pruned = prune(live, current_tokens=tokens)
+                assert_bytes(pruned, prompt, f"ordinary call {call} tool pruning")
+                assert count_pruned == 0
+            check("response", prompt)
+            live.append(reply)
+            visible = prompt + [reply_bytes]
+            assert hooks["post_llm_call"](**payload, conversation_history=list(live), context_compressor=engine) is None
+            check("post_llm_call ingest", visible)
+            engine.on_turn_complete(deepcopy(live), usage=usage, turn_id=payload["turn_id"], interrupted=False)
+            check("on_turn_complete", visible)
+            durable = stored_rows()
+            assert [(row["role"], row["content"]) for row in durable[len(stored):]] == [
+                (user["role"], user["content"]), (reply["role"], reply["content"]),
+            ], f"ordinary call {call} appended different stored rows"
+            stored = snapshot(durable)
+
+    returned = engine.compress(live, force=True)
+    assert_bytes(live, visible, "next compaction input")
+    assert_bytes(stored_rows(), stored, "next compaction stored rows")
+    assert snapshot(returned) != visible and len(returned) < len(live)
+    assert engine._compress_calls == calls + 1
 
 
 def test_tool_separated_refusal_recovers_with_covered_survival_fit(tool_refusal_host, monkeypatch, caplog):
