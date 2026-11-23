@@ -55,6 +55,7 @@ def committed_stub_exit(uid_mode, host_for, monkeypatch, caplog):  # noqa: F811
     assert engine._last_compress_leaves[1] == engine._compress_host_rows_consumed == 0
     assert engine._verified_lcm_summary_prefix_end(result[0]["content"])
     assert engine._generated_context_carrier_remainder(result[0])
+    assert "timestamp" in original[0], "fixture precondition: the host's carrier row carries a timestamp"
     assert result[0] == original[0], "fix (a): row 0 equals the host's carrier byte for byte, timestamp included"
     assert engine._compress_commit_publication == "local"
 

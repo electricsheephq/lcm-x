@@ -58,7 +58,9 @@ def split_head_stub_exit(uid_mode, make_engine, summaries, monkeypatch, caplog):
     engine.note_turn_complete()
     before = _stored_rows(engine)
     nodes = engine._dag.get_session_nodes(engine._session_id)
+    supplied_before = deepcopy(supplied)  # the host's rows as sent, before any in-place change by the pass
     returned = run(engine, supplied, caplog)
+    assert supplied == supplied_before, "the stub-only exit changed the host's rows in place"
     assert stop_line(caplog).group(1, 2) == ("stub_first_exit", "0")
     assert engine._dag.get_session_nodes(engine._session_id) == nodes
     assert _stored_rows(engine) == before, "stub-only pass copied or lost a durable row"
