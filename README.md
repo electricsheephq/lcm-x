@@ -708,6 +708,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in share of the model window below which automatic compaction waits during a tool turn. Requires host response stop reasons. Use `0` to disable or a finite ratio greater than zero and below `1 - LCM_SURVIVAL_RESERVE`. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -933,6 +934,16 @@ Examples, as math rather than universal recommendations:
 | `1000000` | `250000` | `0.25` |
 | `1000000` | `400000` | `0.40` |
 | `1000000` | `600000` | `0.60` |
+
+With a host that passes response stop reasons, this profile example defers
+eligible mid-turn passes from 500,000 up to 700,000 prompt tokens on a
+1M-token window. At 700,000, on forced overflow, or at the next turn start,
+the normal gates decide whether to compact.
+
+```dotenv
+LCM_CONTEXT_THRESHOLD=0.50
+LCM_TURN_START_DEFER_CEILING=0.70
+```
 
 A reasonable first pass for a true 1M effective window is:
 

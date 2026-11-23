@@ -23,6 +23,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache, partial, wraps
 from inspect import signature
 from threading import get_ident
@@ -324,6 +325,16 @@ class CompactionMixin:
             return True
         if self.threshold_tokens <= 0:
             return False
+        ceiling = self._config.turn_start_defer_ceiling
+        if ceiling and self.context_length > 0 and tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+            ceiling_tokens = Decimal(str(ceiling)) * self.context_length
+            if tokens < ceiling_tokens:
+                logger.info(
+                    "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                    "prompt_tokens=%d ceiling_tokens=%s",
+                    ceiling, tokens, ceiling_tokens,
+                )
+                return False
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
@@ -834,19 +845,27 @@ class CompactionMixin:
                 self._compress_refusal = None
             self._compaction_inflight += 1
         try:
-            caller_messages = messages
-            try:
-                messages, host_view = self._canonical_host_view(caller_messages)
-            except Exception as exc:
-                self._last_compression_status = "error"
-                self._record_ingest_failure("compress", exc)
-                return caller_messages
-            # Generated pairs match the copy made here and take precedence.
-            host_pairs = host_view.get("host_pairs", host_pairs)
-            if self._compaction_is_closing():
-                return messages
             self._maybe_reclassify_late_auxiliary_before_compaction_write()
             with self._bypass_compression_binding() as bypassed:
+                if not bypassed:
+                    if not owned:  # A bypass may have ended while the call was preparing.
+                        with self._compaction_gate:
+                            owned = self._claim_compress_owner(caller)
+                            if not owned:
+                                return messages
+                    # Clear at foreground pass entry so even an early exit drops deferral for the host's overflow recheck.
+                    self._turn_start_defer_mid_turn_id = None
+                caller_messages = messages
+                try:
+                    messages, host_view = self._canonical_host_view(caller_messages)
+                except Exception as exc:
+                    self._last_compression_status = "error"
+                    self._record_ingest_failure("compress", exc)
+                    return caller_messages
+                # Generated pairs match the copy made here and take precedence.
+                host_pairs = host_view.get("host_pairs", host_pairs)
+                if self._compaction_is_closing():
+                    return messages
                 if bypassed:
                     if owned:  # First-ingest reclassification found a late auxiliary caller.
                         with self._compaction_gate:
@@ -857,11 +876,6 @@ class CompactionMixin:
                         self._emission_handle = None
                     # #1931: store a delegated child's rows before the host rewrites its view.
                     return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
-            if not owned:  # A bypass may have ended while the call was preparing.
-                with self._compaction_gate:
-                    owned = self._claim_compress_owner(caller)
-                    if not owned:
-                        return caller_messages
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         host_pairs=host_pairs, caller_messages=caller_messages)
         finally:
