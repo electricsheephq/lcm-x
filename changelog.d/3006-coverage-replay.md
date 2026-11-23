@@ -1,0 +1,1 @@
+- Fix: After Hermes refuses a compaction, LCM-X can reuse saved summaries for merged assistant replies, including replies separated by tool results. If marking the refusal fails, LCM-X retries it in the same session.
