@@ -781,9 +781,9 @@ class LCMEngine(
         # None is turn start. An empty ID denotes a direct response from a host without turn IDs.
         self._turn_start_defer_mid_turn_id: str | None = None
         self._turn_start_defer_logged = False
-        self._turn_start_deferrals = 0
+        self._turn_start_deferred_checks = 0
         self._turn_start_defer_warned: set[tuple[int, int, float]] = set()
-        self._absolute_threshold_active = False
+        self._window_anchored_trigger: tuple[int, int] | None = None
         self._absolute_threshold_tokens = getattr(
             self._config, "_absolute_threshold_tokens", None
         )
@@ -1634,6 +1634,7 @@ class LCMEngine(
             self.effective_context_length_reason = ""
             self._context_length_source = source
             self.threshold_tokens = 0
+            self._window_anchored_trigger = None
             self.context_threshold, self._context_threshold_source, self._context_threshold_autoraised = (
                 self._runtime_context_threshold(model=model, provider=provider)
             )
@@ -1656,6 +1657,7 @@ class LCMEngine(
         context_threshold_tokens = int(
             effective_context_length * self.context_threshold
         )
+        self._window_anchored_trigger = (effective_context_length, context_threshold_tokens)
         self.threshold_tokens = self._effective_threshold_tokens(
             context_threshold_tokens
         )
@@ -1673,8 +1675,8 @@ class LCMEngine(
             # config.yaml lcm.context_threshold_tokens, resolved by LCMConfig.from_env()
             # with LCM_ABSOLUTE_THRESHOLD_TOKENS taking precedence (#48).
             absolute_threshold_tokens = int(getattr(self._config, "absolute_threshold_tokens", 0) or 0)
-        self._absolute_threshold_active = absolute_threshold_tokens > 0
         if absolute_threshold_tokens > 0:
+            self._window_anchored_trigger = None
             self.threshold_tokens = absolute_threshold_tokens
             # Keep route-specific ratio auto-raise from re-climbing the
             # intermediate ratio on later recomputes; absolute still wins
@@ -1687,14 +1689,17 @@ class LCMEngine(
         context_length, trigger = self.context_length, self.threshold_tokens
         if not ceiling or context_length <= 0 or trigger <= 0:
             return
-        ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling)
+        key = (context_length, trigger, ceiling)
+        if key in self._turn_start_defer_warned:
+            return
+        ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, context_length)
         if ceiling_tokens <= trigger:
             reason = "inert: the defer ceiling is at or below the compaction trigger; the gate never defers"
-        elif self._absolute_threshold_active or self._context_threshold_source.startswith("model_thresholds:"):
-            reason = "unanchored: the defer ceiling follows the model window and the trigger is absolute or per-model"
+        elif self._window_anchored_trigger != (context_length, trigger):
+            reason = "unanchored: the defer ceiling follows the model window with an absolute or adjusted compaction trigger"
         else:
+            # The same numbers can become unanchored after a model switch and host clamp.
             return
-        key = (context_length, trigger, ceiling)
         with self._compaction_gate:
             if key in self._turn_start_defer_warned:
                 return
@@ -1705,7 +1710,7 @@ class LCMEngine(
                 reason, ceiling_tokens, trigger, context_length,
             )
         except Exception:
-            pass  # A diagnostic handler cannot interrupt model or session binding.
+            pass  # A diagnostic handler cannot interrupt binding or the gate decision.
 
     def _session_metadata_matches_active_runtime(
         self,
@@ -4813,7 +4818,7 @@ class LCMEngine(
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
         if session_id != previous_session_id:
             # A compression continuation can retain the tool-turn phase across session IDs.
-            self._reset_turn_start_deferrals()
+            self._reset_turn_start_deferred_checks()
         for digest in boundary_native_recovery_snapshot_digests:
             self._remember_native_recovery_replay_snapshot_digest(digest)
         commit_proof = getattr(self, "_compress_commit_proof", None)
@@ -6639,9 +6644,10 @@ class LCMEngine(
         if ceiling := self._config.turn_start_defer_ceiling:
             status.update(
                 turn_start_defer_ceiling=ceiling,
-                turn_start_defer_ceiling_tokens=format(self._turn_start_defer_ceiling_tokens(ceiling).normalize(), "f")
-                if self.context_length > 0 else None,
-                turn_start_deferrals=self._turn_start_deferrals,
+                turn_start_defer_ceiling_tokens=format(
+                    self._turn_start_defer_ceiling_tokens(ceiling, self.context_length).normalize(), "f",
+                ) if self.context_length > 0 else None,
+                turn_start_deferred_checks=self._turn_start_deferred_checks,
             )
         with self._assertion_extraction_metrics_lock:
             status["assertion_extraction"] = {

@@ -81,17 +81,91 @@ def test_b_absolute_trigger_warns_for_each_distinct_window(make_engine, caplog):
     assert "ceiling_tokens=140000" in second and "threshold_tokens=130000" in second
 
 
-def test_c_ratio_trigger_is_quiet_and_model_override_uses_clamped_trigger(make_engine, caplog):
-    eng = make_engine(model_thresholds={"special": 0.8}, max_assembly_tokens=600_000)
-    bind(eng, model="ordinary")
+@pytest.mark.parametrize(("model", "trigger"), [("ordinary", TRIGGER), ("special", 600_000)])
+def test_c_window_anchored_ratio_is_quiet(make_engine, caplog, model, trigger):
+    eng = make_engine(model_thresholds={"special": 0.6})
+    eng.update_model(model, WINDOW)
+    bind(eng, model=model)
+    assert eng.threshold_tokens == trigger
+    assert eng.should_compress(trigger) is True
+    eng.update_from_response({"stop_reason": "tool_use"})
+    assert eng.should_compress(trigger) is False
+    assert warnings(caplog) == []
+
+
+@pytest.mark.parametrize("model", ["ordinary", "special"])
+def test_assembly_cap_makes_a_ratio_trigger_unanchored(make_engine, caplog, model):
+    eng = make_engine(model_thresholds={"special": 0.6}, max_assembly_tokens=400_000)
+    eng.update_model(model, WINDOW)
+    bind(eng, model=model)
+    assert eng.threshold_tokens == 400_000
+    eng.update_from_response({"stop_reason": "tool_use"})
+    assert eng.should_compress(399_999) is False
+    assert eng.should_compress(400_000) is True  # The assembly cap forces overflow recovery.
+    message, = warnings(caplog)
+    assert "unanchored" in message
+    assert "ceiling_tokens=700000" in message and "threshold_tokens=400000" in message
+
+
+def test_host_auxiliary_clamp_after_bind_warns_once_at_the_lowered_trigger(make_engine, caplog):
+    eng = make_engine()
+    eng.update_model("wide", WINDOW)
+    bind(eng, model="wide")
     assert eng.threshold_tokens == TRIGGER
+    assert warnings(caplog) == []
+    # Hermes turn preflight applies the auxiliary cap after model update and session bind.
+    eng.threshold_tokens = 128_000
+    assert eng.should_compress(127_999) is False
+    message, = warnings(caplog)
+    assert "unanchored" in message
+    assert "ceiling_tokens=700000" in message and "threshold_tokens=128000" in message
+    eng.update_from_response({"stop_reason": "tool_use"})
+    for _ in range(3):
+        assert eng.should_compress(128_000) is False
+    assert warnings(caplog) == [message]
+
+
+def test_inert_warning_is_reevaluated_after_host_auxiliary_clamp(make_engine, caplog):
+    eng = make_engine(model_thresholds={"wide": 0.8})
+    eng.update_model("wide", WINDOW)
+    bind(eng, model="wide")
+    assert eng.threshold_tokens == 800_000
+    inert, = warnings(caplog)
+    assert "inert" in inert
+    assert "ceiling_tokens=700000" in inert and "threshold_tokens=800000" in inert
+    eng.threshold_tokens = 128_000
+    eng.update_from_response({"stop_reason": "tool_use"})
+    for _ in range(3):
+        assert eng.should_compress(128_000) is False
+    first, unanchored = warnings(caplog)
+    assert first == inert
+    assert "unanchored" in unanchored
+    assert "ceiling_tokens=700000" in unanchored and "threshold_tokens=128000" in unanchored
+
+
+def test_quiet_key_can_warn_when_a_different_model_is_clamped_to_it(make_engine, caplog):
+    eng = make_engine(model_thresholds={"special": 0.8})
+    bind(eng, model="ordinary")
+    assert eng.should_compress(TRIGGER) is True
     assert warnings(caplog) == []
 
     eng.update_model("special", WINDOW)
-    assert eng.threshold_tokens == 600_000
+    assert eng.threshold_tokens == 800_000
+    eng.threshold_tokens = TRIGGER
+    assert eng.should_compress(TRIGGER) is True
+    inert, unanchored = warnings(caplog)
+    assert "inert" in inert
+    assert "unanchored" in unanchored and "threshold_tokens=500000" in unanchored
+
+
+def test_seen_warning_key_skips_the_lock(make_engine, caplog, monkeypatch):
+    eng = make_engine(absolute_threshold_tokens=750_000)
+    bind(eng)
     message, = warnings(caplog)
-    assert "unanchored" in message
-    assert "ceiling_tokens=700000" in message and "threshold_tokens=600000" in message
+    with monkeypatch.context() as patch:
+        patch.setattr(eng, "_compaction_gate", None)
+        eng._warn_turn_start_defer_ceiling()
+    assert warnings(caplog) == [message]
 
 
 def test_bind_rechecks_trigger_after_host_auxiliary_clamp(make_engine, caplog):
@@ -107,20 +181,44 @@ def test_bind_rechecks_trigger_after_host_auxiliary_clamp(make_engine, caplog):
     assert "ceiling_tokens=700000" in message and "threshold_tokens=130000" in message
 
 
-def test_d_deferral_episode_logs_once_and_status_counts_every_response(make_engine, caplog):
+def test_d_deferral_episode_logs_once_and_status_counts_every_gate_check(make_engine, caplog):
     eng = make_engine()
     bind(eng)
     with caplog.at_level(logging.DEBUG):
-        for _ in range(200):
+        for _ in range(100):
             defer(eng)
+            assert eng.should_compress() is False
     assert deferral_levels(caplog) == [logging.INFO] + [logging.DEBUG] * 199
     lines = command.handle_lcm_command("status", eng).splitlines()
     start = lines.index("threshold_tokens: 500000")
     assert lines[start + 1:start + 4] == [
         "turn_start_defer_ceiling: 0.7",
         "turn_start_defer_ceiling_tokens: 700000",
-        "turn_start_deferrals: 200",
+        "turn_start_deferred_checks: 200",
     ]
+    assert eng.get_status()["turn_start_deferred_checks"] == 200
+
+
+def test_bypassed_check_preserves_the_owner_episode(make_engine, caplog):
+    eng = make_engine()
+    bind(eng)
+    with caplog.at_level(logging.DEBUG):
+        defer(eng)
+        eng._mark_thread_context_stateless("child")
+        try:
+            assert eng.should_compress(TRIGGER) is True
+        finally:
+            eng._clear_thread_context_stateless("child")
+        assert eng.should_compress(TRIGGER) is False
+    assert deferral_levels(caplog) == [logging.INFO, logging.DEBUG]
+
+
+def test_status_ceiling_tokens_are_uninitialized_before_bind(make_engine):
+    eng = make_engine()
+    eng.update_model("wide", WINDOW)
+    lines = command.handle_lcm_command("status", eng).splitlines()
+    assert "threshold_tokens: (uninitialized)" in lines
+    assert "turn_start_defer_ceiling_tokens: (uninitialized)" in lines
 
 
 def test_e_idless_host_starts_a_new_episode_at_turn_completion(make_engine, caplog, monkeypatch):
@@ -161,14 +259,14 @@ def test_f_counter_resets_at_session_boundaries(make_engine, boundary):
     eng = make_engine()
     bind(eng)
     defer(eng)
-    assert "turn_start_deferrals: 1" in command.handle_lcm_command("status", eng).splitlines()
+    assert "turn_start_deferred_checks: 1" in command.handle_lcm_command("status", eng).splitlines()
     if boundary == "reset":
         eng.on_session_reset()
         assert eng.should_compress(TRIGGER) is True
     else:
         eng.on_session_start("rotated", boundary_reason="compression", old_session_id="session", platform="cli")
         assert eng.current_session_id == "rotated"
-    assert "turn_start_deferrals: 0" in command.handle_lcm_command("status", eng).splitlines()
+    assert "turn_start_deferred_checks: 0" in command.handle_lcm_command("status", eng).splitlines()
     if boundary == "rotation":
         assert eng.should_compress(TRIGGER) is False  # The continued tool turn keeps its phase.
 
@@ -188,4 +286,4 @@ def test_g_off_is_quiet_and_preserves_status_bytes(make_engine, caplog, tmp_path
     expected = json.loads((Path(__file__).parent / "fixtures" / "command_status.json").read_text())
     assert command.handle_lcm_command("status", default_engine).replace(str(tmp_path), "<tmp>") == expected["bound"]
     assert not any("turn_start_defer" in line for line in command.handle_lcm_command("status", eng).splitlines())
-    assert eng._turn_start_deferrals == 0
+    assert eng._turn_start_deferred_checks == 0

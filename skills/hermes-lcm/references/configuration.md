@@ -127,11 +127,15 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
   at or above the ceiling and during forced overflow.
   Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
 
-  LCM-X warns when the ceiling is at or below the effective trigger (inert) or
-  above an absolute or per-model trigger (unanchored), with both token values.
-  The first deferral in each episode logs at INFO and subsequent deferrals log
-  at DEBUG. When enabled, `/lcm status` shows the ceiling as a share and in tokens
-  beside the trigger, plus the session's deferral count.
+  LCM-X checks the ceiling against the live trigger, including after Hermes or
+  the LCM assembly cap lowers it. It warns when the ceiling is at or below the
+  trigger (inert) or above an absolute or lowered trigger (unanchored), with both
+  token values. Global and per-model ratio triggers below the ceiling are quiet
+  while they retain their window-derived value. The first deferral in each
+  episode logs at INFO and subsequent deferrals log at DEBUG. When enabled,
+  `/lcm status` shows the ceiling as a share and in tokens beside the trigger,
+  plus `turn_start_deferred_checks`, the number of gate checks deferred in the
+  current session.
 
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;

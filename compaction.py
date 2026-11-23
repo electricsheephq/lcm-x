@@ -298,8 +298,9 @@ class CompactionMixin:
         if callable(maybe_reclassify):
             maybe_reclassify()
 
-    def _turn_start_defer_ceiling_tokens(self, ceiling: float) -> Decimal:
-        return Decimal(str(ceiling)) * self.context_length
+    @staticmethod
+    def _turn_start_defer_ceiling_tokens(ceiling: float, context_length: int) -> Decimal:
+        return Decimal(str(ceiling)) * context_length
 
     def _end_turn_start_defer_episode(self) -> None:
         # Reset sites also run on half-built engines (tests/test_frontier_state.py); only a gate hit sets the flag.
@@ -309,7 +310,6 @@ class CompactionMixin:
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._bypasses_lcm_context_management():
-            self._end_turn_start_defer_episode()
             if self._compression_boundary_cooldown_active():
                 return False
             if prompt_tokens is not None:
@@ -339,22 +339,24 @@ class CompactionMixin:
             self._end_turn_start_defer_episode()
             return False
         ceiling = self._config.turn_start_defer_ceiling
-        if ceiling and self.context_length > 0 and tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
-            ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling)
-            if tokens < ceiling_tokens:
-                with self._compaction_gate:
-                    level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
-                    self._turn_start_defer_logged = True
-                    self._turn_start_deferrals += 1
-                try:
-                    logger.log(
-                        level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
-                        "prompt_tokens=%d ceiling_tokens=%s",
-                        ceiling, tokens, ceiling_tokens,
-                    )
-                except Exception:
-                    pass  # A diagnostic handler cannot change the gate result.
-                return False
+        if ceiling and self.context_length > 0:
+            self._warn_turn_start_defer_ceiling()
+            if tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+                ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, self.context_length)
+                if tokens < ceiling_tokens:
+                    with self._compaction_gate:
+                        level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
+                        self._turn_start_defer_logged = True
+                        self._turn_start_deferred_checks += 1
+                    try:
+                        logger.log(
+                            level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                            "prompt_tokens=%d ceiling_tokens=%s",
+                            ceiling, tokens, ceiling_tokens,
+                        )
+                    except Exception:
+                        pass  # A diagnostic handler cannot change the gate result.
+                    return False
         self._end_turn_start_defer_episode()
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 

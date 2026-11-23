@@ -73,6 +73,7 @@ def render_status(facts: StatusFacts) -> str:
     db_exists = facts.db_exists
     db_size = facts.db_size
     session_bound = bool(facts.session_id)
+    defer_ceiling_tokens = status.get("turn_start_defer_ceiling_tokens") if session_bound else None
     source_stats = status.get("source_lineage") or {}
     runtime_identity = status.get("runtime_identity") or {}
     source_stats = {
@@ -135,8 +136,8 @@ def render_status(facts: StatusFacts) -> str:
         f"threshold_tokens: {facts.threshold_tokens if session_bound else '(uninitialized)'}",
         *([
             f"turn_start_defer_ceiling: {defer_ceiling}",
-            f"turn_start_defer_ceiling_tokens: {status['turn_start_defer_ceiling_tokens'] or uninitialized}",
-            f"turn_start_deferrals: {status['turn_start_deferrals']}",
+            f"turn_start_defer_ceiling_tokens: {defer_ceiling_tokens or uninitialized}",
+            f"turn_start_deferred_checks: {status['turn_start_deferred_checks']}",
         ] if defer_ceiling else []),
         f"cache_metrics_available: {_fmt_bool(status.get('cache_metrics_available'))}",
         f"last_input_tokens: {status.get('last_input_tokens', 0)}",

@@ -945,12 +945,15 @@ LCM_CONTEXT_THRESHOLD=0.50
 LCM_TURN_START_DEFER_CEILING=0.70
 ```
 
-LCM-X warns when the ceiling is at or below the effective compaction trigger
-(inert) or when it exceeds an absolute or per-model trigger (unanchored). Both
-warnings show the ceiling and trigger in tokens. The first deferral in an
-episode logs at INFO and subsequent deferrals log at DEBUG. With the ceiling
-enabled, `/lcm status` shows its share, its token value and the session's deferral
-count beside the trigger.
+LCM-X checks the ceiling against the live compaction trigger, including after
+Hermes or the LCM assembly cap lowers it. A ceiling at or below the trigger
+warns as inert. A ceiling above an absolute or lowered trigger warns as
+unanchored. Global and per-model ratio triggers below the ceiling are quiet
+while they retain their window-derived value. Both warnings show the ceiling
+and trigger in tokens. The first deferral in an episode logs at INFO and
+subsequent deferrals log at DEBUG. With the ceiling enabled, `/lcm status` shows
+its share, its token value and `turn_start_deferred_checks`, the number of gate
+checks deferred in the current session.
 
 A reasonable first pass for a true 1M effective window is:
 
