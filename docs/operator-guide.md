@@ -1095,8 +1095,9 @@ What the main knobs do:
   and publishes one active context at the end. It remains synchronous and does
   not enable deferred/background maintenance.
 - With depth targeting active, the `lcm_status` sweep block reports
-  `depth_target_tokens`, `fixed_load_tokens`, `whole_prompt_tokens_after`, and
-  `depth_target_met`. The pass estimate determines whether the target was met.
+  `depth_target_tokens`, `fixed_load_tokens`, `whole_prompt_tokens_after`,
+  `depth_target_met`, and `depth_token_scale`. The pass estimate determines
+  whether the target was met.
   The reported size after compaction is measured from the returned context plus
   fixed load.
 - Its time is one budget counted from `compress()` entry (#605). The progress

@@ -13,10 +13,11 @@ import pytest
 import hermes_lcm.compaction as compaction
 import hermes_lcm.externalize as externalize
 import hermes_lcm.leaf_prep as leaf_prep
+import hermes_lcm.survival_fit as survival_fit
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from hermes_lcm.tokens import count_messages_tokens, count_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 from hermes_lcm.tools import lcm_status
 from tests.test_issue_457_resume_controls import _HostCancel, _spy_resumes
 from tests.test_issue_605_foreground_budget import _provider
@@ -36,7 +37,7 @@ from tests.test_issue_671_stub_first_exit import summaries as summaries
 
 WINDOW = 100_000
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
-DEPTH_KEYS = {"depth_target_tokens", "fixed_load_tokens", "whole_prompt_tokens_after", "depth_target_met"}
+DEPTH_KEYS = {"depth_target_tokens", "fixed_load_tokens", "whole_prompt_tokens_after", "depth_target_met", "depth_token_scale"}
 MAIN_SWEEP_KEYS = {
     "status", "leaf_passes", "condensation_passes", "pre_leaf_condensation_passes",
     "pre_leaf_condensation_stop_reason", "post_drain_condensation_skipped", "total_passes",
@@ -771,3 +772,307 @@ def test_deep_pass_keeps_committed_leaves_after_a_third_leaf_lock(make_engine, m
     assert _stored_row_hashes(engine) == before
     assert _sweep(engine)["stop_reason"] == "sqlite_publication_locked"
     assert _sweep(engine)["depth_target_met"] is False
+
+
+@pytest.mark.parametrize("raw_ratio, recall, prepared, expected_leaves", [
+    ("depth", True, False, 3), ("depth", False, False, 2),
+    ("depth", True, True, 3), ("0", True, False, 4), (None, True, False, 4),
+])
+def test_depth_stop_reserves_proactive_recall(
+    make_engine, summaries, monkeypatch, raw_ratio, recall, prepared, expected_leaves,
+):
+    view = _view()
+    observed, target = count_messages_tokens(view), _target_after(view, 2) + 100
+    window = 12_000 if prepared else WINDOW  # prepared leaves require a trigger above 45% of the window
+    if raw_ratio is None:
+        monkeypatch.delenv("LCM_DEPTH_TARGET_RATIO", raising=False)
+    else:
+        monkeypatch.setenv("LCM_DEPTH_TARGET_RATIO", str(target / window) if raw_ratio == "depth" else raw_ratio)
+    recall_text = "<relevant-memories>\n" + payload_of(300) + "\n</relevant-memories>"
+    recall_cost = count_message_tokens({"role": "user", "content": recall_text})
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=LCMConfig.from_env().depth_target_ratio,
+                           proactive_recall_enabled=recall, proactive_recall_budget_tokens=recall_cost,
+                           background_leaf_prep_enabled=prepared)
+    engine.context_length = window
+    if prepared:
+        _seed_prepared_chain(engine, view, monkeypatch, expected_leaves)
+
+    def build_recall(tail, role, active_ids):
+        return {"role": role, "content": recall_text} if recall else None
+
+    monkeypatch.setattr(engine, "_build_proactive_recall_message", build_recall)
+    result = engine.compress(view, current_tokens=observed)
+
+    assert len(_leaves(engine)) == expected_leaves
+    status = _sweep(engine)
+    assert status.get("promoted_leaves", 0) == (expected_leaves if prepared else 0)
+    assert len(summaries) == expected_leaves - status.get("promoted_leaves", 0)
+    assert any(recall_text in row["content"] for row in result) is recall
+    if raw_ratio == "depth":
+        assert status["depth_target_met"] is True
+        assert status["whole_prompt_tokens_after"] == engine._survival_measure(result) <= target
+        if recall:
+            estimate_after_two = _target_after(view, 2) - 100
+            assert estimate_after_two <= target < estimate_after_two + recall_cost
+    else:
+        assert DEPTH_KEYS.isdisjoint(status)
+        assert set(status) == MAIN_SWEEP_KEYS | {"hidden_rows"}
+
+
+@pytest.mark.parametrize("first_lock", ["_publish_leaf_node", "_condense_summary_nodes"])
+def test_double_lock_in_stub_first_fallback_fails_open_once(make_engine, monkeypatch, summaries, caplog, first_lock):
+    view = tool_view()
+    settings = {"summary_prefix_target_tokens": 100, "condensation_fanin": 2} if first_lock == "_condense_summary_nodes" else {}
+    engine = exit_engine(make_engine, temporal_rollups_enabled=False, **settings)
+    if first_lock == "_condense_summary_nodes":
+        _seed_oversized_summary_prefix(engine)
+    engine._config.depth_target_ratio = 120 / engine.context_length
+    engine.ingest(view)
+    before = _stored_row_hashes(engine)
+    leaf_ids = [leaf.node_id for leaf in _leaves(engine)]
+    calls = []
+
+    def lock(*args, **kwargs):
+        calls.append(first_lock)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(engine, first_lock, lock)
+    finalize = engine._finalize_stub_first_exit
+
+    def finalize_with_lock(*args, **kwargs):
+        calls.append("finalize")
+        if calls.count("finalize") == 1:
+            engine._store._conn.execute("BEGIN IMMEDIATE")
+            raise sqlite3.OperationalError("database is locked")
+        return finalize(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "_finalize_stub_first_exit", finalize_with_lock)
+    result = engine.compress(view, current_tokens=count_messages_tokens(view))
+
+    assert calls == [first_lock, "finalize"]
+    assert result == view and engine.last_compression_status == "error"
+    assert _sweep(engine)["stop_reason"] == "sqlite_publication_locked"
+    assert len(summaries) == (1 if first_lock == "_publish_leaf_node" else 0)
+    assert [leaf.node_id for leaf in _leaves(engine)] == leaf_ids
+    assert not engine._store._conn.in_transaction
+    assert _stored_row_hashes(engine) == before
+    engine.ingest(result)
+    assert _stored_row_hashes(engine) == before
+    assert sum("stub-first fallback" in record.message for record in caplog.records) == 1
+
+
+@pytest.mark.parametrize("source, ratio, expected", [
+    ("absolute", 0.58, 0), ("absolute", 0.57999, 57_999), ("ratio", 0.58, 0),
+])
+def test_depth_target_rounds_before_comparing_trigger(make_engine, source, ratio, expected):
+    engine = make_engine(context_threshold=0.58, absolute_threshold_tokens=58_000 if source == "absolute" else 0)
+    engine._set_context_length(WINDOW, source="test")
+    assert engine.threshold_tokens == (58_000 if source == "absolute" else int(WINDOW * 0.58))
+    engine._config.depth_target_ratio = ratio
+    state = compaction._CompressionState(observed_prompt_tokens=60_000, threshold_full_sweep_active=True)
+
+    assert engine._resolve_depth_target(state, force=False, recovery_attempt=False) == expected
+
+
+@pytest.mark.parametrize("retry_ratio", ["depth", "0", None])
+def test_retry_that_meets_depth_adopts_without_a_leaf(make_engine, monkeypatch, retry_ratio):
+    monkeypatch.delenv("LCM_DEPTH_TARGET_RATIO", raising=False)
+    view = _view(7)
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=LCMConfig.from_env().depth_target_ratio)
+    observed, target = count_messages_tokens(view), _target_after(view, 2)
+    calls = []
+    cancel = True
+
+    def summarize(**kwargs):
+        calls.append(kwargs["depth"])
+        if cancel and len(calls) == 3:
+            raise _HostCancel()
+        return SUMMARY, 1
+
+    monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation", summarize)
+    engine.ingest(view)
+    before = _stored_row_hashes(engine)
+    with pytest.raises(_HostCancel):
+        engine.compress(view, current_tokens=observed)
+    committed = [leaf.node_id for leaf in _leaves(engine)]
+    assert len(committed) == 2 and len(calls) == 3
+    if retry_ratio is not None:
+        monkeypatch.setenv("LCM_DEPTH_TARGET_RATIO", str(target / WINDOW) if retry_ratio == "depth" else retry_ratio)
+    engine._config.depth_target_ratio = LCMConfig.from_env().depth_target_ratio
+    cancel = False
+    calls.clear()
+
+    result = engine.compress(view, current_tokens=observed)
+
+    status = _sweep(engine)
+    assert [leaf.node_id for leaf in _leaves(engine)[:2]] == committed
+    assert sum(row["content"].count("Earlier turns.") for row in result) >= 2
+    assert engine._no_progress_hold is None and engine._sweep_budget_hold_until == 0
+    assert _stored_row_hashes(engine) == before
+    engine.ingest(result)
+    assert _stored_row_hashes(engine) == before
+    if retry_ratio == "depth":
+        assert not calls and len(_leaves(engine)) == 2
+        assert status["leaf_passes"] == status["condensation_passes"] == 0
+        assert status["stop_reason"] == "depth_target_reached" and status["depth_target_met"] is True
+        assert result[-10:] == view[-10:]
+    else:
+        assert len(calls) == status["leaf_passes"] == 4
+        assert result[-2:] == view[-2:]
+        assert status["stop_reason"] == "summary_prefix_target_reached"
+        assert set(status) == MAIN_SWEEP_KEYS | {"hidden_rows"}
+
+
+def _force_unit_depth_scale(engine, monkeypatch):
+    prepare = engine._prepare_compression_sweep
+
+    def prepare_sweep(state, *args, **kwargs):
+        result = prepare(state, *args, **kwargs)
+        state.depth_token_scale = 1.0
+        return result
+
+    monkeypatch.setattr(engine, "_prepare_compression_sweep", prepare_sweep)
+
+
+@pytest.mark.parametrize("host_estimator", [False, True], ids=["no-host-estimator", "host-estimator"])
+def test_depth_scale_excludes_fixed_load(make_engine, summaries, monkeypatch, host_estimator):
+    view = _view(31)
+    observed, trigger = 80_000, 75_000
+
+    def host_estimate(rows):
+        return round(count_messages_tokens(rows) * 1.1)
+
+    monkeypatch.setattr(survival_fit, "_host_estimate", host_estimate if host_estimator else lambda rows: None)
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=0.73)
+    engine.threshold_tokens = trigger
+    result = engine.compress(view, current_tokens=observed)
+    status = _sweep(engine)
+    recount = host_estimate if host_estimator else count_messages_tokens
+
+    assert status["fixed_load_tokens"] == observed - recount(view)
+    assert recount(result) + status["fixed_load_tokens"] < trigger
+    if host_estimator:
+        assert status["depth_token_scale"] == pytest.approx(1.1, abs=0.0001)
+        assert status["depth_token_scale"] < observed / count_messages_tokens(view)
+    else:
+        assert status["depth_token_scale"] == 1.0
+        unscaled_engine = _sweep_engine(make_engine, view, depth_target_ratio=0.73)
+        unscaled_engine.threshold_tokens = trigger
+        _force_unit_depth_scale(unscaled_engine, monkeypatch)
+        unscaled_engine.compress(view, current_tokens=observed)
+        assert status["leaf_passes"] == _sweep(unscaled_engine)["leaf_passes"]
+
+
+def _reasoning_view(turns, carrier_chars):
+    view = _view(turns)
+    for row in view:
+        if row["role"] == "assistant":
+            row["reasoning_content"] = "r" * carrier_chars
+            row["reasoning_details"] = [{"type": "reasoning.text", "text": "d" * carrier_chars}]
+    assert count_messages_tokens(view) == count_messages_tokens(_view(turns))
+    return view
+
+
+def _host_recount(view):
+    reasoning_chars = sum(
+        len(row.get("reasoning_content") or "")
+        + sum(len(detail["text"]) for detail in row.get("reasoning_details") or [])
+        for row in view
+    )
+    return count_messages_tokens(view) + reasoning_chars // 4
+
+
+def test_depth_scale_calibrates_against_reasoning_recount(make_engine, summaries, monkeypatch):
+    """Use the reasoning-aware row recount to calibrate savings with a separate fixed load."""
+    view = _reasoning_view(turns=25, carrier_chars=1600)
+    fixed_load = 20_000
+    observed = _host_recount(view) + fixed_load
+    target = observed - 16_000
+    trigger = observed - 1_000
+    monkeypatch.setattr(survival_fit, "_host_estimate", _host_recount)
+
+    def run(*, unit_scale):
+        engine = _sweep_engine(make_engine, view, depth_target_ratio=target / WINDOW, survival_fit=False)
+        engine.threshold_tokens = trigger
+        if unit_scale:
+            _force_unit_depth_scale(engine, monkeypatch)
+
+        estimates = []
+        reached = engine._depth_target_reached
+
+        def record_estimate(state, estimate=None):
+            estimates.append(state.estimated_active_tokens if estimate is None else estimate)
+            return reached(state, estimate)
+
+        monkeypatch.setattr(engine, "_depth_target_reached", record_estimate)
+        result = engine.compress(view, current_tokens=observed)
+        return _sweep(engine), estimates, _host_recount(result) + fixed_load, _leaves(engine)
+
+    status, estimates, recounted, leaves = run(unit_scale=False)
+    unscaled, _, _, unscaled_leaves = run(unit_scale=True)
+
+    assert status["fixed_load_tokens"] == fixed_load
+    assert status["depth_token_scale"] == round(_host_recount(view) / count_messages_tokens(view), 4) > 1
+    assert status["leaf_passes"] == len(leaves) < unscaled["leaf_passes"]
+    assert [(leaf.source_token_count, leaf.token_count) for leaf in leaves] == [
+        (leaf.source_token_count, leaf.token_count) for leaf in unscaled_leaves[:len(leaves)]
+    ]
+    assert status["depth_target_met"] is True
+    assert estimates[-1] <= target
+    assert recounted <= target * 1.05
+    assert recounted < trigger
+    assert estimates[-1] == pytest.approx(recounted, rel=0.10)
+
+
+def test_depth_scale_caps_large_host_ratio(make_engine, summaries, monkeypatch):
+    view = _reasoning_view(turns=5, carrier_chars=12_000)
+    fixed_load = 20_000
+    observed = _host_recount(view) + fixed_load
+    monkeypatch.setattr(survival_fit, "_host_estimate", _host_recount)
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=0.40, survival_fit=False)
+    engine.threshold_tokens = 48_000
+    assert _host_recount(view) / count_messages_tokens(view) > 4
+    assert _host_recount(view[:1] + view[3:]) + fixed_load > engine.threshold_tokens
+
+    engine.compress(view, current_tokens=observed)
+
+    status = _sweep(engine)
+    assert status["depth_token_scale"] == 4.0
+    assert status["leaf_passes"] == len(summaries) > 1
+
+
+def test_depth_scale_floors_small_host_ratio_and_defaults_without_host(make_engine, summaries, monkeypatch):
+    view = _view()
+    monkeypatch.setattr(survival_fit, "_host_estimate", lambda rows: None)
+    for observed, expected_leaves in [(count_messages_tokens(view) - 250, 2), (None, 2)]:
+        engine = _sweep_engine(make_engine, view, depth_target_ratio=_target_after(view, 2) / WINDOW)
+        engine.compress(view, current_tokens=observed)
+
+        status = _sweep(engine)
+        assert status["depth_token_scale"] == 1.0
+        assert status["leaf_passes"] == len(_leaves(engine)) == expected_leaves
+
+
+@pytest.mark.parametrize("raw_ratio", [None, "0"])
+def test_depth_scale_inert_with_reasoning_carriers(make_engine, summaries, monkeypatch, raw_ratio):
+    if raw_ratio is None:
+        monkeypatch.delenv("LCM_DEPTH_TARGET_RATIO", raising=False)
+    else:
+        monkeypatch.setenv("LCM_DEPTH_TARGET_RATIO", raw_ratio)
+    view = _reasoning_view(turns=25, carrier_chars=1600)
+    observed = _host_recount(view) + 20_000
+    engine = _sweep_engine(make_engine, view, depth_target_ratio=LCMConfig.from_env().depth_target_ratio,
+                           survival_fit=False)
+    engine.threshold_tokens = observed - 1_000
+    engine.ingest(view)
+    before = _stored_row_hashes(engine)
+
+    result = engine.compress(view, current_tokens=observed)
+
+    status = _sweep(engine)
+    assert status["leaf_passes"] == len(summaries) == len(_leaves(engine)) == 12
+    assert status["stop_reason"] == "pass_budget_exhausted"
+    assert set(status) == MAIN_SWEEP_KEYS
+    assert _stored_row_hashes(engine) == before
+    engine.ingest(result)
+    assert _stored_row_hashes(engine) == before
