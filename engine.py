@@ -110,6 +110,7 @@ from .ingest_protection import (
     sensitive_pattern_status,
 )
 from .plugin_identity import ENGINE_NAME, LEGACY_ENGINE_NAME, PLUGIN_NAME
+from .sidecar_ingest import SIDECAR_SESSION_PREFIX, persist_sidecar_messages
 from .tool_pairs import repair_tool_pairs
 from .runtime_identity import (
     _PLUGIN_ROOT,
@@ -7918,6 +7919,16 @@ class LCMEngine(
                         if self._ingest_ledger_attempt is not None:
                             self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                         self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+
+                        @lru_cache(maxsize=1)
+                        def replay_store_ids():
+                            return self._get_store_id_map_for_messages(messages)
+
+                        stored_at = prepared.get("stored_at", {})
+                        persist_sidecar_messages(
+                            store, self._session_id, self._conversation_id, self._session_platform, messages,
+                            lambda i: stored_at.get(i) or replay_store_ids().get(id(messages[i])),
+                        )
                     emission_committed = True
                     if ledger_prepared is not None:
                         ingest_ledger.settle_pending_emissions(
@@ -11344,7 +11355,7 @@ class LCMEngine(
             # Dedupe: skip anything already represented in the active context —
             # the current session (its summary prefix + recent tail window) and
             # any summary node already placed in the prefix.
-            if hit.get("from_current_session"):
+            if hit.get("from_current_session") or str(hit.get("session_id") or "").startswith(SIDECAR_SESSION_PREFIX):
                 continue
             node_id = hit.get("node_id")
             if node_id is not None and node_id in active_node_ids:

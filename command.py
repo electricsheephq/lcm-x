@@ -82,6 +82,7 @@ from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
+from .sidecar_ingest import SIDECAR_SESSION_PREFIX, sidecar_session_id
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage, \
     run_session_purges
@@ -1409,6 +1410,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     # would race with that ingest.
     protected_session_ids = {getattr(engine, "_session_id", "")}
     protected_session_ids = {str(s) for s in protected_session_ids if s}
+    protected_session_ids.update(sidecar_session_id(sid) for sid in tuple(protected_session_ids))
     session_ids = {str(s) for s in session_ids if s and str(s) not in protected_session_ids}
     if not session_ids:
         return {
@@ -1424,6 +1426,12 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     with store._write_lock, store.atomic(immediate=True):
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
+        conn.execute(
+            f"INSERT OR IGNORE INTO {scope_table}(session_id) "
+            "SELECT DISTINCT m.session_id FROM messages AS m WHERE m.session_id GLOB ? AND EXISTS ("
+            f"SELECT 1 FROM {scope_table} AS scope WHERE scope.session_id = substr(m.session_id, ?))",
+            (SIDECAR_SESSION_PREFIX + "*", len(SIDECAR_SESSION_PREFIX) + 1),
+        )
         # Capture the store_ids about to be deleted so their raw-history chunks
         # can be archived in this same transaction (chunks map to messages by
         # store_id; a deleted message's chunks must drop from ranking).
