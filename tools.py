@@ -40,6 +40,7 @@ from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
+    sqlite_wal_reset_check,
     survival_fit_count,
 )
 from .dag import build_nodes_fts_spec
@@ -47,6 +48,7 @@ from .db_bootstrap import (
     check_external_content_fts_integrity,
     inspect_lcm_schema_health,
     load_integrity_failed,
+    sqlite_wal_reset_affected,
 )
 from .extraction import sanitize_pre_compaction_content
 from .inactive_record import inactive_record_notice
@@ -6134,6 +6136,9 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         "status": "warn" if hidden_warning or zero_leaf_warning else "pass",
         "detail": detail,
     })
+
+    if sqlite_wal_reset_affected():
+        checks.append(sqlite_wal_reset_check(sqlite3.sqlite_version))
 
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):

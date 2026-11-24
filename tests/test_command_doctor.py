@@ -144,6 +144,10 @@ def doctor_engine(
     tmp_path: Path, case: str, patch: pytest.MonkeyPatch, *, trace: bool = False
 ) -> Iterator[Any]:
     # No session bind: no background work, host calls, or provider loads.
+    affected = case == "wal_affected"
+    patch.setattr(sqlite3, "sqlite_version_info", (3, 46, 1) if affected else (3, 53, 1))
+    if affected:
+        patch.setattr(sqlite3, "sqlite_version", "3.46.1")
     patch.setattr(tokens, "token_counter_status", lambda: {
         "counter": "char_estimate", "encoding": "", "state": "unavailable",
     })
@@ -249,9 +253,6 @@ def doctor_engine(
             owner._conn = replacement
             old.close()
         if not trace:
-            patch.setattr(
-                command, "sqlite_wal_reset_affected", lambda: case == "wal_affected"
-            )
             patch.setattr(
                 command, "stem_index_status", lambda conn: "fixture stem ready"
             )
@@ -499,13 +500,10 @@ def test_doctor_read_order(
             assert events.index(save) < events.index(insert) < events.index(rollback)
         if surface == "text":
             guidance = events.index("call: doctor_guidance_for_checks")
+            assert events.index("call: sqlite_wal_reset_affected") < guidance
             assert all(
                 events.index("call: " + name) > guidance
-                for name in (
-                    "sqlite_wal_reset_affected",
-                    "stem_index_status",
-                    "host_uid_doctor_lines",
-                )
+                for name in ("stem_index_status", "host_uid_doctor_lines")
             )
 
 

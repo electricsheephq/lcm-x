@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_affected, sqlite_wal_reset_warning
+
 
 @dataclass(frozen=True)
 class StatusFacts:
@@ -17,6 +19,7 @@ class StatusFacts:
     db_path: Path
     db_exists: bool
     db_size: int
+    sqlite_warning: str
     session_id: str
     session_platform: str
     engine_name: str
@@ -49,6 +52,7 @@ def collect_status(engine: Any) -> StatusFacts:
     stem_index = command.stem_index_status(engine._store.connection)
     return StatusFacts(
         status=status, db_path=db_path, db_exists=db_exists, db_size=db_size,
+        sqlite_warning=sqlite_wal_reset_warning(sqlite3.sqlite_version) if sqlite_wal_reset_affected() else "",
         session_id=engine.current_session_id, session_platform=engine.current_session_platform,
         engine_name=engine.name, model=engine.model, provider=engine.provider,
         context_length_source=getattr(engine, "_context_length_source", ""),
@@ -119,6 +123,7 @@ def render_status(facts: StatusFacts) -> str:
         f"database_path_source: {runtime_identity.get('database_path_source', '(unknown)')}",
         f"database_exists: {_fmt_bool(db_exists)}",
         f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
+        *([f"sqlite_wal_reset: warn {facts.sqlite_warning} {SQLITE_WAL_RESET_ACTION}"] if facts.sqlite_warning else []),
         f"compression_count: {facts.compression_count}",
         f"total_compactions: {status.get('total_compactions', 0)}",
         f"total_compactions_scope: {status.get('total_compactions_scope', 'current_conversation')}",

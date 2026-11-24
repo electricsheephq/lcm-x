@@ -25,6 +25,10 @@ from .schema_families import SchemaFinding
 
 logger = logging.getLogger(__name__)
 _wal_reset_warned = False  # no lock: a rare duplicate warning beats a lock a forked child could inherit held
+SQLITE_WAL_RESET_ACTION = (
+    "Upgrade to a Python whose SQLite is 3.51.3 or newer "
+    "(or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch)."
+)
 
 
 def sqlite_wal_reset_affected(version_info=None) -> bool:
@@ -33,6 +37,14 @@ def sqlite_wal_reset_affected(version_info=None) -> bool:
     return ((3, 7, 0) <= v < (3, 51, 3)
             and not (3, 50, 7) <= v < (3, 51, 0)
             and not (3, 44, 6) <= v < (3, 45, 0))
+
+
+def sqlite_wal_reset_warning(version: str) -> str:
+    return (
+        f"Linked SQLite {version} has the WAL-reset bug (#1085). "
+        "In WAL mode with several connections, whole recently committed transactions can vanish. "
+        "Fixed in SQLite 3.51.3."
+    )
 
 
 class SchemaVersionTooNewError(RuntimeError):
@@ -148,11 +160,8 @@ def configure_connection(conn: sqlite3.Connection) -> None:
     if not _wal_reset_warned and sqlite_wal_reset_affected():
         _wal_reset_warned = True
         logger.warning(
-            "LCM-X: the linked SQLite %s has the WAL-reset bug "
-            "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
-            "a WAL database written by several connections; upgrade to a Python "
-            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch).",
-            sqlite3.sqlite_version,
+            "LCM-X: %s %s See https://sqlite.org/wal.html#walresetbug.",
+            sqlite_wal_reset_warning(sqlite3.sqlite_version), SQLITE_WAL_RESET_ACTION,
         )
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA wal_autocheckpoint=500")
