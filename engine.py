@@ -1053,6 +1053,7 @@ class LCMEngine(
         # not session-scoped, so it is not cleared on session reset.
         self._ingest_failure_count = 0
         self._consecutive_ingest_failures = 0
+        self._sidecar_recovery_failures = (0, 0.0)
         # Proactive-recall injection telemetry (SPEC F). Store-scoped counters so
         # a session reset does not zero the operator's running totals; surfaced
         # through lcm_status. injected = a block was placed this assembly;
@@ -6277,6 +6278,10 @@ class LCMEngine(
 
     def get_status(self) -> Dict[str, Any]:
         status = super().get_status()
+        sidecar_failure_count, last_sidecar_failure_at = self._sidecar_recovery_failures
+        if sidecar_failure_count:
+            status["sidecar_recovery_failure_count"] = sidecar_failure_count
+            status["sidecar_recovery_last_failure_at"] = last_sidecar_failure_at
         status["ingest_ledger"] = dict(getattr(self, "_ingest_ledger_counters", {}))
         try:
             status["ingest_lock"] = self._ingest_lock_status()
@@ -7798,12 +7803,22 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
 
-    def _persist_ingest_sidecars(self, session_id, conversation_id, source, messages, *args, **kwargs):
+    def _persist_ingest_sidecars(self, session_id, conversation_id, source, messages, *args,
+                                 busy_timeout=None, retry_store=None):
         try:
-            persist_sidecar_messages(self._store, session_id, conversation_id, source, messages, *args, **kwargs)
-        except Exception:
+            store = self._store if retry_store is None else retry_store
+            persist_sidecar_messages(store, session_id, conversation_id, source, messages, *args,
+                                     ignore_message=self._matches_ignore_message_patterns, busy_timeout=busy_timeout)
+        except Exception as exc:
+            count, _ = self._sidecar_recovery_failures
+            self._sidecar_recovery_failures = (count + 1, time.time())
             if self._claim_session_diagnostic(("sidecar-ingest", session_id)):
                 logger.warning("LCM sidecar recovery failed for session=%s", session_id)
+            if retry_store is not None:
+                raise
+            if (busy_timeout is not None or self._session_end_flush_active) and _is_ingest_busy_error(exc):
+                self._queue_cold_session_tail(messages, session_id=session_id, conversation_id=conversation_id,
+                                              source=source, error=exc, sidecars_only=True)
 
     @_uid_recognition_pass
     def _ingest_messages(
@@ -12819,20 +12834,22 @@ class LCMEngine(
             message.get("observed_at") if stored else _normalize_observed_at(message.get("timestamp")),
         )
 
-    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error):
+    def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error, sidecars_only=False):
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
-                    context_window_tokens=self._store.get_context_window_tokens(session_id))
+                    context_window_tokens=self._store.get_context_window_tokens(session_id), sidecars_only=sidecars_only)
         if not any(self._tail_key(old) == self._tail_key(tail) for old in self._pending_session_tails):
             self._pending_session_tails.append(tail)
             self._ledger_count("ledger.tail.queued.cold." + type(error).__name__)
-        logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
+        if not sidecars_only:
+            logger.warning("LCM session-end cold tail retry pending (%s)", type(error).__name__)
         maintenance_scheduler._PENDING_TAIL_ENGINES.add(self)
 
     @staticmethod
     def _tail_key(tail):
         if tail.get("kind") == "cold":
-            return ("cold", tail["store"].db_path, tail["hermes_home"], tail["session_id"], tail["conversation_id"], tail["view"])
+            return ("cold", tail.get("sidecars_only", False), tail["store"].db_path, tail["hermes_home"],
+                    tail["session_id"], tail["conversation_id"], tail["view"])
         return (tail.get("kind", "warm"), tail["store"].db_path, *(tail[key] for key in (
             "session_id", "conversation_id", "after_store_id", "messages", "metadata_messages")))
 
@@ -12959,6 +12976,10 @@ class LCMEngine(
                 and tail["hermes_home"] == str(self._hermes_home or ""))
 
     def _retry_cold_tail(self, tail, *, sibling, deadline=None):
+        if tail.get("sidecars_only"):
+            self._persist_ingest_sidecars(tail["session_id"], tail["conversation_id"], tail["source"], tail["view"],
+                                          retry_store=tail["store"])
+            return True
         tail.pop("kept_on_conflict", None)
         if not self._cold_tail_is_bound(tail):
             if tail["store"]._conn is None:
@@ -13244,6 +13265,8 @@ class LCMEngine(
     def _warn_unflushed_session_tails(self, reason: str, *, deadline=None) -> None:
         counts = {}
         for tail in self._pending_session_tails:
+            if tail.get("sidecars_only"):
+                continue
             why, remaining = reason, len(tail["view"] if tail.get("kind") == "cold" else tail["messages"])
             if (tail.get("kind") == "cold" and tail.get("kept_on_conflict")
                     and tail["store"]._write_lock.acquire(blocking=False)):

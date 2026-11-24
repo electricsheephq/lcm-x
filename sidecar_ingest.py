@@ -37,7 +37,7 @@ def _receipt_key(scope, identity):
 
 
 def persist_sidecar_messages(store, session_id, conversation_id, source, messages,
-                             carrier_ids=lambda _: None, *, busy_timeout=None):
+                             carrier_ids=lambda _: None, *, ignore_message, busy_timeout=None):
     """Recover complete steer blocks under a savepoint, outside the host occurrence map."""
     from .reconcile import _OOB_MESSAGE_BLOCK_MARKER, _OOB_MESSAGE_BLOCK_RE
 
@@ -48,9 +48,11 @@ def persist_sidecar_messages(store, session_id, conversation_id, source, message
         content = row.get("content")
         if _OOB_MESSAGE_BLOCK_MARKER not in api or api == content:
             continue
-        # Hermes prefixes hook context with the durable text and a blank line.
-        if isinstance(content, str) and api.startswith(content + "\n\n"):
-            continue
+        # Hermes puts the durable text before hook context, sometimes after a live-only prefix.
+        if isinstance(content, str) and content:
+            hook_boundary = api.find(content + "\n\n")
+            if hook_boundary >= 0:
+                api = api[:hook_boundary]
         if found := Counter(_OOB_MESSAGE_BLOCK_RE.findall(api)):
             blocks[i] = found
     if not blocks:
@@ -61,10 +63,10 @@ def persist_sidecar_messages(store, session_id, conversation_id, source, message
     with store._write_lock, timeout, store.atomic(immediate=True), _sqlite_savepoint(
         conn, owner_active=True, abort_on_cleanup_failure=True,
     ):
-        _persist_blocks(store, session_id, conversation_id, source, messages, blocks, carrier_ids)
+        _persist_blocks(store, session_id, conversation_id, source, messages, blocks, carrier_ids, ignore_message)
 
 
-def _persist_blocks(store, session_id, conversation_id, source, messages, blocks, carrier_ids):
+def _persist_blocks(store, session_id, conversation_id, source, messages, blocks, carrier_ids, ignore_message):
     from .reconcile import _OOB_MESSAGE_BLOCK_RE
 
     contents = [normalize_content_value(row.get("content")) or "" for row in messages]
@@ -90,11 +92,14 @@ def _persist_blocks(store, session_id, conversation_id, source, messages, blocks
             elsewhere[block] -= explained
             if explained == count:
                 continue
+            message = {"role": "user", "content": block, "timestamp": stamp}
+            if ignore_message(message):
+                continue
             if identity := _gateway_block_identity(block):
                 key = _receipt_key(scope, identity)
                 receipt = store.read_metadata_json(key)
                 if not receipt or not store.get(receipt["store_id"]):
-                    _append_block(store, session_id, conversation_id, source, [key], block, stamp, carrier_ids(i))
+                    _append_block(store, session_id, conversation_id, source, [key], message, carrier_ids(i))
                 continue
             carrier = carrier_ids(i)
             origin = (*occurrence_key, occurrences[occurrence_key])
@@ -107,11 +112,10 @@ def _persist_blocks(store, session_id, conversation_id, source, messages, blocks
                     if old and old["carrier_store_id"] in (None, carrier):
                         receipt = old
                 if not receipt or not store.get(receipt["store_id"]):
-                    _append_block(store, session_id, conversation_id, source, keys, block, stamp, carrier)
+                    _append_block(store, session_id, conversation_id, source, keys, message, carrier)
 
 
-def _append_block(store, session_id, conversation_id, source, keys, block, stamp, carrier):
-    message = {"role": "user", "content": block, "timestamp": stamp}
+def _append_block(store, session_id, conversation_id, source, keys, message, carrier):
     recovered, = store.append_batch(sidecar_session_id(session_id), [message], [count_message_tokens(message)],
                                     source=source, conversation_id=conversation_id)
     store.write_metadata_json(keys, json.dumps({"store_id": recovered, "carrier_store_id": carrier}))
