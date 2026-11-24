@@ -1,4 +1,9 @@
-"""The adoption-only depth stop must survive UID replay finalization."""
+"""Under a UID trim, the adoption-only depth stop (#3049) still frees the adopted rows on this line.
+
+Review of the port (#3088): the zero-leaf finalizer validates the trimmed, adopted list and clears the
+UID scope, so the zero-leaf UID restore in _compress_owned does not return the pre-trim list. The stop
+therefore stays as on main: no extra summary call, no hold, and the host gets fewer tokens.
+"""
 
 from collections import Counter
 
@@ -81,8 +86,10 @@ def test_depth_retry_after_uid_trim(make_engine, monkeypatch, tmp_path, uid_mode
         assert trimmed == pre_trim[:1] + pre_trim[3:]
         assert len(trimmed) == len(pre_trim) - 2
         assert adoptions == [(False, True, 0, [row["content"] for row in view[3:5]])]
-        assert (status["stop_reason"], status["leaf_passes"]) != ("depth_target_reached", 0)
-        assert count_messages_tokens(result) < count_messages_tokens(pre_trim) or len(leaves) > len(committed)
+        assert status["stop_reason"] == "depth_target_reached" and status["depth_target_met"] is True
+        assert status["leaf_passes"] == 0 and leaves == committed and calls == [0, 0, 0]
+        assert count_messages_tokens(result) < count_messages_tokens(pre_trim)
+        assert engine._no_progress_hold is None and engine._last_compression_status == "compacted"
     else:
         assert not trims
         assert adoptions == [(False, True, 0, [row["content"] for row in view[1:5]])]

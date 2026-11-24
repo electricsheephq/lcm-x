@@ -3068,11 +3068,7 @@ class CompactionMixin:
         if adopt_before_stop:  # #640: the committed summary is adopted; no new leaf while every route is refused
             state.sweep_stop_reason = "summary_route_unavailable"
             return "break", None
-        # A UID trim restores a zero-leaf result to the pre-trim list, so keep going to publish a leaf.
-        if (
-            resumed and state.depth_target_tokens and self._depth_target_reached(state)
-            and not (state.budget.leaves == 0 and scope is not None and scope.owner is self and scope.uid_trimmed)
-        ):
+        if resumed and state.depth_target_tokens and self._depth_target_reached(state):
             state.sweep_stop_reason = "depth_target_reached"
             self._last_threshold_full_sweep["depth_target_met"] = True
             return "break", None
