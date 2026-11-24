@@ -570,3 +570,29 @@ def test_context_hook_script(tmp_path: Path) -> None:
     assert (tmp_path / ".cache" / "lcmx-hub" / "context-error.txt").read_text().strip().endswith("hub: down")
     done, _ = run_context(tmp_path, {"hook_event_name": "Stop"}, {})
     assert done.returncode == 0 and done.stdout == ""
+
+
+def test_session_switches_start_the_engine_cursor_at_the_saved_shadow(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One engine serves all sessions, so a session switch is a fresh bind. The engine must start at the saved shadow
+    and store only new rows (field: thousands of rows stored again across switches and summaries)."""
+    summarizing_model(monkeypatch)
+    lines = []
+    for index in range(40):
+        lines += [cc_user(f"u{index}", f"Note {index}: " + "words " * 250), cc_assistant(f"a{index}", f"noted {index}")]
+    write(cc_file(root), lines)
+    write(codex_file(root), codex_lines(["first codex turn"]))
+    hub = hub_module.Hub(root, context_length=8_000, summarize=True)
+    try:
+        hub.scan()
+        saved = len(json.loads(hub._value("shadows", "cc:laptop:s-1")))
+        write(codex_file(root), codex_lines(["first codex turn", "second codex turn"]))
+        write(cc_file(root), lines + [cc_user("u-late", "a later turn"), cc_assistant("a-late", "ok")])
+        seen = []
+        real = hub.engine.ingest
+        monkeypatch.setattr(hub.engine, "ingest", lambda messages: (seen.append((hub.bound[0], hub.engine._ingest_cursor)), real(messages))[1])
+        hub.scan()
+    finally:
+        hub.close()
+    assert ("cc:laptop:s-1", saved) in seen, seen
+    report = hub_module.audit(root)
+    assert report["ok"], report

@@ -93,14 +93,16 @@ class Hub:
         self.bound: Optional[tuple[str, str]] = None
         self.backlog_tried: dict[str, int] = {}
 
-    def bind(self, session: str, platform: str) -> None:
+    def bind(self, session: str, platform: str, known: int = 0) -> None:
         # The engine keys a session's rows by session and platform: the same session under another platform name
-        # stores its rows again. So bind again when either changes.
+        # stores its rows again. So bind again when either changes. One engine serves all sessions, so most binds
+        # are fresh: ``known`` (the saved shadow, all stored) starts the engine's ingest cursor there.
         if self.bound == (session, platform):
             return
         self.engine.on_session_start(session, platform=platform, conversation_id=session, model="dev-agent",
                                      provider=platform, context_length=self.context_length)
         self.engine.update_model(model="dev-agent", context_length=self.context_length, provider=platform)
+        eve_host.prime_cursor(self.engine, known)
         self.bound = (session, platform)
 
     # -- capture --
@@ -161,8 +163,9 @@ class Hub:
         shadow: list[dict] = json.loads(self._value("shadows", transcript.session) or "[]")
         compressed = False
         if fed:
+            known = len(shadow)
             shadow = shadow + fed
-            self.bind(transcript.session, transcript.harness)
+            self.bind(transcript.session, transcript.harness, known)
             self.engine.ingest(shadow)
             self.engine.note_turn_complete()
             current = tokens.count_messages_tokens(shadow)
@@ -217,7 +220,7 @@ class Hub:
             current = tokens.count_messages_tokens(shadow)
             if self.backlog_tried.get(session) == current:
                 continue
-            self.bind(session, self.harness_of(session))
+            self.bind(session, self.harness_of(session), len(shadow))
             if not self.engine.should_compress(current):
                 self.backlog_tried[session] = current
                 continue
