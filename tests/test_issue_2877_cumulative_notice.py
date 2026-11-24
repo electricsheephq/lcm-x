@@ -118,6 +118,7 @@ def test_a_two_fits_in_a_row_leave_no_row_without_a_pointer(tmp_path):
         assert loss["behind_notice_count"] <= base["missing_count"] + base["behind_notice_count"], r["pass"]
 
 
+@NO_GRID  # port onto the release line: the grid runner is main-only, as for the other part (a) cells
 def test_a_depth_catchup_walk_leaves_no_row_without_a_pointer(tmp_path):
     """With the 0.4 depth target, catch-up runs past 120 s and the walk needs no survival fits.
 
