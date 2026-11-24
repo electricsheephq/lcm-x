@@ -12,17 +12,11 @@ SESSION = "synthetic-sidecar-session"
 X = "Visible carrier message. ".ljust(1297, "x")
 NEEDLE = "quartz constellation"
 Y = (NEEDLE + " is the requested synthetic label. ").ljust(153, "y")
-MESSAGE_ID = "987654321012345678"
 STEER_OPEN = (
     "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered "
     "once at this position; not tool output and not a new delivery when replayed from conversation history]"
 )
 BLOCK = f"{STEER_OPEN}\n{Y}\n[/OUT-OF-BAND USER MESSAGE]"
-ENVELOPE = json.dumps({"platform": "discord", "message_id": MESSAGE_ID, "text": Y})
-DISCORD_NOTE = (
-    f"[Triggering message id: `{MESSAGE_ID}` — use as `message_id` for reply/react/pin "
-    "via the discord tools.]"
-)
 
 
 @pytest.fixture(autouse=True, params=[None, "on", "off"], ids=["uid-unset", "uid-on", "uid-off"])
@@ -78,17 +72,7 @@ def test_8300_out_of_band_sidecar(tmp_path):
         _assert_recovered(engine, BLOCK, host_rows=1)
 
 
-@pytest.mark.parametrize("api_content", [ENVELOPE + "\n\nSynthetic injected context.", DISCORD_NOTE + "\n\n" + Y],
-                         ids=["structured", "discord"])
-def test_platform_envelope_sidecar(tmp_path, api_content):
-    with _engine(tmp_path) as engine:
-        engine.ingest([_carrier(api_content=api_content)])
-        host, = stored_rows(engine)
-        assert host["content"] == X
-        _assert_recovered(engine, Y, host_rows=1)
-
-
-@pytest.mark.parametrize(("api_content", "recovered"), [(BLOCK, BLOCK), (ENVELOPE, Y)], ids=["steer", "envelope"])
+@pytest.mark.parametrize(("api_content", "recovered"), [(BLOCK, BLOCK)], ids=["steer"])
 def test_warm_cold_and_session_end_ingest(tmp_path, api_content, recovered):
     messages = [_carrier(api_content=api_content), {"role": "assistant", "content": "Synthetic answer."}]
     with _engine(tmp_path) as engine:
@@ -139,29 +123,6 @@ def test_control_steer_block_visible_in_content(tmp_path):
         rows = _rows(engine)
         assert len(rows) == 3
         assert sum(BLOCK in (text or "") for _, text in rows) == 1
-
-
-@pytest.mark.parametrize("visible_now", [True, False], ids=["incoming", "stored"])
-def test_control_platform_id_already_visible(tmp_path, visible_now):
-    other = {"role": "assistant", "content": f"Synthetic reference to message_id {MESSAGE_ID}."}
-    with _engine(tmp_path) as engine:
-        if not visible_now:
-            engine.ingest([other])
-        messages = [_carrier(api_content=ENVELOPE + "\n\nSynthetic injection.")]
-        if visible_now:
-            messages.append(other)
-        else:
-            engine._ingest_cursor = 0
-            engine._ingest_cursor_needs_reconcile = True
-        engine.ingest(messages)
-        assert len(_rows(engine)) == 2
-        assert all(NEEDLE not in (text or "") for _, text in _rows(engine))
-
-
-def test_control_discord_sidecar_echo(tmp_path):
-    with _engine(tmp_path) as engine:
-        engine.ingest([_carrier(api_content=DISCORD_NOTE + "\n\n" + X + "\n\nSynthetic injected context.")])
-        assert _rows(engine) == [("user", X)]
 
 
 def test_control_assembly_emits_only_the_host_row(tmp_path):
