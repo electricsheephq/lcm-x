@@ -21,7 +21,7 @@ from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from datetime import datetime
-from functools import lru_cache, wraps
+from functools import cached_property, lru_cache, wraps
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -764,6 +764,8 @@ class LCMEngine(
         self._ingest_lock_records = deque(maxlen=512)
         self._ingest_lock_totals = Counter()
         self._config = config or LCMConfig.from_env()
+        # None is turn start. An empty ID denotes a direct response from a host without turn IDs.
+        self._turn_start_defer_mid_turn_id: str | None = None
         self._absolute_threshold_tokens = getattr(
             self._config, "_absolute_threshold_tokens", None
         )
@@ -1857,6 +1859,36 @@ class LCMEngine(
 
     # -- ContextEngine required methods ------------------------------------
 
+    @cached_property
+    def _relay_current_turn(self):
+        try:
+            from agent.relay_runtime import current_turn
+        except ImportError:
+            return None
+        return current_turn
+
+    def _host_turn_id_for_deferral(self) -> str:
+        try:
+            current_turn = self._relay_current_turn
+            turn = current_turn() if current_turn is not None else None
+            return str(turn.turn_id or "") if turn is not None and not turn.closed else ""
+        except Exception:
+            return ""
+
+    def _note_turn_start_defer_response(self, reason: str | None, *, turn_id: str | None = None) -> None:
+        if not self._config.turn_start_defer_ceiling or self._bypasses_lcm_context_management():
+            return
+        active_turn_id = self._host_turn_id_for_deferral()
+        if turn_id is not None and (not turn_id or turn_id != active_turn_id):
+            return
+        # A direct ContextEngine response is already scoped to this engine. A hook
+        # observation must match the active host turn so an early exit fails open.
+        self._turn_start_defer_mid_turn_id = active_turn_id if reason in ("tool_use", "tool_calls") else None
+
+    def _turn_start_defer_is_mid_turn(self) -> bool:
+        turn_id = self._turn_start_defer_mid_turn_id
+        return turn_id is not None and (not turn_id or turn_id == self._host_turn_id_for_deferral())
+
     def update_from_response(self, usage: Dict[str, Any]) -> None:
         if self._thread_context_stateless():
             auxiliary_session_id = self._thread_context_session_id()
@@ -1920,6 +1952,7 @@ class LCMEngine(
         self.last_prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         self.last_completion_tokens = int(usage.get("completion_tokens", 0) or 0)
         self.last_total_tokens = int(usage.get("total_tokens", 0) or 0)
+        self._note_turn_start_defer_response(usage.get("stop_reason") or usage.get("finish_reason"))
 
         cache_keys = {"cache_read_tokens", "cache_write_tokens"}
         self.cache_metrics_available = any(key in usage for key in cache_keys)
@@ -2643,6 +2676,8 @@ class LCMEngine(
         """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
+            if not self._bypasses_lcm_context_management():
+                self._turn_start_defer_mid_turn_id = None
             if (self._sweep_budget_hold_turn_paced and (strike := self._hung_summary_strike) is not None
                     and strike[0] == self._hold_conversation_key()
                     and self._sweep_budget_hold_conversation == self._hold_conversation_key()
@@ -2988,6 +3023,9 @@ class LCMEngine(
     def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
         """Persist stopped turns on the already-bound engine (#1623)."""
         try:
+            # Stopped turns can skip post_llm_call and stopped-tail ingest.
+            if not self._bypasses_lcm_context_management():
+                self._turn_start_defer_mid_turn_id = None
             base = getattr(super(), "on_turn_complete", None)
             if callable(base):
                 base(messages, usage=usage, **meta)
@@ -5209,6 +5247,8 @@ class LCMEngine(
             suppress_as_foreground_reuse=not side_channel_rebind,
         )
         self._clear_thread_context_stateless()
+        if not (boundary_reason == "compression" and old_session_id == session_id == previous_session_id):
+            self._turn_start_defer_mid_turn_id = None
         if previous_session_id and previous_session_id != session_id:
             self._finalize_pending_reset_boundary(previous_session_id)
             self._reset_session_scoped_runtime_state()

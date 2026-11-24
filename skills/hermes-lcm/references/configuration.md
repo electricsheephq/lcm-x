@@ -116,6 +116,15 @@ by default for provider-bound copies; durable storage stays raw. See
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
+- `LCM_TURN_START_DEFER_CEILING` (default `0`, env only) defers otherwise threshold-eligible
+  automatic passes during tool turns while prompt pressure is below this share of the active model
+  window. A nonzero setting must be finite, positive and below `1 - LCM_SURVIVAL_RESERVE`.
+  Invalid values disable deferral and appear once in `config_source_warnings`. The host must
+  supply a response stop reason in usage (`tool_use` or `tool_calls`) or supply the normalized
+  finish reason through `post_api_request` with a verifiable current turn ID. Without a phase
+  signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
+  at or above the ceiling and during forced overflow.
+  Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
@@ -295,6 +304,7 @@ without changing its behavior until removal.
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
 | `LCM_SURVIVAL_FIT` | `bool` | `true` | — | — |
 | `LCM_SURVIVAL_RESERVE` | `float` | `0.15` | `>= 0.0`, `<= 0.9` | — |
+| `LCM_TURN_START_DEFER_CEILING` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `int` | `2` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `int` | `300` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` | `int` | `6` | — | — |

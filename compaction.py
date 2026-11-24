@@ -24,6 +24,7 @@ from threading import get_ident
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache, wraps
 from inspect import signature
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -107,6 +108,12 @@ def _counted_compaction(operation):
         try:
             messages, host_view = self._canonical_host_view(messages)
         except Exception as exc:
+            # On this line canonicalization precedes foreground admission, even on errors.
+            if self._config.turn_start_defer_ceiling:
+                self._maybe_reclassify_late_auxiliary_before_compaction_write()
+                with self._bypass_compression_binding() as bypassed, self._compaction_gate:
+                    if not bypassed and self._compress_owner in (None, get_ident()):
+                        self._clear_turn_start_defer_phase()
             self._last_compression_status = "error"
             self._record_ingest_failure("compress", exc)
             return messages
@@ -353,6 +360,16 @@ class CompactionMixin:
             return True
         if self.threshold_tokens <= 0:
             return False
+        ceiling = self._config.turn_start_defer_ceiling
+        if ceiling and self.context_length > 0 and tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+            ceiling_tokens = Decimal(str(ceiling)) * self.context_length
+            if tokens < ceiling_tokens:
+                logger.info(
+                    "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                    "prompt_tokens=%d ceiling_tokens=%s",
+                    ceiling, tokens, ceiling_tokens,
+                )
+                return False
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
@@ -870,12 +887,17 @@ class CompactionMixin:
                 return _OWNER_REFUSED
             if not (self._compress_refusal or {}).get("refused"):
                 self._compress_refusal = None
+            self._clear_turn_start_defer_phase()
         try:
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._compaction_gate:
                 self._release_compress_owner()
+
+    def _clear_turn_start_defer_phase(self) -> None:
+        # A foreground pass reopens the gate for the host's overflow recheck.
+        self._turn_start_defer_mid_turn_id = None
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *, host_pairs=()):

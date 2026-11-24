@@ -54,6 +54,7 @@ class ResetStateMixin:
         source lifecycle after rebinding.
         """
         # Each boundary exit counts its own outcome (#2055); a reset only drops the handle.
+        self._turn_start_defer_mid_turn_id = None
         self._emission_handle = None
         self._reset_session_counters()
         self._reset_compaction_progress()
