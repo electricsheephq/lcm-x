@@ -87,6 +87,7 @@ class ResetStateMixin:
         self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
         self._no_progress_hold_persisted = False
         self._zero_leaf_streaks = {}  # #1162: nor does its zero-leaf streak (a kept conversation id included)
+        self._hidden_only_streaks = {}  # #3081
         self._retained_escape_memos = {}
         self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""

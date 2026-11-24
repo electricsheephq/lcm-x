@@ -5590,6 +5590,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         **({"background_leaf_prep": full_status["background_leaf_prep"]}  # #787; absent while off
            if "background_leaf_prep" in full_status else {}),
         "zero_leaf_streak": full_status.get("zero_leaf_streak"),  # #1162
+        "hidden_only_streak": full_status.get("hidden_only_streak", 0),
+        **({"hidden_only_last_pass": full_status["hidden_only_last_pass"]}
+           if "hidden_only_last_pass" in full_status else {}),
         "model": full_status.get("model", ""),
         "provider": full_status.get("provider", ""),
         "raw_context_length": full_status.get("raw_context_length", engine.context_length),
@@ -6118,12 +6121,18 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception:
         survival_fit = None
 
-    # 8. Compaction progress (#1162): consecutive over-threshold passes that stored no leaf
+    # 8. Compaction progress: no stored leaf (#1162) or only hidden leaves (#3081).
     streak = engine._zero_leaf_streak_status() if hasattr(engine, "_zero_leaf_streak_status") else None
+    hidden = engine._hidden_only_streak_status() if hasattr(engine, "_hidden_only_streak_status") else {}
+    zero_leaf_warning = bool(streak and streak.get("passes", 0) >= 3)
+    hidden_warning = hidden.get("hidden_only_streak", 0) >= 3
+    detail = streak or {"passes": 0}
+    if hidden_warning:
+        detail = {**(detail if zero_leaf_warning else {}), **hidden}
     checks.append({
         "check": "compaction_progress",
-        "status": "warn" if streak and streak.get("passes", 0) >= 3 else "pass",
-        "detail": streak or {"passes": 0},
+        "status": "warn" if hidden_warning or zero_leaf_warning else "pass",
+        "detail": detail,
     })
 
     overall = "healthy"
