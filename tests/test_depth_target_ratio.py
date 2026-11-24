@@ -168,7 +168,7 @@ def test_t4_whole_prompt_counts_fixed_load_once(make_engine, summaries, host_fig
 def test_t5_soft_target_stops_before_second_call(make_engine, monkeypatch, clock):
     view = _view()
     engine = _sweep_engine(make_engine, view, depth_target_ratio=_target_after(view, 3) / WINDOW,
-                           foreground_soft_seconds=60, summary_timeout_ms=60_000)
+                           foreground_soft_seconds=59, summary_timeout_ms=60_000)
     provider = _provider(monkeypatch, clock, default=31.0)
 
     engine.compress(view, current_tokens=count_messages_tokens(view))

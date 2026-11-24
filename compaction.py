@@ -2693,6 +2693,27 @@ class CompactionMixin:
         recall_reserve = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
         return estimate + state.depth_load_addend + recall_reserve <= state.depth_target_tokens
 
+    def _update_depth_catchup(self, state: _CompressionState) -> None:
+        budget = state.budget
+        if (state.depth_target_tokens <= 0 or (budget.soft, budget.hard) != (60.0, 120.0)
+                or budget.catchup_ended):
+            return
+        strike = self._hung_summary_strike
+        if strike is not None and strike[0] == self._hold_conversation_key():
+            budget.end_catchup()
+            return
+        if not budget.progress:
+            return
+        if self._depth_target_reached(state):
+            budget.end_catchup()
+        else:
+            budget.catchup_open = True
+
+    @staticmethod
+    def _credit_condensation_saving(state: _CompressionState, before: int, after: int) -> None:
+        saving = int(round(max(0, before - after) * state.depth_token_scale))
+        state.estimated_active_tokens = max(0, state.estimated_active_tokens - saving)
+
     def _prepare_compression_sweep(self, state: _CompressionState,
                                    messages: List[Dict[str, Any]],
                                    force: bool = False,
@@ -2743,6 +2764,7 @@ class CompactionMixin:
         state.budget.sweep_active = state.threshold_full_sweep_active
         if force or state.force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
             state.budget.soft = 0.0
+        self._update_depth_catchup(state)
         state.sweep_deadline = state.budget.t0 + state.budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         if configured_sweep_target > 0:
@@ -2830,6 +2852,12 @@ class CompactionMixin:
             and self._summary_route_available()
         ):
             state.budget.leaf_reserve = state.budget.estimate(self._primary_summary_route())
+            frontier_after = state.sweep_summary_prefix_before
+
+            def record_frontier(_before: int, after: int) -> None:
+                nonlocal frontier_after
+                frontier_after = after
+
             span_started = time.monotonic()
             try:
                 state.pre_leaf_condensation_passes, state.pre_leaf_condensation_reason = (
@@ -2838,6 +2866,7 @@ class CompactionMixin:
                         pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES - 1,
                         deadline=state.sweep_deadline,
                         focus_topic=focus_topic,
+                        **({"on_stored": record_frontier} if state.depth_target_tokens else {}),
                     )
                 )
             except Exception as exc:
@@ -2874,6 +2903,8 @@ class CompactionMixin:
                 state.budget.leaf_reserve = 0.0
                 self._pre_leaf_span("condensation", span_started)
             state.max_leaf_passes -= state.pre_leaf_condensation_passes
+            if state.depth_target_tokens and state.pre_leaf_condensation_passes:
+                self._credit_condensation_saving(state, state.sweep_summary_prefix_before, frontier_after)
         if self._compress_binding_changed() or self._compaction_is_closing():
             return "return", state.host_messages
         if state.threshold_full_sweep_active:
@@ -2892,7 +2923,8 @@ class CompactionMixin:
         """Admit one leaf pass and adopt already committed replay."""
         if self._compaction_is_closing():
             return "return", state.host_messages
-        if state.threshold_full_sweep_active and time.monotonic() >= state.sweep_deadline:
+        self._update_depth_catchup(state)
+        if state.threshold_full_sweep_active and time.monotonic() >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if state.budget.progress:
@@ -2927,7 +2959,7 @@ class CompactionMixin:
         leaf.publication_excluded_store_ids = self._get_store_ids_for_messages(
             state.working_messages[:leaf.leading_anchor_count]
         ) if leaf.leading_anchor_count else []  # #608: an empty slice maps to nothing
-        if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.sweep_deadline:
+        if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if leaf_passes == 0 and scope is not None and scope.owner is self:
@@ -2949,7 +2981,7 @@ class CompactionMixin:
                 return "continue", None
             step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
             leaf.hidden_backlog = self._store_complete_backlog(state.working_messages, leaf.leading_anchor_count, leaf.copy_lookup)
-            if state.threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
         if leaf.fresh_tail_start <= leaf.leading_anchor_count and not leaf.hidden_backlog and not adopt_before_stop:
@@ -2976,7 +3008,7 @@ class CompactionMixin:
             resumed, store_ids, summary_tokens, kept = self._committed_replay_drops(
                 state.working_messages, leaf.candidate_start
             )
-            if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 if scope is not None and scope.owner is self:
                     scope.drop_stage_reached = False
@@ -3054,7 +3086,7 @@ class CompactionMixin:
                 if leaf.premapped_store_ids is not None
                 else self._get_store_id_map_for_messages(state.working_messages[leaf.leading_anchor_count:])
             )
-            if state.threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= state.sweep_deadline:
+            if state.threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= state.budget.step_deadline:
                 state.sweep_stop_reason = "time_budget_exhausted"
                 return "break", None
             compactable_pairs = list(
@@ -3542,14 +3574,29 @@ class CompactionMixin:
                         0,
                         _THRESHOLD_FULL_SWEEP_MAX_PASSES - state.leaf_passes - state.pre_leaf_condensation_passes,
                     )
-                    state.condensation_passes, state.sweep_stop_reason = (
+                    self._update_depth_catchup(state)
+
+                    def credit_group(before: int, after: int) -> None:
+                        self._credit_condensation_saving(state, before, after)
+                        self._update_depth_catchup(state)
+                        if self._depth_target_reached(state):
+                            self._last_threshold_full_sweep["depth_target_met"] = True
+
+                    state.condensation_passes, condensation_reason = (
                         self._run_threshold_sweep_condensation(
                             target_tokens=state.sweep_target_tokens,
                             pass_budget=remaining_passes,
-                            deadline=state.sweep_deadline,
+                            deadline=state.budget.step_deadline,
                             focus_topic=focus_topic,
+                            **({"on_stored": credit_group} if state.depth_target_tokens else {}),
                         )
                     )
+                    preserve_depth_stop = state.sweep_stop_reason == "depth_target_reached" and (
+                        condensation_reason == "time_budget_exhausted"
+                        or (not state.condensation_passes and condensation_reason == "summary_prefix_target_reached")
+                    )
+                    if not preserve_depth_stop:
+                        state.sweep_stop_reason = condensation_reason
             else:
                 state.condensation_passes = self._maybe_condense(
                     focus_topic=focus_topic,
@@ -4183,7 +4230,7 @@ class CompactionMixin:
             budget=max(1, int(self._config.leaf_chunk_tokens)), accounted_ids=leaf.publication_excluded_store_ids,
             copy_lookup=leaf.copy_lookup[0] if leaf.copy_lookup else None,
         )
-        if state.threshold_full_sweep_active and sweep_step_done("identity_anchor", step_started) >= state.sweep_deadline:
+        if state.threshold_full_sweep_active and sweep_step_done("identity_anchor", step_started) >= state.budget.step_deadline:
             state.sweep_stop_reason = "time_budget_exhausted"
             return "break", None
         if leaf.anchored_input == []:
@@ -4292,6 +4339,7 @@ class CompactionMixin:
         action, result = self._condense_before_leaves(state, focus_topic)
         if action == "return":
             return result
+        estimated_active_tokens = state.estimated_active_tokens
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
