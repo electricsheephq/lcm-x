@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,8 @@ def test_compaction_rewrite_receipt_precedes_carrier_lookup(tmp_path, monkeypatc
 
 
 def test_same_message_id_with_edited_body(tmp_path):
-    original, edited = _block(), _block("Edited synthetic text. " + Y)
+    original, edited = _block(), _block(Y.replace("requested", "corrected"))
+    assert original.splitlines()[2] == edited.splitlines()[2]
     with _engine(tmp_path) as engine:
         engine.ingest([_carrier(api_content=original)])
         engine.ingest([_carrier(api_content=edited)])
@@ -237,7 +239,7 @@ def test_sidecar_fault_rolls_back_only_sidecar(tmp_path, monkeypatch, caplog):
         with monkeypatch.context() as patch:
             patch.setattr(engine._store, "write_metadata_json", fail_receipt)
             engine.ingest([row])
-            with sqlite3.connect(engine._store.db_path) as conn:
+            with closing(sqlite3.connect(engine._store.db_path)) as conn:
                 assert conn.execute("SELECT session_id, content FROM messages").fetchall() == [(SESSION, X)]
             engine.ingest([row])
         sidecar_warnings = [r for r in caplog.records
@@ -269,12 +271,12 @@ def test_cleanup_keeps_companion_and_integrity(tmp_path, pattern):
 
 def _doctor_integrity(engine):
     cli = handle_lcm_command("doctor", engine)
-    sqlite_integrity = next(line for line in cli.splitlines() if line.startswith("sqlite_integrity:"))
-    assert sqlite_integrity == "sqlite_integrity: ok"
+    integrity_lines = ("sqlite_integrity: ok", "messages_fts: ok", "nodes_fts: ok")
+    assert set(integrity_lines) <= set(cli.splitlines())
     report = json.loads(lcm_doctor({}, engine=engine))
     checks = [check for check in report["checks"] if "integrity" in check["check"]]
     assert checks and all(check["status"] == "pass" for check in checks), checks
-    return sqlite_integrity, [(check["check"], check["status"]) for check in checks]
+    return integrity_lines, [(check["check"], check["status"]) for check in checks]
 
 
 def test_companion_does_not_stall_background_leaf_publication(tmp_path, provider, _isolated):
