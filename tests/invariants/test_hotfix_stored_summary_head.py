@@ -6,6 +6,7 @@ import pytest
 
 from hermes_lcm import host_uid_emit, ingest_ledger, tools
 from hermes_lcm.tokens import count_message_tokens
+from tests.invariants.test_head_copy_subset import _base_is_known_head_copy, head_copy_subset  # noqa: F401
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_issue_2854_no_summary_pass_unchanged import open_engine  # noqa: F401
 from tests.test_issue_671_stub_first_exit import (
@@ -19,6 +20,8 @@ from tests.test_issue_671_stub_first_exit import (
     text_view,
     tool_view,
 )
+
+pytestmark = pytest.mark.usefixtures("head_copy_subset")
 
 RELATION = "generated_unproven"
 NEW_TURN = [
@@ -44,8 +47,41 @@ def _append(engine, row, relation=None, *, session=None):
     return store_id
 
 
+def _append_bound_carrier(engine, row, *, source_id=None, session=None):
+    """Seed a replay with a matching host stamp or the v0.30.2 ledger placement."""
+    store = engine._store
+    if source_id is not None:
+        stamp = store.get(source_id)["observed_at"]
+        assert stamp is not None
+        return _append(engine, {**row, "timestamp": stamp}, RELATION, session=session)
+    conn = store.connection
+    sid = engine._session_id
+    lineage = ingest_ledger.persisted_lineage(conn, sid, ingest_ledger.lineage_key(None, sid))
+    remainder = engine._generated_context_carrier_remainder(row)
+    own_id, = [r["store_id"] for r in store.get_session_messages(sid) if r["content"] == remainder]
+    right = conn.execute(
+        "SELECT min(b.ordinal) FROM occurrence_bindings b JOIN messages m USING (store_id) "
+        "WHERE b.lineage=? AND m.session_id=? AND m.store_id>?", (lineage, sid, own_id),
+    ).fetchone()[0]
+    assert right is not None
+    existing = ingest_ledger.lineage_ordinals(conn, lineage)
+    left = max((ordinal for ordinal in existing if ordinal < right), default=None)
+    ordinals, respace = ingest_ledger.plan_ordinals(existing, [ingest_ledger.Placement(left, right)])
+    copy_id = _append(engine, row, RELATION)
+    stored = store.get(copy_id)
+    digest = ingest_ledger.identity_digest(store.ingest_ledger_salt(), stored)
+    with store.atomic():
+        ingest_ledger.apply_respace(conn, lineage, respace)
+        ingest_ledger.insert_bindings(conn, lineage, [{
+            "ordinal": ordinals[0], "store_id": copy_id, "identity_digest": digest,
+            "stamp": ingest_ledger.stamp_text(stored["observed_at"]), "disposition": "stored",
+            "view_seq": ingest_ledger.next_view_seq(conn),
+        }])
+    return copy_id
+
+
 @pytest.fixture
-def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
+def twins(uid_mode, make_engine, summaries, caplog, head_copy_subset):  # noqa: F811
     engines = []
     for with_copy in (False, True):
         engine = exit_engine(make_engine, threshold_full_sweep_enabled=False, l3_truncate_tokens=1)
@@ -70,7 +106,7 @@ def twins(uid_mode, make_engine, summaries, caplog):  # noqa: F811
             r["content"] == head["content"]
             for r in engine._store.get_session_messages_after(engine._session_id, old_top)
         )  # This synthetic warm ingest leaves the copy out. Seed the stored shape through the ingest writer.
-        copy_id = (_append(engine, head, RELATION) if with_copy else None)
+        copy_id = _append_bound_carrier(engine, head) if with_copy else None
         if not with_copy:
             # Occupy the same global ID outside this conversation's session, so leaf IDs are directly comparable.
             _append(engine, NEW_TURN[0], session="unrelated")
@@ -113,7 +149,7 @@ def test_consecutive_stored_carrier_copies_are_both_known(twins):
     from hermes_lcm.head_copy import is_known_head_copy
 
     _, (engine, head, first_id) = twins
-    second_id = _append(engine, head, RELATION)
+    second_id = _append_bound_carrier(engine, head)
     assert second_id == first_id + 1
     for store_id in (first_id, second_id):
         assert is_known_head_copy(engine._store.connection, engine._store.get(store_id))
@@ -165,7 +201,7 @@ def test_budget_trimmed_tail_carrier_copy_is_excluded(make_engine, summaries, ca
     engine = exit_engine(make_engine, threshold_full_sweep_enabled=False)
     run(engine, text_view()[1:], caplog)
     oversized = {"role": "user", "content": "Earlier uncovered request." + TURN * 10}
-    carried = {"role": "user", "content": "Please check the pending invoice."}
+    carried = {"role": "user", "content": "Please check the pending invoice.", "timestamp": 101}
     cap = 512
     assert count_message_tokens(oversized) > cap
     oversized_id = _append(engine, oversized)
@@ -183,7 +219,7 @@ def test_budget_trimmed_tail_carrier_copy_is_excluded(make_engine, summaries, ca
     assert any(candidate["kind"] == "carrier" and candidate["retained_source"] == {"store_id": carried_id}
                for candidate in engine._pending_emission_candidates)
 
-    copy_id = _append(engine, head, RELATION)
+    copy_id = _append_bound_carrier(engine, head, source_id=carried_id)
     _append(engine, {"role": "assistant", "content": "The pending invoice was checked."})
     for row in NEW_TURN:
         _append(engine, row)
@@ -242,17 +278,18 @@ def _assert_distinct_head_uid(engine, emitted, quote):
         assert quote_uid != uid and quote_uid not in absorbed
 
 
-@pytest.mark.parametrize("quote_mode", [
-    "default",
-    pytest.param("on", marks=pytest.mark.xfail(
+@pytest.mark.parametrize(("quote_mode", "repeat_request"), [
+    pytest.param("default", False, id="default-quote-only"),
+    pytest.param("default", True, id="default-quote-and-carrier-remainder"),
+    pytest.param("on", True, id="on-quote-and-carrier-remainder"),
+    pytest.param("on", False, id="on-quote-only", marks=pytest.mark.xfail(
         strict=True, raises=_QuotedTurnHidden,
         reason="UID-on refinement: keep a separately stamped quote with a UID distinct from every emitted head",
     )),
 ])
-@pytest.mark.parametrize("repeat_request", [False, True], ids=["quote-only", "quote-and-carrier-remainder"])
 def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkeypatch,  # noqa: F811
                                           quote_mode, repeat_request):
-    """Pin the accepted default tradeoff: the quote stays stored but is hidden from prompt, compaction and recall."""
+    """A verbatim head keeps the legacy handling and a separately stamped remainder stays visible."""
     if quote_mode == "on":
         monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
     else:
@@ -317,7 +354,10 @@ def test_separately_stamped_summary_quote(open_engine, summaries, caplog, monkey
     assert reply_id in sources
     assert engine._store.get(quote_id) == row
     visible = (prompt_visible, quote_id in sources, *recall_visible)
-    if quote_mode == "default":
+    assert _base_is_known_head_copy(engine._store.connection, row)
+    if repeat_request:
+        assert visible == (True, True, True, True)
+    elif quote_mode == "default":
         assert visible == (False, False, False, False)
     elif not all(visible):
         raise _QuotedTurnHidden(f"Quote visibility (prompt, compaction, expand, session recall): {visible}")
@@ -363,9 +403,9 @@ def test_carried_head_copy_with_legacy_conversation_id(make_engine, legacy_id, r
     engine = make_engine()
     engine.on_session_start("legacy", conversation_id="conv", context_length=200_000)
     source = _append(engine, {"role": "assistant", "content": "Earlier reply."})
-    earlier = _append(engine, {"role": "user", "content": "continue"})
+    earlier = _append(engine, {"role": "user", "content": "continue", "timestamp": 101})
     head = _head_with_remainder("continue", _summary_node(engine, [source]))
-    store_id = _append(engine, head, RELATION)
+    store_id = _append_bound_carrier(engine, head, source_id=earlier)
     conn = engine._store.connection
     with engine._store.atomic():
         conn.execute("UPDATE messages SET conversation_id=? WHERE store_id=?", (legacy_id, earlier))
@@ -382,10 +422,10 @@ def test_carried_head_copy_uses_highest_source_across_the_verified_prefix(make_e
     leaf = _summary_node(engine, [first, later])
     condensed = _summary_node(engine, [leaf.node_id], depth=1)
     older = _summary_node(engine, [first])
-    _append(engine, {"role": "user", "content": "First uncovered turn."})
+    earlier = _append(engine, {"role": "user", "content": "First uncovered turn.", "timestamp": 101})
     for nodes in ((condensed, older), (older, condensed)):
         head = _head_with_remainder("First uncovered turn.", *nodes)
-        store_id = _append(engine, head, RELATION)
+        store_id = _append_bound_carrier(engine, head, source_id=earlier)
         assert is_known_head_copy(engine._store.connection, engine._store.get(store_id))
 
 
@@ -400,7 +440,9 @@ def test_carried_head_copy_with_no_source_coverage_uses_first_user_turn(make_eng
     conn = engine._store.connection
     for remainder, recognised in (("First turn.", True), ("Second turn.", False)):
         store_id = _append(engine, _head_with_remainder(remainder, node), RELATION)
-        assert is_known_head_copy(conn, engine._store.get(store_id)) == recognised
+        stored = engine._store.get(store_id)
+        assert _base_is_known_head_copy(conn, stored) == recognised
+        assert not is_known_head_copy(conn, stored)
 
 
 @pytest.mark.usefixtures("uid_mode")
@@ -411,18 +453,18 @@ def test_rotated_head_copy_can_prove_parent_nodes_and_remainder(make_engine):  #
     parent = engine._session_id
     source = _append(engine, {"role": "assistant", "content": "Earlier reply."})
     node = _summary_node(engine, [source])
-    _append(engine, {"role": "user", "content": "First parent turn."})
-    _append(engine, {"role": "user", "content": "Second parent turn."})
+    first = _append(engine, {"role": "user", "content": "First parent turn.", "timestamp": 101})
+    second = _append(engine, {"role": "user", "content": "Second parent turn.", "timestamp": 102})
     head = _head_with_remainder("First parent turn.", node)
     engine._record_rotation_predecessor("child", parent)
-    store_id = _append(engine, head, RELATION, session="child")
+    store_id = _append_bound_carrier(engine, head, source_id=first, session="child")
     conn = engine._store.connection
     assert is_known_head_copy(conn, engine._store.get(store_id))
-    store_id = _append(engine, head, RELATION, session="unrelated")
+    store_id = _append_bound_carrier(engine, head, source_id=first, session="unrelated")
     assert not is_known_head_copy(conn, engine._store.get(store_id))
     _append(engine, {"role": "user", "content": "Stop at the next checkpoint."}, session="child")
     later_head = _head_with_remainder("Second parent turn.", node)
-    store_id = _append(engine, later_head, RELATION, session="child")
+    store_id = _append_bound_carrier(engine, later_head, source_id=second, session="child")
     assert is_known_head_copy(conn, engine._store.get(store_id))
 
 

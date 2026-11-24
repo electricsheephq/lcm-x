@@ -12,10 +12,14 @@ from hermes_lcm import tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from tests.compat.helpers import run_old
-from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, RELATION, _append, _view
+from tests.invariants.test_head_copy_subset import head_copy_subset  # noqa: F401
+from tests.invariants.test_hotfix_stored_summary_head import NEW_TURN, _append_bound_carrier, _view
+from tests.invariants.test_hotfix_stored_summary_head import _append as _append
 from tests.invariants.test_issue_3006_post_refusal import _host_flush
 from tests.test_issue_671_stub_first_exit import THRESHOLD, run, stop_line, summaries, text_view, tool_view  # noqa: F401
 
+
+pytestmark = pytest.mark.usefixtures("head_copy_subset")
 
 PINS = {"v0.30.2": "f77d6ed98c8f2e896851b31720876e4c9d10f7b4"}
 BINDING = {"session_id": "hf2", "conversation_id": "hf2", "context_length": 200_000}
@@ -90,7 +94,7 @@ def _seed_copy(engine, caplog):
         row["content"] != head["content"]
         for row in engine._store.get_session_messages_after(engine._session_id, previous_max)
     )
-    copy_id = _append(engine, head, RELATION)
+    copy_id = _append_bound_carrier(engine, head)
     return head["content"], copy_id, flush(host_view + ROLLBACK_TURN)
 
 

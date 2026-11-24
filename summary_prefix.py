@@ -1,5 +1,6 @@
 """Rendered LCM summary parts, prefix verification and source coverage."""
 
+import json
 import re
 
 
@@ -58,3 +59,36 @@ def summary_coverage_end(conn, node_ids):
         [int(node_id) for node_id in node_ids],
     ).fetchone()
     return None if row is None or row[0] is None else int(row[0])
+
+
+def complete_summary_coverage(conn, node_ids, candidate_ids):
+    """Return the coverage boundary and covered candidates if every source resolves."""
+    row = conn.execute(
+        """WITH RECURSIVE walk(id) AS (
+               SELECT value FROM json_each(?)
+               UNION
+               SELECT CAST(j.value AS INTEGER)
+               FROM walk w JOIN summary_nodes n ON n.node_id=w.id
+               JOIN json_each(CASE WHEN json_valid(n.source_ids) THEN n.source_ids ELSE '[]' END) j
+               WHERE n.source_type='nodes' AND CAST(j.value AS INTEGER) < n.node_id
+           ), sources AS (
+               SELECT n.node_id, n.source_type, j.type, j.value, CAST(j.value AS INTEGER) AS id
+               FROM walk w LEFT JOIN summary_nodes n ON n.node_id=w.id
+               LEFT JOIN json_each(CASE
+                   WHEN json_valid(n.source_ids) THEN
+                       CASE WHEN json_type(n.source_ids)='array' THEN n.source_ids ELSE '[]' END
+                   ELSE '[]' END) j
+           )
+           SELECT MAX(s.id) FILTER (WHERE s.source_type='messages'),
+                  json_group_array(s.id) FILTER (WHERE s.source_type='messages'
+                      AND s.id IN (SELECT value FROM json_each(?)))
+           FROM sources s LEFT JOIN messages m ON s.source_type='messages' AND m.store_id=s.id
+           HAVING NOT MAX(CASE
+               WHEN s.id IS NULL OR s.id <= 0 OR s.type NOT IN ('integer', 'text')
+                   OR CAST(s.id AS TEXT) != CAST(s.value AS TEXT) THEN 1
+               WHEN s.source_type='messages' THEN m.store_id IS NULL
+               WHEN s.source_type='nodes' THEN s.id >= s.node_id
+               ELSE 1 END)""",
+        (json.dumps(node_ids), json.dumps(candidate_ids)),
+    ).fetchone()
+    return (row[0], set(json.loads(row[1]))) if row and row[0] is not None else (None, set())

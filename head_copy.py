@@ -1,10 +1,8 @@
 """Recognise stored copies of LCM-X's own summary head.
 
 A marked user row is a known copy when its leading summary parts verify byte for byte
-against owned nodes. Any carrier remainder must equal a stored user turn in
-the same normalised conversation across the session and its rotation predecessors, strictly
-after the verified summaries' highest source store ID and before the candidate.
-With no source coverage, use the first stored user turn of the candidate's session.
+against owned nodes. A carrier remainder must bind to an earlier user occurrence
+in the same normalised conversation, beyond the verified summaries' source coverage.
 The proof is read-only and leaves the stored row and its relations intact.
 """
 
@@ -13,7 +11,7 @@ import sqlite3
 from functools import cache
 from types import SimpleNamespace
 
-from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, summary_coverage_end, verify_summary_prefix
+from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, complete_summary_coverage, verify_summary_prefix
 
 
 def _head_copy_shape_sql(prefix=""):
@@ -50,7 +48,7 @@ def _head_copy_candidate(row) -> bool:
 
 def _verify_marked_head_copy(conn, row) -> bool:
     content = row["content"]
-    store_id, session_id = row["store_id"], row["session_id"]
+    session_id = row["session_id"]
 
     def get_node(node_id):
         node = conn.execute(
@@ -85,25 +83,68 @@ def _verify_marked_head_copy(conn, row) -> bool:
     for separator in ("\n\n---\n\n", "\n\n"):
         if suffix.startswith(separator):
             remainder = suffix[len(separator):]
-            if not remainder.strip():
-                return False
-            covered_through = summary_coverage_end(conn, node_ids)
-            sessions = [session_id] if covered_through is None else [session_id, *predecessors()]
-            prior_users = conn.execute(
-                "SELECT content, conversation_id FROM messages "
-                f"WHERE session_id IN ({','.join('?' * len(sessions))}) AND role='user' "
-                "AND store_id>? AND store_id<? ORDER BY store_id", (*sessions, covered_through or 0, store_id),
-            )
-            conversation = (row.get("conversation_id") or "").strip()
-            for prior_content, prior_conversation in prior_users:
-                if (prior_conversation or "").strip() not in ("", conversation):
-                    continue
-                if prior_content == remainder:
-                    return True
-                if covered_through is None:
-                    return False
-            return False
+            return bool(remainder.strip() and _carrier_remainder_is_replay(
+                conn, row, remainder, node_ids, predecessors,
+            ))
     return False
+
+
+def _carrier_remainder_is_replay(conn, row, remainder, node_ids, predecessors):
+    if not {"observed_at", "conversation_id", "tool_call_id", "tool_calls", "tool_name"} <= row.keys():
+        return False
+    stamp = row["observed_at"]
+    conversation = (row["conversation_id"] or "").strip()
+    sessions = [row["session_id"], *predecessors()]
+    matches = [(store_id, session_id, same_stamp) for store_id, session_id, same_stamp, prior_conv in conn.execute(
+        "SELECT store_id, session_id, observed_at=?, conversation_id FROM messages "
+        f"WHERE session_id IN ({','.join('?' * len(sessions))}) AND store_id<? AND role='user' AND content=?",
+        (stamp, *sessions, row["store_id"], remainder),
+    ) if (prior_conv or "").strip() in ("", conversation)]
+    if not matches:
+        return False
+    covered_through, covered_matches = complete_summary_coverage(
+        conn, node_ids, [store_id for store_id, _, _ in matches],
+    )
+    if covered_through is None:
+        return False
+    stamped = [store_id for store_id, _, same_stamp in matches if same_stamp]
+    if stamped:
+        return len(stamped) == 1 and stamped[0] > covered_through
+    uncovered = [(store_id, session_id) for store_id, session_id, _ in matches if store_id not in covered_matches]
+    return (len(uncovered) == 1 and uncovered[0][0] > covered_through and uncovered[0][1] == row["session_id"]
+            and _recorded_carrier_emission(conn, row))
+
+
+def _recorded_carrier_emission(conn, row):
+    """Require a pre-binding emission and evidence that ingest inserted the carrier before an older row."""
+    from .ingest_ledger import identity_digest
+
+    try:
+        salt = conn.execute("SELECT value FROM ledger_meta WHERE key='digest_salt'").fetchone()
+        if salt is None:
+            return False
+        session_id = row["session_id"]
+        return conn.execute(
+            """SELECT 1 FROM ledger_emissions e
+               JOIN occurrence_bindings b ON b.store_id=? AND b.lineage=e.lineage
+                 AND EXISTS (SELECT 1 FROM occurrence_bindings successor JOIN messages m USING (store_id)
+                             WHERE successor.lineage=b.lineage AND successor.view_seq<b.view_seq
+                               AND successor.ordinal>b.ordinal AND successor.store_id<b.store_id
+                               AND m.session_id=?)
+               WHERE e.lineage IN (?, (SELECT value FROM ledger_meta WHERE key=?))
+                 AND e.descriptor_digest=? AND e.kind='carrier' AND e.state!='refused'
+                 AND NOT EXISTS (SELECT 1 FROM occurrence_bindings prior
+                                 WHERE prior.store_id=? AND prior.view_seq<=e.view_seq)
+               LIMIT 1""",
+            (row["store_id"], session_id, f"provisional:{session_id}", f"session_lineage:{session_id}",
+             identity_digest(bytes(salt[0]), row),
+             row["store_id"]),
+        ).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if str(exc) not in {"no such table: ledger_meta", "no such table: ledger_emissions",
+                            "no such table: occurrence_bindings"}:
+            raise
+        return False
 
 
 def is_known_head_copy(conn, row) -> bool:
@@ -140,7 +181,8 @@ def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
     candidates = _read_head_copy_candidates(
         conn,
         "SELECT DISTINCT m.store_id, m.session_id, m.conversation_id, m.role, m.content, "
-        "m.tool_call_id, m.tool_calls, m.tool_name FROM message_relations r JOIN messages m USING (store_id) "
+        "m.tool_call_id, m.tool_calls, m.tool_name, m.observed_at "
+        "FROM message_relations r JOIN messages m USING (store_id) "
         f"WHERE r.kind='generated_unproven' AND {_head_copy_shape_sql('m.')} {session_filter} {id_filter}", args
     )
     if candidates is None:
