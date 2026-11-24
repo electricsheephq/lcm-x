@@ -68,10 +68,12 @@ def render_status(facts: StatusFacts) -> str:
     from .command import _fmt_bool, _fmt_size
 
     status = facts.status
+    defer_ceiling = status.get("turn_start_defer_ceiling")
     db_path = facts.db_path
     db_exists = facts.db_exists
     db_size = facts.db_size
     session_bound = bool(facts.session_id)
+    defer_ceiling_tokens = status.get("turn_start_defer_ceiling_tokens") if session_bound else None
     source_stats = status.get("source_lineage") or {}
     runtime_identity = status.get("runtime_identity") or {}
     source_stats = {
@@ -132,6 +134,11 @@ def render_status(facts: StatusFacts) -> str:
         f"context_threshold_source: {status.get('context_threshold_source', config_sources.get('context_threshold', 'manual_or_default'))}",
         f"context_threshold_autoraised: {status.get('context_threshold_autoraised') or '(none)'}",
         f"threshold_tokens: {facts.threshold_tokens if session_bound else '(uninitialized)'}",
+        *([
+            f"turn_start_defer_ceiling: {defer_ceiling}",
+            f"turn_start_defer_ceiling_tokens: {defer_ceiling_tokens or uninitialized}",
+            f"turn_start_deferred_checks: {status['turn_start_deferred_checks']}",
+        ] if defer_ceiling else []),
         f"cache_metrics_available: {_fmt_bool(status.get('cache_metrics_available'))}",
         f"last_input_tokens: {status.get('last_input_tokens', 0)}",
         f"last_output_tokens: {status.get('last_output_tokens', 0)}",
