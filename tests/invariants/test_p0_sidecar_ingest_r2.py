@@ -1,12 +1,15 @@
 """T1-604 sidecar recovery through the turn and session-end entry points."""
 
+import importlib.util
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from hermes_lcm import _pre_llm_context
+from hermes_lcm import evidence_compiler
 from hermes_lcm.command import handle_lcm_command
+from hermes_lcm.session_patterns import compile_session_patterns
 from hermes_lcm.tokens import count_messages_tokens
 from hermes_lcm.tools import lcm_doctor, lcm_grep, lcm_recall
 from tests.invariants.test_p0_sidecar_ingest import (
@@ -58,8 +61,8 @@ def _block(text=Y, message_id="test-message-001"):
         "user_id": "synthetic-user",
         "message_id": message_id,
     }
-    prefix, body = _format_steer_marker(_steer_text_with_origin(text, origin)).split(text, 1)
-    origin["chat_id"] += "c" * (692 - len(prefix + text + body))
+    unpadded = _format_steer_marker(_steer_text_with_origin(text, origin)).lstrip("\n")
+    origin["chat_id"] += "c" * (692 - len(unpadded))
     return _format_steer_marker(_steer_text_with_origin(text, origin)).lstrip("\n")
 
 
@@ -79,7 +82,7 @@ def _rebind(engine, session_id, conversation_id=CONVERSATION):
 
 
 def _assert_grep(engine, session_id=COMPANION):
-    hit = json.loads(lcm_grep({"query": NEEDLE, "role": "user"}, engine=engine))
+    hit = json.loads(lcm_grep({"query": NEEDLE, "role": "user", "session_scope": "all"}, engine=engine))
     assert any(row.get("session_id") == session_id and
                NEEDLE in row["snippet"].replace(">>>", "").replace("<<<", "")
                for row in hit["results"]), hit
@@ -253,7 +256,8 @@ def test_cleanup_keeps_companion_and_integrity(tmp_path, pattern):
         engine.ingest([_carrier(api_content=block)])
         _rebind(engine, "foreground", "cleanup-conversation")
         engine._config.doctor_clean_apply_enabled = True
-        engine._config.ignore_session_patterns = [pattern]
+        engine._compiled_ignore_session_patterns = compile_session_patterns([pattern])
+        assert "candidate_sessions: 1" in handle_lcm_command("doctor clean", engine)
         before = _doctor_integrity(engine)
         result = handle_lcm_command("doctor clean apply", engine)
         assert "status: ok" in result
@@ -268,9 +272,9 @@ def _doctor_integrity(engine):
     sqlite_integrity = next(line for line in cli.splitlines() if line.startswith("sqlite_integrity:"))
     assert sqlite_integrity == "sqlite_integrity: ok"
     report = json.loads(lcm_doctor({}, engine=engine))
-    checks = [check for check in report["checks"] if "integrity" in check["name"]]
+    checks = [check for check in report["checks"] if "integrity" in check["check"]]
     assert checks and all(check["status"] == "pass" for check in checks), checks
-    return sqlite_integrity, [(check["name"], check["status"]) for check in checks]
+    return sqlite_integrity, [(check["check"], check["status"]) for check in checks]
 
 
 def test_companion_does_not_stall_background_leaf_publication(tmp_path, provider, _isolated):
@@ -298,20 +302,53 @@ def test_companion_does_not_stall_background_leaf_publication(tmp_path, provider
 
 
 @pytest.mark.parametrize("targeted", [False, True], ids=["baseline", "targeted"])
-def test_preanswer_evidence_never_injects_companion_hit(tmp_path, targeted):
+def test_preanswer_evidence_never_injects_companion_hit(tmp_path, monkeypatch, targeted):
     fact = "My project status is green."
     block = _block(fact)
-    question = "What is my project status?"
+    question = "What is the project status?"
     with _engine(tmp_path) as engine:
         engine._config.preanswer_evidence_enabled = True
         engine._config.preanswer_evidence_mode = "requirements_v1"
         view = [_carrier(api_content=block)]
         engine.ingest(view)
-        recalled = json.loads(lcm_recall({"query": "project status"}, engine=engine))
-        assert any(hit.get("session_id") == COMPANION for hit in recalled["hits"])
+        recalled = json.loads(lcm_recall({"query": "project status", "detail": "answer_ready"}, engine=engine))
+        companion = next(hit for hit in recalled["hits"] if hit.get("session_id") == COMPANION)
+        ref = f"lcm:{companion['store_id']}:"
+        received = []
+        compile_evidence = evidence_compiler.compile_preanswer_evidence
+        dispatch = engine.handle_tool_call
+
+        def fixed_query(tool, args, **kwargs):
+            return dispatch(tool, {**args, "query": "project status"}, **kwargs)
+
+        def capture_inputs(*args, baseline_refs, retrieve, **kwargs):
+            if not targeted:
+                received.extend(baseline_refs)
+
+            def capture_retrieval(recall_args):
+                raw = retrieve(recall_args)
+                if targeted:
+                    received.append(json.loads(raw) if isinstance(raw, str) else raw)
+                return raw
+
+            return compile_evidence(*args, baseline_refs=baseline_refs, retrieve=capture_retrieval, **kwargs)
+
+        monkeypatch.setattr(engine, "handle_tool_call", fixed_query)
+        monkeypatch.setattr(evidence_compiler, "compile_preanswer_evidence", capture_inputs)
         assert engine._last_active_replay_messages[0]["api_content"] == block
         payload = {"user_message": question}
         if targeted:
             payload["baseline_refs"] = []
-        result = _pre_llm_context(engine, payload)
+        spec = importlib.util.spec_from_file_location(
+            "hermes_lcm.sidecar_test_plugin", Path(__file__).parents[2] / "__init__.py",
+        )
+        plugin = importlib.util.module_from_spec(spec)
+        plugin.__package__ = "hermes_lcm"
+        spec.loader.exec_module(plugin)
+        result = plugin._pre_llm_context(engine, payload)
+        if targeted:
+            assert received, engine._last_preanswer_evidence_trace
+            assert all(hit.get("session_id") != COMPANION for result in received for hit in result["hits"])
+        else:
+            assert ref not in json.dumps(received)
         assert fact not in (result or {}).get("context", "")
