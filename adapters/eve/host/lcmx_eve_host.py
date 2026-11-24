@@ -65,6 +65,10 @@ LEDGER_DDL = (
     "NOT NULL, position INTEGER NOT NULL, digest TEXT NOT NULL, role TEXT, disposition TEXT NOT NULL, fed_rows "
     "INTEGER NOT NULL, notes TEXT, raw BLOB, op TEXT, captured_at REAL NOT NULL, "
     "UNIQUE(session, generation, position))",
+    # Extra store rows that an operator examined and accepted for one session (an engine re-store, upstream #1674):
+    # kept, never deleted; the audit passes for exactly this count and fails again on any other mismatch.
+    "CREATE TABLE IF NOT EXISTS accepted (session TEXT PRIMARY KEY, extra INTEGER NOT NULL, reason TEXT NOT NULL, "
+    "at REAL NOT NULL)",
 )
 
 
@@ -387,6 +391,10 @@ def audit(home: Path) -> dict:
         return report
     with closing(sqlite3.connect(f"{(home / LEDGER).as_uri()}?mode=ro", uri=True)) as ledger, \
             closing(sqlite3.connect(f"{(home / 'lcm.db').as_uri()}?mode=ro", uri=True)) as store:
+        has_accepted = ledger.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accepted'").fetchone() is not None
+        accepted = {session: (extra, reason) for session, extra, reason in ledger.execute(
+            "SELECT session, extra, reason FROM accepted")} if has_accepted else {}
         for session, value in ledger.execute("SELECT session, value FROM views"):
             view = json.loads(value)
             report["sessions"] += 1
@@ -399,7 +407,10 @@ def audit(home: Path) -> dict:
             stored = store.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session,)).fetchone()[0]
             report["fed_rows"] += fed
             report["store_rows"] += stored
-            if fed != stored:
+            known = accepted.get(session)
+            if known is not None and stored - fed == known[0]:
+                report.setdefault("accepted", []).append({"session": session, "extra": known[0], "reason": known[1]})
+            elif fed != stored:
                 report["row_mismatch_sessions"] += 1
                 report.setdefault("mismatch", []).append({"session": session, "fed": fed, "stored": stored})
         report["base_mismatch"] = ledger.execute(
@@ -587,6 +598,21 @@ def check() -> dict:
     return report
 
 
+def accept(home: Path, session: str, extra: int, reason: str) -> dict:
+    """Record that a session's store holds exactly ``extra`` rows more than the host fed (examined, kept)."""
+    if not reason.strip():
+        raise ValueError("a reason is required")
+    report = audit(home)
+    found = next((item for item in report.get("mismatch", []) if item["session"] == session), None)
+    if found is None or found["stored"] - found["fed"] != extra:
+        return {"ok": False, "error": f"no mismatch of {extra} extra rows for {session}", "mismatch": found}
+    with closing(open_ledger(home)) as ledger:
+        ledger.execute("INSERT INTO accepted(session, extra, reason, at) VALUES (?, ?, ?, ?) ON CONFLICT(session) DO "
+                       "UPDATE SET extra = excluded.extra, reason = excluded.reason, at = excluded.at",
+                       (session, extra, reason.strip(), time.time()))
+    return {"ok": True, "session": session, "extra": extra}
+
+
 def retime(home: Path, sessions: dict) -> dict:
     """Give the rows of imported sessions (``import-<eve id>``) their original times, one time per message in order.
 
@@ -619,7 +645,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         sys.stderr.write("lcmx-eve host needs Python 3.11 or newer\n")
         return 2
     parser = argparse.ArgumentParser(prog="lcmx_eve_host.py", description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("serve", "drain", "audit", "check", "retime"))
+    parser.add_argument("command", choices=("serve", "drain", "audit", "check", "retime", "accept"))
+    parser.add_argument("--session", default="", help="accept: the store session id (eve:<id>)")
+    parser.add_argument("--extra", type=int, default=0, help="accept: the extra rows examined and kept")
+    parser.add_argument("--reason", default="", help="accept: why the extra rows are kept")
     parser.add_argument("--home", default="", help="absolute store home (one Eve memory scope)")
     parser.add_argument("--core", default=os.environ.get("LCMX_PACKAGE_ROOT", ""), help="LCM-X core folder")
     parser.add_argument("--context-length", type=int, default=int(os.environ.get("LCMX_CONTEXT_LENGTH", "200000")),
@@ -642,6 +671,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     if options.command == "serve":
         return serve(home, context_length=options.context_length, model=options.model,
                      llm_bridge=options.llm_bridge)
+    if options.command == "accept":
+        result = accept(home, options.session, options.extra, options.reason)
+        sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
+        return 0 if result["ok"] else 1
     if options.command == "retime":  # {"sessions": {"import-<id>": [ISO time per message]}} on stdin
         result = retime(home, json.loads(sys.stdin.read() or "{}").get("sessions") or {})
         sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")

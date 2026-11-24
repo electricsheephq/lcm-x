@@ -304,3 +304,33 @@ def test_serve_lock_is_exclusive(home: Path) -> None:
     finally:
         first.close()
         second.close()
+
+
+def test_accepted_extra_rows_pass_the_audit_only_at_their_count(home: Path) -> None:
+    agent = Agent(home)
+    agent.capture([user("alpha"), assistant("beta")])
+    host = new_host(home)
+    try:
+        host.drain()
+    finally:
+        host.close()
+    with closing(sqlite3.connect(home / "lcm.db")) as conn:  # stands in for an engine re-store of one row
+        conn.execute("INSERT INTO messages(session_id, source, role, content, timestamp) "
+                     "SELECT session_id, source, role, content, timestamp FROM messages WHERE session_id = 'eve:s1' "
+                     "ORDER BY store_id LIMIT 1")
+        conn.commit()
+    assert host_module.audit(home)["ok"] is False
+    assert host_module.accept(home, "eve:s1", 2, "wrong count")["ok"] is False
+    with pytest.raises(ValueError):
+        host_module.accept(home, "eve:s1", 1, " ")
+    assert host_module.accept(home, "eve:s1", 1, "engine re-store at a cold bind (upstream #1674)")["ok"]
+    report = host_module.audit(home)
+    assert report["ok"], report
+    assert report["accepted"] == [{"session": "eve:s1", "extra": 1, "reason": "engine re-store at a cold bind (upstream #1674)"}]
+    agent.capture([user("alpha"), assistant("beta"), user("gamma"), assistant("delta")], turn="t2", inputs=[user("gamma")])
+    host = new_host(home)
+    try:
+        host.drain()
+    finally:
+        host.close()
+    assert host_module.audit(home)["ok"]  # new turns stored once: still exactly one accepted extra row

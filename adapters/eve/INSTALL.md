@@ -141,3 +141,16 @@ stopped, run `lcmx-eve drain`. A second run stores nothing new for a session tha
 drained, the import sets each imported message's original time (Eve's event time of the delivery or the reply;
 `retime` in the last output line). The engine itself stores the ingest time. `retime` changes only the
 `timestamp` column of the rows of `import-*` sessions, and only when a session's row count matches its transcript.
+
+## Extra rows after a restart (audit mismatch)
+
+The engine can store some rows of a long session again at the first turn after a restart (a cold bind; #1674).
+Nothing is lost. Later LCM-X releases fix several cold-bind re-store paths (v0.30.2); vendor such a core with
+`node scripts/vendor-core.mjs <tag>`. When `lcmx-eve audit` still shows `stored` greater than `fed` for a session,
+examine the extra rows, then record them (they stay in the store):
+
+```bash
+npx lcmx-eve accept --root <root> --session eve:<id> --extra <stored - fed> --reason "<what you found>"
+```
+
+The audit then passes for exactly that count, and fails again on any other mismatch in that session.

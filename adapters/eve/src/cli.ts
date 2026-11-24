@@ -165,6 +165,22 @@ function main(): void {
     process.stdout.write(`${JSON.stringify(result.out)}\n`);
     process.exit(result.status);
   }
+  if (command === "accept") {
+    // Extra rows an operator examined in one session (an engine re-store): kept, and the audit passes for that count.
+    const root = rootOf(args);
+    const { python } = runtime(root);
+    const session = option(args, "--session");
+    const extra = option(args, "--extra");
+    const reason = option(args, "--reason");
+    if (!session || !extra || !reason) fail("usage: lcmx-eve accept --root <dir> --session eve:<id> --extra <n> --reason <text>");
+    let accepted = false;
+    for (const home of homes(root)) {
+      const result = host(python, ["accept", "--home", home, "--session", session!, "--extra", extra!, "--reason", reason!]);
+      process.stdout.write(`${JSON.stringify({ home, ...(result.out as object) })}\n`);
+      accepted = accepted || result.status === 0;
+    }
+    process.exit(accepted ? 0 : 1);
+  }
   if (command === "drain" || command === "audit") {
     const root = rootOf(args);
     const { python } = runtime(root);
@@ -177,7 +193,7 @@ function main(): void {
     process.exit(status);
   }
   process.stdout.write(
-    "usage: lcmx-eve setup|check|drain|audit|import --root <absolute folder> [--python <abs>] [--fastembed]\n",
+    "usage: lcmx-eve setup|check|drain|audit|import|accept --root <absolute folder> [--python <abs>] [--fastembed]\n",
   );
   process.exit(command ? 2 : 0);
 }
