@@ -23,7 +23,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix (rc2): a new user message that repeats an earlier one word for word, saved in the same row as a summary head,
   stays in the prompt. The first release candidate matched it to any earlier row with the same text (#3061, #3063).
 - Known issues: the head-copy check can cost a coverage walk on every turn for a carrier whose message matches an
-  earlier one (#3062, fix planned for v0.30.4). With `LCM_HOST_MESSAGE_UID=on`, a stub-first exit can return a
+  earlier one (#3062; v0.30.4 reduces the cost, and a cache for the rest is planned). With `LCM_HOST_MESSAGE_UID=on`, a stub-first exit can return a
   summary together with the raw rows it covers, as on v0.30.2 (#3048, planned for v0.31.0). Passes in a row can free
   no host rows while compaction walks stored rows the host no longer shows (#3081: v0.30.4 is planned to show it in
   `/lcm status` and the doctor, and the fix is planned for v0.31.0). The release notes list the rest.
