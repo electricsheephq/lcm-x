@@ -136,6 +136,41 @@ def notes(agent: Agent, count: int) -> list[dict]:
     return history
 
 
+def tool_turns(agent: Agent, start: int, count: int, history: list[dict]) -> list[dict]:
+    """Turns with large tool results (the engine stubs old ones in its own window after a summary)."""
+    for index in range(start, start + count):
+        ident = f"call_{index}"
+        # A second call whose result never comes as its own message (an Eve task that answers later): the engine
+        # puts a stub result in its window for it.
+        history += [user(f"Look up item {index}."),
+                    assistant("", [(ident, "lookup", {"item": index}), (f"task_{index}", "start_task", {"item": index})]),
+                    tool(ident, "lookup", f"Item {index}: code ZX-{index * 7}. " + "detail words " * 220),
+                    assistant(f"Item {index} has code ZX-{index * 7}.")]
+        agent.capture(list(history), turn=f"t{index + 1}", inputs=[history[-4]])
+    return history
+
+
+def test_a_restart_after_summaries_stores_no_row_twice(home: Path, eve_model: FakeEveModel) -> None:
+    """Seen in the field: the first ingest after an engine restart stored old tool turns again (upstream #1674
+    shape: a cold bind cannot match the engine's own stubbed window to the stored rows)."""
+    agent = Agent(home)
+    history = tool_turns(agent, 0, 30, [])
+    host = new_host(home, context_length=8_000, summarize=True)
+    try:
+        assert host.drain()["compressed"] >= 1
+    finally:
+        host.close()
+    history = tool_turns(agent, 30, 3, history)
+    host = new_host(home, context_length=8_000, summarize=True)  # the next Eve process
+    try:
+        host.drain()
+    finally:
+        host.close()
+    result = host_module.audit(home)
+    assert result["ok"], result
+    assert result["store_rows"] == 33 * 4
+
+
 def test_engine_summarizes_through_the_eve_model_and_tools_answer(home: Path, eve_model: FakeEveModel) -> None:
     history = notes(Agent(home), 40)
     host = new_host(home, context_length=8_000, summarize=True)
