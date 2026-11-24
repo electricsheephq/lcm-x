@@ -5699,6 +5699,10 @@ class LCMEngine(
                     if queue_off_current_busy_tail(exc):
                         return
                     raise
+            self._persist_ingest_sidecars(
+                session_id, off_current_normal_conversation_id, off_current_source, messages,
+                busy_timeout=_SESSION_END_BUSY_TIMEOUT_MS,
+            )
             try:
                 state = self._lifecycle.get_by_conversation(off_current_normal_conversation_id)
                 frontier_store_id = state.current_frontier_store_id if state is not None else 0
@@ -5782,6 +5786,10 @@ class LCMEngine(
             # cursor indexes compress()'s output, so skip the re-ingest. Still
             # finalize: the end may be a real exit after a cancelled commit, and
             # the compression start rebinds this session's own frontier (C3).
+            self._persist_ingest_sidecars(
+                session_id, self._conversation_id, self._session_platform, messages,
+                busy_timeout=_SESSION_END_BUSY_TIMEOUT_MS,
+            )
             self._frontier_holder().mark_end_consumed(proof)  # one-shot; a second identical end re-ingests
             try:
                 with _temporary_sqlite_busy_timeout(
@@ -7790,6 +7798,13 @@ class LCMEngine(
             self._raise_ingest_busy(exc)
             logger.warning("LCM todo replay link write failed (%s)", type(exc).__name__)
 
+    def _persist_ingest_sidecars(self, session_id, conversation_id, source, messages, *args, **kwargs):
+        try:
+            persist_sidecar_messages(self._store, session_id, conversation_id, source, messages, *args, **kwargs)
+        except Exception:
+            if self._claim_session_diagnostic(("sidecar-ingest", session_id)):
+                logger.warning("LCM sidecar recovery failed for session=%s", session_id)
+
     @_uid_recognition_pass
     def _ingest_messages(
         self,
@@ -7925,8 +7940,8 @@ class LCMEngine(
                             return self._get_store_id_map_for_messages(messages)
 
                         stored_at = prepared.get("stored_at", {})
-                        persist_sidecar_messages(
-                            store, self._session_id, self._conversation_id, self._session_platform, messages,
+                        self._persist_ingest_sidecars(
+                            self._session_id, self._conversation_id, self._session_platform, messages,
                             lambda i: stored_at.get(i) or replay_store_ids().get(id(messages[i])),
                         )
                     emission_committed = True
