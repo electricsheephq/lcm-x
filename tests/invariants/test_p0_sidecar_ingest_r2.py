@@ -82,9 +82,12 @@ def _rebind(engine, session_id, conversation_id=CONVERSATION):
                             conversation_id=conversation_id)
 
 
-def _assert_grep(engine, session_id=COMPANION):
-    hit = json.loads(lcm_grep({"query": NEEDLE, "role": "user", "session_scope": "all"}, engine=engine))
-    assert any(row.get("session_id") == session_id and
+def _assert_grep(engine, *, all_sessions=False):
+    args = {"query": NEEDLE, "role": "user"}
+    if all_sessions:
+        args["session_scope"] = "all"
+    hit = json.loads(lcm_grep(args, engine=engine))
+    assert any(row.get("session_id") == COMPANION and
                NEEDLE in row["snippet"].replace(">>>", "").replace("<<<", "")
                for row in hit["results"]), hit
 
@@ -222,7 +225,7 @@ def test_late_sight_off_current_session_end(tmp_path):
         assert len(after) == 2 and after[:1] == before
         assert not _host_sql_rows(engine, "foreground")
         assert _copies(engine, block) == 1
-        _assert_grep(engine)
+        _assert_grep(engine, all_sessions=True)
 
 
 def test_sidecar_fault_rolls_back_only_sidecar(tmp_path, monkeypatch, caplog):
@@ -265,7 +268,7 @@ def test_cleanup_keeps_companion_and_integrity(tmp_path, pattern):
         assert "status: ok" in result
         assert len(_host_sql_rows(engine)) == int(pattern != SESSION)
         assert _copies(engine, block) == 1
-        _assert_grep(engine)
+        _assert_grep(engine, all_sessions=True)
         assert _doctor_integrity(engine) == before
 
 
