@@ -96,6 +96,13 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 _OWNER_REFUSED = object()
 
 
+@dataclass
+class _RestoredHostRows:
+    """Return the original rows after bookkeeping used their canonical view."""
+
+    rows: list
+
+
 def _counted_compaction(operation):
     """Keep connections live through the entire pass, including its finalizers."""
     @wraps(operation)
@@ -120,6 +127,11 @@ def _counted_compaction(operation):
         else:
             # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
             result = operation(self, messages, *args, **{**kwargs, **host_view})
+            if isinstance(result, _RestoredHostRows):
+                if result.rows is messages:
+                    return raw
+                originals = {id(clean): original for original, clean in host_view.get("host_pairs", ())}
+                return [originals.get(id(row), row) for row in result.rows]
             return raw if result is _OWNER_REFUSED else result
         finally:
             with self._compaction_gate:
@@ -1054,6 +1066,7 @@ class CompactionMixin:
             ):
                 result = messages
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
+            before_survival_fit = result
             result = self._survival_fit(messages, result, current_tokens,
                                         summary_failure=budget.summary_failure if not self._survival_fit_reason else "",
                                         fit_cause=self._last_compression_noop_reason if not self._survival_fit_reason else "",
@@ -1075,6 +1088,14 @@ class CompactionMixin:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
+            restore_no_progress_host_rows = (
+                budget.leaves == 0 and not budget.progress and not force and not bypass_cooldown
+                and not self._compress_forced_overflow and self._last_compression_status != "error"
+                and not self._stub_first_exit_now and result is before_survival_fit
+            )
+            result = self._keep_host_compress_rows(messages, result, no_progress=restore_no_progress_host_rows)
+            if restore_no_progress_host_rows:
+                self._ingest_cursor = len(result)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
@@ -1112,6 +1133,8 @@ class CompactionMixin:
             except Exception:
                 logger.debug("LCM hidden-only streak update failed", exc_info=True)
             returned = result
+            if restore_no_progress_host_rows and host_pairs:
+                return _RestoredHostRows(result)
             return result
         except BaseException as exc:
             if binding_changed():

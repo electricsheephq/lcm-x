@@ -155,7 +155,7 @@ from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _str
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import (
     _commit_proof_identity_digest, _emitted_user_replay_digest, _has_lossy_redacted_identity,
-    _merge_append_cut, _proof_user_identity,
+    _host_row_key, _merge_append_cut, _proof_user_identity,
 )
 from . import compaction
 from .compaction import CompactionMixin, select_oldest_leaf_chunk
@@ -3131,10 +3131,91 @@ class LCMEngine(
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
+    def _is_compress_placeholder(self, host, row):
+        return (id(row) in self._generated_ignored_active_replay_placeholder_message_ids
+                or self._replay_diff_requests_ingest_cleanup([host], [row]))
+
+    def _keep_host_compress_rows(self, messages, result, *, no_progress=False):
+        """Restore host occurrences and retain LCM's protection rewrites."""
+        if result is messages or not isinstance(result, list):
+            return result
+
+        def address(row):
+            if row.get("role") == "tool" and row.get("tool_call_id"):
+                return ("tool", str(row["tool_call_id"]))
+            if _valid_uid(uid := row.get("message_uid")):
+                return ("uid", uid)
+            if row.get("_row_id") is not None:
+                return ("row", str(row["_row_id"]))
+            return tuple(_host_row_key(row) or ())
+
+        def compatible(host, row):
+            left, right = address(host), address(row)
+            return not left or not right or left[0] != right[0] or left == right
+
+        def positions(rows):
+            groups = defaultdict(list)
+            for index, row in enumerate(rows):
+                if isinstance(row, dict) and (no_progress or row.get("role") == "user"):
+                    groups[row.get("role")].append(index)
+            return groups
+
+        # Match surviving occurrences by object, address and content in that order.
+        # A role's remaining ordinal is usable when its aligned counts and anchors agree.
+        generated = set()
+        if not no_progress:
+            pending = getattr(self, "_pending_emission_candidates", None) or ()
+            generated = {id(candidate.get("row")) for candidate in pending}
+            if (fit := getattr(self, "_survival_fit_emission", None)) is not None:
+                generated.add(id(fit.get("row")))
+        replacements = {}
+        returned_roles = positions(result)
+        for role, incoming in positions(messages).items():
+            outgoing = returned_roles[role]
+            matched = {}
+            used = set()
+            for key in (id, address, _emission_identity):
+                left, right = defaultdict(list), defaultdict(list)
+                for index in incoming:
+                    if index not in used and (value := key(messages[index])):
+                        left[value].append(index)
+                for index in outgoing:
+                    if index not in matched and (value := key(result[index])):
+                        right[value].append(index)
+                for value in left.keys() & right.keys():
+                    if len(left[value]) == len(right[value]) and (key is not address or len(left[value]) == 1):
+                        for source, target in zip(left[value], right[value]):
+                            if key is id or compatible(messages[source], result[target]):
+                                matched[target] = source
+                                used.add(source)
+            if len(incoming) == len(outgoing) and all(
+                target not in matched or matched[target] == source for source, target in zip(incoming, outgoing)
+            ):
+                for source, target in zip(incoming, outgoing):
+                    if compatible(messages[source], result[target]):
+                        matched.setdefault(target, source)
+            for target, source in matched.items():
+                host, row = messages[source], result[target]
+                if host is row or id(row) in generated:
+                    continue
+                if self._is_compress_placeholder(host, row):
+                    if no_progress:
+                        replacements[source] = row
+                elif not no_progress and (
+                    normalize_content_value(host.get("content")) == normalize_content_value(row.get("content"))
+                    or not self._lcm_generated_marker(row)
+                ):
+                    replacements[target] = host
+        if no_progress:
+            return [replacements.get(index, row) for index, row in enumerate(messages)] if replacements else messages
+        for index, host in replacements.items():
+            result[index] = host
+        return result
+
     @wraps(CompactionMixin.compress)
     def compress(self, messages, *args, **kwargs):
         # All compaction routes converge here, with the original host list still available.
-        result = super().compress(messages, *args, **kwargs)
+        result = self._keep_host_compress_rows(messages, super().compress(messages, *args, **kwargs))
         if result is messages or not isinstance(result, list):
             return result
         with_api = {id(row): row for row in result if isinstance(row, dict) and "api_content" in row}
@@ -6813,8 +6894,13 @@ class LCMEngine(
                 "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
                 *IDENTITY_KEYS, *ADDRESS_KEYS,
             }
-            for host, row in zip(host_messages, current):
+            compressing = getattr(self._thread_context, "foreground_budget", None) is not None
+            for index, (host, row) in enumerate(zip(host_messages, current)):
                 if row is host or id(row) in generated_ids:
+                    continue
+                if (compressing and host.get("role") == row.get("role") == "user"
+                        and not self._is_compress_placeholder(host, row)):
+                    current[index] = host
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
                 # can later drop one. The engine writes only excluded keys on a kept row.
@@ -6857,7 +6943,16 @@ class LCMEngine(
                     self._copy_active_replay_messages_preserving_generated_ids(cached),
                     original_messages if fresh_replay_messages is None else fresh_replay_messages,
                 )
-                self._last_active_replay_messages = current
+                # The returned view can borrow a host user dict. Keep our replay
+                # snapshot independent of edits the host may make after compress().
+                cached = current
+                for index, (host, row) in enumerate(zip(original_messages, current)):
+                    if row is host and row.get("role") == "user":
+                        if cached is current:
+                            cached = current.copy()
+                        cached[index] = copied = dict(row)
+                        self._no_progress_public_rows[id(copied)] = self._no_progress_public_rows[id(row)]
+                self._last_active_replay_messages = cached
                 self._refresh_generated_active_replay_placeholder_retention(
                     original_messages,
                     current,
@@ -11889,6 +11984,14 @@ class LCMEngine(
         return (generated_context_row, carried_tail, folded_source_store_id,
                 folded_result_index, folded_original_tail, tail_selected)
 
+    @staticmethod
+    def _has_independent_api_content(row):
+        api_content = row.get("api_content")
+        content = row.get("content")
+        return api_content is not None and not (
+            isinstance(api_content, str) and isinstance(content, str) and api_content.startswith(content)
+        )
+
     def _emit_summary_carrier(
         self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail, source_id=None,
     ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -11906,6 +12009,7 @@ class LCMEngine(
             and tail_selected
             and tail_selected[0].get("role") == "user"
             and isinstance(tail_selected[0].get("content"), str)
+            and not self._has_independent_api_content(tail_selected[0])
             and any(message.get("role") == "user" for message in tail_selected[1:])
         ):
             # This shape deliberately matches Hermes _merge_consecutive_users;
@@ -11940,7 +12044,7 @@ class LCMEngine(
         survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
         single proven host uid; the carrier's API-side content is not the row's either."""
         remainder = self._carried_user_text(row, store_id)
-        if remainder is None:
+        if remainder is None or self._has_independent_api_content(row):
             return row
         unwrapped = {key: value for key, value in row.items() if key != "api_content"}
         unwrapped["content"] = remainder

@@ -223,3 +223,96 @@ def test_control_no_progress_adopts_placeholder_without_sidecar(open_engine, cap
         assert engine._ingest_cursor == len(returned)
     assert marker in returned[index]["content"]
     assert "api_content" not in returned[index]
+
+
+def test_stub_first_exit_keeps_list_user_with_no_merge(open_engine, caplog):
+    text = "u" * 1349
+    user = _user([{"type": "text", "text": text}], timestamp=42.0, api_content=Y)
+    rows = [
+        {"role": "system", "content": "System prompt."},
+        _user("Run the tool."),
+        *tool_pair("aged", "synthetic output " * 900),
+        user,
+        _assistant("Latest answer."),
+    ]
+    settings = dict(
+        fresh_tail_count=2,
+        large_output_externalization_enabled=True,
+        large_output_externalization_threshold_chars=1_000_000,
+        large_output_active_replay_stubbing_enabled=True,
+        large_output_active_replay_stub_threshold_tokens=10_000,
+        large_output_active_replay_stub_aged_threshold_tokens=20,
+    )
+    with open_engine(**settings) as engine, caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        engine.threshold_tokens = 2_000
+        _stamp(rows)
+        engine.ingest(rows)
+        stored = engine._store.get_session_messages(engine._session_id)
+        assert engine._last_active_replay_messages[-2]["content"] == user["content"]
+        # Fault seam: leave the stored occurrence and the cache's source key intact.
+        engine._last_active_replay_messages[-2]["content"] = ""
+        returned = _compress(engine, rows)
+        assert "reason=stub_first_exit leaves=0 progress=none" in _stop_line(caplog)
+        assert any(row["role"] == "tool" and row["content"].startswith("[Externalized tool output:")
+                   for row in returned)
+        assert len(returned) == len(rows)
+        assert not engine._dag.get_session_nodes(engine._session_id)
+        assert engine._store.get_session_messages(engine._session_id) == stored
+    assert returned[-2]["content"] == [{"type": "text", "text": text}]
+    assert returned[-2] is user
+
+
+def test_turn_end_native_image_rewrite_is_stored_once(open_engine):
+    image = {"type": "image_url", "image_url": {"url": "https://example.invalid/native-image.png"}}
+    row = _user([{"type": "text", "text": "u" * 511}, image],
+                _row_id=502, timestamp=42.0, api_content=None)
+    _stamp([row])
+    rewritten = [
+        *row["content"],
+        {"type": "text", "text": "<relevant-memories>\n" + "c" * 1734 + "\n</relevant-memories>"},
+    ]
+    assert sum(len(part.get("text", "")) for part in rewritten) == 2286
+
+    with open_engine() as engine:
+        engine.ingest([row])
+        first, = engine._store.get_session_messages(engine._session_id)
+        row["content"] = rewritten
+        engine.ingest([row])
+        stored = engine._store.get_session_messages(engine._session_id)
+        assert len(stored) == 2 and stored[0] == first
+        assert stored[1]["content"] == engine_module.normalize_content_value(rewritten)
+        for _ in range(2):
+            assert _compress(engine, [row])[0] is row
+            engine.ingest([row])
+            assert engine._store.get_session_messages(engine._session_id) == stored
+
+
+def test_three_block_host_merge_stays_merged_over_two_turns(open_engine, caplog):
+    first, part = "An unanswered prompt.", "x" * 46
+    earlier = [{"type": "text", "text": first}]
+    separate = [{"type": "text", "text": part}, {"type": "text", "text": "Extra context."}]
+    merged = _user([*earlier, *separate], timestamp=42.0)
+    rows = [*_history(), _user(earlier, timestamp=42.0), _user(separate, timestamp=43.0),
+            _assistant("Combined answer.")]
+    _stamp(rows)
+    merged["message_uid"] = rows[-3]["message_uid"]
+
+    with open_engine() as engine, caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        engine.ingest(rows)
+        stored = engine._store.get_session_messages(engine._session_id)
+        assert [row["content"] for row in stored[-3:-1]] == [
+            engine_module.normalize_content_value(content) for content in (earlier, separate)
+        ]
+        host = [*rows[:-3], merged, rows[-1]]
+        returned = _compress(engine, host, force=True)
+        assert "leaves=1 progress=leaf" in _stop_line(caplog)
+        views = [returned]
+        for turn in range(2):
+            host = [*returned, _user(f"Follow-up {turn}", timestamp=50.0 + turn,
+                                     message_uid=f"{100 + turn:032x}"), _assistant(f"Reply {turn}")]
+            returned = _compress(engine, host)
+            views.append(returned)
+
+    for view in views:
+        assert sum(row.get("content") == merged["content"] for row in view) == 1
+        assert all(row.get("content") not in (earlier, separate) for row in view)
