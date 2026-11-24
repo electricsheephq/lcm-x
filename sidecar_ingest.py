@@ -48,12 +48,21 @@ def persist_sidecar_messages(store, session_id, conversation_id, source, message
         content = row.get("content")
         if _OOB_MESSAGE_BLOCK_MARKER not in api or api == content:
             continue
+        matches = list(_OOB_MESSAGE_BLOCK_RE.finditer(api))
+        hook_boundary = len(api)
         # Hermes puts the durable text before hook context, sometimes after a live-only prefix.
         if isinstance(content, str) and content:
-            hook_boundary = api.find(content + "\n\n")
-            if hook_boundary >= 0:
-                api = api[:hook_boundary]
-        if found := Counter(_OOB_MESSAGE_BLOCK_RE.findall(api)):
+            delimiter = content + "\n\n"
+            offset = api.find(delimiter)
+            for match in matches:
+                if offset < match.start():
+                    break
+                if offset < match.end():
+                    # The delimiter is part of this steer. Resume beyond the complete block.
+                    offset = api.find(delimiter, match.end())
+            if offset >= 0:
+                hook_boundary = offset
+        if found := Counter(match.group() for match in matches if match.end() <= hook_boundary):
             blocks[i] = found
     if not blocks:
         return

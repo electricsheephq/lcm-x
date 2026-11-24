@@ -155,7 +155,8 @@ from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin,
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import (
-    _commit_proof_identity_digest, _emitted_user_replay_digest, _has_lossy_redacted_identity,
+    _OOB_MESSAGE_BLOCK_MARKER, _commit_proof_identity_digest, _emitted_user_replay_digest,
+    _has_lossy_redacted_identity,
     _merge_append_cut, _proof_user_identity,
 )
 from . import compaction
@@ -5583,6 +5584,9 @@ class LCMEngine(
                 return False
             self._queue_cold_session_tail(messages, session_id=session_id,
                 conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc)
+            self._queue_cold_session_tail(messages, session_id=session_id,
+                conversation_id=off_current_normal_conversation_id, source=off_current_source, error=exc,
+                sidecars_only=True)
             self._ledger_count("ledger.tail.busy_at_end")
             logger.warning(
                 "LCM session-end raw-message ingest skipped due to SQLite lock; retry pending at the next session start or "
@@ -5764,6 +5768,8 @@ class LCMEngine(
                     raise
                 self._queue_cold_session_tail(messages, session_id=session_id,
                     conversation_id=self._conversation_id, source=self._session_platform, error=exc)
+                self._queue_cold_session_tail(messages, session_id=session_id,
+                    conversation_id=self._conversation_id, source=self._session_platform, error=exc, sidecars_only=True)
                 self._ledger_count("ledger.tail.busy_at_end")
                 return
         else:
@@ -5846,6 +5852,9 @@ class LCMEngine(
                     return
                 except Exception as exc:
                     if _is_ingest_busy_error(exc):
+                        self._queue_cold_session_tail(messages, session_id=session_id,
+                            conversation_id=self._conversation_id, source=self._session_platform, error=exc,
+                            sidecars_only=True)
                         self._ledger_count("ledger.tail.busy_at_end")
                         logger.warning(
                             "LCM session-end raw-message ingest skipped due to SQLite lock after short wait; "
@@ -5902,6 +5911,10 @@ class LCMEngine(
             return
         except Exception as exc:
             if _is_sqlite_locked_error(exc):
+                if not ingest_finished:
+                    self._queue_cold_session_tail(messages, session_id=session_id,
+                        conversation_id=self._conversation_id, source=self._session_platform, error=exc,
+                        sidecars_only=True)
                 logger.warning(
                     "LCM session-end ingest/finalize skipped due to SQLite lock before bounded flush: %s%s",
                     exc,
@@ -8027,7 +8040,10 @@ class LCMEngine(
                             self._queue_cold_session_tail(messages, session_id=self._session_id,
                                 conversation_id=self._conversation_id, source=self._session_platform, error=frozen_error)
                         if frozen_replay is not None:
-                            return frozen_replay  # Classification proved there is no tail to freeze.
+                            self._queue_cold_session_tail(messages, session_id=self._session_id,
+                                conversation_id=self._conversation_id, source=self._session_platform, error=exc,
+                                sidecars_only=True)
+                            return frozen_replay  # Classification proved there are no new host rows.
                     self._frontier.needs_reconcile = True
                     raise  # The existing ingest/compress caller records the failure.
                 finally:
@@ -12835,6 +12851,12 @@ class LCMEngine(
         )
 
     def _queue_cold_session_tail(self, view, *, session_id, conversation_id, source, error, sidecars_only=False):
+        # Preserve host-only retries when the view cannot contain a recoverable sidecar.
+        if sidecars_only and not any(
+            row.get("role") == "user" and isinstance(api := row.get("api_content"), str)
+            and _OOB_MESSAGE_BLOCK_MARKER in api and api != row.get("content") for row in view
+        ):
+            return
         tail = dict(kind="cold", store=self._store, hermes_home=str(self._hermes_home or ""), session_id=session_id,
                     conversation_id=conversation_id, source=source, view=copy.deepcopy(view),
                     context_window_tokens=self._store.get_context_window_tokens(session_id), sidecars_only=sidecars_only)
