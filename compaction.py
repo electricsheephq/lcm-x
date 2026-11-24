@@ -910,8 +910,9 @@ class CompactionMixin:
                 return _OWNER_REFUSED
             if not (self._compress_refusal or {}).get("refused"):
                 self._compress_refusal = None
-            self._clear_turn_start_defer_phase()
         try:
+            # Inside the try whose finally releases the owner, as on main: a raise here cannot leak the owner.
+            self._clear_turn_start_defer_phase()
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:

@@ -327,5 +327,6 @@ def test_g_off_is_quiet_and_preserves_status_bytes(make_engine, caplog, tmp_path
     default_engine._config.turn_start_defer_ceiling = eng._config.turn_start_defer_ceiling
     expected = json.loads((Path(__file__).parent / "fixtures" / "command_status.json").read_text())
     assert command.handle_lcm_command("status", default_engine).replace(str(tmp_path), "<tmp>") == expected["bound"]
-    assert not any(line.startswith("turn_start_defer") for line in command.handle_lcm_command("status", eng).splitlines())
+    status_text = command.handle_lcm_command("status", eng).replace(str(tmp_path), "<tmp>")
+    assert not any("turn_start_defer" in line for line in status_text.splitlines())
     assert eng._turn_start_deferred_checks == 0
