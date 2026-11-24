@@ -8,6 +8,8 @@ import pytest
 from hermes_lcm import host_uid_emit
 from hermes_lcm.engine import _summary_part_text
 from hermes_lcm.tokens import count_messages_tokens
+from tests.invariants.test_head_copy_subset import head_copy_subset  # noqa: F401
+from tests.invariants.test_hotfix_stored_summary_head import _append_bound_carrier
 from tests.invariants.test_issue_3006_post_refusal import LINEAGE_STOP, _host_flush
 from tests.test_issue_2854_no_summary_pass_unchanged import open_engine, published_head  # noqa: F401
 from tests.test_issue_671_stub_first_exit import (
@@ -25,6 +27,8 @@ from tests.test_issue_671_stub_first_exit import (
     tool_pair,
     tool_view,
 )
+
+pytestmark = pytest.mark.usefixtures("head_copy_subset")
 
 RELATION = "generated_unproven"
 NEW_TURN = [
@@ -73,8 +77,7 @@ def _build_host_twin(make_engine, caplog, *, with_copy):  # noqa: F811
     if with_copy:
         from hermes_lcm.head_copy import is_known_head_copy
 
-        copy_id, = engine._store.append_batch("hf2", [head], conversation_id="hf2")
-        engine._store.add_message_relations([[(copy_id, RELATION, None, None, None)]])
+        copy_id = _append_bound_carrier(engine, head)
         assert is_known_head_copy(engine._store.connection, engine._store.get(copy_id))
     else:
         # Reserve the same global ID outside this session for the source comparison.

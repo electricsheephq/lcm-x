@@ -22,6 +22,7 @@ from tests.compat.test_hotfix_head_copy_rollback import (
     _view,
     run_old,
 )
+from tests.invariants.test_head_copy_subset import head_copy_subset  # noqa: F401
 from tests.invariants.test_hotfix_stored_summary_head import make_engine, summaries, twins, uid_mode  # noqa: F401
 
 
