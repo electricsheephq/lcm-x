@@ -5,19 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm.head_copy import (
-    _head_copy_candidate,
-    _read_head_copy_candidates,
-    is_known_head_copy,
-    known_head_copies_in_rows,
-    known_head_copy_ids,
-)
-from hermes_lcm.store import MessageStore
-from hermes_lcm.summary_prefix import summary_coverage_end, verify_summary_prefix
-
 
 # The a63ddbb9c predicate, kept here as the reference for the subset check.
 def _base_verify_marked_head_copy(conn, row) -> bool:
+    from hermes_lcm.summary_prefix import summary_coverage_end, verify_summary_prefix
+
     content = row["content"]
     store_id, session_id = row["store_id"], row["session_id"]
 
@@ -77,6 +69,8 @@ def _base_verify_marked_head_copy(conn, row) -> bool:
 
 def _base_is_known_head_copy(conn, row) -> bool:
     """Prove this stored user occurrence is fully represented by earlier LCM context."""
+    from hermes_lcm.head_copy import _head_copy_candidate, _read_head_copy_candidates
+
     if conn is None or not _head_copy_candidate(row):
         return False
     relation = _read_head_copy_candidates(
@@ -86,6 +80,13 @@ def _base_is_known_head_copy(conn, row) -> bool:
 
 
 def _audit_head_copies(store):
+    from hermes_lcm.head_copy import (
+        _read_head_copy_candidates,
+        is_known_head_copy,
+        known_head_copies_in_rows,
+        known_head_copy_ids,
+    )
+
     conn = store.connection
     if conn is None:
         return
@@ -106,6 +107,8 @@ def _audit_head_copies(store):
 
 @pytest.fixture
 def head_copy_subset(monkeypatch):
+    from hermes_lcm.store import MessageStore
+
     close = MessageStore.close
 
     def audited_close(store):
@@ -119,6 +122,8 @@ def head_copy_subset(monkeypatch):
 
 def test_head_copy_subset_is_strict_on_unbound_carriers(tmp_path):
     from hermes_lcm.dag import SummaryDAG, SummaryNode
+    from hermes_lcm.head_copy import is_known_head_copy, known_head_copies_in_rows
+    from hermes_lcm.store import MessageStore
     from hermes_lcm.summary_prefix import _summary_part_text
 
     store = MessageStore(tmp_path / "subset.db")
