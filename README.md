@@ -957,7 +957,11 @@ in an episode logs at INFO and subsequent deferrals log at DEBUG. With the
 ceiling enabled, `/lcm status` shows the configured share and its token value
 alongside `turn_start_deferred_checks`, the number of gate checks deferred
 since the last session bind or reset (a side-channel session's bind resets it
-too).
+too). A foreground pass at or above the ceiling, or on forced overflow, clears the
+tool-turn phase, so if it leaves the prompt above the trigger, the host's next
+check in the same turn can start another pass, as with the setting off. The
+host's progress latch and attempt cap bound it; that pass logs no deferral line
+and does not move the counter.
 
 A reasonable first pass for a true 1M effective window is:
 
