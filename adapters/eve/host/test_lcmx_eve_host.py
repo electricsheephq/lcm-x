@@ -334,3 +334,35 @@ def test_accepted_extra_rows_pass_the_audit_only_at_their_count(home: Path) -> N
     finally:
         host.close()
     assert host_module.audit(home)["ok"]  # new turns stored once: still exactly one accepted extra row
+
+
+def test_a_fresh_bind_starts_the_engine_cursor_at_the_saved_shadow(home: Path, eve_model: FakeEveModel) -> None:
+    """The engine already holds every message of the saved shadow (the ledger commits after the engine). A fresh bind
+    starts the engine's ingest cursor there, so it stores only the new rows and does not reconcile a compacted
+    shadow against the store (field: rows stored again after a restart)."""
+    agent = Agent(home)
+    history = tool_turns(agent, 0, 30, [])
+    host = new_host(home, context_length=8_000, summarize=True)
+    try:
+        assert host.drain()["compressed"] >= 1
+        saved = len(host_module.load_json(host.ledger, "shadows", "eve:s1"))
+    finally:
+        host.close()
+    tool_turns(agent, 30, 1, history)
+    host = new_host(home, context_length=8_000, summarize=True)
+    seen: list[int] = []
+    real = host.engine.ingest
+
+    def spy(messages):
+        seen.append(host.engine._ingest_cursor)
+        return real(messages)
+
+    host.engine.ingest = spy
+    try:
+        host.drain()
+    finally:
+        host.close()
+    assert seen and seen[0] == saved
+    result = host_module.audit(home)
+    assert result["ok"], result
+    assert result["store_rows"] == 31 * 4

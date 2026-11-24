@@ -142,6 +142,19 @@ class Bridge:
         event.set()
         return True
 
+
+def prime_cursor(engine: Any, known: int) -> None:
+    """Start a freshly bound session's ingest cursor at ``known`` (the saved shadow the engine already holds).
+
+    Sets the engine's private ``_ingest_cursor`` and ``_ingest_cursor_needs_reconcile`` (no public host API for
+    "this prefix is already stored" exists yet; #1674). Without it, a cold bind reconciles a compacted shadow against
+    the store and stores some of its rows again (seen in the field: Eve agents after a restart; the hub at every
+    session switch)."""
+    if known > 0:
+        engine._ingest_cursor = known
+        engine._ingest_cursor_needs_reconcile = False
+
+
 class Lock:
     def __init__(self, home: Path):
         self.handle = open(home / LOCK, "a")
@@ -194,13 +207,19 @@ class Host:
         self.backlog_tried: dict[str, int] = {}  # session -> shadow tokens at the last idle summary attempt
         self.turn_started_at: Optional[float] = None  # an Eve turn runs (from turn/started until turn.completed)
 
-    def bind(self, session: str) -> None:
-        """Hermes ``on_session_start`` when the turn's session changes (as a gateway rebinds)."""
+    def bind(self, session: str, known: int = 0) -> None:
+        """Hermes ``on_session_start`` when the turn's session changes (as a gateway rebinds).
+
+        ``known``: the length of the session's saved shadow, every message of which the engine already holds (the
+        ledger commits only after the engine). A fresh bind (a new engine process, or another session in between)
+        then starts the engine's ingest cursor there, so the engine stores only what follows; it does not try to
+        work out again which messages of a shadow it compacted earlier it already has (upstream #1674 shape)."""
         if self.bound == session:
             return
         self.engine.on_session_start(session, platform=PLATFORM, conversation_id=session, model=self.model,
                                      provider=PLATFORM, context_length=self.context_length)
         self.engine.update_model(model=self.model, context_length=self.context_length, provider=PLATFORM)
+        prime_cursor(self.engine, known)
         self.bound = session
 
     # -- capture --
@@ -246,8 +265,9 @@ class Host:
             fed += event["fed"]
         compressed = False
         if fed:
+            known = len(shadow)
             shadow = shadow + fed
-            self.bind(session)
+            self.bind(session, known)
             self.engine.ingest(shadow)
             self.engine.note_turn_complete()
             current = tokens.count_messages_tokens(shadow)
@@ -294,7 +314,7 @@ class Host:
             current = tokens.count_messages_tokens(shadow)
             if self.backlog_tried.get(session) == current:
                 continue
-            self.bind(session)
+            self.bind(session, len(shadow))
             if not self.engine.should_compress(current):
                 self.backlog_tried[session] = current
                 continue
