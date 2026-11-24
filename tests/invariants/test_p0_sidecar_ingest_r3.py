@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 
 import pytest
 
+from hermes_lcm import message_patterns
 from hermes_lcm.command import handle_lcm_command
 from tests.harness.engine import engine_context
-from tests.invariants.test_p0_sidecar_ingest import SESSION, Y, _carrier, _engine, _rows, _user, host_uid
+from tests.invariants.test_p0_sidecar_ingest import SESSION, Y, _carrier, _engine, _rows, _user
+from tests.invariants.test_p0_sidecar_ingest import host_uid as host_uid
 from tests.invariants.test_p0_sidecar_ingest_r2 import (
     CONVERSATION,
     NEIGHBOUR,
@@ -19,6 +21,7 @@ from tests.invariants.test_p0_sidecar_ingest_r2 import (
     _rebind,
 )
 from tests.test_compression_boundary import _compacted_engine
+from tests.test_lcm_engine import _FakeTimeoutRegexEngine
 
 
 @pytest.mark.parametrize("prefix", [
@@ -51,7 +54,9 @@ def test_empty_carrier_does_not_hide_block_after_blank_line(tmp_path):
         assert _copies(engine, block) == 1
 
 
-def test_recovered_block_obeys_host_ignore_message_patterns(tmp_path):
+def test_recovered_block_obeys_host_ignore_message_patterns(tmp_path, monkeypatch):
+    if message_patterns._regex_engine is None:
+        monkeypatch.setattr(message_patterns, "_regex_engine", _FakeTimeoutRegexEngine)
     ignored = _block("Synthetic DROP_STEER_BODY preference.")
     allowed = _block("Synthetic retained preference.", message_id="synthetic-allowed-message")
     for route in ("host", "sidecar"):
@@ -102,11 +107,11 @@ def test_status_shows_only_count_and_time_after_failures(tmp_path, monkeypatch):
         assert "sidecar_recovery_failure_count: 2" in handle_lcm_command("status", engine).splitlines()
 
 
-@pytest.mark.parametrize("compaction_end", [True, False], ids=["compaction-commit", "off-current"])
-def test_session_end_sidecar_busy_retries_once(tmp_path, monkeypatch, caplog, compaction_end):
+@pytest.mark.parametrize("route", ["compaction-commit", "off-current", "ordinary-current"])
+def test_session_end_sidecar_busy_retries_once(tmp_path, monkeypatch, caplog, route):
     block = _block()
     with ExitStack() as stack:
-        if compaction_end:
+        if route == "compaction-commit":
             engine, original, _ = _compacted_engine(tmp_path, monkeypatch)
             stack.callback(engine.shutdown)
             ended = "S0"
@@ -118,7 +123,8 @@ def test_session_end_sidecar_busy_retries_once(tmp_path, monkeypatch, caplog, co
             row = _carrier()
             late = [dict(row, api_content=block), {"role": "assistant", "content": "Synthetic final answer."}]
             engine.ingest([row])
-            _rebind(engine, "foreground", "new-conversation")
+            if route == "off-current":
+                _rebind(engine, "foreground", "new-conversation")
         before = _host_sql_rows(engine, ended)
         busy = sqlite3.OperationalError("database is locked")
         busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
@@ -126,7 +132,7 @@ def test_session_end_sidecar_busy_retries_once(tmp_path, monkeypatch, caplog, co
             _fail_sidecar_receipts(engine, patch, busy)
             engine.on_session_end(ended, late)
         durable = _host_sql_rows(engine, ended)
-        if compaction_end:
+        if route == "compaction-commit":
             assert engine._compress_commit_proof["end_consumed"] is True
             assert durable == before
         else:
