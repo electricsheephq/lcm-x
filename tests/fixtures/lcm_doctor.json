@@ -8524,7 +8524,7 @@
       ]
     },
     "wal_affected": {
-      "overall": "healthy",
+      "overall": "warnings",
       "survival_fit": null,
       "runtime_identity": {
         "engine": "lcm-x",
@@ -8786,9 +8786,23 @@
           "detail": {
             "passes": 0
           }
+        },
+        {
+          "check": "sqlite_wal_reset",
+          "status": "warn",
+          "detail": "Linked SQLite <sqlite_version> has the WAL-reset bug (#1085). In WAL mode with several connections, whole recently committed transactions can vanish. Fixed in SQLite 3.51.3."
         }
       ],
-      "guidance": []
+      "guidance": [
+        {
+          "check": "sqlite_wal_reset",
+          "status": "warn",
+          "action": "inspect",
+          "operator_action": "Upgrade to a Python whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch).",
+          "warning_only": true,
+          "rationale": "the linked SQLite version can lose whole recently committed transactions in WAL mode with several connections"
+        }
+      ]
     },
     "schema_raise": {
       "overall": "unhealthy",

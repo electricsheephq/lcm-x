@@ -19,6 +19,10 @@ def status_engine(tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(tokens, "token_counter_status", lambda: {
         "counter": "char_estimate", "encoding": "", "state": "unavailable",
     })
+    affected = case == "wal_affected"
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 46, 1) if affected else (3, 53, 1))
+    if affected:
+        monkeypatch.setattr(sqlite3, "sqlite_version", "3.46.1")
     status: dict[str, Any] = {}
     bound = case != "cold"
     if bound:
@@ -63,7 +67,7 @@ def status_engine(tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch) ->
     return engine
 
 
-@pytest.mark.parametrize("case", ["cold", "bound", "error", "rotation", "rotation_zero"])  # type: ignore[untyped-decorator]
+@pytest.mark.parametrize("case", ["cold", "bound", "error", "rotation", "rotation_zero", "wal_affected"])  # type: ignore[untyped-decorator]
 def test_status_text_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     engine = status_engine(tmp_path, case, monkeypatch)
     expected = json.loads((Path(__file__).parent / "fixtures" / "command_status.json").read_text())
