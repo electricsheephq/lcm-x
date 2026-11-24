@@ -525,11 +525,26 @@ compaction summarises is set by `LCM_LEAF_CHUNK_TOKENS`, and how long it may tak
 `LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`; the summary DAG depth
 is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
 
+With `LCM_TURN_START_DEFER_CEILING` enabled, LCM-X checks the ceiling against the
+live compaction trigger, including after Hermes or the LCM assembly cap lowers
+it. The effective ceiling is the lower of the configured ceiling and any
+assembly cap, where forced overflow takes over. LCM-X warns when the effective
+ceiling is at or below the trigger (inert) or above an absolute or lowered
+trigger (unanchored). Global and per-model ratio triggers below the effective
+ceiling are quiet while they retain their window-derived value. Both warnings
+include the token values and name the cap when it limits deferral. The first
+deferral in each episode logs at INFO and subsequent deferrals log at DEBUG.
+`/lcm status` shows the configured ceiling as a share and in tokens beside the
+trigger, plus `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too).
+
 Useful environment variables:
 
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in fraction of the current model window. Below this ceiling, the automatic gate defers a pass after a tool-use response. Starting a foreground compaction pass clears that phase until the next tool-use response. So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the trigger, the host's next pre-API check in the same turn can start another pass, as with the setting off. The host's progress latch and attempt cap bound it; that pass logs no deferral line and does not move `turn_start_deferred_checks`. Turn starts, forced overflow and pressure at or above the ceiling use the normal gates. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold fractions, for example `"glm-5.3:0.115"`. Each key is matched as a substring of the active route's model name (the longest key wins) and takes priority over `LCM_CONTEXT_THRESHOLD`. Also settable as `lcm.model_thresholds` in config.yaml |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -1335,6 +1350,9 @@ Doctor output is metadata-only for these scans; it intentionally does not print
 raw payload previews.
 
 The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#install-consent-updates-and-recovery).
+
+`lcm_status` reports `hidden_only_streak`, which counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` gives the latest `frontier_store_id`, `leaves`, and `hidden_rows`.
+The `lcm_doctor` check `compaction_progress` warns at three hidden-only passes and shows the streak and latest pass. Compaction is summarising stored rows the host no longer shows, so this work cannot shrink host context until it reaches rows the host still holds.
 
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning

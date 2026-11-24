@@ -15,6 +15,9 @@ H4 the pre-API gate (turn_preflight_gate.py:60-101; turn_preflight.py:85-192): l
 H5 rearm (turn_usage.py:128-162): verify is read BEFORE update_from_response; attempts, latch and the last pre-API
    figure reset when attempts > 0, verify was set and 0 < prompt < threshold.
 H6 verdict (conversation_compression.py:3442-3475): output == input -> no-progress abort, else committed.
+H7 optional provider rejection (pinned Hermes d923a5eb48, turn_overflow.py:440-449):
+   compact directly, then force the pre-API recheck above threshold. A blocked forced
+   recheck exhausts recovery (turn_preflight_gate.py:65-72; turn_preflight.py:96-102, 221-224).
 """
 
 import copy
@@ -282,13 +285,18 @@ class Host:
         self.eng, self.steps, self.clock, self.cap = eng, steps, clock, cap
         self.thr = int(eng.threshold_tokens)
         self.attempts, self.blocked, self.last_pre, self.anchor = 0, False, None, None
-        self.verdicts, self.requests, self.passes = [], [], []
+        self.verdicts, self.requests, self.passes, self.gates = [], [], [], []
 
-    def compress(self, msgs, pressure, req):  # H6 + H2
+    def gate(self, phase, pressure):
+        verdict = self.eng.should_compress(pressure)
+        self.gates.append((phase, pressure, verdict))
+        return verdict
+
+    def compress(self, msgs, pressure, req, *, bypass_cooldown=False):  # H6 + H2
         eng = self.eng
         before = copy.deepcopy(msgs)
         newest = next((m.get("tool_call_id") for m in reversed(msgs) if m.get("role") == "tool"), None)
-        out = eng.compress(list(msgs), current_tokens=pressure)  # conversation_compression.py:2904-2907
+        out = eng.compress(list(msgs), current_tokens=pressure, bypass_cooldown=bypass_cooldown)
         made_progress = bool(getattr(eng, "_last_compression_made_progress", False))
         if getattr(eng, "_last_compress_aborted", False):
             verdict, result = "aborted_compressor", before
@@ -315,8 +323,13 @@ class Host:
             return a, True
         return host_rough(msgs) + ROUGH_OVERHEAD, False
 
-    def run(self):
-        eng, msgs = self.eng, [dict(USER)]
+    def run(self, initial_messages=None, *, start_pressure=None, reject_request=None):
+        eng, msgs = self.eng, initial_messages if initial_messages is not None else [dict(USER)]
+        self.compression_exhausted = False
+        overflow_pending = False
+        if start_pressure is not None and self.gate("turn_start", start_pressure):
+            self.attempts += 1
+            msgs = self.compress(msgs, start_pressure, 1)
         eng.should_compress_preflight(list(msgs))  # turn prologue (turn_context_compaction.py:436-460)
         r = 0
         for _guard in range(500):
@@ -327,17 +340,32 @@ class Host:
             if prev is not None and P >= self.thr and not (prev > 0 and P < prev * 0.95):
                 self.blocked = True
             defer = False if anchored else bool(getattr(eng, "should_defer_preflight_to_real_usage", lambda _t: False)(P))
-            if len(msgs) > 1 and self.attempts < self.cap and not self.blocked and not defer and eng.should_compress(P):
+            overflow_pending = overflow_pending and P >= self.thr
+            phase = "provider_overflow_recheck" if overflow_pending else "pre_api"
+            eligible = len(msgs) > 1 and self.attempts < self.cap
+            if eligible and (overflow_pending or not (self.blocked or defer)) and self.gate(phase, P):
                 self.attempts += 1
                 self.last_pre = P
                 msgs = self.compress(msgs, P, r + 1)
+                continue
+            if overflow_pending:
+                self.compression_exhausted = True
+                break
+            if reject_request == r + 1:
+                # Rejection has no response to deliver. The host runs this pass without a gate.
+                reject_request = None
+                self.clock.tick()
+                self.attempts += 1
+                msgs = self.compress(msgs, P, r + 1, bypass_cooldown=True)
+                overflow_pending = True
                 continue
             r += 1  # send (H5)
             self.clock.tick()
             prompt = int(OVERHEAD + sum(real_msg_tokens(m) for m in msgs))
             verify_before = bool(getattr(eng, "_verify_compaction_cleared_threshold", False))
             eng.update_from_response({"prompt_tokens": prompt, "completion_tokens": COMPLETION,
-                                      "total_tokens": prompt + COMPLETION})
+                                      "total_tokens": prompt + COMPLETION,
+                                      "stop_reason": "tool_use" if r <= len(self.steps) else "end_turn"})
             self.anchor = Anchor(prompt, COMPLETION, msgs)
             if self.attempts and verify_before and 0 < prompt < self.thr:
                 self.attempts, self.blocked, self.last_pre = 0, False, None
@@ -353,9 +381,10 @@ class Host:
             P2 = self.anchor.tokens(msgs)
             if P2 is None:
                 P2 = max(int(eng.last_prompt_tokens or 0), 0)
-            if self.attempts < self.cap and eng.should_compress(P2):
+            if self.attempts < self.cap and self.gate("post_tool", P2):
                 self.attempts += 1
                 msgs = self.compress(msgs, P2, r + 1)
+        self.messages = msgs
         return self.requests
 
 

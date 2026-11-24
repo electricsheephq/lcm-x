@@ -12,6 +12,7 @@ import pytest
 import hermes_lcm.engine as engine_module
 import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
+from hermes_lcm import tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
@@ -210,3 +211,235 @@ def test_host_consuming_pass_is_byte_identical_to_922_base(engine):
     encoded = json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
     # Captured on #922's exact base, 72044e2c, before implementing D2.
     assert hashlib.sha256(encoded).hexdigest() == "712fda3dfa33c9fb71bda594b131ecf93adb4e5d635c6a16647bc5f526f17b51"
+
+
+def _hidden_passes(instance, host, count):
+    for _ in range(count):
+        assert _compress(instance, host) is host
+        assert instance._no_progress_hold[1] == "hidden_only"
+        instance.note_turn_complete()
+
+
+def _status(instance):
+    return json.loads(tools.lcm_status({}, engine=instance))
+
+
+def _doctor_progress(instance):
+    report = json.loads(tools.lcm_doctor({}, engine=instance))
+    check = next(check for check in report["checks"] if check["check"] == "compaction_progress")
+    return check, report["guidance"]
+
+
+def test_3081_a_third_hidden_only_pass_warns_with_latest_pass(engine):
+    instance, _ = engine
+    _hidden_passes(instance, _hidden_view(instance), 3)
+
+    status = _status(instance)
+    check, guidance = _doctor_progress(instance)
+    assert check["status"] == "warn"
+    assert status["hidden_only_streak"] == check["detail"]["hidden_only_streak"] == 3
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    latest_leaf = max(nodes, key=lambda node: max(node.source_ids))
+    latest_pass = {
+        "frontier_store_id": max(latest_leaf.source_ids),
+        "leaves": 1,
+        "hidden_rows": len(latest_leaf.source_ids),
+    }
+    assert status["hidden_only_last_pass"] == check["detail"]["hidden_only_last_pass"] == latest_pass
+    item = next(item for item in guidance if item["check"] == "compaction_progress")
+    assert item["warning_only"]
+    assert "summarising stored rows the host no longer shows" in item["rationale"]
+    assert "context will not shrink until the walk reaches rows the host still holds" in item["rationale"]
+    assert "3 hidden-only passes" in item["rationale"]
+    assert f"frontier store id {latest_pass['frontier_store_id']}" in item["rationale"]
+    assert "latest pass published 1 leaf" in item["rationale"]
+    assert "#3081" in item["rationale"]
+
+
+def test_3081_b_host_consuming_pass_clears_hidden_only_streak(engine):
+    instance, _ = engine
+    _hidden_passes(instance, _hidden_view(instance), 2)
+    before = _status(instance)
+
+    # Give the host the still-uncovered rows in store order, so the next leaf
+    # starts with host-visible input and has a raw prefix outside the fresh tail.
+    frontier = instance._store_complete_frontier()
+    remaining = instance._store.get_range(instance._session_id, start_id=frontier + 1)
+    host = [{"role": row["role"], "content": row["content"]} for row in remaining]
+    result = _compress(instance, host)
+    assert instance._compress_host_rows_consumed > 0
+    assert len(result) < len(host)
+
+    assert _doctor_progress(instance)[0]["status"] == "pass"
+    status = _status(instance)
+    assert status["hidden_only_streak"] == 0
+    assert "hidden_only_last_pass" not in status
+    assert before["hidden_only_streak"] == 2
+
+
+@pytest.mark.parametrize("boundary", ["session-reset", "conversation-change"])
+def test_3081_c_boundary_clears_hidden_only_streak(engine, boundary):
+    instance, _ = engine
+    _hidden_passes(instance, _hidden_view(instance), 1)
+    before = _status(instance)
+
+    if boundary == "session-reset":
+        instance.on_session_reset()
+    else:
+        instance.on_session_start("issue-904", conversation_id="different-conversation")
+        assert instance._conversation_id == "different-conversation"
+
+    status = _status(instance)
+    assert status["hidden_only_streak"] == 0
+    assert "hidden_only_last_pass" not in status
+    assert before["hidden_only_streak"] == 1
+    if boundary == "conversation-change":
+        instance.on_session_start("issue-904", conversation_id="hidden-only")
+        assert instance._conversation_id == "hidden-only"
+        assert _status(instance)["hidden_only_streak"] == 0
+
+
+def test_3081_d_two_hidden_only_passes_leave_doctor_passing(engine):
+    instance, _ = engine
+    _hidden_passes(instance, _hidden_view(instance), 2)
+
+    check, _ = _doctor_progress(instance)
+    assert check == {"check": "compaction_progress", "status": "pass", "detail": {"passes": 0}}
+    assert _status(instance)["hidden_only_streak"] == 2
+
+
+def test_3081_e_zero_streak_before_and_after_normal_compaction(engine):
+    instance, _ = engine
+    before = _status(instance)
+    host = _history(8)
+    result = _compress(instance, host)
+    assert instance._compress_host_rows_consumed > 0
+    assert len(result) < len(host)
+    after = _status(instance)
+
+    # Top-level lcm_status keys for this bound session with optional features off.
+    base_keys = {
+        "session_id", "compression_count", "total_compactions", "total_compactions_scope",
+        "last_compression_status", "last_compression_noop_reason", "last_survival_fit",
+        "threshold_full_sweep", "last_stub_first_exit", "no_progress_hold", "zero_leaf_streak",
+        "model", "provider", "raw_context_length", "context_length", "effective_context_length_cap",
+        "effective_context_length_reason", "context_length_source", "configured_context_threshold",
+        "context_threshold", "context_threshold_source", "context_threshold_autoraised", "threshold_tokens",
+        "last_prompt_tokens", "last_input_tokens", "last_output_tokens", "last_cache_read_tokens",
+        "last_cache_write_tokens", "last_reasoning_tokens", "cache_metrics_available", "cache_read_ratio",
+        "store", "dag", "config", "proactive_recall", "config_sources", "config_source_warnings",
+        "ignored_config_yaml_lcm_keys", "session_filters", "source_lineage", "ingest_protection",
+        "preset_suggestion", "ingest_reconciliation", "runtime_identity", "token_counter",
+        "identity_migration", "lifecycle", "lifecycle_fragmentation", "summary_route",
+    }
+    for status in (before, after):
+        assert set(status) == base_keys | {"hidden_only_streak"}
+        assert status["hidden_only_streak"] == 0
+        assert status["zero_leaf_streak"] is None
+    assert before["store"]["messages"] == 0 and after["store"]["messages"] == len(host)
+    assert before["dag"]["total_nodes"] == 0 and after["dag"]["total_nodes"] == 1
+
+
+@pytest.mark.parametrize("entry_point", ["preflight", "pressure-yield"])
+def test_3081_r1_pressure_relief_clears_hidden_only_warning(engine, entry_point):
+    instance, _ = engine
+    _hidden_passes(instance, _hidden_view(instance), 3)
+    assert _status(instance)["hidden_only_streak"] == 3
+    assert _doctor_progress(instance)[0]["status"] == "warn"
+
+    smaller_view = [{"role": "user", "content": "short turn"}]
+    observed_tokens = count_messages_tokens(smaller_view)
+    assert 0 < observed_tokens < instance.threshold_tokens
+    if entry_point == "preflight":
+        assert not instance.should_compress_preflight(smaller_view)
+    else:
+        instance._config.fresh_tail_pressure_yield_enabled = True
+        assert not instance._maybe_engage_fresh_tail_pressure_yield(smaller_view, observed_tokens=observed_tokens)
+
+    status = _status(instance)
+    assert status["hidden_only_streak"] == 0
+    assert "hidden_only_last_pass" not in status
+    assert _doctor_progress(instance)[0]["status"] == "pass"
+
+
+@pytest.mark.parametrize("hidden_only", [True, False], ids=["hidden-only", "host-consuming"])
+def test_3081_r1_bookkeeping_failure_preserves_published_pass(engine, monkeypatch, caplog, hidden_only):
+    instance, _ = engine
+    host = _hidden_view(instance) if hidden_only else _history(8)
+
+    class BrokenStreaks(dict):
+        def __setitem__(self, key, value):
+            raise RuntimeError("streak update failed")
+
+        def pop(self, key, default=None):
+            raise RuntimeError("streak reset failed")
+
+    monkeypatch.setattr(instance, "_hidden_only_streaks", BrokenStreaks(), raising=False)
+    with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
+        result = _compress(instance, host)
+
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    assert len(nodes) == 1 and nodes[0].depth == 0
+    assert instance._store_complete_frontier() == max(nodes[0].source_ids)
+    assert instance._last_compression_status == "compacted"
+    if hidden_only:
+        assert result is host
+        assert instance._no_progress_hold[1] == "hidden_only"
+    else:
+        assert len(result) < len(host)
+        assert instance._no_progress_hold is None
+    assert any(record.levelno == logging.DEBUG and record.exc_info and
+               record.getMessage() == "LCM hidden-only streak update failed" for record in caplog.records)
+
+
+def test_3081_r1_held_pass_leaves_hidden_only_streak_alone(engine):
+    instance, summarize = engine
+    host = _hidden_view(instance)
+    assert _compress(instance, host) is host
+    assert instance._no_progress_hold[1] == "hidden_only"
+    status = _status(instance)
+
+    assert _compress(instance, host) is host
+    assert instance._last_compress_leaves[1] == 0
+    assert summarize.call_count == 1
+    after_hold = _status(instance)
+    assert status["hidden_only_streak"] == after_hold["hidden_only_streak"] == 1
+    assert status["hidden_only_last_pass"] == after_hold["hidden_only_last_pass"]
+
+    instance.note_turn_complete()
+    _hidden_passes(instance, host, 2)
+    status = _status(instance)
+    check, _ = _doctor_progress(instance)
+    assert status["hidden_only_streak"] == 3
+    assert check == {"check": "compaction_progress", "status": "warn", "detail": {
+        "hidden_only_streak": 3, "hidden_only_last_pass": status["hidden_only_last_pass"],
+    }}
+
+
+def test_3081_r1_combined_guidance_tracks_both_stalls(engine):
+    instance, _ = engine
+    host = _hidden_view(instance)
+    _hidden_passes(instance, host, 3)
+    # Model four selected zero-leaf passes after the hidden leaves were published.
+    zero_leaf = {"passes": 4, "last_reason": "retained occurrence"}
+    instance._zero_leaf_streaks[instance._hold_conversation_key()] = zero_leaf
+
+    check, guidance = _doctor_progress(instance)
+    assert check["status"] == "warn"
+    assert check["detail"]["passes"] == 4
+    assert check["detail"]["last_reason"] == zero_leaf["last_reason"]
+    assert check["detail"]["hidden_only_streak"] == 3
+    item = next(item for item in guidance if item["check"] == "compaction_progress")
+    assert item["warning_only"]
+    assert "zero_leaf_streak" in item["operator_action"]
+    assert "hidden_only_streak" in item["operator_action"]
+    assert "over-threshold passes that store no leaf" in item["rationale"]
+    assert "3 hidden-only passes" in item["rationale"]
+
+    _hidden_passes(instance, host, 1)
+    check, guidance = _doctor_progress(instance)
+    assert check["status"] == "warn"
+    assert check["detail"]["hidden_only_streak"] == 4
+    assert "passes" not in check["detail"]
+    item = next(item for item in guidance if item["check"] == "compaction_progress")
+    assert "zero_leaf_streak" not in item["operator_action"]

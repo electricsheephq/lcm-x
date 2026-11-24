@@ -559,9 +559,9 @@ The manifest still declares all 16 tools.
 | `lcm_describe` | Inspect the current-session DAG or preview an `externalized_ref` without loading full content. |
 | `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message from a cross-session `lcm_grep` result and `include_exact_ref=true` when its returned slice must be cited or computed. |
 | `lcm_expand_query` | Answer a question using expanded current-session LCM context while returning a bounded answer. |
-| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
+| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. `hidden_only_streak` counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` shows the latest frontier store ID, leaves, and hidden rows. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
-| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. `compaction_progress` warns at three hidden-only passes because the host context can only shrink once compaction reaches rows the host still holds. |
 | `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ## Recall skill and policy
@@ -660,6 +660,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in share of the model window below which automatic compaction waits during a tool turn. Requires host response stop reasons. Use `0` to disable or a finite ratio greater than zero and below `1 - LCM_SURVIVAL_RESERVE`. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -859,6 +860,34 @@ Examples, as math rather than universal recommendations:
 | `1000000` | `250000` | `0.25` |
 | `1000000` | `400000` | `0.40` |
 | `1000000` | `600000` | `0.60` |
+
+With a host that passes response stop reasons, this profile example defers
+eligible mid-turn passes from 500,000 up to 700,000 prompt tokens on a
+1M-token window. At 700,000, on forced overflow, or at the next turn start,
+the normal gates decide whether to compact.
+
+```dotenv
+LCM_CONTEXT_THRESHOLD=0.50
+LCM_TURN_START_DEFER_CEILING=0.70
+```
+
+LCM-X checks the ceiling against the live compaction trigger, including after
+Hermes or the LCM assembly cap lowers it. The effective ceiling is the lower of
+the configured ceiling and any assembly cap, where forced overflow takes over.
+An effective ceiling at or below the trigger warns as inert. An effective
+ceiling above an absolute or lowered trigger warns as unanchored. Global and
+per-model ratio triggers below the effective ceiling are quiet while they
+retain their window-derived value. Both warnings show the effective ceiling and
+trigger in tokens and name the cap when it limits deferral. The first deferral
+in an episode logs at INFO and subsequent deferrals log at DEBUG. With the
+ceiling enabled, `/lcm status` shows the configured share and its token value
+alongside `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too). A foreground pass at or above the ceiling, or on forced overflow, clears the
+tool-turn phase, so if it leaves the prompt above the trigger, the host's next
+check in the same turn can start another pass, as with the setting off. The
+host's progress latch and attempt cap bound it; that pass logs no deferral line
+and does not move the counter.
 
 A reasonable first pass for a true 1M effective window is:
 

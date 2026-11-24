@@ -293,6 +293,21 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")
+        if isinstance(detail, dict) and (latest := detail.get("hidden_only_last_pass")):
+            leaves = latest["leaves"]
+            leaf_label = "leaf" if leaves == 1 else "leaves"
+            hidden_command = "inspect lcm_status hidden_only_streak and hidden_only_last_pass to track the frontier"
+            hidden_rationale = (
+                "Compaction is summarising stored rows the host no longer shows, so the host's context will not "
+                "shrink until the walk reaches rows the host still holds "
+                f"({detail['hidden_only_streak']} hidden-only passes, frontier store id {latest['frontier_store_id']}, "
+                f"latest pass published {leaves} {leaf_label}) (#3081)."
+            )
+            if detail.get("passes", 0) >= 3:
+                command = f"{hidden_command}. Also {command}"
+                rationale = f"{hidden_rationale} Also, {rationale}"
+            else:
+                command, rationale = hidden_command, hidden_rationale
     elif name == "survival_fit":
         detail = detail if isinstance(detail, dict) else {}
         within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "

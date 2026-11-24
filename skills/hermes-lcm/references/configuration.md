@@ -116,6 +116,34 @@ by default for provider-bound copies; durable storage stays raw. See
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
+- `LCM_TURN_START_DEFER_CEILING` (default `0`, env only) defers otherwise threshold-eligible
+  automatic passes during tool turns while prompt pressure is below this share of the active model
+  window. A nonzero setting must be finite, positive and below `1 - LCM_SURVIVAL_RESERVE`.
+  Invalid values disable deferral and appear once in `config_source_warnings`. The host must
+  supply a response stop reason in usage (`tool_use` or `tool_calls`) or supply the normalized
+  finish reason through `post_api_request` with a verifiable current turn ID. Without a phase
+  signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
+  at or above the ceiling and during forced overflow.
+  Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
+  So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the
+  trigger, the host's next
+  pre-API check in the same turn can start another pass, as with the setting off. The host's progress
+  latch and attempt cap bound it; that pass logs no deferral line and does not move
+  `turn_start_deferred_checks`.
+
+  LCM-X checks the ceiling against the live trigger, including after Hermes or
+  the LCM assembly cap lowers it. The effective ceiling is the lower of the
+  configured ceiling and any assembly cap, where forced overflow takes over.
+  LCM-X warns when the effective ceiling is at or below the trigger (inert) or
+  above an absolute or lowered trigger (unanchored). Both warnings include the
+  token values and name the cap when it limits deferral. Global and per-model
+  ratio triggers below the effective ceiling are quiet while they retain their
+  window-derived value. The first deferral in each episode logs at INFO and
+  subsequent deferrals log at DEBUG. When enabled, `/lcm status` shows the
+  configured ceiling as a share and in tokens beside the trigger, plus
+  `turn_start_deferred_checks`, the number of gate checks deferred since the
+  last session bind or reset (a side-channel session's bind resets it too).
+
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
@@ -295,6 +323,7 @@ without changing its behavior until removal.
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
 | `LCM_SURVIVAL_FIT` | `bool` | `true` | — | — |
 | `LCM_SURVIVAL_RESERVE` | `float` | `0.15` | `>= 0.0`, `<= 0.9` | — |
+| `LCM_TURN_START_DEFER_CEILING` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `int` | `2` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `int` | `300` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` | `int` | `6` | — | — |

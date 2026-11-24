@@ -24,6 +24,7 @@ from threading import get_ident
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache, wraps
 from inspect import signature
 from typing import Any, Callable, Dict, List, Literal, Optional
@@ -107,6 +108,12 @@ def _counted_compaction(operation):
         try:
             messages, host_view = self._canonical_host_view(messages)
         except Exception as exc:
+            # On this line canonicalization precedes foreground admission, even on errors.
+            if self._config.turn_start_defer_ceiling:
+                self._maybe_reclassify_late_auxiliary_before_compaction_write()
+                with self._bypass_compression_binding() as bypassed, self._compaction_gate:
+                    if not bypassed and self._compress_owner in (None, get_ident()):
+                        self._clear_turn_start_defer_phase()
             self._last_compression_status = "error"
             self._record_ingest_failure("compress", exc)
             return messages
@@ -326,6 +333,16 @@ class CompactionMixin:
         if callable(maybe_reclassify):
             maybe_reclassify()
 
+    @staticmethod
+    def _turn_start_defer_ceiling_tokens(ceiling: float, context_length: int) -> Decimal:
+        return Decimal(str(ceiling)) * context_length
+
+    def _end_turn_start_defer_episode(self) -> None:
+        # Reset sites also run on half-built engines (tests/test_frontier_state.py); only a gate hit sets the flag.
+        if getattr(self, "_turn_start_defer_logged", False):
+            with self._compaction_gate:
+                self._turn_start_defer_logged = False
+
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._bypasses_lcm_context_management():
             if self._compression_boundary_cooldown_active():
@@ -345,14 +362,37 @@ class CompactionMixin:
                 return False
             return tokens >= self.threshold_tokens
         if self._compression_boundary_cooldown_active():
+            self._end_turn_start_defer_episode()
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         self._last_gate_tokens = int(tokens or 0)
         self._no_progress_observed_tokens = int(tokens or 0)
         if self._should_force_overflow_recovery(observed_tokens=tokens):
+            self._end_turn_start_defer_episode()
             return True
         if self.threshold_tokens <= 0:
+            self._end_turn_start_defer_episode()
             return False
+        ceiling = self._config.turn_start_defer_ceiling
+        if ceiling and self.context_length > 0:
+            self._warn_turn_start_defer_ceiling()
+            if tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+                ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, self.context_length)
+                if tokens < ceiling_tokens:
+                    with self._compaction_gate:
+                        level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
+                        self._turn_start_defer_logged = True
+                        self._turn_start_deferred_checks += 1
+                    try:
+                        logger.log(
+                            level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                            "prompt_tokens=%d ceiling_tokens=%s",
+                            ceiling, tokens, ceiling_tokens,
+                        )
+                    except Exception:
+                        pass  # A diagnostic handler cannot change the gate result.
+                    return False
+        self._end_turn_start_defer_episode()
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
@@ -387,7 +427,7 @@ class CompactionMixin:
         self._no_progress_observed_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
-            self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
+            self._clear_compaction_streaks_below_threshold()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
         pre_ingest_placeholder_cleanup_requested = False
@@ -871,11 +911,18 @@ class CompactionMixin:
             if not (self._compress_refusal or {}).get("refused"):
                 self._compress_refusal = None
         try:
+            # Inside the try whose finally releases the owner, as on main: a raise here cannot leak the owner.
+            self._clear_turn_start_defer_phase()
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._compaction_gate:
                 self._release_compress_owner()
+
+    def _clear_turn_start_defer_phase(self) -> None:
+        # A foreground pass reopens the gate for the host's overflow recheck.
+        self._turn_start_defer_mid_turn_id = None
+        self._end_turn_start_defer_episode()
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *, host_pairs=()):
@@ -1016,9 +1063,10 @@ class CompactionMixin:
             if binding_changed():
                 return messages
             comparison = guarded_restore if guarded_restore is not None and result is stubbed_guard_restore else result
-            if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
-                    and len(comparison) >= len(messages)
-                    and count_messages_tokens(comparison) >= count_messages_tokens(messages)):
+            hidden_only = (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
+                           and len(comparison) >= len(messages)
+                           and count_messages_tokens(comparison) >= count_messages_tokens(messages))
+            if hidden_only:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
@@ -1048,6 +1096,21 @@ class CompactionMixin:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
                                              persist=self._no_progress_proof_complete)
+            try:
+                if budget.leaves:
+                    streaks, key = self.__dict__.setdefault("_hidden_only_streaks", {}), self._hold_conversation_key()
+                    if hidden_only:
+                        streaks[key] = {
+                            "passes": streaks.get(key, {}).get("passes", 0) + 1,
+                            # The last committed leaf already advanced this marker.
+                            "frontier_store_id": self._last_compacted_store_id,
+                            "leaves": budget.leaves,
+                            "hidden_rows": self._compress_hidden_rows_consumed,
+                        }
+                    elif self._compress_host_rows_consumed > 0:
+                        streaks.pop(key, None)
+            except Exception:
+                logger.debug("LCM hidden-only streak update failed", exc_info=True)
             returned = result
             return result
         except BaseException as exc:
