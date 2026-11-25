@@ -104,6 +104,7 @@ from .search_query import (
     requires_like_fallback, sanitize_fts5_query,
 )
 from .head_copy import _head_copy_candidate, exclude_head_copies, known_head_copies_in_rows, known_head_copy_ids
+from .sidecar_ingest import sidecar_session_id
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
@@ -1287,6 +1288,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     excluded_session_ids = set(args.get("_excluded_session_ids") or ())
+    excluded_session_ids.update(sidecar_session_id(sid) for sid in tuple(excluded_session_ids))
     results: list[Dict[str, Any]] = []
     message_search_error: str | None = None
 
@@ -1301,6 +1303,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 scoped_id for scoped_id in (search_session_id, *descendant_ids)
                 if scoped_id not in excluded_session_ids
             ]
+            has_messages = getattr(engine._store, "has_session_messages", None)
+            if has_messages is not None:
+                for sid in tuple(scoped_session_ids):
+                    if sid and has_messages(companion := sidecar_session_id(sid)):
+                        scoped_session_ids.append(companion)
             for scoped_session_id in scoped_session_ids:
                 msg_hits = engine._store.search(
                     query,

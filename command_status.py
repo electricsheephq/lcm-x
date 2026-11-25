@@ -174,6 +174,13 @@ def render_status(facts: StatusFacts) -> str:
         f"source_effective_unknown_messages: {source_stats['effective_unknown_messages']}",
     ]
 
+    if failures := status.get("sidecar_recovery_failure_count"):
+        last_failure = datetime.fromtimestamp(status["sidecar_recovery_last_failure_at"], tz=timezone.utc)
+        lines.extend([
+            f"sidecar_recovery_failure_count: {failures}",
+            f"sidecar_recovery_last_failure_at: {last_failure.isoformat(timespec='seconds')}",
+        ])
+
     last_rotate_at = status.get("last_rotate_at")
     if last_rotate_at:
         lines.append(
