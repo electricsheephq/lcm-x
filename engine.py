@@ -3139,7 +3139,15 @@ class LCMEngine(
         refresh_redaction = cleanup and _contains_sensitive_redaction(row.get("content"))
         if cleanup and not refresh_redaction:
             return self._protect_restored_replay_row(row)
-        protected = self._protect_restored_replay_row(host)
+        source = host
+        if (self._config.sensitive_patterns_enabled
+                and _contains_sensitive_redaction(host.get("api_content"))
+                and (row.get("content") != host.get("content") or "api_content" not in row)):
+            # A marker-bearing sidecar stays dropped after a cache content mismatch,
+            # including when the wrapper sees the refreshed content.
+            source = dict(host)
+            source.pop("api_content", None)
+        protected = self._protect_restored_replay_row(source)
         if not refresh_redaction and protected is host:
             return None
         return self._user_replay_content(protected, row)
@@ -3238,9 +3246,14 @@ class LCMEngine(
                 if self._compress_generated_row(row, generated):
                     continue
                 if role != "user":
-                    restored = host if self._compression_rows_equal(
-                        row, _clean_active_assistant_message(host) or host,
-                    ) else row
+                    cleaned_host = _clean_active_assistant_message(host) or host
+                    cosmetic = self._compression_rows_equal(row, cleaned_host)
+                    if not cosmetic and self._config.sensitive_patterns_enabled:
+                        cosmetic = self._compression_rows_equal(
+                            self._protect_restored_replay_row(row),
+                            self._protect_restored_replay_row(cleaned_host),
+                        )
+                    restored = host if cosmetic else row
                     protected = self._protect_restored_replay_row(restored)
                     if protected is not row:
                         replacements[target] = protected
@@ -3283,14 +3296,20 @@ class LCMEngine(
         if not with_api:
             return result
 
-        input_pairs = [(row.get("content"), row["api_content"]) for row in messages
-                       if isinstance(row, dict) and "api_content" in row]
+        input_rows = [row for row in messages if isinstance(row, dict) and "api_content" in row]
+        input_pairs = [(row.get("content"), row["api_content"]) for row in input_rows]
         if self._config.sensitive_patterns_enabled:
             protected_pairs = []
-            for content, api in input_pairs:
+            for row, (content, api) in zip(input_rows, input_pairs):
                 protected_api = redact_sensitive_value(api, self._config, parse_json_strings=True)
-                if protected_api != api:
-                    protected_content = redact_sensitive_value(content, self._config, parse_json_strings=False)
+                protected_content = redact_sensitive_value(content, self._config, parse_json_strings=False)
+                if protected_api == api and protected_content != content and row.get("role") == "user":
+                    # Keep the placeholder rule when redaction replaces the user's own text.
+                    original = text_content_for_pattern_matching(content) or ""
+                    protected = text_content_for_pattern_matching(protected_content) or ""
+                    if _strip_volatile_host_scaffolding(original) != _strip_volatile_host_scaffolding(protected):
+                        continue
+                if protected_api != api or protected_content != content:
                     protected_pairs.append((protected_content, protected_api))
             input_pairs.extend(protected_pairs)
         input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
@@ -6980,6 +6999,8 @@ class LCMEngine(
             for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
         ]
         compressing = getattr(self._thread_context, "foreground_budget", None) is not None
+        prior_drop = getattr(self, "_dropped_marker_sidecars", None)
+        dropped = prior_drop[1].copy() if prior_drop and prior_drop[0] is self._last_active_replay_messages else set()
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
             generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
@@ -7004,7 +7025,15 @@ class LCMEngine(
                         row["content"] = host["content"]
                     else:
                         row.pop("content", None)
-                if "api_content" in host and row.get("content") == host.get("content"):
+                same_content = row.get("content") == host.get("content")
+                if ((index in dropped or compressing and not same_content)
+                        and row.get("role") == "user" and self._config.sensitive_patterns_enabled
+                        and _contains_sensitive_redaction(host.get("api_content"))):
+                    # Refreshing the cached content must not requalify its dropped sidecar.
+                    dropped.add(index)
+                    row.pop("api_content", None)
+                    continue
+                if "api_content" in host and same_content:
                     row["api_content"] = host["api_content"]
                     if compressing and row.get("role") != "user" and self._config.sensitive_patterns_enabled:
                         current[index] = self._protect_restored_replay_row(row)
@@ -7027,6 +7056,7 @@ class LCMEngine(
                 view[index] = dict(restored)
         if snapshot is not None:
             snapshot.extend(current)
+            self._dropped_marker_sidecars = (snapshot, dropped) if dropped else None
         # Hash the refreshed cache and returned view, using their own object identities.
         for row in (*current, *view) if view is not current else current:
             self._no_progress_public_rows[id(row)] = self._public_compression_row(row)
