@@ -33,12 +33,12 @@ def patterns(request):
     return request.param
 
 
-def test_shared_replay_redaction_keeps_api_content(open_engine):
+def test_shared_replay_redaction_keeps_api_content(open_engine, patterns):
     source = _user(f"api_key={SENSITIVE} keep this.", api_content=API_NOTE)
-    with open_engine(**REDACTION) as engine:
+    with open_engine(**(REDACTION | {"sensitive_patterns_enabled": patterns})) as engine:
         row, = engine._redact_active_replay_messages([source])
-        assert SENSITIVE not in row["content"]
-        assert row["content"].endswith(" keep this.")
+        expected = source["content"].replace(SENSITIVE, "<redacted>") if patterns else source["content"]
+        assert re.sub(MARKER, "<redacted>", row["content"]) == expected
         assert row["api_content"] == source["api_content"]
 
 
@@ -83,10 +83,13 @@ def test_promoted_assistant_keeps_redacted_reply(open_engine, patterns):
 
 
 def test_assistant_cleanup_keeps_both_merged_texts(open_engine, patterns):
-    first = dict(_assistant("First answer."), api_content=API_NOTE)
+    first = _assistant("First answer.")
     second = _assistant("Second answer.")
     host = [_user("Question"), first, second]
+    _stamp(host)
     with open_engine(**(REDACTION | {"sensitive_patterns_enabled": patterns})) as engine:
+        engine.ingest(host)
+        first["api_content"] = API_NOTE
         result = _cleanup(engine, host)
         assert first["message_uid"] != second["message_uid"]
         assert [row["content"] for row in result if row["role"] == "assistant"] == [
@@ -106,7 +109,7 @@ def test_restored_user_text_stays_utf8_after_redaction(open_engine, patterns):
         assert row["content"] == "Current \ufffd question."
         _assert_sidecar(row, API_NOTE, patterns)
         if patterns:
-            _assert_absent(engine, result)
+            assert SENSITIVE not in repr(result)
 
 
 def test_literal_marker_annotation_keeps_sidecar_in_cache(open_engine, patterns):

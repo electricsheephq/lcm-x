@@ -14,7 +14,7 @@ from tests.invariants.test_r4_host_user_replay import _todo
 
 SENSITIVE = "sk-syntheticroundseven1234567890"
 REDACTION = dict(sensitive_patterns_enabled=True, sensitive_patterns=["api_key"])
-MARKER = r"\[LCM sensitive redaction: api_key[^\]]*\]"
+MARKER = r"\[LCM sensitive redaction: name=api_key;[^\]]*\]"
 
 
 def _cached_row(engine, uid):
