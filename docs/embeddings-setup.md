@@ -79,7 +79,7 @@ rerank inputs by default under the `privacy:off` vector revision. Set
 `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to experimental provider-input
 filtering with `LCM_SENSITIVE_PATTERNS`. Changing the setting requires
 re-embedding. `LCM_SENSITIVE_PATTERNS_ENABLED=true` separately enables
-irreversible redaction on future durable ingest.
+irreversible redaction on future durable ingest (unsupported; do not enable).
 
 Notes: requests are batched under Voyage's caps — both the token budget and the 1000-item
 per-request cap; over-length documents are skipped and reported, never silently truncated;

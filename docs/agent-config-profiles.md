@@ -195,7 +195,7 @@ Account-specific free tokens and other billing adjustments are not included.
 The experimental cloud embedding filter changes provider input only and
 defaults to off. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in for known
 cloud providers. The default sends unfiltered copies under the `privacy:off`
-vector revision. Separately, `LCM_SENSITIVE_PATTERNS_ENABLED=true` redacts configured
+vector revision. Separately, `LCM_SENSITIVE_PATTERNS_ENABLED=true` (unsupported; do not enable) redacts configured
 matches from ordinary future ingest before they reach SQLite messages, FTS,
 summaries, active replay, or ordinary externalized ingest payloads; those matched values
 are intentionally not recoverable from those LCM surfaces. One exception is
