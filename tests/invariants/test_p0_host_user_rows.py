@@ -62,16 +62,39 @@ def _stop_line(caplog):
     return [line for line in caplog.messages if line.startswith("LCM compaction stop:")][-1]
 
 
+def _message_rows(engine):
+    return [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id")]
+
+
+def _ingest_keys(row):
+    return {key: value for key, value in row.items() if key not in {"content", "api_content"}}
+
+
+def _assert_host_content_with_ingest_keys(engine, returned, host, cached, ingest_keys):
+    for key in ("content", "api_content"):
+        assert (key in returned) == (key in host)
+        assert returned.get(key) == host.get(key)
+    assert returned is not cached
+    assert all(returned is not row for row in engine._last_active_replay_messages)
+    assert _ingest_keys(returned) == ingest_keys
+
+
 def test_8300_wrapper_returns_host_user(open_engine, monkeypatch):
-    rows = [_user(X, api_content=Y)]
-    monkeypatch.setattr(CompactionMixin, "compress", lambda self, messages, **_: [dict(messages[0], content="X'")])
+    source = _user(X, api_content=Y, timestamp=42.0)
+    _stamp([source])
     with open_engine() as engine:
-        returned, = _compress(engine, rows)
-    assert returned is rows[0]
-    assert returned["api_content"] == Y
+        engine.ingest([source])
+        cached, = engine._last_active_replay_messages
+        ingest_keys = _ingest_keys(cached)
+        stored = _message_rows(engine)
+        source["observed_at"] = 1720000000.0
+        monkeypatch.setattr(CompactionMixin, "compress", lambda self, messages, **_: [dict(cached, content="X'")])
+        returned, = _compress(engine, [source])
+        _assert_host_content_with_ingest_keys(engine, returned, source, cached, ingest_keys)
+        assert _message_rows(engine) == stored
 
 
-def _cached_compress(engine, rows, cached_content):
+def _seed_cached_compress(engine, rows, cached_content):
     source = rows[0]
     _stamp(rows)
     engine.ingest(rows)
@@ -79,6 +102,11 @@ def _cached_compress(engine, rows, cached_content):
     assert cached is not source
     cached["content"] = cached_content
     engine._preflight_automatic_request = True
+    return cached
+
+
+def _cached_compress(engine, rows, cached_content):
+    _seed_cached_compress(engine, rows, cached_content)
     return _compress(engine, rows)[0]
 
 
@@ -90,8 +118,13 @@ def test_control_8300_equal_cache_keeps_sidecar(open_engine):
 
 
 def test_8300_different_cache_returns_host_user(open_engine, monkeypatch):
-    rows = [_user(X, api_content=Y)]
+    source = _user(X, api_content=Y, timestamp=42.0)
+    rows = [source]
     with open_engine() as engine:
+        cached = _seed_cached_compress(engine, rows, "X'")
+        ingest_keys = _ingest_keys(cached)
+        stored = _message_rows(engine)
+        source["observed_at"] = 1720000000.0
         observed = []
         keep = engine._keep_host_held_stubs
 
@@ -101,25 +134,31 @@ def test_8300_different_cache_returns_host_user(open_engine, monkeypatch):
             return result
 
         monkeypatch.setattr(engine, "_keep_host_held_stubs", replay)
-        returned = _cached_compress(engine, rows, "X'")
-    assert observed and observed[-1] is rows[0]
-    assert returned is rows[0]
-    assert returned["api_content"] == Y
+        returned, = _compress(engine, rows)
+        assert observed
+        _assert_host_content_with_ingest_keys(engine, observed[-1], source, cached, ingest_keys)
+        _assert_host_content_with_ingest_keys(engine, returned, source, cached, ingest_keys)
+        assert _message_rows(engine) == stored
 
 
 @pytest.mark.parametrize("form", range(3), ids=["empty-string", "none", "absent"])
 def test_sidecar_only_keeps_original_empty_form(open_engine, monkeypatch, form):
-    source = dict(role="user", api_content=Y, **EMPTY_FORMS[form])
+    source = dict(role="user", api_content=Y, timestamp=42.0, **EMPTY_FORMS[form])
+    _stamp([source])
 
     def rewritten(self, messages, **kwargs):
-        return [dict(role="user", message_uid=messages[0]["message_uid"], api_content=Y,
-                     **EMPTY_FORMS[(form + 1) % len(EMPTY_FORMS)])]
+        return [dict(ingest_keys, api_content=Y, **EMPTY_FORMS[(form + 1) % len(EMPTY_FORMS)])]
 
-    monkeypatch.setattr(CompactionMixin, "compress", rewritten)
     with open_engine() as engine:
+        engine.ingest([source])
+        cached, = engine._last_active_replay_messages
+        ingest_keys = _ingest_keys(cached)
+        stored = _message_rows(engine)
+        source["observed_at"] = 1720000000.0
+        monkeypatch.setattr(CompactionMixin, "compress", rewritten)
         returned, = _compress(engine, [source])
-    assert returned is source
-    assert returned["api_content"] == Y
+        _assert_host_content_with_ingest_keys(engine, returned, source, cached, ingest_keys)
+        assert _message_rows(engine) == stored
 
 
 @pytest.mark.parametrize("held", [False, True], ids=["below-threshold", "hold"])
@@ -174,20 +213,29 @@ def _history():
 def test_summary_carrier_keeps_unrelated_tail_sidecar(open_engine, caplog):
     rows = _history()
     users = {row["content"]: row for row in rows if row["role"] == "user"}
-    for row in users.values():
+    for index, row in enumerate(users.values(), 1):
         row["api_content"] = Y
+        row["timestamp"] = float(index)
+    _stamp(rows)
     with open_engine() as engine, caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        engine.ingest(rows)
+        stored = _message_rows(engine)
+        cached_users = {
+            row["content"]: (row, _ingest_keys(row))
+            for row in engine._last_active_replay_messages if row["role"] == "user"
+        }
         returned = _compress(engine, rows, force=True)
         assert "leaves=1 progress=leaf" in _stop_line(caplog)
         assert engine._compress_host_rows_consumed > 0
         assert engine._durable_commit_proof_payload()["emissions"]
         carrier = next((row for row in returned if engine._generated_context_carrier_remainder(row)), None)
         assert carrier is None, "the durable proof describes a carrier where the host needs a standalone user row"
-        assert any(row is rows[-4] for row in returned)
+        assert any(row.get("content") == rows[-4]["content"] for row in returned)
         for row in returned:
             if row.get("content") in users:
-                assert row is users[row["content"]]
-                assert row["api_content"] == Y
+                cached, ingest_keys = cached_users[row["content"]]
+                _assert_host_content_with_ingest_keys(engine, row, users[row["content"]], cached, ingest_keys)
+        assert _message_rows(engine) == stored
 
 
 @pytest.mark.parametrize("kind", ["redaction", "ignore", "quarantine", "externalized-tool"])
