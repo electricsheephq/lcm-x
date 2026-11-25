@@ -78,7 +78,8 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
     "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
-    "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
+    "_last_active_replay_source_identities", "_dropped_marker_sidecars",
+    "_last_ingest_reconciliation", "_retired_durable_proof",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
     "_compression_boundary_active_placeholder_digest_budget", "_compression_boundary_active_placeholder_digest_ordinals",
     "_compression_boundary_stored_placeholder_digest_counts", "_ignored_message_count", "_ignore_pattern_dropped_count",
@@ -367,7 +368,7 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
             for field in dataclasses.fields(value):
                 register(getattr(value, field.name))
     for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {
-        "_store", "_dag", "_lifecycle", "_host_rewrite_store", "_compress_refusal",
+        "_store", "_dag", "_lifecycle", "_host_rewrite_store", "_compress_refusal", "_dropped_marker_sidecars",
     }):
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
@@ -390,6 +391,10 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
             continue  # New fail-closed guard: observe it when set; preserve existing absent-state outcomes.
         if name == REFUSED_INPUT and value is None:
             continue  # Observe the guard only when it carries a refused input.
+        if name == "_dropped_marker_sidecars":
+            if not isinstance(value, tuple) or value[0] is not engine._last_active_replay_messages:
+                continue
+            value = sorted(value[1])  # Observe active cache positions without recording the cache twice.
         if name == "_compress_refusal":
             if not value or value.get("refused") is not True:
                 continue
