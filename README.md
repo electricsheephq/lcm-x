@@ -699,7 +699,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | **Unsupported/experimental: not maintained; do not enable.** Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | off (unset or `false`) | Experimental filter for provider-bound copies on known cloud embedding providers. Opt in with `true`. The default sends unfiltered input under the `privacy:off` vector revision |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
@@ -741,6 +741,8 @@ assistant even when doing so exceeds a configured bound.
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Sensitive-pattern redaction
+
+> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
