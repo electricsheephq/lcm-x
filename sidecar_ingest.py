@@ -58,10 +58,7 @@ def persist_sidecar_messages(store, session_id, conversation_id, source, message
                 if offset < match.start():
                     break
                 if offset < match.end():
-                    if offset + len(delimiter) > match.end():
-                        # The delimiter runs past this block, so it is the content's own text.
-                        break
-                    # The delimiter lies inside this steer. Resume beyond the complete block.
+                    # The delimiter is part of this steer. Resume beyond the complete block.
                     offset = api.find(delimiter, match.end())
             if offset >= 0:
                 hook_boundary = offset
