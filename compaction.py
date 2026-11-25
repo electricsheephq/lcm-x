@@ -891,13 +891,15 @@ class CompactionMixin:
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
                  force: bool = False,
-                 bypass_cooldown: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
+                 bypass_cooldown: bool = False, *, host_pairs=(), _lcm_admission=None) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         if self._compaction_is_closing():
             return messages
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
+            if _lcm_admission is not None:
+                _lcm_admission.append(bypassed)
             if bypassed:
                 handle = self._emission_handle
                 if handle is not None and handle.session_id == self._bypass_lcm_session_id():
@@ -1054,6 +1056,7 @@ class CompactionMixin:
             ):
                 result = messages
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
+            before_survival_fit = result
             result = self._survival_fit(messages, result, current_tokens,
                                         summary_failure=budget.summary_failure if not self._survival_fit_reason else "",
                                         fit_cause=self._last_compression_noop_reason if not self._survival_fit_reason else "",
@@ -1075,6 +1078,15 @@ class CompactionMixin:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
+            restore_no_progress_host_rows = (
+                budget.leaves == 0 and not budget.progress and not force and not bypass_cooldown
+                and not self._compress_forced_overflow and self._last_compression_status in {"sanitized", "noop"}
+                and not self._stub_first_exit_now and result is before_survival_fit
+                and getattr(self, "_compress_host_rows_consumed", 0) == 0
+            )
+            result = self._keep_host_compress_rows(messages, result, no_progress=restore_no_progress_host_rows)
+            if restore_no_progress_host_rows:
+                self._ingest_cursor = len(result)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))

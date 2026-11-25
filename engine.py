@@ -156,8 +156,7 @@ from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _str
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import (
     _OOB_MESSAGE_BLOCK_MARKER, _commit_proof_identity_digest, _emitted_user_replay_digest,
-    _has_lossy_redacted_identity,
-    _merge_append_cut, _proof_user_identity,
+    _has_lossy_redacted_identity, _host_row_key, _merge_append_cut, _proof_user_identity,
 )
 from . import compaction
 from .compaction import CompactionMixin, select_oldest_leaf_chunk
@@ -3134,10 +3133,134 @@ class LCMEngine(
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
+    def _compress_placeholder(self, host, row):
+        """Keep protection rewrites and repair invalid Unicode before restoring host text."""
+        if self._replay_diff_requests_ingest_cleanup([host], [row]):
+            return canonical_value(row)
+        repaired = canonical_value(host)
+        if repaired is host:
+            return None
+        return self._user_replay_content(repaired, row)
+
+    @staticmethod
+    def _user_replay_content(host, occurrence):
+        """Copy the cached occurrence and replace the two host content fields."""
+        replay = dict(occurrence)
+        for key in ("content", "api_content"):
+            if key in host:
+                replay[key] = host[key]
+            else:
+                replay.pop(key, None)
+        return replay
+
+    @staticmethod
+    def _compress_generated_row(row, generated):
+        return id(row) in generated or LCMEngine._lcm_generated_marker(row)
+
+    def _keep_host_compress_rows(self, messages, result, *, no_progress=False):
+        """Restore host occurrences and retain LCM's protection rewrites."""
+        if result is messages or not isinstance(result, list):
+            return result
+
+        def address(row):
+            if row.get("role") == "tool" and row.get("tool_call_id"):
+                return ("tool", str(row["tool_call_id"]))
+            if _valid_uid(uid := row.get("message_uid")):
+                return ("uid", uid)
+            if row.get("_row_id") is not None:
+                return ("row", str(row["_row_id"]))
+            return tuple(_host_row_key(row) or ())
+
+        def compatible(host, row):
+            left, right = address(host), address(row)
+            return not left or not right or left[0] != right[0] or left == right
+
+        def positions(rows):
+            groups = defaultdict(list)
+            for index, row in enumerate(rows):
+                if isinstance(row, dict) and (no_progress or row.get("role") == "user"):
+                    groups[row.get("role")].append(index)
+            return groups
+
+        # Match surviving occurrences by object, address and content in that order.
+        # A role's remaining ordinal is usable when its aligned counts and anchors agree.
+        generated = self._generated_ignored_active_replay_placeholder_message_ids.copy()
+        generated.update(id(candidate.get("row")) for candidate in getattr(self, "_pending_emission_candidates", None) or ())
+        if (fit := getattr(self, "_survival_fit_emission", None)) is not None:
+            generated.add(id(fit.get("row")))
+        replacements = {}
+        returned_roles = positions(result)
+        for role, incoming in positions(messages).items():
+            outgoing = returned_roles[role]
+            matched = {}
+            used = set()
+            for key in (id, address, _emission_identity):
+                left, right = defaultdict(list), defaultdict(list)
+                for index in incoming:
+                    if index not in used and (value := key(messages[index])):
+                        left[value].append(index)
+                for index in outgoing:
+                    if index not in matched and (value := key(result[index])):
+                        right[value].append(index)
+                for value in left.keys() & right.keys():
+                    if len(left[value]) == len(right[value]) and (key is not address or len(left[value]) == 1):
+                        for source, target in zip(left[value], right[value]):
+                            if key is id or compatible(messages[source], result[target]):
+                                matched[target] = source
+                                used.add(source)
+            if len(incoming) == len(outgoing) and all(
+                target not in matched or matched[target] == source for source, target in zip(incoming, outgoing)
+            ):
+                for source, target in zip(incoming, outgoing):
+                    if target in matched or not compatible(messages[source], result[target]):
+                        continue
+                    if role == "user" and (
+                        self._message_replay_identity(messages[source]) != self._message_replay_identity(result[target])
+                    ):
+                        continue
+                    matched[target] = source
+            for target, source in matched.items():
+                host, row = messages[source], result[target]
+                if self._compress_generated_row(row, generated):
+                    continue
+                if role != "user":
+                    cleaned_host = _clean_active_assistant_message(host) or host
+                    restored = host if self._compression_rows_equal(row, cleaned_host) else row
+                    repaired = canonical_value(restored)
+                    if repaired is not row:
+                        replacements[target] = repaired
+                    continue
+                if host is row:
+                    continue
+                content = (host.get("content"), host.get("api_content"))
+                canonical = tuple(canonical_value(value) for value in content)
+                if canonical != content and canonical == (row.get("content"), row.get("api_content")):
+                    replacements[target] = canonical_value(row)
+                    continue
+                placeholder = self._compress_placeholder(host, row)
+                if placeholder is not None:
+                    replacements[target] = placeholder
+                else:
+                    restored = self._user_replay_content(host, row)
+                    if no_progress and restored == host:
+                        replacements[target] = host
+                    elif restored != row:
+                        replacements[target] = restored
+        if replacements:
+            result = [replacements.get(index, row) for index, row in enumerate(result)]
+        if no_progress and messages and result == messages:
+            return messages  # Hermes skips the boundary on equality, even for copies.
+        if messages and len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
+            return messages
+        return result
+
     @wraps(CompactionMixin.compress)
     def compress(self, messages, *args, **kwargs):
-        # All compaction routes converge here, with the original host list still available.
-        result = super().compress(messages, *args, **kwargs)
+        # Share the actual admission decision with the backstop after the pass.
+        admission = []
+        result = super().compress(messages, *args, **kwargs, _lcm_admission=admission)
+        if admission != [True]:
+            result = self._keep_host_compress_rows(messages, result)
         if result is messages or not isinstance(result, list):
             return result
         with_api = {id(row): row for row in result if isinstance(row, dict) and "api_content" in row}
@@ -6818,6 +6941,7 @@ class LCMEngine(
         host_messages: List[Dict[str, Any]],
         cached: List[Dict[str, Any]],
         fresh: List[Dict[str, Any]],
+        snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """#772: a stub and its payload share an identity, so the cache would resurrect a host-held stub.
         #773: the host's pruned-tool placeholder shares its stored row's identity too, so the host keeps it."""
@@ -6844,10 +6968,11 @@ class LCMEngine(
                 if row is host or id(row) in generated_ids:
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
-                # can later drop one. The engine writes only excluded keys on a kept row.
-                for key in [key for key in row if key not in excluded and key not in host]:
+                # can later drop one. User replay also retains its ingest observation.
+                kept_keys = excluded | {"observed_at"} if row.get("role") == "user" else excluded
+                for key in row.keys() - kept_keys - host.keys():
                     del row[key]
-                row.update((key, value) for key, value in host.items() if key not in excluded)
+                row.update((key, value) for key, value in host.items() if key not in kept_keys)
                 if not normalize_content_value(host.get("content")) and not normalize_content_value(row.get("content")):
                     # The replay identity reads "", None and no content as the same: keep the host's form.
                     if "content" in host:
@@ -6861,14 +6986,25 @@ class LCMEngine(
             sync_cached_host_metadata(
                 host_messages, current, generated_ids,
             )
-        # The copy loop captured the old fields. Hash the refreshed view on this pass
-        # so the next identical replay does not appear to change.
-        for row in current:
-            self._no_progress_public_rows[id(row)] = {
-                key: value for key, value in row.items()
-                if key != "timestamp" and not str(key).startswith("_")
-            }
-        return current
+        view = current
+        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
+        if len(host_messages) == len(cached) and compressing:
+            for index, (host, row) in enumerate(zip(host_messages, current)):
+                if (host is row or host.get("role") != "user" or row.get("role") != "user"
+                        or self._compress_generated_row(row, generated_ids)):
+                    continue
+                placeholder = self._compress_placeholder(host, row)
+                restored = self._user_replay_content(host, row) if placeholder is None else placeholder
+                if view is current:
+                    view = current.copy()
+                current[index] = restored
+                view[index] = dict(restored)
+        if snapshot is not None:
+            snapshot.extend(current)
+        # Hash the refreshed cache and returned view, using their own object identities.
+        for row in (*current, *view) if view is not current else current:
+            self._no_progress_public_rows[id(row)] = self._public_compression_row(row)
+        return view
 
     def _cached_active_replay_messages(
         self,
@@ -6879,17 +7015,16 @@ class LCMEngine(
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
+                snapshot = []
                 current = self._keep_host_held_stubs(
                     original_messages,
                     self._copy_active_replay_messages_preserving_generated_ids(cached),
                     original_messages if fresh_replay_messages is None else fresh_replay_messages,
+                    snapshot,
                 )
-                self._last_active_replay_messages = current
-                self._refresh_generated_active_replay_placeholder_retention(
-                    original_messages,
-                    current,
-                )
-                self._observe_no_progress_replay(original_messages, current)
+                self._last_active_replay_messages = snapshot
+                self._refresh_generated_active_replay_placeholder_retention(original_messages, snapshot)
+                self._observe_no_progress_replay(original_messages, snapshot)
                 return current
         return None
 
@@ -11946,6 +12081,14 @@ class LCMEngine(
         return (generated_context_row, carried_tail, folded_source_store_id,
                 folded_result_index, folded_original_tail, tail_selected)
 
+    @staticmethod
+    def _has_independent_api_content(row):
+        api_content = row.get("api_content")
+        content = row.get("content")
+        return api_content is not None and not (
+            isinstance(api_content, str) and isinstance(content, str) and api_content.startswith(content)
+        )
+
     def _emit_summary_carrier(
         self, summary_message, leading_msg, result, tail_selected, summary_candidate, carried_tail, source_id=None,
     ) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -11963,6 +12106,7 @@ class LCMEngine(
             and tail_selected
             and tail_selected[0].get("role") == "user"
             and isinstance(tail_selected[0].get("content"), str)
+            and not self._has_independent_api_content(tail_selected[0])
             and any(message.get("role") == "user" for message in tail_selected[1:])
         ):
             # This shape deliberately matches Hermes _merge_consecutive_users;
@@ -11997,7 +12141,7 @@ class LCMEngine(
         survival fit's split does (site 18), the row keeps no carrier identity or address and gets back the
         single proven host uid; the carrier's API-side content is not the row's either."""
         remainder = self._carried_user_text(row, store_id)
-        if remainder is None:
+        if remainder is None or self._has_independent_api_content(row):
             return row
         unwrapped = {key: value for key, value in row.items() if key != "api_content"}
         unwrapped["content"] = remainder

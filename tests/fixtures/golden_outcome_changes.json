@@ -616,22 +616,6 @@
       "outcome_sha": "8f1d4a919c5533445740f48043c9e454dbf7ac96ad5c0b39579fd940d81f3c26",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
-    "sequence-compaction": {
-      "outcome_sha": "b7530134497fd5bca8404b1fc21008e2a47266467e135d183ffe9cd2b5c46272",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
-    },
-    "sequence-host-merge": {
-      "outcome_sha": "6652f566e1fc0bf3b55282d7f9df9334f8d7ddb7b9b7060aeffce24fa2e00235",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
-    },
-    "sequence-rewrite": {
-      "outcome_sha": "3d5b5fe312485983be3ad6ff137d630a81bc4207d09f012fd56cb53ba90b35fd",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
-    },
-    "sequence-rotation": {
-      "outcome_sha": "1294da1506dbd42abd196d77b73a9b2b8de7092c772aa74b8e05ecdafe0f70b4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
-    },
     "sqlite-append": {
       "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
