@@ -154,7 +154,18 @@ def test_hidden_only_pass_with_keyed_sidecar(open_engine, backlog_engine):
     assert SENSITIVE not in repr(result)
 
 
-def test_fresh_user_sidecar_on_ordinary_pass(open_engine, monkeypatch):
+@pytest.mark.xfail(strict=True, reason=PRE_EXISTING)
+def test_fresh_user_sidecar_on_ordinary_noop(open_engine):
+    tail = _user("Fresh question.", api_content={"api_key": SENSITIVE})
+    with open_engine(**REDACTION) as engine:
+        assert not engine._last_active_replay_messages
+        result = _compress(engine, [tail])
+        assert engine._last_compression_status == "noop"
+        assert result[-1]["content"] == tail["content"]
+        assert SENSITIVE not in repr(result)
+
+
+def test_fresh_user_sidecar_on_ordinary_leaf_pass(open_engine, monkeypatch):
     tail = _user("Fresh question.", api_content={"api_key": SENSITIVE})
     host = [*_history(), tail]
     with open_engine(context_threshold=0.01, **REDACTION) as engine:
