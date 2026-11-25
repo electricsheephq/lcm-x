@@ -55,7 +55,8 @@ def persist_sidecar_messages(store, session_id, conversation_id, source, message
             delimiter = content + "\n\n"
             offset = api.find(delimiter)
             for match in matches:
-                if offset < match.start():
+                # A delimiter that starts at a block's first character is the content's own text.
+                if offset <= match.start():
                     break
                 if offset < match.end():
                     # The delimiter is part of this steer. Resume beyond the complete block.
