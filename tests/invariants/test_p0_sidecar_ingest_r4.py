@@ -199,3 +199,13 @@ def test_content_that_is_a_block_keeps_hook_quote_out(tmp_path):
         engine.ingest(view)
         engine.ingest(view)
         assert engine._store.get_session_messages(COMPANION) == []
+
+
+def test_carrier_that_opens_a_steer_keeps_the_whole_steer(tmp_path):
+    block = _block("use staging\n\nkeep production untouched")
+    content = block[: block.index("\n\nkeep production untouched")]
+    with _engine(tmp_path) as engine:
+        view = [_user(content, api_content=block)]
+        engine.ingest(view)
+        engine.ingest(view)
+        _assert_companion(engine, block)
