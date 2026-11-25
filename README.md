@@ -140,9 +140,10 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 
 ## Project status
 
-The latest stable release is
+This tree is
 [`v0.30.4`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.4)
-(plugin `hermes-lcm-x`, engine `lcm-x`), a patch release on v0.30.2 that also carries the v0.30.3 hotfix.
+(plugin `hermes-lcm-x`, engine `lcm-x`), a patch release on v0.30.2 that also carries the v0.30.3 hotfix,
+first tagged as the `v0.30.4-rc1` release candidate. The [releases page](https://github.com/electricsheephq/lcm-x/releases) marks the latest stable release.
 After a compaction pass that makes no progress, LCM-X hands the host back its own user rows unchanged;
 a message the host carried only in a hidden `api_content` field is now stored; and the recall tools skip a
 proven copy of the summary head.
@@ -1379,7 +1380,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.30.4` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. The releases page marks the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
