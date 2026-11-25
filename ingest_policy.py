@@ -21,6 +21,9 @@ from .ingest_pem_scan import (
 )
 
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
+_SENSITIVE_PLACEHOLDER_RE = re.compile(
+    "(" + re.escape(_SENSITIVE_PLACEHOLDER_PREFIX) + r"[^][\r\n]*\])"
+)
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
 # v3: single-pass PEM scanner (short-terminal-line bound, body-adjacent END
 # pairing, linear on pathological inputs) — output differs from v2 on
@@ -345,6 +348,19 @@ def _sensitive_pattern_for_key(key: Any, active_names: list[str]) -> str | None:
 
 
 def _redact_entire_sensitive_string(text: str, pattern_name: str) -> str:
-    if not text or _SENSITIVE_PLACEHOLDER_PREFIX in text:
+    if not text:
         return text
-    return _sensitive_placeholder(pattern_name, text)
+    if _SENSITIVE_PLACEHOLDER_PREFIX not in text:
+        return _sensitive_placeholder(pattern_name, text)
+    spans = _SENSITIVE_PLACEHOLDER_RE.split(text)
+    if len(spans) == 1:
+        return _sensitive_placeholder(pattern_name, text)
+    # Split captures the marker spans at odd positions. Keep those bytes and
+    # the separating whitespace so another pass produces the same value.
+    for index in range(0, len(spans), 2):
+        span = spans[index]
+        secret = span.strip()
+        if secret:
+            start = len(span) - len(span.lstrip())
+            spans[index] = span[:start] + _sensitive_placeholder(pattern_name, secret) + span[start + len(secret):]
+    return "".join(spans)

@@ -28,8 +28,9 @@ def cache_hits(monkeypatch):
     return observe
 
 
-def test_marker_sidecar_is_dropped_on_cached_content_mismatch(open_engine, cache_hits):
+def test_marker_sidecar_is_protected_on_cached_content_mismatch(open_engine, cache_hits):
     tail = _user(LITERAL)
+    literal_marker = "[LCM sensitive redaction: example]"
     host = [*_history(), tail]
     _stamp(host)
     with open_engine(**REDACTION) as engine:
@@ -37,7 +38,7 @@ def test_marker_sidecar_is_dropped_on_cached_content_mismatch(open_engine, cache
         hits = cache_hits(engine)
         identity = engine._message_replay_identity(tail)
         tail["content"] += "\n\n" + _todo("Synthetic annotation")
-        tail["api_content"] = {"note": LITERAL}
+        tail["api_content"] = {"api_key": f"{SENSITIVE} {literal_marker}", "note": LITERAL}
         assert engine._message_replay_identity(tail) == identity
         result = _compress(engine, host, force=True)
         assert hits and engine._last_compress_leaves[1] == 1
@@ -49,7 +50,12 @@ def test_marker_sidecar_is_dropped_on_cached_content_mismatch(open_engine, cache
             assert returned["content"] == tail["content"]
             cached = _cached_row(engine, uid)
             assert cached["content"] == tail["content"]
-            assert ("api_content" in returned, "api_content" in cached) == (False, False)
+            # T1-612 preserves the sidecar and its marker while redacting the keyed value.
+            _assert_absent(engine, result)
+            for row in (returned, cached):
+                sidecar = row["api_content"]
+                assert sidecar["note"] == LITERAL
+                assert re.sub(MARKER, "<redacted>", sidecar["api_key"]) == f"<redacted> {literal_marker}"
         assert len(hits) >= 2
 
 

@@ -414,39 +414,53 @@ def redact_catalog_sensitive_text(text: str) -> str:
     return protected
 
 
-def redact_sensitive_value(value: Any, config, *, parse_json_strings: bool = False) -> Any:
-    """Recursively redact configured sensitive values without externalizing data."""
+def redact_sensitive_value(
+    value: Any, config, *, parse_json_strings: bool = False, marker_keyed_only: bool = False,
+) -> Any:
+    """Redact configured values, optionally limited to keyed values containing a marker."""
     active_names = _active_sensitive_pattern_names(config)
     if not active_names:
         return value
     if isinstance(value, dict):
         protected: dict[Any, Any] = {}
         for key, val in value.items():
-            protected_key = redact_sensitive_text(key, config) if isinstance(key, str) else key
+            protected_key = key
+            if not marker_keyed_only and isinstance(key, str):
+                protected_key = redact_sensitive_text(key, config)
             key_pattern = _sensitive_pattern_for_key(key, active_names)
             if key_pattern and isinstance(val, str):
-                text_redacted = redact_sensitive_text(val, config)
-                if text_redacted == val:
-                    text_redacted = _redact_entire_sensitive_string(val, key_pattern)
-                protected[protected_key] = text_redacted
+                if _SENSITIVE_PLACEHOLDER_PREFIX in val:
+                    val = _redact_entire_sensitive_string(val, key_pattern)
+                elif not marker_keyed_only:
+                    redacted = redact_sensitive_text(val, config)
+                    val = redacted if redacted != val else _redact_entire_sensitive_string(val, key_pattern)
             else:
-                protected[protected_key] = redact_sensitive_value(
+                val = redact_sensitive_value(
                     val,
                     config,
                     parse_json_strings=parse_json_strings,
+                    marker_keyed_only=marker_keyed_only,
                 )
+            protected[protected_key] = val
         return protected
     if isinstance(value, list):
-        return [redact_sensitive_value(item, config, parse_json_strings=parse_json_strings) for item in value]
+        return [
+            redact_sensitive_value(
+                item, config, parse_json_strings=parse_json_strings, marker_keyed_only=marker_keyed_only,
+            )
+            for item in value
+        ]
     if not isinstance(value, str):
         return value
     if parse_json_strings:
         parsed = _maybe_parse_json_string(value)
         if parsed is not None and not _json_has_duplicate_object_keys(value):
-            protected = redact_sensitive_value(parsed, config, parse_json_strings=True)
+            protected = redact_sensitive_value(
+                parsed, config, parse_json_strings=True, marker_keyed_only=marker_keyed_only,
+            )
             if protected != parsed:
                 return json.dumps(canonical_value(protected), ensure_ascii=False, separators=(",", ":"))
-    return redact_sensitive_text(value, config)
+    return value if marker_keyed_only else redact_sensitive_text(value, config)
 
 
 def _externalize_quarantined_assistant_output(

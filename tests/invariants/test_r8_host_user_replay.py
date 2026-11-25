@@ -127,7 +127,6 @@ def test_literal_marker_annotation_keeps_sidecar_in_cache(open_engine, patterns)
         assert result[-1]["api_content"] == tail["api_content"]
 
 
-@pytest.mark.xfail(strict=True, reason=PRE_EXISTING)
 def test_literal_marker_inside_sensitive_keyed_value(open_engine):
     tail = _user(LITERAL)
     host = [*_history(), tail]
@@ -137,7 +136,7 @@ def test_literal_marker_inside_sensitive_keyed_value(open_engine):
         tail["api_content"] = {"api_key": SENSITIVE + " [LCM sensitive redaction: example]"}
         result = _compress(engine, host, force=True)
         assert engine._last_compress_leaves[1] == 1
-        assert SENSITIVE not in repr(result)
+        _assert_absent(engine, result)
 
 
 @pytest.mark.xfail(strict=True, reason=PRE_EXISTING)

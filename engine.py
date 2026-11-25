@@ -3139,15 +3139,7 @@ class LCMEngine(
         refresh_redaction = cleanup and _contains_sensitive_redaction(row.get("content"))
         if cleanup and not refresh_redaction:
             return self._protect_restored_replay_row(row)
-        source = host
-        if (self._config.sensitive_patterns_enabled
-                and _contains_sensitive_redaction(host.get("api_content"))
-                and (row.get("content") != host.get("content") or "api_content" not in row)):
-            # A marker-bearing sidecar stays dropped after a cache content mismatch,
-            # including when the wrapper sees the refreshed content.
-            source = dict(host)
-            source.pop("api_content", None)
-        protected = self._protect_restored_replay_row(source)
+        protected = self._protect_restored_replay_row(host)
         if not refresh_redaction and protected is host:
             return None
         return self._user_replay_content(protected, row)
@@ -6999,8 +6991,6 @@ class LCMEngine(
             for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
         ]
         compressing = getattr(self._thread_context, "foreground_budget", None) is not None
-        prior_drop = getattr(self, "_dropped_marker_sidecars", None)
-        dropped = prior_drop[1].copy() if prior_drop and prior_drop[0] is self._last_active_replay_messages else set()
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
             generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
@@ -7026,13 +7016,6 @@ class LCMEngine(
                     else:
                         row.pop("content", None)
                 same_content = row.get("content") == host.get("content")
-                if ((index in dropped or compressing and not same_content)
-                        and row.get("role") == "user" and self._config.sensitive_patterns_enabled
-                        and _contains_sensitive_redaction(host.get("api_content"))):
-                    # Refreshing the cached content must not requalify its dropped sidecar.
-                    dropped.add(index)
-                    row.pop("api_content", None)
-                    continue
                 if "api_content" in host and same_content:
                     row["api_content"] = host["api_content"]
                     if compressing and row.get("role") != "user" and self._config.sensitive_patterns_enabled:
@@ -7056,7 +7039,6 @@ class LCMEngine(
                 view[index] = dict(restored)
         if snapshot is not None:
             snapshot.extend(current)
-            self._dropped_marker_sidecars = (snapshot, dropped) if dropped else None
         # Hash the refreshed cache and returned view, using their own object identities.
         for row in (*current, *view) if view is not current else current:
             self._no_progress_public_rows[id(row)] = self._public_compression_row(row)
@@ -7500,6 +7482,15 @@ class LCMEngine(
                     self._config,
                     parse_json_strings=True,
                 )
+            if self._config.sensitive_patterns_enabled and "api_content" in redacted_message:
+                # Fresh replay must protect the same keyed marker values as restored replay.
+                # The remaining sidecar redaction stays on the restored-row path.
+                api = redacted_message["api_content"]
+                protected_api = redact_sensitive_value(
+                    api, self._config, parse_json_strings=True, marker_keyed_only=True,
+                )
+                if protected_api != api:
+                    redacted_message["api_content"] = protected_api
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(redacted_message)] = redacted_message
