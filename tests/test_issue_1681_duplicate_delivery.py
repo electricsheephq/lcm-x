@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -322,7 +323,7 @@ def test_duplicate_free_bytes_match_main(engine, monkeypatch):
 
 
 @pytest.mark.parametrize("consumer", ["pack", "compiler", "host", "preanswer", "adaptive", "baseline"])
-def test_structured_consumers_preserve_duplicate_ids(engine, consumer):
+def test_structured_consumers_preserve_duplicate_ids(engine, consumer, monkeypatch):
     first, second = append(engine, "I read 5 pages."), append(engine, "I read 5 pages.")
     hit = {"store_id": first, "content": "I read 5 pages.", "content_offset": 0,
            "exact_ref": f"lcm:{first}:0-15", "quote": "I read 5 pages.", "duplicate_store_ids": [second]}
@@ -342,6 +343,7 @@ def test_structured_consumers_preserve_duplicate_ids(engine, consumer):
     else:
         spec = importlib.util.spec_from_file_location("hermes_lcm.issue1681_plugin", Path(__file__).parents[1] / "__init__.py")
         plugin = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, plugin)
         spec.loader.exec_module(plugin)
         result = plugin._answer_ready_baseline(SimpleNamespace(handle_tool_call=lambda *_, **kw: {"hits": [hit]}), "q", {})[0]
     assert result["duplicate_store_ids"] == [second]

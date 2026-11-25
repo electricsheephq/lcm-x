@@ -49,6 +49,7 @@ TURN_PATH_FILES = {
     "host_row_recovery.py",  # Off by default; when on, recovery stores turn content under its original session/conversation.
     "unended_catchup.py",  # Off by default; when on, the #2042 catch-up stores failed-turn sessions' content under their own ids.
     "ingest_ledger.py",  # Transaction-owned shadow ledger writes on foreground ingest.
+    "sidecar_ingest.py",  # v0.30.4: foreground ingest stores complete out-of-band steer blocks in the companion session.
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
