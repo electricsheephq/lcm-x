@@ -12,6 +12,7 @@ from tests.invariants.test_p0_host_user_rows import (
 from tests.invariants.test_r4_host_user_replay import _todo
 
 SYNTHETIC_VALUE = "sk-syntheticroundseven1234567890"
+API_NOTE = f"API note: api_key={SYNTHETIC_VALUE} ends here."
 
 
 def _cached_row(engine, uid):
@@ -97,6 +98,59 @@ def test_forced_leaf_keeps_repaired_api_text_after_late_stamp(open_engine):
         assert 0 < engine._compress_host_rows_consumed
         row, = [row for row in returned if row.get("message_uid") == tail["message_uid"]]
         assert row["api_content"] == "Synthetic API \ufffd text"
+
+
+@pytest.mark.parametrize("content", ["Current question", ""], ids=["different-text", "sidecar-only"])
+def test_forced_leaf_keeps_late_user_sidecar(open_engine, content):
+    tail = _user(content)
+    host = [*_history(), tail]
+    _stamp(host)
+    with open_engine() as engine:
+        engine.ingest(host)
+        tail["api_content"] = API_NOTE
+        returned = _compress(engine, host, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        cached = _cached_row(engine, tail["message_uid"])
+        for row in (returned[-1], cached):
+            assert (row["content"], row["api_content"]) == (content, API_NOTE)
+
+
+def test_cleanup_keeps_promoted_assistant_sidecar(open_engine):
+    promoted = dict(_assistant(""), api_content=API_NOTE)
+    host = [_user("Question"), _assistant("First"), _assistant("Second"), _user("Another question"), promoted]
+    _stamp(host)
+    with open_engine(fresh_tail_count=len(host)) as engine:
+        engine.ingest(host)
+        row = _returned_tail(engine, host)
+        assert engine._compress_host_rows_consumed == engine._last_compress_leaves[1] == 0
+        assert (row["content"], row["api_content"]) == ("", API_NOTE)
+
+
+def test_cleanup_keeps_both_merged_assistant_texts(open_engine):
+    first = _assistant("First answer.")
+    second = _assistant("Second answer.")
+    host = [_user("Question"), first, second]
+    _stamp(host)
+    with open_engine() as engine:
+        engine.ingest(host)
+        first["api_content"] = API_NOTE
+        engine._preflight_automatic_request = True
+        returned = _compress(engine, host)
+        assert engine._compress_host_rows_consumed == engine._last_compress_leaves[1] == 0
+        assert first["message_uid"] != second["message_uid"]
+        assert [row["content"] for row in returned if row["role"] == "assistant"] == [
+            "First answer.\nSecond answer.",
+        ]
+
+
+def test_forced_leaf_repairs_surrogate_in_user_text(open_engine):
+    tail = _user("Current \ud800 question.", api_content=API_NOTE)
+    host = [*_history(), tail]
+    with open_engine() as engine:
+        returned = _compress(engine, host, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        row, = [row for row in returned if row.get("message_uid") == tail["message_uid"]]
+        assert (row["content"], row["api_content"]) == ("Current \ufffd question.", API_NOTE)
 
 
 def test_equal_generated_head_does_not_skip_real_session_end(open_engine):
