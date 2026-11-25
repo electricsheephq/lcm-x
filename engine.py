@@ -3134,16 +3134,18 @@ class LCMEngine(
             sender_capture.retire(self, meta.get("turn_id"))
 
     def _compress_placeholder(self, host, row):
-        """Keep protection rewrites and refresh a redaction against the current host content."""
-        if not self._replay_diff_requests_ingest_cleanup([host], [row]):
+        """Keep protection rewrites and check the current host text before restoring it."""
+        user = host.get("role") == "user"
+        refresh_redaction = user and _contains_sensitive_redaction(row.get("content"))
+        if not refresh_redaction and self._replay_diff_requests_ingest_cleanup([host], [row]):
+            return row
+        if not (refresh_redaction or self._config.sensitive_patterns_enabled):
             return None
-        if host.get("role") != "user" or not _contains_sensitive_redaction(row.get("content")):
-            return row
         redacted = self._redact_active_replay_messages([host])[0]
-        if row.get("content") == redacted.get("content") and "api_content" not in row:
-            return row
+        if not refresh_redaction and redacted == host:
+            return None
         redacted.pop("api_content", None)
-        return self._user_replay_content(redacted, row)
+        return self._user_replay_content(redacted, row) if user else redacted
 
     @staticmethod
     def _user_replay_content(host, occurrence):
@@ -3226,8 +3228,9 @@ class LCMEngine(
                 host, row = messages[source], result[target]
                 if host is row or self._compress_generated_row(row, generated):
                     continue
-                canonical = canonical_value(host)
-                if canonical is not host and row == canonical:
+                content = (host.get("content"), host.get("api_content"))
+                canonical = tuple(canonical_value(value) for value in content)
+                if canonical != content and canonical == (row.get("content"), row.get("api_content")):
                     continue  # Surrogate canonicalization is a validity repair.
                 placeholder = self._compress_placeholder(host, row)
                 if placeholder is not None:
@@ -3242,6 +3245,8 @@ class LCMEngine(
                     replacements[target] = host
         if replacements:
             result = [replacements.get(index, row) for index, row in enumerate(result)]
+        if no_progress and messages and result == messages:
+            return messages  # Hermes skips the boundary on equality, even for copies.
         if messages and len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
             return messages
         return result
@@ -6971,7 +6976,8 @@ class LCMEngine(
                         row["content"] = host["content"]
                     else:
                         row.pop("content", None)
-                if "api_content" in host and row.get("content") == host.get("content"):
+                if ("api_content" in host and row.get("content") == host.get("content")
+                        and not self._sensitive_api_content(host["api_content"])):
                     row["api_content"] = host["api_content"]
                 else:
                     row.pop("api_content", None)
@@ -7413,6 +7419,9 @@ class LCMEngine(
         )
         return durable_content is not None
 
+    def _sensitive_api_content(self, value: Any) -> bool:
+        return redact_sensitive_value(value, self._config, parse_json_strings=True) != value
+
     def _redact_active_replay_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         redacted_replay_messages: list[Dict[str, Any]] = []
         generated_message_ids = getattr(
@@ -7422,6 +7431,8 @@ class LCMEngine(
         )
         for message in messages:
             redacted_message = dict(message)
+            if "api_content" in message and self._sensitive_api_content(message["api_content"]):
+                redacted_message.pop("api_content")
             if "content" in redacted_message:
                 redacted_content = redact_sensitive_value(
                     redacted_message.get("content"),
