@@ -368,7 +368,7 @@ def test_an_invalid_pin_digest_is_never_echoed():
     assert result["pins_sha256"] == {} and "typed" not in json.dumps(result)
 
 
-def _fake_read(monkeypatch, tmp_path, end, message_patterns):
+def _fake_read(monkeypatch, tmp_path, end, message_patterns, *, row_identity=identity):
     """end_read with the runner's host faked; the start rows are START and the end rows are `end`."""
     class Host:
         def __init__(self, config, scratch):
@@ -378,7 +378,7 @@ def _fake_read(monkeypatch, tmp_path, end, message_patterns):
             return {"verdict": "PASS"}
 
         def rules(self):
-            return {"identity": identity}
+            return {"identity": row_identity}
 
         def rows(self, folder):
             return START if folder == "start-dir" else end

@@ -1,0 +1,1 @@
+- Fix: Finished temporal rollups can now wait for ingest to release the SQLite write lock within the existing busy timeout and then publish as ready (#2976).

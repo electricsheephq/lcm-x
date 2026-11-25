@@ -951,13 +951,14 @@ def test_preview_own_folder(tmp_path, shape, copy_name, stored_preview, record_p
 def test_own_session_folders_match_capture(tmp_path):
     """The checker's folder rule is capture's session_dir() for live transcript names, read from both modules."""
     import importlib.util
-    specs = {name: importlib.util.spec_from_file_location(name, path)
-             for name, path in (("checker_under_test", CHECKER), ("capture_rule", ROOT / "claude_code_capture.py"))}
-    modules = {}
-    for name, spec in specs.items():
-        modules[name] = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(modules[name])
-    checker, capture = modules["checker_under_test"], modules["capture_rule"]
+
+    # The checker is a standalone script, so it loads from its file; capture is a package
+    # module with relative imports, so it loads through the package.
+    from hermes_lcm import claude_code_capture as capture
+
+    spec = importlib.util.spec_from_file_location("checker_under_test", CHECKER)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
     session = tmp_path / "projects/p/s"
     names = [tmp_path / "projects/p/s.jsonl", tmp_path / "projects/p/s.v1.jsonl", tmp_path / "projects/p/.hidden.jsonl",
              tmp_path / "projects/p/agent-a.b.jsonl", tmp_path / "projects/p/noext",

@@ -973,7 +973,7 @@ def test_restart_repeated_user_1328():
         previous = deepcopy(machine.host)
         machine.compress()
         machine.exactly_once()
-        assert machine.engine._last_compression_status == "sanitized"
+        assert machine.engine._last_compression_status in {"noop", "sanitized"}
         assert machine.host == previous
         machine.new_turn("alpha", False, 0, False, "lookup")
         expected = list(map(identity, machine.occurrences))

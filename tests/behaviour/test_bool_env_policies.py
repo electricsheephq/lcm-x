@@ -101,6 +101,7 @@ BOOLEAN_POLICIES = {
 RAW_READERS = {
     # _engine_took_slot reads the scalar HERMES_HOME path for inactive records.
     "__init__.py": {"_session_context_value", "register", "_engine_took_slot"},
+    "cloud_restore.py": {"_safe_path"},  # Scalar HERMES_HOME restore destination guard.
     "command.py": {"_env_float", "_embedding_backfill_batch_size", "_preset_suggest_text"},
     "config.py": {
         "_parse_int_env", "_parse_float_env", "_parse_bool_env", "_parse_str_env",
@@ -137,9 +138,13 @@ def test_boolean_policy_inventory():
             for alias in node.names if alias.name == "_parse_bool_env"
         }
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
-            if any(isinstance(node, ast.Call) and ast.unparse(node.func) in ("os.environ.get", "os.getenv", "lcm_env_get")
-                   for node in ast.walk(function)):
+            reads = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                     and ast.unparse(node.func) in ("os.environ.get", "os.getenv", "lcm_env_get")]
+            if reads:
                 raw_readers.setdefault(path.name, set()).add(function.name)
+            if (path.name, function.name) == ("cloud_restore.py", "_safe_path"):
+                assert len(reads) == 1 and ast.unparse(reads[0].func) == "os.environ.get"
+                assert ast.literal_eval(reads[0].args[0]) == "HERMES_HOME"
         for call in calls:
             called = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
             if called not in parser_names:

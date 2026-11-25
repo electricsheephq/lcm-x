@@ -309,11 +309,21 @@ def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
     pre = list(host)
     compressed = engine.compress(list(host), force=True)
     assert engine._last_compression_status == "compacted"
+    _drain_session_end_maintenance(engine)
     return engine, pre, compressed
 
 
 def _row_count(engine, session_id="S0"):
     return engine._store.get_session_count(session_id)
+
+
+def _drain_session_end_maintenance(engine):
+    # Bind-time rollups and incremental embeddings can write to this database
+    # on private connections while session end uses a short SQLite busy timeout.
+    # _compacted_engine drains after its bind; a test that binds again drains
+    # again before its session end.
+    assert engine.drain_rollup_maintenance(timeout=10)
+    assert engine.drain_embedding_maintenance(timeout=10)
 
 
 def test_compaction_commit_end_finalizes_without_reingest(tmp_path, monkeypatch):
@@ -478,9 +488,9 @@ def test_host_that_keeps_the_compress_input_resumes_after_it(tmp_path, monkeypat
         engine.shutdown()
 
 
-def _refused_commit(tmp_path, monkeypatch):
-    """Cycle 1 commits in place. Cycle 2 compresses and the host runs the commit end, then its
-    would_grow guard refuses the candidate: no compression start, the host keeps `pre` + reply."""
+def _unadopted_commit(tmp_path, monkeypatch):
+    """Legacy lifecycle order: the commit end ran, the compression start never arrived,
+    and the host continued with the input list."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     engine.on_session_end("S0", pre)
     engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -522,7 +532,7 @@ def test_compress_rebinds_after_a_commit_end_the_host_did_not_adopt(tmp_path, mo
     """The commit end finalized the row and the compression start never came: the next compress
     re-binds the session at its finalized frontier instead of publishing against frontier 0."""
     caplog.set_level(logging.INFO)
-    engine, host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         assert frontier > 0
         _compress_next(engine, host)
@@ -544,7 +554,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
     """(i) a normal start binds the row (nothing left to re-bind); (ii) another conversation and (iii) a
     reset after the finalize never re-bind."""
     caplog.set_level(logging.INFO)
-    engine, host, _frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, _frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         if control == "start":
             engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -568,7 +578,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
 def test_rebind_never_advances_from_the_in_process_frontier(tmp_path, monkeypatch, caplog):
     """(iv) the in-process frontier differs from the row: warn, move nothing without a publication."""
     caplog.set_level(logging.INFO)
-    engine, _host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, _host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         engine._last_compacted_store_id = frontier + 5
         monkeypatch.setattr(engine._lifecycle, "advance_frontier", lambda *a, **k: pytest.fail("advanced"))
@@ -1720,6 +1730,7 @@ def test_profile_rebind_clears_the_commit_proof(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", context_length=200_000, hermes_home=str(tmp_path / "other-home"))
         assert engine._compress_commit_proof is None
+        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
         state = engine._lifecycle.get_by_session("S0")
         assert state.current_session_id is None
@@ -1738,6 +1749,7 @@ def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
         assert engine._conversation_id == "other-conversation" != old_conversation
+        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
         assert engine._compress_commit_proof is None or not engine._compress_commit_proof.get("end_consumed")
         state = engine._lifecycle.get_by_conversation("other-conversation")

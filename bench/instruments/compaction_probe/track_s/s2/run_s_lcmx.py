@@ -22,6 +22,9 @@ from s2lib import arms as A, reader as R, seam, deep  # noqa: E402
 import checkpoints as CP  # noqa: E402
 
 SUMMARY_RE = re.compile(r"\[[^\[\]\n]*Summary \(d\d+, node \d+\)\]")  # engine.py:5189/7394 summary part header (S7 D7)
+SUMMARY_BLOCK_RE = re.compile(
+    rf"(?:\A|\n\n---\n\n)({SUMMARY_RE.pattern}\n.*?\n\[Expand for details:[^\n]*\])(?=\n\n|\Z)", re.DOTALL
+)
 CFG_SKIP = {"config_sources", "config_source_warnings", "ignored_config_yaml_lcm_keys"}
 
 jload = lambda p: json.loads(p.read_text())  # noqa: E731
@@ -197,7 +200,7 @@ class Run:
         SKIPS.n = 0
         t_start, m0 = time.time(), time.monotonic()
         seam.set_event(len(self.events) + 1, row["turn"])
-        new = self.engine.compress(view, current_tokens=cur, force=forced)
+        new = self.engine.compress(view, current_tokens=cur + self.args.fixed_load_tokens, force=forced)
         wall = round(time.monotonic() - m0, 3)
         calls, sums = seam.take()
         cols = ("node_id", "depth", "source_type", "source_ids", "token_count", "source_token_count")
@@ -321,6 +324,29 @@ def batches_for(sdir: Path, checkpoint=None):
                     for k in cont if k not in ("id", "row_id", "row_index", "row_role")]})
     return CP.augment(sdir, out, checkpoint)
 
+def summary_tokens(run: Run, view: list[dict]) -> int:
+    """Count the rendered blocks without the tail text sharing a summary carrier."""
+    total = 0
+    for message in view:
+        content = message.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [part["text"] for part in content
+                     if isinstance(part, dict) and isinstance(part.get("text"), str)]
+        else:
+            continue
+        for text in texts:
+            total += sum(run.m.tokens.count_tokens(block) for block in SUMMARY_BLOCK_RE.findall(text))
+    return total
+
+def schema_engine(m):
+    """A closed engine shell for the tool-schema lookup. Engines from 6a848776 (v0.27.0) on read their config there, so
+    the shell carries one built from the arm's env, which the caller has applied."""
+    shell = m.engine.LCMEngine.__new__(m.engine.LCMEngine)
+    shell._config = m.config.LCMConfig.from_env()
+    return shell
+
 def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[dict]:
     src_db, src_home, out = (src["db"], src["home"], src["dir"]) if src else (run.db, run.home, run.dir)
     blocks = sum(len(SUMMARY_RE.findall(m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content"))))
@@ -433,6 +459,8 @@ def main():
     ap.add_argument("--fault-hang", choices=("T", "P"), help="1096-H: one hang (T) or two-turn hang episode (P)")
     ap.add_argument("--checkpoints", default=None, help="manifest ids or lifecycle for v4; comma-separated rows for v3")
     ap.add_argument("--context-length", type=int, default=DEFAULT_CTX)
+    ap.add_argument("--fixed-load-tokens", type=int, default=0,
+                    help="fixed tokens added to the host prompt figure used by compaction (default: 0)")
     ap.add_argument("--batches", type=int, default=0, help="answer only the first N batches (0 = all)")
     ap.add_argument("--dry-run", action="store_true", help="print effective config per arm; no model calls")
     ap.add_argument("--full-stream", action="store_true", help="D5-A: replay every transcript row (--slice still applies); "
@@ -442,6 +470,8 @@ def main():
     ap.add_argument("--prefix60k", action="store_true", help="S6 A3: replay to the frozen prefix60k row, the arm's "
                     "own compaction fires once there (LCM_ABSOLUTE_THRESHOLD_TOKENS = view tokens at that gate); no probes")
     args = ap.parse_args()
+    if args.fixed_load_tokens < 0:
+        ap.error("--fixed-load-tokens must be non-negative")
     seam.set_fault(args.fault_hang)
     if args.seed_db and not args.full_stream or args.full_stream and (args.checkpoints or args.prefix60k):
         raise SystemExit("--seed-db needs --full-stream; --full-stream excludes --checkpoints and --prefix60k")
@@ -472,10 +502,12 @@ def main():
     summary = {"arm": arm, "seed": seed, "run": args.run, "lane": args.lane, "reader": args.reader,
                "worktree": str(seam.WORKTREE), "worktree_head": seam.PINNED, "context_length": args.context_length,
                "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint, "late_corrected_value_checkpoint": CP.late_checkpoint(sdir),
-               **({"fleet_keys_excluded": {}, "harness_overrides": {}} if arm["name"] == A.ENV_FILE_ARM else
+               **({"fleet_keys_excluded": {}, "harness_overrides": {}} if A.is_env_file_arm(arm["name"]) else
                   {"fleet_keys_excluded": A.FLEET_EXCLUDED, "harness_overrides": A.HARNESS_OVERRIDES}), "started": time.time(),
                "material_sha256": hashlib.sha256((sdir / "material.manifest.json").read_bytes()).hexdigest(),
                "population": "prefix60k" if args.prefix60k else "full-stream"}
+    if args.fixed_load_tokens:
+        summary["fixed_load_tokens"] = args.fixed_load_tokens
     if arm["unsupported"]:
         summary.update(status="UNSUPPORTED", reason=arm["unsupported"])
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
@@ -512,15 +544,23 @@ def main():
     else:
         view = [to_msg(r) for r in rows if r["role"] != "system"]
         view = view[-int(arm["env"]["LCM_FRESH_TAIL_COUNT"]):] if arm["name"] == "C1" else view
-    run.engine = m.engine.LCMEngine.__new__(m.engine.LCMEngine)  # closed; only for the tool-schema lookup
+    run.engine = schema_engine(m)  # closed; only for the tool-schema lookup
     summary.update(gates=run.gates, events=run.events, receipts=run.receipts_out,
                    final_context={"rows": len(view), "tokens": run.ntok([run.sysmsg] + view)},
                    final_continuity=continuity(man, run.system, view))
     (run_dir / "assembled_context.json").write_text(json.dumps({"system": run.system, "view": view}))
     if args.prefix60k or args.full_stream:  # a timing population only: no probes
         summary.update(status="DONE", finished=time.time(), prefix60k=getattr(run, "p60", None))
+        summary.update(summary_tokens=summary_tokens(run, view),  # untimed
+                       prompt_tokens=summary["final_context"]["tokens"] + args.fixed_load_tokens)
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
         return print(f"wrote {run_dir}/summary.json ({len(run.events)} event(s), no probes)")
+    if run.snaps:
+        for cp in run.snaps:
+            cp["summary_tokens"] = summary_tokens(run, cp["view"])
+    else:
+        summary.update(summary_tokens=summary_tokens(run, view),
+                       prompt_tokens=summary["final_context"]["tokens"] + args.fixed_load_tokens)
     reader = (None if args.reader == "fake" else R.GLMReader() if args.reader == "glm" else
               (R.SolLowReader if args.reader == "sol-low" else R.AstraLowReader)(run_dir / "reader-scratch"))
     if args.reader == "fake":
@@ -539,15 +579,20 @@ def main():
             shutil.copy2(run_dir / "continuity" / f"event-{e['event']}.json", cp["dir"] / "continuity")
         (cp["dir"] / "assembled_context.json").write_text(json.dumps({"system": run.system, "view": cp["view"]}))
         (cp["dir"] / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in res))
+        view_tokens = run.ntok([run.sysmsg] + cp["view"])
+        prompt_tokens = view_tokens + summary.get("fixed_load_tokens", 0)
         (cp["dir"] / "summary.json").write_text(json.dumps({**summary, "stop_row_index": cp["row"], "checkpoint": cp["row"],
             **({"checkpoint_id": cp["checkpoint"]["id"]} if "checkpoint" in cp and isinstance(cp["checkpoint"]["id"], str) else {}),
             "events": evs, "receipts": cp["receipts"], "admission": cp["admission"], "reader_calls": run.reader_calls,
-            "final_context": {"rows": len(cp["view"]), "tokens": run.ntok([run.sysmsg] + cp["view"])}, "summary_blocks": res[0]["summary_blocks"] if res else None,
+            "final_context": {"rows": len(cp["view"]), "tokens": view_tokens}, "summary_blocks": res[0]["summary_blocks"] if res else None,
+            **({"summary_tokens": cp["summary_tokens"], "prompt_tokens": prompt_tokens} if "summary_tokens" in cp else {}),
             "store_summaries": db_ro(cp["db"]).execute("SELECT COUNT(*) FROM summary_nodes WHERE session_id = ?", (run.sid,)).fetchone()[0],
             "final_continuity": continuity(man, run.system, cp["view"]), "reader_readback": reader.readback, "status": cp_status,
             "isolation": {"snapshot_sha256_before_probes": sha0, "snapshot_sha256_after_probes": sha1}, "finished": time.time()}, indent=1, default=str))
         print(f"wrote {cp['dir']} ({len(res)} rows)", flush=True)
     if run.snaps:
+        if fixed_load_tokens := summary.get("fixed_load_tokens"):
+            summary["prompt_tokens"] = summary["final_context"]["tokens"] + fixed_load_tokens
         summary.setdefault("status", "DONE")
         summary.update(finished=time.time(), checkpoints=[c.get("checkpoint", {"id": c["row"]})["id"] for c in run.snaps])
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
@@ -569,9 +614,10 @@ def dry_run(m, args, rows, stop):
     defaults = config_dict(m.config.LCMConfig())  # the printed line = every value the arm moves off the default
     sysmsg = {"role": "system", "content": "\n".join(r["content"] for r in rows if r["role"] == "system")}
     view = [to_msg(r) for r in rows if r["role"] != "system"]
+    fixed_load = f"; fixed_load_tokens={args.fixed_load_tokens}" if args.fixed_load_tokens else ""
     print(f"dry run: seed {args.seed}, rows 0..{stop} ({len(rows)} rows, "
           f"{m.tokens.count_messages_tokens([sysmsg] + view)} tokens incl. system), "
-          f"context_length {args.context_length}; no model calls")
+          f"context_length {args.context_length}{fixed_load}; no model calls")
     for name in A.all_arms() if args.arm == "ALL" else [args.arm]:
         arm = A.resolve(name)
         if arm["unsupported"]:
@@ -583,7 +629,7 @@ def dry_run(m, args, rows, stop):
         try:
             apply_env(arm["env"], tmp / "hermes-home", tmp / "lcm.db")
             cfg = config_dict(m.config.LCMConfig.from_env())
-            if name == A.ENV_FILE_ARM:  # D5-A: the effective env must be the file's LCM_* set plus the harness keys only
+            if A.is_env_file_arm(name):  # D5-A: the effective env must be the file's LCM_* set plus the harness keys only
                 lcm = {k: v for k, v in sorted(os.environ.items()) if k.startswith("LCM_")}
                 same = {k: v for k, v in lcm.items() if k not in A.HARNESS_KEYS} == arm["env"] and set(A.HARNESS_KEYS) <= set(lcm)
                 print(f"{name}: effective LCM_* env ({len(lcm)} keys) == env file LCM_* set ({len(arm['env'])}) + harness keys "
@@ -604,7 +650,7 @@ def dry_run(m, args, rows, stop):
         (out_dir / f"{name}.config.json").write_text(json.dumps(
             {"arm": arm["note"], "effective": eff, "full_config": cfg}, indent=1, sort_keys=True))
         print(f"{name:26s} " + " ".join(f"{k}={v}" for k, v in eff.items()))
-    if args.arm != A.ENV_FILE_ARM:  # the env-file arm carries no fleet value and no harness override
+    if not A.is_env_file_arm(args.arm):  # the env-file arm carries no fleet value and no harness override
         print(f"fleet keys excluded: {json.dumps(A.FLEET_EXCLUDED)}")
 
 if __name__ == "__main__":

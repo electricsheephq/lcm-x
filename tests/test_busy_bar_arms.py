@@ -178,6 +178,30 @@ def test_checkpoint_smoke(tmp_path):
         assert not (tmp_path / f"checkpoint-run-{i}" / "holds.jsonl").exists()
 
 
+_INGEST_OPENINGS = ("LCM reconciled ingest cursor", "Ingest: session=")
+_INGEST_FINISHED = ("LCM attribution phase=ingest", "Per-turn ingest OK")
+
+
+def _drop_aborted_ingest_attempts(logs):
+    """Drop the first copy of an unfinished ingest attempt that one thread logs twice in a row.
+
+    Under contention the engine reruns an attempt once with no log line of its own: the prelock reclassification
+    after another writer commits (engine.py, `_IngestReclassify`), or the evidence retry (#1815). The aborted copy
+    logs the attempt's opening lines but never the attribution line, which only a finished call logs. Whether a
+    rerun fires is timing. A repeated finished call is never dropped.
+    """
+    out = []
+    for record in logs:
+        out.append(record)
+        for size in range(1, len(out) // 2 + 1):
+            block, before = out[-size:], out[-2 * size:-size]
+            if (block == before and block[0]["message"].startswith(_INGEST_OPENINGS)
+                    and not any(line["message"].startswith(_INGEST_FINISHED) for line in before)):
+                del out[-2 * size:-size]
+                break
+    return out
+
+
 def normalize(rows):
     """Exclude timing values only; canonically rename OS IDs, retaining relationships."""
     rows = deepcopy(rows)
@@ -189,13 +213,23 @@ def normalize(rows):
                 op.pop(key)
             threads.setdefault(op["thread"], f"thread-{len(threads)}")
             op["thread"] = threads[op["thread"]]
+        log_only = {}
         for record in row["logs"]:
             record.pop("time")
             record["message"] = re.sub(r"lock_hold_ms=\d+\.\d+", "lock_hold_ms=<timing>", record["message"])
-            threads.setdefault(record["thread"], f"thread-{len(threads)}")
             processes.setdefault(record["process"], f"process-{len(processes)}")
+            if record["thread"] not in threads:
+                rest = {key: value for key, value in record.items() if key not in ("thread", "process")}
+                log_only.setdefault(record["thread"], []).append(json.dumps(rest, sort_keys=True))
+        # A thread with no operations is labeled by what it logged, not by when its first line arrived.
+        for thread in sorted(log_only, key=log_only.get):
+            threads[thread] = f"thread-{len(threads)}"
+        for record in row["logs"]:
             record["thread"] = threads[record["thread"]]
             record["process"] = processes[record["process"]]
+        # Threads interleave their log lines by timing. Keep each thread's own order and compare per thread.
+        row["logs"].sort(key=lambda record: (record["process"], record["thread"]))
+        row["logs"] = _drop_aborted_ingest_attempts(row["logs"])
         for summary in row["success_wall_ms"].values():
             if isinstance(summary, dict):
                 for key in ("p50", "p95", "max"):

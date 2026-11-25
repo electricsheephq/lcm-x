@@ -30,6 +30,7 @@ from .config import host_message_uid_mode, identity_anchor_enabled
 from .fresh_tail import tool_group_safe_end
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
+from .head_copy import is_known_head_copy
 from .reconcile import _has_lossy_redacted_identity
 from .tokens import count_message_tokens
 
@@ -78,17 +79,18 @@ class StoreCompleteMixin:
             for _ in range(_SCAN_EXTEND if scale == 1 else 1):
                 batch = self._store.get_range(source, start_id=start + 1, end_id=stop, limit=limit,
                                               conversation_id=self._conversation_id, include_blank_conversation=True)
-                page.extend(batch)
+                visible = [row for row in batch if not is_known_head_copy(self._store.connection, row)]
+                page.extend(visible)
                 covered = self._store_complete_node_covered([int(row["store_id"]) for row in batch])
                 if len(batch) < limit or any(
                     int(row["store_id"]) not in covered and int(row["store_id"]) not in excluded_ids
                     and row.get("role") != "system" and not self._matches_ignore_message_patterns(row, stored_row=True)
-                    for row in batch
+                    for row in visible
                 ):
                     break
                 start = int(batch[-1]["store_id"])
             if len(batch) >= limit:
-                last = int(page[-1]["store_id"])
+                last = int(batch[-1]["store_id"])
                 reached = last if reached is None else min(reached, last)
             rows.update((int(row["store_id"]), row) for row in page if self._identity_anchor_owned(row, carry))
         return [rows[key] for key in sorted(rows) if reached is None or key <= reached], reached is not None
@@ -223,7 +225,8 @@ class StoreCompleteMixin:
     def _store_complete_input(self, chunk, claims, full_map, view, raw_chunk, frontier, carry, budget,
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None,
                               escape_retained: bool = False, allow_retained_escape: bool = False,
-                              lift_allowed: bool = True, prefix_retry: bool = True) -> Optional[list]:
+                              lift_allowed: bool = True, prefix_retry: bool = True,
+                              retry_allowed: Optional[bool] = None, retry_budget: Optional[int] = None) -> Optional[list]:
         """``[(input_row, [store_id, ...]), ...]`` in walk order (when the host reordered the leaf,
         ``_store_complete_order`` holds each input row's store-order rank); ``[]`` when the leaf cannot start
         (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
@@ -236,6 +239,8 @@ class StoreCompleteMixin:
         self._store_complete_escaped = []
         self._store_complete_order = {}  # #2007: id(input row) -> store-order rank, set only for a host-reordered leaf
         given_claims = claims
+        retry_allowed = (allow_retained_escape and not escape_retained) if retry_allowed is None else retry_allowed
+        retry_budget = budget if retry_budget is None else retry_budget
         in_chunk = {id(message) for message in chunk}
         claims = {key: list(ids) for key, ids in claims.items()}
         # Rows this pass accounts for elsewhere: its exclusions (anchors, scaffold, committed replay)
@@ -404,7 +409,8 @@ class StoreCompleteMixin:
                                                   budget, accounted_ids, scale=_SCAN_EXTEND, scanned=scanned,
                                                   copy_lookup=copy_lookup, escape_retained=escape_retained,
                                                   allow_retained_escape=allow_retained_escape,
-                                                  lift_allowed=lift_allowed, prefix_retry=prefix_retry)
+                                                  lift_allowed=lift_allowed, prefix_retry=prefix_retry,
+                                                  retry_allowed=retry_allowed, retry_budget=retry_budget)
             else:  # the documented oversized-group exception: admitted as read
                 logger.warning("LCM store-complete leaf: a first tool group is still open after a %d-row scan; "
                                "admitted as read (frontier=%d)", _SCAN_LIMIT * scale, frontier)
@@ -427,7 +433,8 @@ class StoreCompleteMixin:
             return self._store_complete_input(chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                                               budget, accounted_ids, scale=scale, scanned=(rows, truncated), copy_lookup=({}, set()),
                                               escape_retained=escape_retained, allow_retained_escape=allow_retained_escape,
-                                              lift_allowed=lift_allowed, prefix_retry=prefix_retry)
+                                              lift_allowed=lift_allowed, prefix_retry=prefix_retry,
+                                              retry_allowed=retry_allowed, retry_budget=retry_budget)
         if not out and allow_retained_escape and self._retained_escape_enabled:
             blocked_row = self._store_complete_blocked
             lifted = self._context_aware_leaf_cap() or max(budget, 1) * _SCAN_EXTEND
@@ -439,7 +446,7 @@ class StoreCompleteMixin:
                     budget if blocked_row else lifted, accounted_ids, scale=scale, scanned=(rows, truncated),
                     copy_lookup=copy_lookup, escape_retained=bool(blocked_row) or escape_retained,
                     allow_retained_escape=not escape_retained, lift_allowed=lift_allowed and bool(blocked_row),
-                    prefix_retry=prefix_retry)
+                    prefix_retry=prefix_retry, retry_allowed=retry_allowed, retry_budget=retry_budget)
                 if blocked_row is not None:
                     self._store_complete_blocked = blocked_row
                 return result
@@ -449,27 +456,29 @@ class StoreCompleteMixin:
             # become a hole. Once, retry on the tool-group-safe chunk prefix before the blocking row: the
             # rows cut off stay retained host rows, which the #1162 escape summarises from the store.
             hole, pending = hole_stop
+            self._store_complete_hole = hole  # Refs #2815: retain the id even when the outer stop is retained.
             holder = next((k for k in range(index, len(chunk)) if hole in claims.get(id(chunk[k]), ())), None)
             end = tool_group_safe_end(chunk, index) if holder is not None else 0
-            retry = (prefix_retry and holder is not None and not escape_retained and allow_retained_escape
-                     and self._retained_escape_enabled)
+            retry = (prefix_retry and holder is not None and retry_allowed
+                     and self._retained_escape_enabled)  # Refs #2815: escape frames too, top caller permitting
             logged = self.__dict__.setdefault("_contiguity_hole_logged", set())
             if str(self._conversation_id or "") not in logged:
                 logged.add(str(self._conversation_id or ""))
                 logger.info(
                     "LCM contiguity hole: conversation=%s hole_store_id=%d role=%s taken_not_emitted=%d "
-                    "blocking_chunk_index=%d/%d blocking_position=%d truncated=%s budget=%d used=%d prefix_retry=%s",
+                    "blocking_chunk_index=%d/%d blocking_position=%d truncated=%s budget=%d used=%d prefix_retry=%s retry_budget=%d",
                     self._conversation_id, hole, next((row.get("role") for row in rows if int(row["store_id"]) == hole), None),
                     pending, index, len(chunk), position(chunk[index]) if index < len(chunk) else 0, truncated,
-                    budget, used, retry)
+                    budget, used, retry, retry_budget)
             if retry:
                 prefix = chunk[:end if end <= index else 0]  # never extended through the blocking row
                 cut = {id(message) for message in chunk[len(prefix):]}
                 raw_end = next((i for i, message in enumerate(raw_chunk) if id(message) in cut), len(raw_chunk))
                 result = self._store_complete_input(
                     prefix, {id(m): given_claims[id(m)] for m in prefix if id(m) in given_claims}, full_map, view,
-                    raw_chunk[:raw_end] if prefix else [], frontier, carry, budget, accounted_ids,
-                    allow_retained_escape=True, lift_allowed=False, prefix_retry=False)
+                    raw_chunk[:raw_end] if prefix else [], frontier, carry, min(budget, retry_budget),
+                    accounted_ids, allow_retained_escape=True, lift_allowed=False, prefix_retry=False,
+                    retry_allowed=False)
                 if result is None:  # the prefix is today's input; the caller would read None as the whole chunk
                     result = [(message, []) for message in prefix]
                 # A claim of a cut row (a composite or carrier the retry cannot re-identify) may reach this leaf

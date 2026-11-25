@@ -65,6 +65,11 @@ WRITES_AS_SELF = {
     "carry_over_new_session_context",
     "rollover_session",
     "rotate_active_session",
+    # #2855: a thin wrapper over the compaction entry point the host already
+    # calls. It adds no store access: after the pass returns it only removes a
+    # row's API-side text when no input row carries the same text with the same
+    # content. The pass itself writes as the bound principal, as ingest does.
+    "compress",
 }
 
 # Host/operator lifecycle, reachable only by something holding the Python

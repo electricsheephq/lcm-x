@@ -31,6 +31,7 @@ from .db_bootstrap import (
 
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
+from .message_content import canonical_text
 from .search_query import (
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
@@ -167,6 +168,14 @@ _NODE_COLUMNS = (
 )
 _NODE_SELECT = ", ".join(_NODE_COLUMNS)
 _NODE_SELECT_N = ", ".join(f"n.{column}" for column in _NODE_COLUMNS)
+
+
+class CondensationPublicationRejected(RuntimeError):
+    """The selected summary sources no longer support publication."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class SummaryDAG:
@@ -308,7 +317,7 @@ class SummaryDAG:
                     (
                         node.session_id,
                         node.depth,
-                        node.summary,
+                        canonical_text(node.summary),
                         node.token_count,
                         node.source_token_count,
                         json.dumps(node.source_ids),
@@ -316,7 +325,7 @@ class SummaryDAG:
                         node.created_at or time.time(),
                         node.earliest_at,
                         node.latest_at,
-                        node.expand_hint,
+                        canonical_text(node.expand_hint) if node.expand_hint is not None else None,
                     ),
                 )
                 if cur.lastrowid is None:
@@ -339,6 +348,35 @@ class SummaryDAG:
                 operation_name="summary_dag.add_node",
             )
             return node.node_id
+
+    @staticmethod
+    def validate_condensation_sources(conn: sqlite3.Connection, node: SummaryNode, node_id: int) -> None:
+        """Recheck the source set in the transaction that inserted the new parent."""
+        source_ids = json.dumps(node.source_ids)
+        depths = conn.execute(
+            """SELECT source.depth
+               FROM json_each(?) AS selected
+               LEFT JOIN summary_nodes AS source
+                 ON source.node_id = selected.value AND source.node_id != ?
+                AND source.session_id = ?""",
+            (source_ids, node_id, node.session_id),
+        ).fetchall()
+        if any(row[0] is None for row in depths):
+            raise CondensationPublicationRejected("source_missing")
+        if any(row[0] != node.depth - 1 for row in depths):
+            raise CondensationPublicationRejected("source_wrong_depth")
+        claimed = conn.execute(
+            """SELECT 1
+               FROM summary_nodes AS parent INDEXED BY idx_nodes_session_depth,
+                    json_each(parent.source_ids) AS edge
+               WHERE parent.session_id = ? AND parent.depth = ?
+                 AND parent.node_id != ? AND parent.source_type = 'nodes'
+                 AND CAST(edge.value AS INTEGER) IN (SELECT value FROM json_each(?))
+               LIMIT 1""",
+            (node.session_id, node.depth, node_id, source_ids),
+        ).fetchone()
+        if claimed is not None:
+            raise CondensationPublicationRejected("source_already_claimed")
 
     @staticmethod
     def stage_delete_session_scope(

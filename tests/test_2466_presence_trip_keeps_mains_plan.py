@@ -107,8 +107,9 @@ def test_a_trip_keeps_mains_plan_with_an_r6_rewrite(tmp_path, monkeypatch, caplo
     found, cursor, missed, (plan_cursor, positional) = seen[0]  # the turn-end ingest
     assert found is None
     assert plan_cursor == min(missed)
-    assert positional == {i for i in range(min(missed), cursor) if i not in missed}  # main's formula
-    assert 4 in positional and min(missed) < 4  # the R6 row is inside the range, so the exclusion would show
+    # Topic 9 (F2): a trip never credits the unexplained R6 rewrite; its new bytes stay a write.
+    assert positional == {i for i in range(min(missed), cursor) if i not in missed and i != 4}
+    assert 4 not in positional and min(missed) < 4  # the R6 row is inside the range, so the exclusion shows
     changed = [m for level, m in records if "host changed its list before the cursor" in m]
     assert changed and all("unstored rows from" in m for m in changed)
     assert not [m for level, m in records if level >= logging.WARNING and "host changed its list" in m]

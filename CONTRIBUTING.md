@@ -120,7 +120,7 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 - every review thread is resolved before merge; a bot thread is resolved only after a reply
   that records its disposition;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
-- enqueue the reviewed head with `gh pr merge --merge --match-head-commit <head>` after checks pass and threads are resolved; never squash,
+- enqueue the reviewed head through the merge queue's `enqueuePullRequest` mutation pinned to `expectedHeadOid: <head>` (the form in AGENTS.md) after checks pass and threads are resolved, never with `gh pr merge`, which requests auto-merge on a pull request whose merge state is UNSTABLE; never squash,
   rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency. Do not update the branch first; stop on dequeue.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,

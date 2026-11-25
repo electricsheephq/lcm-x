@@ -147,6 +147,7 @@ class HostUidShadowMixin:
             if lineage is None:
                 return
             seen, pending = Counter(), self.__dict__.setdefault("_engine_uids_pending", {})
+            snapshot = getattr(self._thread_context, "compress_refusal", None)
             taken = set(taken)
             for row, kind, basis, proof_kind in generated:
                 basis = basis or hashlib.sha256(str(row.get("content") or "").encode("utf-8")).hexdigest()
@@ -154,6 +155,8 @@ class HostUidShadowMixin:
                     seen[(kind, basis)] += 1
                 row["message_uid"] = uid
                 seen[(kind, basis)] += 1
+                if snapshot is not None:
+                    snapshot["pending_uids"].setdefault(uid, pending.get(uid))
                 pending[uid] = (lineage, proof_kind)
         except Exception as exc:  # fail open: an unminted row is a no-uid row, as at the base
             self._host_uid_count(Counter(errors=1), exc)
@@ -174,20 +177,25 @@ class HostUidShadowMixin:
                        for uid in [row.get("message_uid"), *(row.get("_absorbed_message_uids") or ())]
                        if isinstance(uid, str)}
             records: dict = defaultdict(list)
+            snapshot = getattr(self._thread_context, "compress_refusal", None)
             for uid in (present & pending.keys()) - done:
                 entry = pending.get(uid)  # a bypassed pass on another thread may drop its own uid meanwhile
                 if entry is None:
                     continue
                 lineage, proof_kind = entry
+                if snapshot is not None:
+                    snapshot["pending_uids"].setdefault(uid, entry)
                 records[lineage].append((0, uid, "engine", proof_kind))
             for uid in (pending.keys() - present) | (pending.keys() & done):
                 pending.pop(uid, None)
             for lineage, rows in records.items():
                 try:
-                    self._store.add_host_uid_bindings(lineage, rows)
+                    created_at = self._store.add_host_uid_bindings(lineage, rows)
                 except Exception as exc:
                     self._host_uid_count(Counter(errors=1), exc)
                     continue
+                if snapshot is not None and created_at is not None:
+                    snapshot["uids"].extend((lineage, uid, created_at) for _, uid, _, _ in rows)
                 for _sid, uid, _kind, _proof in rows:
                     done.add(uid)
                     pending.pop(uid, None)

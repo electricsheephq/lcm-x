@@ -209,8 +209,7 @@ def test_an_ingest_that_raises_on_the_lock_still_records_its_span(tmp_path, summ
         engine._store._conn.execute("PRAGMA busy_timeout=1200")  # the store's statements give up after 1.2 s
         grown = [*view, *_turn("N1", 100.0)]
         with _Writer(tmp_path / "lcm.db", hold=3.0), caplog.at_level(logging.WARNING, logger="hermes_lcm"):
-            with pytest.raises(sqlite3.OperationalError, match="locked"):
-                engine.compress(grown, current_tokens=engine.threshold_tokens + 1)
+            assert engine.compress(grown, current_tokens=engine.threshold_tokens + 1) is grown
         lines = _lines(caplog)
         assert len(lines) == 1, lines
         line = lines[0]

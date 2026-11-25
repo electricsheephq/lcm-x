@@ -9,6 +9,7 @@ import unicodedata
 
 from . import config
 from .host_uid import _valid_uid
+from .message_content import canonical_value
 
 logger = logging.getLogger(__name__)
 SENDER_SOURCES = frozenset({"gateway_principal", "gateway"})  # gateway reserved, never emitted in S0
@@ -93,7 +94,7 @@ def create_pending(engine, payload):
                 or (author is not None and (not isinstance(author, dict) or author.get("is_bot")
                                            or author.get("id") != raw))):
             return None
-        pending = Pending(turn, obj, engine._message_replay_identity(obj, strip_carrier=False),
+        pending = Pending(turn, obj, engine._message_replay_identity(canonical_value(obj), strip_carrier=False),
                           str(engine._conversation_id or ""), key[1], (f"{platform}:{sender}", "gateway_principal"), now)
         with _LOCK:
             if (*key, turn) in _RETIRED:
@@ -134,7 +135,10 @@ def matches(engine, pending, message):
         candidate = message is pending.obj or any(
             any(obj is pending.obj for obj in entry[2]) and any(obj is message for obj in entry[2])
             for _sid, entry in _watch(engine))
-    return candidate and engine._message_replay_identity(message, strip_carrier=False) == pending.identity
+        if not candidate:
+            canonical = canonical_value(pending.obj)
+            candidate = canonical is not pending.obj and message == canonical
+    return candidate and engine._message_replay_identity(canonical_value(message), strip_carrier=False) == pending.identity
 
 
 def batch_senders(engine, originals, excluded=()):

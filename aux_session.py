@@ -27,6 +27,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .message_content import canonical_value
 from .sqlite_util import _is_ingest_busy_error
 
 logger = logging.getLogger(__name__)
@@ -1421,7 +1422,7 @@ class DelegateChildMixin:
                 if isinstance(outcome, dict):
                     outcome["linked"] = True
                 with self._attribution_span("delegate_child_store", len(messages)):
-                    return self._append_delegate_child_rows(session_id, messages, link)
+                    return self._append_delegate_child_rows(session_id, canonical_value(messages), link)
 
             if lock_wait is None:
                 with _DELEGATE_STORE_LOCK:

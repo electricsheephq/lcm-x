@@ -54,6 +54,7 @@ TURN_PATH_FILES = {
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
+    "head_copy.py",  # v0.30.3: a stored copy of the summary head stays out of assembly and compaction input.
     "host_rewrite.py", "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
@@ -100,6 +101,12 @@ NON_TURN_PATH_FILES = {
     "claude_code_capture.py",  # Claude Code transcript projection; not imported by the Hermes turn path.
     "claude_code_store.py",  # Claude Code capture writer, only for stores it creates and stamps.
     "cloud_delta.py",  # Cloud capture page-delta codec; called only by the cloud upload and restore code, never loaded by Hermes or the capture worker.
+    "cloud_guard.py",  # Cloud publication guard and retention; isolated CLI only, never the Hermes turn path.
+    "cloud_copy.py",  # Cloud capture snapshot and upload; run only by scripts/lcm_x_cloud.py, never loaded by Hermes or the capture worker.
+    "cloud_reader.py",  # Cloud capture recall merger; a separate process started through reader-override.json, never loaded by Hermes.
+    "cloud_restore.py",  # Cloud restore in a separate process; never loaded by Hermes or the capture worker.
+    "cloud_s3.py",  # Cloud S3 transport; called only by cloud copy/guard, never the Hermes turn path.
+    "cloud_view.py",  # Isolated replica-view builder; never loaded by Hermes or the capture worker.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.

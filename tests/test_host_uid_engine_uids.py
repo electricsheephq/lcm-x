@@ -70,6 +70,7 @@ def test_recompress_with_carried_recall_has_unique_uids(tmp_path, monkeypatch):
     _state_db(tmp_path, [("S", None, None)])
     engine = _open(tmp_path)
     recall = "<relevant-memories>\nEarlier context\n</relevant-memories>"
+    monkeypatch.setattr(engine, "_proactive_recall_eligible", lambda: True)
     monkeypatch.setattr(engine, "_build_proactive_recall_message",
                         lambda *a: {"role": "user", "content": recall})
     try:
@@ -420,7 +421,11 @@ def _cut(engine, out, budget, absorbed):
     out[0]["_row_id"] = 3
     seen = []
     original = engine._survival_generated
-    engine._survival_generated = lambda message: seen.append(message) or original(message)
+    def record(message, store_id=None, *, carrier_cache=None):
+        seen.append(message)
+        return original(message, store_id, carrier_cache=carrier_cache)
+
+    engine._survival_generated = record
     store_ids = engine._get_store_id_map_for_messages(out)
     fitted = engine._survival_cut(out, 1, budget, True, "test", store_ids, True)[0]
     return fitted, next(m for m in seen if m["content"].startswith("question"))

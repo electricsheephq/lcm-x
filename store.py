@@ -57,6 +57,7 @@ from .search_query import (
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
+from .message_content import canonical_value, count_surrogates
 from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
@@ -70,6 +71,13 @@ from .sqlite_util import (
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_message_bind(field: str, value: Any) -> Any:
+    clean = canonical_value(value)
+    if clean is not value:
+        logger.warning("LCM message insert replaced surrogates: field=%s count=%d", field, count_surrogates(value))
+    return clean
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 _INGEST_LEDGER_TABLES = (
@@ -924,6 +932,16 @@ class MessageStore:
                 value TEXT
             );
         """)
+        if not self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_msg_session_tool_call'"
+        ).fetchone():
+            # The session scan still works on read-only or busy stores. Retry on the next open.
+            with _temporary_sqlite_busy_timeout([self._conn], 250):
+                try:
+                    self._conn.execute("""CREATE INDEX IF NOT EXISTS idx_msg_session_tool_call
+                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL""")
+                except sqlite3.OperationalError:
+                    pass
         ensure_external_content_fts(
             self._conn,
             build_message_fts_spec(),
@@ -1058,7 +1076,7 @@ class MessageStore:
             session_id=session_id,
             context_window_tokens=self.get_context_window_tokens(session_id),
         )
-        tool_calls = msg.get("tool_calls")
+        tool_calls = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
         tc_json = json.dumps(tool_calls) if tool_calls else None
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
@@ -1071,14 +1089,14 @@ class MessageStore:
                     observed_at, observed_at_source)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    session_id,
-                    _normalize_source_value(source),
-                    _normalize_conversation_id_value(conversation_id),
-                    msg.get("role", "unknown"),
-                    _normalize_content_value(msg.get("content")),
-                    msg.get("tool_call_id"),
+                    _canonical_message_bind("session_id", session_id),
+                    _canonical_message_bind("source", _normalize_source_value(source)),
+                    _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                    _canonical_message_bind("role", msg.get("role", "unknown")),
+                    _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                    _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                     tc_json,
-                    msg.get("tool_name"),
+                    _canonical_message_bind("tool_name", msg.get("tool_name")),
                     ingested_at,
                     token_estimate,
                     0,
@@ -1150,7 +1168,7 @@ class MessageStore:
         def insert_messages() -> List[int]:
             ids: List[int] = []
             for index, (msg, est) in enumerate(zip(messages, token_estimates)):
-                tc = msg.get("tool_calls")
+                tc = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
@@ -1167,14 +1185,14 @@ class MessageStore:
                         observed_at, observed_at_source, sender_id, sender_source)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        session_id,
-                        _normalize_source_value(source),
-                        _normalize_conversation_id_value(conversation_id),
-                        msg.get("role", "unknown"),
-                        _normalize_content_value(msg.get("content")),
-                        msg.get("tool_call_id"),
+                        _canonical_message_bind("session_id", session_id),
+                        _canonical_message_bind("source", _normalize_source_value(source)),
+                        _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                        _canonical_message_bind("role", msg.get("role", "unknown")),
+                        _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                        _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                         tc_json,
-                        msg.get("tool_name"),
+                        _canonical_message_bind("tool_name", msg.get("tool_name")),
                         ts,
                         est,
                         0,
@@ -1918,11 +1936,11 @@ class MessageStore:
             "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
             "WHERE first_check IS NOT NULL AND kind IN ('canonical', 'version') GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
 
-    def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
-        """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
+    def add_host_uid_bindings(self, lineage_key: str, rows) -> Optional[float]:
+        """Insert unseen bindings and return the timestamp of this insert batch."""
         rows = list(rows)
         if not rows:
-            return
+            return None
         self._ensure_host_uid_schema()
         now = time.time()
         self._host_uid_write(lambda conn: conn.executemany(
@@ -1931,6 +1949,7 @@ class MessageStore:
             "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
             [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
              for store_id, uid, kind, proof_kind in rows]))
+        return now
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
         """Join the explicit owner, otherwise retain the standalone shadow boundary.
@@ -2397,7 +2416,7 @@ class MessageStore:
         ).fetchone()
         if not row or not row[0]:
             return None
-        return json.loads(str(row[0]))
+        return canonical_value(json.loads(str(row[0])))
 
     def read_metadata_json_many(self, keys: list[str]) -> Dict[str, Any]:
         """Batch ``read_metadata_json``: {key: value}; malformed values are skipped."""
@@ -2407,7 +2426,7 @@ class MessageStore:
             query = f"SELECT key, value FROM metadata WHERE key IN ({','.join('?' * len(chunk))})"
             for key, value in conn.execute(query, chunk):
                 try:
-                    found[key] = json.loads(str(value)) if value else None
+                    found[key] = canonical_value(json.loads(str(value))) if value else None
                 except ValueError:
                     continue
         return found
@@ -2788,6 +2807,21 @@ class MessageStore:
         except (ValueError, TypeError):
             return None
         return data if isinstance(data, dict) else None
+
+    def try_increment_compaction_telemetry(
+        self, conversation_id: str, increment: int, updates: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Skip a turn's diagnostic update if another thread owns the store."""
+        lock = self._write_lock
+        if lock.acquire(blocking=False):
+            try:
+                if self._conn is not None and not self._conn.in_transaction:
+                    return self.increment_compaction_telemetry(conversation_id, increment, updates)
+            except Exception:
+                logger.debug("LCM turn telemetry write failed", exc_info=True)
+            finally:
+                lock.release()
+        return None
 
     def increment_compaction_telemetry(
         self,
@@ -3397,8 +3431,8 @@ class MessageStore:
         # Deserialize tool_calls JSON
         if d.get("tool_calls"):
             try:
-                d["tool_calls"] = json.loads(d["tool_calls"])
-            except (json.JSONDecodeError, TypeError):
+                d["tool_calls"] = canonical_value(json.loads(d["tool_calls"]))
+            except (ValueError, TypeError):
                 pass
         return d
 

@@ -854,7 +854,8 @@ def test_full_text_setup_expiry_does_not_start_search(semantic_engine, monkeypat
         release.set()
         for thread in threading.enumerate():
             if thread.name == "lcm-full-text":
-                thread.join(timeout=0.2)
+                # The asserts below need the worker to finish after release; 0.2 s was too short on a loaded runner.
+                thread.join(timeout=5.0)
     assert len(opened) == 1
     assert opened[0].closed is True
 

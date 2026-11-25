@@ -1,0 +1,1 @@
+- Fix: At a small context window, LCM-X avoids storing a user objective twice when Hermes restores its original text at turn end. Replay requires the generated objective's host occurrence and the retained tool history to match.

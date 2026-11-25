@@ -67,6 +67,12 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_foreground_budget", "_ingest_cursor", "_consecutive_ingest_failures",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities", "_pruned_tool_source_store",
 })
+# Read on the reconcile path but never snapshotted, pinned by test_cache_attribute_inventory_is_pinned: adding a
+# name fails until that test is edited and the name's line says why it cannot change an output.
+CACHE_ATTRIBUTES = frozenset({
+    "_replay_identity_memo",  # #2856 live identity memo: output-neutral by its own oracle and the session differential
+    "_storage_ready",  # read only by the identity wrapper, to leave the memo off until storage is open
+})
 Trace = list[str]
 Message = dict[str, Any]
 NOTE: Message = {"role": "system", "content": (

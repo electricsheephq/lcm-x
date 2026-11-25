@@ -109,17 +109,48 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
 ```
 
 Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
-`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
-by default for provider-bound copies; durable storage stays raw. See
+`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is off
+by default for provider-bound copies (opt in with `LCM_EMBEDDING_PRIVACY_ENABLED=true`);
+durable storage stays raw. See
 [Voyage setup, key creation and current limits](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
 
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
+- `LCM_TURN_START_DEFER_CEILING` (default `0`, env only) defers otherwise threshold-eligible
+  automatic passes during tool turns while prompt pressure is below this share of the active model
+  window. A nonzero setting must be finite, positive and below `1 - LCM_SURVIVAL_RESERVE`.
+  Invalid values disable deferral and appear once in `config_source_warnings`. The host must
+  supply a response stop reason in usage (`tool_use` or `tool_calls`) or supply the normalized
+  finish reason through `post_api_request` with a verifiable current turn ID. Without a phase
+  signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
+  at or above the ceiling and during forced overflow.
+  Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
+  So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the
+  trigger, the host's next
+  pre-API check in the same turn can start another pass, as with the setting off. The host's progress
+  latch and attempt cap bound it; that pass logs no deferral line and does not move
+  `turn_start_deferred_checks`.
+
+  LCM-X checks the ceiling against the live trigger, including after Hermes or
+  the LCM assembly cap lowers it. The effective ceiling is the lower of the
+  configured ceiling and any assembly cap, where forced overflow takes over.
+  LCM-X warns when the effective ceiling is at or below the trigger (inert) or
+  above an absolute or lowered trigger (unanchored). Both warnings include the
+  token values and name the cap when it limits deferral. Global and per-model
+  ratio triggers below the effective ceiling are quiet while they retain their
+  window-derived value. The first deferral in each episode logs at INFO and
+  subsequent deferrals log at DEBUG. When enabled, `/lcm status` shows the
+  configured ceiling as a share and in tokens beside the trigger, plus
+  `turn_start_deferred_checks`, the number of gate checks deferred since the
+  last session bind or reset (a side-channel session's bind resets it too).
+
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
-- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`): the summary-frontier size a threshold sweep condenses toward; `0` means one leaf budget capped at a quarter of the compaction threshold, so a small window's summaries cannot fill it (#1139);
+- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`) sets the threshold sweep's summary-frontier budget. A positive value overrides the ratio. With the tokens setting not positive and the ratio at `0`, the budget is one leaf capped at a quarter of the compaction threshold (#1139).
+- `LCM_SUMMARY_PREFIX_TARGET_RATIO` (default `0`, env only) sets the summary-frontier budget as a share of the model window when the tokens setting is not positive.
+- `LCM_DEPTH_TARGET_RATIO` (default `0`, env only) lets an automatic threshold sweep stop its leaf passes at a whole-prompt estimate expressed as a share of the model window. It is off at `0` and requires a target below the trigger. While the target is active, freed tokens are scaled by the host figure minus the booked fixed load over LCM-X's count (clamped 1-4), and, with the foreground settings at their defaults, a bounded catch-up may admit further summary calls once the pass has stored progress, up to about 210 s from `compress()` entry minus the finalization reserve (each extension call capped at 85% of the summary timeout); forced, overflow and recovery passes keep the base budget. Both window ratios accept values from `0` up to but excluding `1`.
 - `LCM_BACKGROUND_LEAF_PREP_ENABLED` (default `false`, #787 slice 1): prepare leaf summaries off-turn above P = threshold − 0.15 × window and publish them at the threshold crossing with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` (default `8`) and `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` (default `600`) bound its own spend guard;
 - `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true` from v0.27.0): background day/week rollup summaries; the first session bind creates the rollup tables and schedules maintenance; `false` opts out;
 - `LCM_LEAF_TARGET_RATIO` (default `0.20`), `LCM_LEAF_TARGET_MIN_TOKENS` (default `2000`) and `LCM_LEAF_TARGET_MAX_TOKENS` (default `2000`): leaf summary target `min(MAX, max(MIN, int(source_tokens * RATIO)))`; the first summary call gets twice the target as `max_tokens`. Defaults give a fixed 2,000-token target. Setting only RATIO has no effect while MIN equals MAX and warns; set `LCM_LEAF_TARGET_MAX_TOKENS` above MIN to enable the ratio. A MIN above the default cap also needs MAX, otherwise MIN resets with a warning naming that key (#614, #1138);
@@ -131,7 +162,7 @@ Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/
 - `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction. On a cold or reconciled start, `shadow` also uses the ledger's occurrence-proven prefix as a cursor candidate. It can only move the cursor forward past rows proven stored or skipped by `LCM_IGNORE_MESSAGE_PATTERNS`, so it can change which incoming rows are stored. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup, ledger writes and the candidate, and restores the legacy cursor choice. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
-- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
+- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers receive unfiltered copies by default under the `privacy:off` vector revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to experimental filtering with a nonempty list of known patterns. `LCM_SENSITIVE_PATTERNS_ENABLED=true` separately enables irreversible durable redaction. A change in filter setting requires rebuilding the affected vector identity. `LCM_EMBEDDING_PRIVACY_ENABLED` also governs the query and the candidate snippets that optional cloud rerank (`LCM_RERANK_ENABLED=true`, Voyage only, off by default) sends to Voyage. The privacy transform is off by default, so they are sent unfiltered unless it is `true`.
 
 `LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
 Environment values override `lcm.embedding_query_prefix` and `lcm.embedding_document_prefix` in YAML; quote values such as `"search_query: "` to keep whitespace.
@@ -242,8 +273,8 @@ A published retained-occurrence escape logs one WARNING per pass naming the stor
 Regenerate this table with the [reference generator](https://github.com/electricsheephq/lcm-x/blob/main/scripts/gen_config_reference.py) from the
 checkout root. It lists every scalar registry entry using the declared constructor
 default, without reading the environment, credentials, or host configuration.
-`""` is an empty string; `null` means unset (automatic provider-dependent protection
-for `LCM_EMBEDDING_PRIVACY_ENABLED`). Empty model/path defaults resolve at runtime;
+`""` is an empty string and `null` means unset. Unset resolves to off for
+`LCM_EMBEDDING_PRIVACY_ENABLED`. Empty model/path defaults resolve at runtime.
 `LCM_CONTEXT_THRESHOLD` and `LCM_SUMMARY_TIMEOUT_MS` can inherit host settings as
 described above. Some defaults are sentinels: `LCM_FOREGROUND_HARD_SECONDS` `0` means 120 s,
 `LCM_PREANSWER_EVIDENCE_MODE` `""` means `legacy_selective` when pre-answer evidence is on,
@@ -312,10 +343,13 @@ without changing its behavior until removal.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `int` | `2000` | — | — |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | — |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `float` | `0.0` | — | — |
+| `LCM_DEPTH_TARGET_RATIO` | `float` | `0.0` | — | — |
+| `LCM_SUMMARY_PREFIX_TARGET_RATIO` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_MODEL` | `str` | `""` | — | — |
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
 | `LCM_SURVIVAL_FIT` | `bool` | `true` | — | — |
 | `LCM_SURVIVAL_RESERVE` | `float` | `0.15` | `>= 0.0`, `<= 0.9` | — |
+| `LCM_TURN_START_DEFER_CEILING` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `int` | `2` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `int` | `300` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` | `int` | `6` | — | — |

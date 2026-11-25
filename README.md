@@ -179,8 +179,8 @@ Core capabilities:
   protect SQLite from inline media-ish base64 blobs
 - **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
   keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
-  (off by default — the durable store is lossless), and automatic protection of the copies
-  sent to known cloud embedding providers
+  and a separate experimental opt-in filter for copies sent to known cloud embedding
+  providers. Both flags default to off
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
@@ -238,6 +238,14 @@ See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
 [Current project state](docs/project-status.md) and
 [Benchmark methodology](benchmarks/METHODOLOGY.md) for current identities,
 gaps, and proof boundaries.
+
+### AML Cycle 2
+
+Both entries ran the LCM-X v0.28.0 engine ([`v0.28.0`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0), `709099b3`) behind our AML gateway, `bench/aml/aml_server.py`. They used the OmniMemEval client adapter in [our OmniMemEval fork](https://github.com/electricsheephq/OmniMemEval/tree/162640314863db64b5af62138b5b81776516d1ff) (`scripts/client_factory/lcmx_client.py`, commit `16264031`).
+- Coding: tag [`v0.28.0-coding-r3`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-coding-r3) at `9917c35b`. The gateway file is byte-identical to the one that ran.
+- Textual: tag [`v0.28.0-aml-textual`](https://github.com/electricsheephq/lcm-x/tree/v0.28.0-aml-textual) at `533c5956`. The gateway file is content-equivalent: the deployed copy differed only in how it found the OmniMemEval checkout.
+- Embedder: a local BAAI/bge-small-en-v1.5 through FastEmbed, with no generative LLM in the memory path. We disclosed this deviation to AML, which acknowledged it in writing on 6 November 2026.
+- Prior work: the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman; [lossless-claw](https://github.com/martian-engineering/lossless-claw); and [stephenschoettler/hermes-lcm](https://github.com/stephenschoettler/hermes-lcm), the repository LCM-X continues (its root commit is `d6c32609`).
 
 ### Results
 
@@ -468,10 +476,10 @@ identity check from the warmup/profile output, and the finite monotonic
 dry-run/apply loop in the operator guide before semantic coverage is complete.
 
 <a id="cloud-embedding-privacy"></a>
-Cloud embeddings are a separate opt-in. Provider-bound copies use the configured
-sensitive-pattern catalog by default, while durable messages and FTS remain raw.
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly opts out and binds vectors to
-the distinguished `privacy:off` revision. When provider-copy privacy is on, the
+Cloud embeddings are a separate opt-in. The experimental provider-input filter
+defaults to off, which sends unfiltered copies under the `privacy:off` vector
+revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to filtering through
+the configured sensitive-pattern catalog. When the filter is on, the
 catalog must be nonempty and contain only supported pattern names (any unknown
 name fails warmup and dispatch loudly). Dry-run the backfill first;
 raw-chunk cloud backfill also requires explicit raw-text consent.
@@ -599,9 +607,9 @@ The manifest still declares all 16 tools.
 | `lcm_describe` | Inspect the current-session DAG or preview an `externalized_ref` without loading full content. |
 | `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message from a cross-session `lcm_grep` result and `include_exact_ref=true` when its returned slice must be cited or computed. |
 | `lcm_expand_query` | Answer a question using expanded current-session LCM context while returning a bounded answer. |
-| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
+| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. `hidden_only_streak` counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` shows the latest frontier store ID, leaves, and hidden rows. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
-| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. `compaction_progress` warns at three hidden-only passes because the host context can only shrink once compaction reaches rows the host still holds. |
 | `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ## Recall skill and policy
@@ -700,6 +708,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in share of the model window below which automatic compaction waits during a tool turn. Requires host response stop reasons. Use `0` to disable or a finite ratio greater than zero and below `1 - LCM_SURVIVAL_RESERVE`. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -714,7 +723,8 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable backlog-sized leaf chunk targets; when off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`, `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of the oldest non-tail raw backlog, capped at 40% of a known window |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `true` | At threshold, run one synchronous bounded sweep that drains chunked raw history before publishing one new active context; `false` compacts only until pressure falls below the trigger |
-| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` uses one leaf budget, capped at a quarter of the compaction threshold |
+| `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Positive values override the ratio. When the tokens setting is not positive and the ratio is `0`, the sweep uses one leaf budget capped at a quarter of the compaction threshold |
+| `LCM_SUMMARY_PREFIX_TARGET_RATIO` | `0` | Summary-frontier budget as a share of the model window, used when the tokens setting is not positive. Env only, valid from `0` up to but excluding `1` |
 | `LCM_BACKGROUND_LEAF_PREP_ENABLED` | `false` | #787 slice 1: after each turn, summarise the oldest raw backlog above the frontier off-turn (never the fresh tail) once the host count passes P = threshold − 0.15 × window, and at the threshold crossing publish those prepared leaves through the fenced publication, with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); still above L, the turn runs the normal path. Prepared leaves are in memory only. Off on windows where P ≤ 0.30 × window or L ≤ 0, when `auxiliary.compression.max_concurrency` is 1, and while ignore-message patterns are set. `/lcm status` reports `background_leaf_prep` counters while on |
 | `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` | `8` | The background preparation's own spend guard: summariser calls per window (it also waits while the foreground guard has fewer than 2 calls left, and uses its own `prep:` circuit keys) |
 | `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` | `600` | The window of that guard, in seconds |
@@ -762,7 +772,7 @@ describes index fallback and timestamp handling.
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content is excluded from LCM storage |
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
-| `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
+| `LCM_EMBEDDING_PRIVACY_ENABLED` | off (unset or `false`) | Experimental filter for provider-bound copies on known cloud embedding providers. Opt in with `true`. The default sends unfiltered input under the `privacy:off` vector revision |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
@@ -771,6 +781,7 @@ describes index fallback and timestamp handling.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
+| `LCM_DEPTH_TARGET_RATIO` | `0` | Stop a threshold sweep when the estimated whole prompt reaches this share of the model window. Env only, off at `0`, and active only below the compaction trigger. Active sweeps calibrate estimated token savings against the host prompt figure after subtracting booked fixed load, using a scale from 1 to 4. Setting the ratio also enables bounded catch-up with the default foreground budgets. |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
@@ -807,14 +818,12 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched by redaction unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
 Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`); the operator's `/lcm doctor clean apply` deletes on purpose (off by default, takes a backup first). Sessions matched by `LCM_IGNORE_SESSION_PATTERNS` or `LCM_STATELESS_SESSION_PATTERNS` (both empty by default) are not stored at all.
-Cloud embedding privacy is separate and transforms provider-bound copies only;
-it defaults on for known cloud providers and can be explicitly opted out with
-`LCM_EMBEDDING_PRIVACY_ENABLED=false`, which uses the `privacy:off` vector
-revision and sends raw provider input. The nonempty known-pattern policy
-requirements for warmup, backfill, and semantic-query dispatch apply only when
-provider-copy privacy is ON — the explicit `privacy:off` opt-out bypasses
-catalog validation by design. Local providers receive byte-identical
-input and do not enter the cloud privacy path.
+The experimental cloud embedding privacy filter defaults to off. Set
+`LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in for known cloud providers.
+Warmup, backfill, and semantic-query dispatch require a nonempty catalog
+of known patterns when the filter is enabled. The default `privacy:off`
+vector revision sends unfiltered provider input. Local providers receive
+byte-identical input.
 
 When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
 secret values are replaced with metadata-only placeholders before SQLite, FTS,
@@ -839,17 +848,17 @@ the digest to avoid making password-like values easier to dictionary-check.
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` expose the enabled state, configured pattern names,
 unknown names, source, and placeholder format without exposing raw secret values.
 
-Cloud embeddings add a separate provider-input-only privacy transform. It does
-not rewrite historical SQLite, FTS, summary, or payload data. It resolves ON
-automatically for known cloud providers and does not require
-`LCM_SENSITIVE_PATTERNS_ENABLED`. While it is on, cloud warmup, summary/chunk
+The experimental cloud embedding filter applies to provider input only.
+It is off by default. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in.
+While it is on, cloud warmup, summary/chunk
 backfill, and semantic-query dispatch require a nonempty, known
 `LCM_SENSITIVE_PATTERNS` catalog; matching provider input becomes pattern-only
 placeholders, residual matches are rejected, and the transform version plus
 active-pattern-name hash bind into the vector profile revision.
-`LCM_EMBEDDING_PRIVACY_ENABLED=false` opts out explicitly and binds the
-distinguished `privacy:off` revision instead of blocking. Either way a posture or
-policy change refuses dispatch until `/lcm embed warmup` registers the new identity.
+The default binds the `privacy:off` revision. Recall falls back to full
+text while the configured revision and stored vector identity differ. See the
+[operator guide](docs/operator-guide.md#sensitive-pattern-redaction) for how to
+rebuild the affected vectors.
 FastEmbed is in-process. The shipped Ollama provider does not apply the cloud
 gate, so use it only with a trusted local/loopback endpoint; #337 tracks
 endpoint-aware locality for remote Ollama configurations.
@@ -926,6 +935,34 @@ Examples, as math rather than universal recommendations:
 | `1000000` | `400000` | `0.40` |
 | `1000000` | `600000` | `0.60` |
 
+With a host that passes response stop reasons, this profile example defers
+eligible mid-turn passes from 500,000 up to 700,000 prompt tokens on a
+1M-token window. At 700,000, on forced overflow, or at the next turn start,
+the normal gates decide whether to compact.
+
+```dotenv
+LCM_CONTEXT_THRESHOLD=0.50
+LCM_TURN_START_DEFER_CEILING=0.70
+```
+
+LCM-X checks the ceiling against the live compaction trigger, including after
+Hermes or the LCM assembly cap lowers it. The effective ceiling is the lower of
+the configured ceiling and any assembly cap, where forced overflow takes over.
+An effective ceiling at or below the trigger warns as inert. An effective
+ceiling above an absolute or lowered trigger warns as unanchored. Global and
+per-model ratio triggers below the effective ceiling are quiet while they
+retain their window-derived value. Both warnings show the effective ceiling and
+trigger in tokens and name the cap when it limits deferral. The first deferral
+in an episode logs at INFO and subsequent deferrals log at DEBUG. With the
+ceiling enabled, `/lcm status` shows the configured share and its token value
+alongside `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too). A foreground pass at or above the ceiling, or on forced overflow, clears the
+tool-turn phase, so if it leaves the prompt above the trigger, the host's next
+check in the same turn can start another pass, as with the setting off. The
+host's progress latch and attempt cap bound it; that pass logs no deferral line
+and does not move the counter.
+
 A reasonable first pass for a true 1M effective window is:
 
 | Goal | Desired trigger | Threshold | Notes |
@@ -949,10 +986,12 @@ understanding whether your workload is dominated by huge raw backlog passes.
 `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`) is a cache-shape policy. Once
 threshold pressure triggers compaction, the invocation keeps summarizing the
 oldest raw chunks outside the protected fresh tail even after pressure falls
-below the trigger. It then condenses the provider-visible summary frontier only
-when that frontier exceeds `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (or one leaf
-budget, capped at a quarter of the compaction threshold, when the target is `0`).
-One invocation is bounded to 12 total leaf plus
+below the trigger. With `LCM_DEPTH_TARGET_RATIO` set, the sweep can stop the leaf
+passes early when the estimate reaches the target, including the host's fixed
+load. The sweep then condenses an oversized summary frontier toward the prefix
+budget. A positive `LCM_SUMMARY_PREFIX_TARGET_TOKENS` takes precedence over
+`LCM_SUMMARY_PREFIX_TARGET_RATIO`.
+By default, one invocation is bounded to 12 total leaf plus
 condensation calls and 120 seconds between calls, persists each completed DAG
 pass, and publishes one newly assembled active context at the end. It is
 synchronous and independent of deferred/background maintenance.

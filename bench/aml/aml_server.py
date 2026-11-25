@@ -47,8 +47,9 @@ def encoded(value):
 
 
 class APIError(Exception):
-    def __init__(self, status, reason):
+    def __init__(self, status, reason, degraded_reasons=None):
         self.status, self.reason = status, reason
+        self.degraded_reasons = degraded_reasons  # receipts show these only with AML_ITEM_FIELDS=v2
 
 
 def authenticated(headers, token):
@@ -115,6 +116,34 @@ def search_response(text, user_key, top_k):
     lines = ranked_lines(text, top_k)
     result = {'data': [dict(id=digest(user_key + '\0' + line), content=line,
                             score=1.0 / (rank + 1)) for rank, line in enumerate(lines)]}
+    if len(encoded(result)) > MAX_BYTES:
+        raise APIError(413, 'search response exceeds 30 MiB')
+    return result
+
+
+_TIME_PREFIX = re.compile(r'\[([^\]\n]+)\] ')
+
+
+def created_at(stamp):
+    """ISO 8601 UTC for a timezone-aware time, else None (naive or free-text times are never guessed)."""
+    try:
+        parsed = datetime.fromisoformat(stamp.strip().replace('Z', '+00:00'))
+        if parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    except (ValueError, OverflowError):  # unparseable, or past datetime's bounds in UTC
+        return None
+
+
+def with_item_fields(result):
+    """AML_ITEM_FIELDS=v2: each item also carries text (a copy of content) and, when the line
+    starts with the adapter's bracketed time prefix, created_at. Other AML fields are unchanged."""
+    for row in result['data']:
+        row['text'] = row['content']
+        match = _TIME_PREFIX.match(row['content'])
+        stamp = created_at(match.group(1)) if match else None
+        if stamp:
+            row['created_at'] = stamp
     if len(encoded(result)) > MAX_BYTES:
         raise APIError(413, 'search response exceeds 30 MiB')
     return result
@@ -425,6 +454,8 @@ def configure_adapter(root):
                       PYTHONDONTWRITEBYTECODE='1')
     for variable in ('LCMX_EMBED_CACHE', 'LCM_LONGMEMEVAL_EMBED_CACHE', 'LCMX_SEARCH_SCOPE_BIAS'):
         os.environ.pop(variable, None)
+    # An inherited LCMX_ADAPTER_VERSION must not change delivery; only AML_ADAPTER_VERSION does.
+    os.environ['LCMX_ADAPTER_VERSION'] = adapter_version()
     sys.dont_write_bytecode = True
     omni_repo = os.environ.get('AML_OMNIMEMEVAL_REPO', '')
     if not omni_repo:
@@ -435,6 +466,10 @@ def configure_adapter(root):
     sys.path.insert(0, str(OMNI_REPO / 'scripts'))
     from client_factory.lcmx_client import LcmxClient
     return LcmxClient()
+
+
+def adapter_version():
+    return os.environ.get('AML_ADAPTER_VERSION') or '1'
 
 
 def prepare_model_cache(root):
@@ -457,6 +492,7 @@ def worker():
     local_network_only()
     payload = json.load(sys.stdin)
     root, body = Path(payload['root']), payload['body']
+    item_fields = os.environ.get('AML_ITEM_FIELDS') or 'v1'
     # Suppress third-party prints (which can include user identifiers/content).
     output = os.dup(sys.stdout.fileno())
     with open(os.devnull, 'w') as sink:
@@ -476,11 +512,21 @@ def worker():
                         response = coding_search_response if payload['search_mode'] == 'coding' else search_response
                         result = response(client.search(body['query'], user_key, body['top_k']),
                                           user_key, body['top_k'])
+                    if item_fields == 'v2':
+                        result = with_item_fields(result)
             reply = {'status': 200, 'body': result}
         except APIError as error:
             reply = {'status': error.status, 'body': {'detail': {'reason': error.reason}}}
         except Exception:
             reply = {'status': 500, 'body': {'detail': {'reason': 'LCM-X operation failed'}}}
+        except SystemExit as notice:
+            # The adapter aborts degraded or failed work with SystemExit, which would kill this
+            # worker silently. v2 keeps the same 500 reply but returns the notice for the receipt.
+            if item_fields != 'v2':
+                raise
+            reason = notice.code if isinstance(notice.code, str) else 'worker exited'
+            reply = {'status': 500, 'body': {'detail': {'reason': 'LCM-X worker failed'}},
+                     'degraded_reasons': [reason[:500]]}
     with os.fdopen(output, 'wb') as handle:
         handle.write(encoded(reply))
 
@@ -505,12 +551,12 @@ def run_worker(root, operation, body, deadline, search_mode='textual'):
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
-            raise APIError(408, 'request deadline exceeded') from None
+            raise APIError(408, 'request deadline exceeded', ['worker deadline exceeded']) from None
     if process.returncode:
         raise APIError(500, 'LCM-X worker failed')
     reply = json.loads(stdout)
     if reply['status'] != 200:
-        raise APIError(reply['status'], reply['body']['detail']['reason'])
+        raise APIError(reply['status'], reply['body']['detail']['reason'], reply.get('degraded_reasons'))
     return reply['body']
 
 
@@ -554,6 +600,8 @@ class Handler(BaseHTTPRequestHandler):
         self.deadline = self.started + self.server.service.timeout
         self.original_path = None
         self.metrics = dict(top_k=None, hits=0, response_bytes=0, rows_with_newline=0)
+        if self.server.item_fields == 'v2':  # one receipt schema in v2, rejected and health requests included
+            self.metrics.update(degraded=False, degraded_reasons=[], adapter_version=int(adapter_version()))
         self.logged, self.user_hash, self.request_hash = False, None, None
         timer = threading.Timer(self.server.service.timeout, self.expire)
         timer.daemon = True
@@ -738,6 +786,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, response)
             self.capture(body, response)  # after the reply, so capture can never delay it
         except APIError as error:
+            if self.server.item_fields == 'v2' and error.degraded_reasons:
+                self.metrics.update(degraded=True, degraded_reasons=error.degraded_reasons)
             self.respond(error.status, {'detail': {'reason': error.reason}})
         except (TimeoutError, OSError):
             self.respond(408, {'detail': {'reason': 'request interrupted or deadline exceeded'}})
@@ -760,6 +810,7 @@ class Server(ThreadingHTTPServer):
         self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
         self.receipt_lock = threading.Lock()
         self.capture_dir = os.environ.get('AML_CAPTURE_DIR')
+        self.item_fields = os.environ.get('AML_ITEM_FIELDS') or 'v1'
         super().__init__(('127.0.0.1', port), Handler)
 
     def handle_error(self, request, client_address):
@@ -780,6 +831,10 @@ def main():
     v1_routes = os.environ.get('AML_V1_ROUTES') or 'frozen'
     if v1_routes not in ('frozen', 'v2') or (v1_routes == 'v2' and not os.environ.get('AML_V2_DB_ROOT')):
         parser.exit(1, 'AML_V1_ROUTES must be frozen, or v2 with AML_V2_DB_ROOT set\n')
+    if (os.environ.get('AML_ITEM_FIELDS') or 'v1') not in ('v1', 'v2'):
+        parser.exit(1, 'AML_ITEM_FIELDS must be v1 or v2\n')
+    if adapter_version() not in ('1', '2'):
+        parser.exit(1, 'AML_ADAPTER_VERSION must be 1 or 2\n')
     local_network_only()
     os.umask(0o077)
     token = os.environ.get('AML_ADDSEARCH_TOKEN', '')
@@ -822,6 +877,10 @@ def main():
             start = dict(event='start', search_mode=search_mode)
             if server.v1_to_v2:
                 start['v1_routes'] = 'v2'
+            if server.item_fields == 'v2':
+                start['item_fields'] = 'v2'
+            if adapter_version() != '1':
+                start['adapter_version'] = int(adapter_version())
             print(json.dumps(start), flush=True)
             server.serve_forever()
 

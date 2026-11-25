@@ -61,8 +61,11 @@ def local25(receipt, product, cache=None, population=450):
             for name,key in (('lcm.db','database_sha256'),('speakers.json','speakers_sha256')):
                 if digest_file(directory/name)!=r['sources'][key]:
                     raise Incomplete('W1 store digest drift')
-            if json.loads((directory/'build-manifest.json').read_bytes()).get('config')!='local':
+            manifest=json.loads((directory/'build-manifest.json').read_bytes())
+            if manifest.get('config')!='local':
                 raise Incomplete('W1 is not LOCAL')
+            if manifest.get('format')!=4:
+                raise Incomplete('W1 store is not certified (format)')
     return receipt['rows']
 def inventory(receipt, product, cache):
     counts = {name:sum(1 for _ in (Path(cache)/name).glob('*.json')) for name in ('responses','retrieval')}

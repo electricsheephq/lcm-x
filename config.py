@@ -8,6 +8,7 @@ import shlex
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -869,6 +870,26 @@ def _warn_env_range(name: str, value: Any, warnings: list[str]) -> None:
     warnings.append(f"out-of-range env {key}={repr(raw)[:40]} (must be {bounds}); {effect}")
 
 
+def survival_reserve_fraction(config: Any) -> float:
+    """Resolve the survival reserve with the existing default, coercion and clamp."""
+    return min(0.9, max(0.0, float(getattr(config, "survival_reserve", 0.15) or 0.0)))
+
+
+def _parse_turn_start_defer_ceiling(raw: Any, config: "LCMConfig", source: str, warnings: list[str]) -> float:
+    try:
+        value = None if isinstance(raw, bool) else float(raw)
+    except (TypeError, ValueError, OverflowError):
+        value = None
+    if value is not None and (value == 0 or (
+        0 < value < 1
+        and Decimal(str(value)) < 1 - Decimal(str(survival_reserve_fraction(config)))
+    )):
+        return value
+    warnings.append(f"invalid {source}={raw!r} ignored; using 0 (expected 0 or a finite ratio "
+                    "greater than 0 and below 1 - survival reserve)")
+    return 0.0
+
+
 # Accepted spellings, in configuration-reference and diagnostic display order.
 EMBEDDING_PROVIDER_SPELLINGS: dict[str, tuple[str, ...]] = {
     "voyage": ("voyage", "voyageai"),
@@ -1021,10 +1042,13 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     ),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("stub_first_exit_target_ratio", "LCM_STUB_FIRST_EXIT_TARGET_RATIO", float),
+    _EnvFieldSpec("depth_target_ratio", "LCM_DEPTH_TARGET_RATIO", float),
+    _EnvFieldSpec("summary_prefix_target_ratio", "LCM_SUMMARY_PREFIX_TARGET_RATIO", float),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
     _EnvFieldSpec("survival_fit", "LCM_SURVIVAL_FIT", bool),
     _EnvFieldSpec("survival_reserve", "LCM_SURVIVAL_RESERVE", float),
+    _EnvFieldSpec("turn_start_defer_ceiling", "LCM_TURN_START_DEFER_CEILING", float),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
     _EnvFieldSpec("summary_circuit_breaker_rejection_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD", int),
@@ -1135,6 +1159,9 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "summary_timeout_ms",
     "summary_prompt_version",
     "stub_first_exit_target_ratio",
+    "depth_target_ratio",
+    "summary_prefix_target_ratio",
+    "turn_start_defer_ceiling",
 })
 
 # Fields exposed as runtime preset overrides (consumed by presets.py).
@@ -1285,10 +1312,8 @@ class LCMConfig:
     # Durable redaction is opt-in. When enabled, named patterns redact matching
     # secrets before LCM storage, FTS indexing, summarization, or externalization.
     sensitive_patterns_enabled: bool = False
-    # Provider-bound embedding copies have an independent privacy posture.
-    # None means automatic: enabled for recognized cloud providers and skipped
-    # for local providers. False is an explicit cloud-privacy opt-out whose
-    # distinguished revision keeps vector identities posture-bound.
+    # Experimental filter for cloud provider input. Only explicit True enables
+    # it. None (including unset) and False use the privacy:off vector revision.
     embedding_privacy_enabled: bool | None = None
     # Named catalog entries shared by durable redaction and provider-copy privacy.
     sensitive_patterns: list[str] = field(
@@ -1593,6 +1618,9 @@ class LCMConfig:
     # #671 stub-first exit: a share of the threshold that lowers the exit's target to
     # min(threshold - leaf chunk, 0.95 x threshold, int(ratio x threshold)); 0 = the built-in target.
     stub_first_exit_target_ratio: float = 0.0
+    # Shares of the model window. Zero disables the depth target or leaves the prefix ratio unset.
+    depth_target_ratio: float = 0.0
+    summary_prefix_target_ratio: float = 0.0
     # #48: absolute compaction trigger in tokens (0 = ratio-based). from_env() reads
     # LCM_ABSOLUTE_THRESHOLD_TOKENS, then config.yaml lcm.context_threshold_tokens.
     absolute_threshold_tokens: int = 0
@@ -1601,7 +1629,14 @@ class LCMConfig:
     embeddings_enabled_explicit: bool = True
     _embeddings_enabled_supplied: bool | None = field(default=None, repr=False)
 
+    # Below this share of the model window, wait until turn start to compact. Zero disables deferral.
+    # Appended last so positional LCMConfig(...) construction keeps every earlier field's position.
+    turn_start_defer_ceiling: float = 0.0
+
     def __post_init__(self):
+        self.turn_start_defer_ceiling = _parse_turn_start_defer_ceiling(
+            self.turn_start_defer_ceiling, self, "turn_start_defer_ceiling", self.config_source_warnings,
+        )
         # A copy keeps its consent marker; a copy reset to None is an omitted setting again.
         if self._embeddings_enabled_supplied is None or self.embeddings_enabled is None:
             self._embeddings_enabled_supplied = self.embeddings_enabled is not None
@@ -1898,6 +1933,17 @@ class LCMConfig:
                        "(must be >= 0 and <= 1)")
             c.stub_first_exit_target_ratio, source = LCMConfig.stub_first_exit_target_ratio, "default"
         _record("stub_first_exit_target_ratio", source, warning)
+        for name, key in (
+            ("depth_target_ratio", "LCM_DEPTH_TARGET_RATIO"),
+            ("summary_prefix_target_ratio", "LCM_SUMMARY_PREFIX_TARGET_RATIO"),
+        ):
+            default = getattr(c, name)
+            ratio, source, warning = _parse_float_env_with_source(key, default)
+            if not 0 <= ratio < 1:
+                warning = f"invalid env {key}={ratio!r} ignored (must be >= 0 and < 1)"
+                ratio, source = default, "default"
+            setattr(c, name, ratio)
+            _record(name, source, warning)
 
         # Every other scalar LCM_* override is applied uniformly from the spec.
         for spec in ENV_FIELD_SPECS:
@@ -1921,6 +1967,16 @@ class LCMConfig:
                     f"deprecated: {spec.env_key} is set; this experiment is removed in {removal} (#1246). "
                     "Until then it behaves as before."
                 )
+
+        # Validate after the scalar loop so the configured survival reserve is available.
+        defer_key = "LCM_TURN_START_DEFER_CEILING"
+        if defer_key in env:
+            warning_count = len(config_source_warnings)
+            c.turn_start_defer_ceiling = _parse_turn_start_defer_ceiling(
+                env[defer_key], c, f"env {defer_key}", config_source_warnings,
+            )
+            source = f"env:{defer_key}" if len(config_source_warnings) == warning_count else "default"
+            _record("turn_start_defer_ceiling", source)
 
         c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
         if c.recall_delivery_unit not in ("hits", "session"):

@@ -10,7 +10,7 @@ reported as unmatched with a hint class, never as lost.
   final rows.
 - Check 2, coverage: the end capture's host rows above the start capture's highest host id (the window) against the
   end store's rows above the start capture's highest store_id, matched one to one and in order per session by
-  identity alone (bars._ordered).
+  identity alone (with bars._ordered's tie-breaking).
 
 Output: one JSON object with counts, ids, sha256s and the verdict rule; never row content, a path or a settings value.
 
@@ -26,11 +26,13 @@ import logging
 import re
 import sys
 from collections import Counter
+from functools import cache
 from pathlib import Path
 
 import message_content
 import message_patterns
 from bench.instruments.d5_clone import bars, capture, run as runner, snapshot
+from bench.tools.d5_ordered import ordered_pairs
 from session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
@@ -49,24 +51,48 @@ HINTS = ("equal after stripping edge whitespace", "payload swapped for a referen
          "session never stored; a parent session matches a declared pattern",
          "matches a declared message pattern", "no hint")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_PLAIN_KEY_TYPES = (str, int, float, bytes, type(None))
+_MISS = object()
 
 
 def _sha12(value):
     return hashlib.sha256(str(value).encode("utf-8", "surrogatepass")).hexdigest()[:12]
 
 
-def _hint(host, candidates, end_dir):
+def _plain_key(key):
+    """True for exact tuples of the built-in scalar types the kit identity returns."""
+    return type(key) is tuple and all(any(type(value) is kind for kind in _PLAIN_KEY_TYPES) for value in key)
+
+
+def _hint_cache(end_dir):
+    """Cache successful payload lookups and strips of plain strings for one session."""
+    strip_text = cache(str.strip)
+
+    def strip(value):
+        return strip_text(value) if type(value) is str else value.strip()
+
+    return end_dir, {}, strip
+
+
+def _hint(host, candidates, hint_cache):
     """The hint class for one unmatched host row against its session's unpaired stored rows (never a credit)."""
+    end_dir, memo, strip = hint_cache
     text = host.get("content")
     for row in candidates:
         if row.get("role") != host.get("role"):
             continue
         stored = row.get("content")
-        if isinstance(text, str) and isinstance(stored, str) and text != stored and text.strip() == stored.strip():
+        if isinstance(text, str) and isinstance(stored, str) and text != stored and strip(text) == strip(stored):
             return HINTS[0], row["store_id"]
-        if (isinstance(text, str) and runner._swap_payload(end_dir, stored) == text) or \
-                (isinstance(stored, str) and runner._swap_payload(end_dir, text) == stored):  # Either side the reference.
-            return HINTS[1], row["store_id"]
+        for value, expected in ((stored, text), (text, stored)):
+            if isinstance(expected, str):
+                swapped = memo.get(value, _MISS) if type(value) is str else _MISS
+                if swapped is _MISS:
+                    swapped = runner._swap_payload(end_dir, value)
+                    if type(value) is str:
+                        memo[value] = swapped
+                if swapped == expected:
+                    return HINTS[1], row["store_id"]
     return HINTS[4], None
 
 
@@ -110,9 +136,28 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
     for session in dict.fromkeys(h["session_id"] for h in window):
         hosts = [h for h in window if h["session_id"] == session]
         rows = [r for r in new if r["session_id"] == session]
-        pairs = bars._ordered(rows, hosts, lambda r, h: identity(r) == identity(h))
+        pairs = []
+        if rows and hosts:
+            # Follow the first encounter with each row in bars._ordered's row-major comparisons.
+            memo = {}
+            for row in rows[:1] + hosts + rows[1:]:
+                row_id = id(row)
+                if row_id not in memo:
+                    memo[row_id] = identity(row)
+                if not _plain_key(memo[row_id]):
+                    def key(row):
+                        row_id = id(row)
+                        if row_id not in memo:
+                            memo[row_id] = identity(row)
+                        return memo[row_id]
+
+                    pairs = bars._ordered(rows, hosts, lambda r, h: key(r) == key(h))
+                    break
+            else:
+                pairs = ordered_pairs([memo[id(r)] for r in rows], [memo[id(h)] for h in hosts])
         used_rows, used_hosts = {i for i, _ in pairs}, {j for _, j in pairs}
         spare = [r for i, r in enumerate(rows) if i not in used_rows]
+        hint_cache = _hint_cache(end_dir)
         s = per_session.setdefault(_sha12(session), Counter())
         s["window_host_rows"] += len(hosts)
         s["matched"] += len(pairs)
@@ -136,7 +181,7 @@ def coverage(start, end, identity, end_dir, by_design=lambda session: False, inh
                 s["lost"] += 1
                 unmatched.append({"host_id": host["id"], "session_sha256_12": _sha12(session), "class": "LOST"})
                 continue
-            hint, store_id = _hint(host, spare, end_dir)
+            hint, store_id = _hint(host, spare, hint_cache)
             hints[hint] += 1
             s["unmatched"] += 1
             unmatched.append({"host_id": host["id"], "session_sha256_12": _sha12(session), "class": hint,

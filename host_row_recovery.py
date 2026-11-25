@@ -18,6 +18,7 @@ from .ingest_protection import protect_messages_for_ingest
 from .lifecycle_state import LifecycleStateStore
 from .maintenance_scheduler import _HOST_ROW_RECOVERY_SCHEDULER
 from .message_analysis import _tool_call_id, _tool_result_names
+from .message_content import canonical_value
 from .reconcile import _commit_proof_identity_digest, _proof_user_identity
 from .session_patterns import build_session_match_keys, compile_session_patterns, matches_session_pattern
 from .sqlite_util import _is_ingest_busy_error
@@ -238,7 +239,7 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
         if _skip_on_tip_path(state_path, bound, handle, sid):
             return
         try:
-            messages = handle.get_messages_as_conversation(sid)
+            messages = canonical_value(handle.get_messages_as_conversation(sid))
         except Exception:
             return _unproven(sid, "reader_error", 0)
         if _skip_on_tip_path(state_path, bound, handle, sid):

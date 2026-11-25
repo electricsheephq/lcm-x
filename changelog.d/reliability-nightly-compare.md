@@ -1,0 +1,1 @@
+- Fix: Compare all scheduled reliability rounds with the latest published baseline, fail on new regressions, and track them in one issue. Release respins can dispatch the same workflow with an explicit baseline run.

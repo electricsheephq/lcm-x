@@ -31,6 +31,10 @@ def session_schema(schema):
     props = schema["parameters"]["properties"]
     props["limit"]["description"] = "Ranked seed limit (default 8, maximum 25), not delivered message count."
     props["include"]["description"] = "Retrieval arms for seeds; session delivery returns raw source messages."
+    props["detail"]["description"] = (
+        "Response detail. Session delivery returns bounded source-message neighborhoods for either value; "
+        "'answer_ready' is still required for seen_refs and include_occurrence_time."
+    )
     return schema
 
 

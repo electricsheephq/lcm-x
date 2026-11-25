@@ -374,7 +374,11 @@ def test_environment_read_inventory():
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("runtime_identity.py", "_git"):
+            "GIT_OPTIONAL_LOCKS=0 subprocess for the git status probe: the process environment is passed through "
+            "to git, not profile configuration (#2884)",
         ("__init__.py", "_engine_took_slot"): "HERMES_HOME: process launch identity for inactive-record ownership, not profile configuration",
+        ("cloud_restore.py", "_safe_path"): "HERMES_HOME: scalar restore destination guard, not profile configuration",
         ("adapters/claude-code/bin/lcmx_hook.py", "main"):
             "Claude Code plugin hook: the harness's own variables (capture switch, config dir, plugin paths), "
             "never Hermes profile configuration",
@@ -384,6 +388,9 @@ def test_environment_read_inventory():
             "lcm-x mcp reader process: replaces its own LCM_* view with the one profile it serves (#1192)",
         ("mcp_reader.py", "disabled_tool_names"):
             "lcm-x mcp reader process: LCM_DISABLED_TOOLS from that profile view, parsed as the engine does (#1192)",
+        ("cloud_reader.py", "main"):
+            "cloud recall merger process: LCMX_LOCAL_READER_CMD, the stock reader's argv handed over by the "
+            "Claude Code launcher through reader-override.json, never profile configuration",
         ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
             "synthetic compatibility proof tool: isolated home and lazy-install controls only",
         ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
@@ -440,7 +447,7 @@ def test_environment_read_inventory():
             if key == ("embedding_provider.py", "__init__"):
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "FASTEMBED_CACHE_PATH"
-            if key == ("__init__.py", "_engine_took_slot"):
+            if key in {("__init__.py", "_engine_took_slot"), ("cloud_restore.py", "_safe_path")}:
                 call = parents.get(parents.get(node))
                 assert isinstance(call, ast.Call) and ast.literal_eval(call.args[0]) == "HERMES_HOME"
     assert not failures, "\n".join(failures)

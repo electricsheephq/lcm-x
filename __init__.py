@@ -322,6 +322,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
     if mode == "off" or not context_engine_enabled:
         return None
     try:
+        from .message_content import canonical_value
+        payload = canonical_value(payload)
         question = str(payload.get("user_message") or "").strip()
         if not question:
             return None
@@ -1197,6 +1199,22 @@ def register(ctx):
                 register_hook("pre_api_request", _on_live_delegate_child_list)
             except Exception as exc:
                 logger.debug("LCM could not register the pre_api_request live delegated-child hook: %s", exc)
+            if active and config.turn_start_defer_ceiling:
+                # Hermes can report a normalized stop reason separately from usage.
+                def _on_post_api_request(*, session_id="", turn_id="", finish_reason=None, **_kwargs):
+                    if active and session_id and turn_id:
+                        use_active_lcm_engine(
+                            lambda active_engine: active_engine._note_turn_start_defer_response(
+                                finish_reason, turn_id=turn_id,
+                            ),
+                            session_id=session_id,
+                            timeout=0,
+                        )
+
+                try:
+                    register_hook("post_api_request", _on_post_api_request)
+                except Exception as exc:
+                    logger.debug("LCM could not register the post_api_request turn-phase hook: %s", exc)
         else:
             logger.warning(
                 "LCM-X: this Hermes host has no plugin register_hook (below the supported floor); "

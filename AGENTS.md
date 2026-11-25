@@ -59,8 +59,9 @@ filing authority; show the draft and obtain the reporter's approval first.
 - Schema changes follow `docs/process/schema-changes.md`: no new DDL owners, the migration's
   format and oldest reader recorded, forward and rollback tests.
 - Do not implement a `needs-repro` report merely because an upstream PR or issue claims a fix.
+- Before assigning a priority, answer four questions from evidence: can a turn fail, hang or wait without bound; can compaction stop making progress; is the prompt cache rewritten on consecutive turns; is a stored row lost or duplicated. A yes to any of the first three is `P0` unless a measurement shows it cannot reach a user at default settings; the fourth follows the loss rules in this file. A `P0` is fixed before the release that would carry it, never scheduled after it, and never recorded as an optimization.
 - Prioritize verified supported-path impact:
-  - `P0`: active catastrophic data loss, disclosure, or unusable core path.
+  - `P0`: active catastrophic data loss, disclosure, or unusable core path (a turn that cannot complete, compaction that cannot make progress, or a prompt cache rewritten turn after turn).
   - `P1`: severe integrity, security, crash, lockout, or release-blocking failure.
   - `P2`: significant bounded correctness or resource failure.
   - `P3`: limited bug, feature gap, or moderate maintainability/performance issue.
@@ -171,10 +172,14 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   owner's `pull_request` bypass is for a recorded emergency only, noted on the PR.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
-- Enqueue deterministically with the pinned head (a dequeue after failed merge-group CI is a stop):
+- Enqueue deterministically with the pinned head through the merge queue's `enqueuePullRequest`
+  mutation (a dequeue after failed merge-group CI is a stop). Do not use `gh pr merge`: on a pull
+  request whose merge state is UNSTABLE it requests auto-merge, which is forbidden here.
 
 ```bash
-gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
+PR_ID=$(gh pr view <PR> --json id --jq .id)
+gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h}){mergeQueueEntry{position state}}}' \
+  -f id="$PR_ID" -f h=<HEAD_SHA>
 ```
 
 - After merging, verify the merge commit, linked issue state, final `main` SHA, and required
@@ -217,7 +222,9 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   of the full release diff, upgrade/migration dimension mandatory), Phase C (30+ turn live
   `hermes acp` soak), Phase D (release-over-release scorecard against the previous GA: recall
   flips, Track S facts kept, QA rows, latency) — before the GA tag. From v0.31.0 the spec's
-  tiers select the rows each rc runs (the R tier plus promoted rows, the release's own gate
+  tiers select the rows each rc runs (the R tier, which from v0.30.2's first release candidate
+  includes the live-session rows D9-D12, first required at that candidate, plus promoted rows,
+  the release's own gate
   rows, and the full tier at its cadence); patch releases from v0.29.1 use the same tiers, except
   that before v0.31.0 there is no weekly M run, so a patch's unselected rows are not run and its
   release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.

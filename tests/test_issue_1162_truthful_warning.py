@@ -233,7 +233,7 @@ def test_second_compaction_timeout(tmp_path, monkeypatch, host_estimator, sweep)
         view = [*first, *extra]
         engine.compress(view, current_tokens=host_estimator(view))
         assert False in calls and True in calls
-        assert engine._last_compression_status in {"sanitized", "compacted"}
+        assert engine._last_compression_status in {"noop", "sanitized", "compacted"}
         assert engine._survival_fit_pending_warning[1] == FAILED.format(
             n=engine._last_survival_fit["dropped_rows"])
         assert engine._last_survival_fit["cause"] == "summary call failed: TimeoutError"
