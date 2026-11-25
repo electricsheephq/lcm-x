@@ -3240,7 +3240,7 @@ class LCMEngine(
                     replacements[target] = host
         if replacements:
             result = [replacements.get(index, row) for index, row in enumerate(result)]
-        if len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
+        if messages and len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
             return messages
         return result
 
