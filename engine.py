@@ -3134,19 +3134,27 @@ class LCMEngine(
             sender_capture.retire(self, meta.get("turn_id"))
 
     def _compress_placeholder(self, host, row):
-        """Keep protection rewrites and check the current host text before restoring it."""
-        user = host.get("role") == "user"
+        """Keep protection rewrites and check current user text before restoring it."""
         cleanup = self._replay_diff_requests_ingest_cleanup([host], [row])
-        refresh_redaction = cleanup and user and _contains_sensitive_redaction(row.get("content"))
+        refresh_redaction = cleanup and _contains_sensitive_redaction(row.get("content"))
         if cleanup and not refresh_redaction:
-            return row
-        if not (refresh_redaction or self._config.sensitive_patterns_enabled):
+            return self._protect_restored_replay_row(row)
+        protected = self._protect_restored_replay_row(host)
+        if not refresh_redaction and protected is host:
             return None
-        redacted = self._redact_active_replay_messages([host])[0]
-        if not refresh_redaction and redacted == host:
-            return None
-        redacted.pop("api_content", None)
-        return self._user_replay_content(redacted, row) if user else redacted
+        return self._user_replay_content(protected, row)
+
+    def _protect_restored_replay_row(self, row):
+        """Redact restored content and sidecars without modifying the host dict."""
+        if self._config.sensitive_patterns_enabled:
+            protected = self._redact_active_replay_messages([row])[0]
+            if "api_content" in row:
+                protected["api_content"] = redact_sensitive_value(
+                    row["api_content"], self._config, parse_json_strings=True,
+                )
+            if protected != row:
+                row = protected
+        return canonical_value(row)
 
     @staticmethod
     def _user_replay_content(host, occurrence):
@@ -3227,23 +3235,33 @@ class LCMEngine(
                     matched[target] = source
             for target, source in matched.items():
                 host, row = messages[source], result[target]
-                if host is row or self._compress_generated_row(row, generated):
+                if self._compress_generated_row(row, generated):
+                    continue
+                if role != "user":
+                    restored = host if self._compression_rows_equal(
+                        row, _clean_active_assistant_message(host) or host,
+                    ) else row
+                    protected = self._protect_restored_replay_row(restored)
+                    if protected is not row:
+                        replacements[target] = protected
+                    continue
+                if host is row:
                     continue
                 content = (host.get("content"), host.get("api_content"))
                 canonical = tuple(canonical_value(value) for value in content)
                 if canonical != content and canonical == (row.get("content"), row.get("api_content")):
-                    continue  # Surrogate canonicalization is a validity repair.
+                    # Preserve the base's validity repair before redacting the sidecar.
+                    replacements[target] = self._protect_restored_replay_row(row)
+                    continue
                 placeholder = self._compress_placeholder(host, row)
                 if placeholder is not None:
                     replacements[target] = placeholder
-                elif role == "user":
+                else:
                     restored = self._user_replay_content(host, row)
                     if no_progress and restored == host:
                         replacements[target] = host
                     elif restored != row:
                         replacements[target] = restored
-                elif no_progress and self._compression_rows_equal(row, _clean_active_assistant_message(host) or host):
-                    replacements[target] = host
         if replacements:
             result = [replacements.get(index, row) for index, row in enumerate(result)]
         if no_progress and messages and result == messages:
@@ -3267,6 +3285,14 @@ class LCMEngine(
 
         input_pairs = [(row.get("content"), row["api_content"]) for row in messages
                        if isinstance(row, dict) and "api_content" in row]
+        if self._config.sensitive_patterns_enabled:
+            protected_pairs = []
+            for content, api in input_pairs:
+                protected_api = redact_sensitive_value(api, self._config, parse_json_strings=True)
+                if protected_api != api:
+                    protected_content = redact_sensitive_value(content, self._config, parse_json_strings=False)
+                    protected_pairs.append((protected_content, protected_api))
+            input_pairs.extend(protected_pairs)
         input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
         # Index ordinary text pairs, and compare structured values by equality.
         text_pairs = {(content, api) for content, api in input_pairs
@@ -6953,6 +6979,7 @@ class LCMEngine(
             else cached_row
             for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
         ]
+        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
             generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
@@ -6962,7 +6989,7 @@ class LCMEngine(
                 "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
                 *IDENTITY_KEYS, *ADDRESS_KEYS,
             }
-            for host, row in zip(host_messages, current):
+            for index, (host, row) in enumerate(zip(host_messages, current)):
                 if row is host or id(row) in generated_ids:
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
@@ -6977,16 +7004,16 @@ class LCMEngine(
                         row["content"] = host["content"]
                     else:
                         row.pop("content", None)
-                if ("api_content" in host and row.get("content") == host.get("content")
-                        and not self._sensitive_api_content(host["api_content"])):
+                if "api_content" in host and row.get("content") == host.get("content"):
                     row["api_content"] = host["api_content"]
+                    if compressing and row.get("role") != "user" and self._config.sensitive_patterns_enabled:
+                        current[index] = self._protect_restored_replay_row(row)
                 else:
                     row.pop("api_content", None)
             sync_cached_host_metadata(
                 host_messages, current, generated_ids,
             )
         view = current
-        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
         if len(host_messages) == len(cached) and compressing:
             for index, (host, row) in enumerate(zip(host_messages, current)):
                 if (host is row or host.get("role") != "user" or row.get("role") != "user"
@@ -7420,9 +7447,6 @@ class LCMEngine(
         )
         return durable_content is not None
 
-    def _sensitive_api_content(self, value: Any) -> bool:
-        return redact_sensitive_value(value, self._config, parse_json_strings=True) != value
-
     def _redact_active_replay_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         redacted_replay_messages: list[Dict[str, Any]] = []
         generated_message_ids = getattr(
@@ -7432,8 +7456,6 @@ class LCMEngine(
         )
         for message in messages:
             redacted_message = dict(message)
-            if "api_content" in message and self._sensitive_api_content(message["api_content"]):
-                redacted_message.pop("api_content")
             if "content" in redacted_message:
                 redacted_content = redact_sensitive_value(
                     redacted_message.get("content"),
