@@ -85,6 +85,36 @@ def test_equal_literal_redaction_marker_keeps_safe_sidecar(open_engine):
         assert _cached_row(engine, tail["message_uid"])["api_content"] == tail["api_content"]
 
 
+def test_literal_marker_annotation_keeps_sidecar_in_cache(open_engine, monkeypatch):
+    literal = "The manual quotes [LCM sensitive redaction: example]."
+    tail = _user(literal)
+    host = [*_history(), tail]
+    _stamp(host)
+    with open_engine(sensitive_patterns_enabled=False) as engine:
+        engine.ingest(host)
+        identity = engine._message_replay_identity(tail)
+        assert _cached_row(engine, tail["message_uid"])["content"] == literal
+        tail["content"] += "\n\n" + _todo("Synthetic annotation")
+        assert _strip_volatile_host_scaffolding(tail["content"]) == literal
+        tail["api_content"] = "Independent synthetic API text"
+        assert engine._message_replay_identity(tail) == identity
+        cache_hits = []
+        lookup = engine._cached_active_replay_messages
+
+        def observe(*args, **kwargs):
+            cached = lookup(*args, **kwargs)
+            if cached is not None:
+                cache_hits.append(cached)
+            return cached
+
+        monkeypatch.setattr(engine, "_cached_active_replay_messages", observe)
+        result = _compress(engine, host, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        assert cache_hits
+        for row in (result[-1], _cached_row(engine, tail["message_uid"])):
+            assert (row.get("content"), row.get("api_content")) == (tail["content"], tail["api_content"])
+
+
 def test_forced_leaf_keeps_repaired_api_text_after_late_stamp(open_engine):
     tail = _user("Current question", api_content="Synthetic API \ud800 text")
     host = [*_history(), tail]
