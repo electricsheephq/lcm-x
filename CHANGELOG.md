@@ -26,6 +26,37 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   (#3096).
 - No schema change. The known issues, including #3081's fix moving to v0.30.5, are in the v0.30.4 release notes.
 
+## v0.30.3 (2026-11-25)
+
+Released from its own branch, a hotfix on v0.30.2; v0.30.4 carries its fix, rebuilt for this line.
+
+- Fix: a same-length compaction pass (a stub-first exit, or a pass whose only leaf covers hidden rows) no longer
+  makes the next ingest store LCM-X's own summary head again as an extra user row. For that pass LCM-X records, in
+  memory only, exact digests of the user rows it emitted (summary, carrier and objective); the next ingest trusts a
+  row that matches its digest byte for byte, whatever its timestamp. This holds with `LCM_HOST_MESSAGE_UID` unset
+  (the default) or `on`; with `off`, a host whose save stamps the emitted head with a new uid can still get the head
+  stored again, as on v0.30.2 (#3060).
+- Fix: a summary-head copy already stored stays in the store unchanged, but is left out of prompt assembly and out
+  of compaction input. A stored user row counts as LCM-X's own head only when every summary part verifies byte for
+  byte against this session's summary nodes, it carries the existing `generated_unproven` relation, and any carrier
+  remainder binds to exactly one earlier occurrence outside what the head's summaries cover. No setting change, no
+  schema change and no new store write. Recall can still return a stored copy (planned for v0.30.4). The transcript
+  repair planned for v0.30.3 (#3022) moved to the next train.
+- Fix (rc2): a new user message that repeats an earlier one word for word, saved in the same row as a summary head,
+  stays in the prompt. The first release candidate matched it to any earlier row with the same text (#3061, #3063).
+- Known issues: a compaction pass that makes no progress can drop a user message from the prompt (it stays in the
+  store), and a message the host puts only in a user row's `api_content` is not stored, as on v0.30.2 (#3087,
+  planned for v0.30.4). The head-copy check can cost a coverage walk on every turn for a carrier whose message matches an
+  earlier one (#3062; v0.30.4 reduces the cost, and a cache for the rest is planned). With `LCM_HOST_MESSAGE_UID=on`, a stub-first exit can return a
+  summary together with the raw rows it covers, as on v0.30.2 (#3048, planned for v0.31.0). Passes in a row can free
+  no host rows while compaction walks stored rows the host no longer shows (#3081: v0.30.4 is planned to show it in
+  `/lcm status` and the doctor, and the fix is planned for v0.30.5, a patch release after v0.30.4). Durable
+  sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) is unsupported: not maintained; do not enable (#3096).
+  The release notes list the rest.
+- Two crash-path fault cells still show their v0.30.2 behaviour, with no fix release set: a crash after a compaction
+  rotation over ACP on upstream Hermes can store one user turn twice (#2507), and a crash during an upgrade from
+  v0.27.0 keeps a composite row beside its replayed parts (#1506).
+
 ## v0.30.2 (the merged-reply loss fix)
 
 - Fix: on both reproduced routes, an assistant reply that calls tools, at the start of a turn whose two user

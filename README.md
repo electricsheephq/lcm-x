@@ -143,8 +143,9 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 The latest stable release is
 [`v0.30.4`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.4)
 (plugin `hermes-lcm-x`, engine `lcm-x`), a patch release on v0.30.2 that also carries the v0.30.3 hotfix.
-A compaction pass no longer drops a user message from the prompt, a message the host carried only in a
-hidden `api_content` field is now stored, and the recall tools skip a proven copy of the summary head.
+After a compaction pass that makes no progress, LCM-X hands the host back its own user rows unchanged;
+a message the host carried only in a hidden `api_content` field is now stored; and the recall tools skip a
+proven copy of the summary head.
 See [project status](docs/project-status.md) for the release summary,
 the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
