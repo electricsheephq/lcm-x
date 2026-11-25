@@ -190,6 +190,9 @@ def test_carrier_delimiter_inside_steer_does_not_cut_block(tmp_path, hook):
         _assert_companion(engine, block)
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "T1-608b accepted tradeoff: after a complete-block carrier, position cannot tell a hook quote from a genuine "
+    "steer, so the block is stored rather than risk a loss; a hook-aware boundary is a v0.30.5 follow-up"))
 def test_content_that_is_a_block_keeps_hook_quote_out(tmp_path):
     block = _block("use staging")
     quoted = _block("synthetic quoted steer", message_id="synthetic-unseen-quote")
@@ -209,3 +212,25 @@ def test_carrier_that_opens_a_steer_keeps_the_whole_steer(tmp_path):
         engine.ingest(view)
         engine.ingest(view)
         _assert_companion(engine, block)
+
+
+def test_short_carrier_matching_a_block_tail_keeps_both_steers(tmp_path):
+    first = _block("use staging")
+    second = _block("keep production untouched", message_id="test-message-002")
+    assert first.endswith("]")
+    with _engine(tmp_path) as engine:
+        view = [_user("]", api_content=first + "\n\n" + second)]
+        engine.ingest(view)
+        engine.ingest(view)
+        rows = engine._store.get_session_messages(COMPANION)
+        assert sorted(row["content"] for row in rows) == sorted([first, second])
+
+
+def test_steer_after_a_complete_block_carrier_is_kept(tmp_path):
+    carrier = _block("use staging")
+    steer = _block("keep production untouched", message_id="test-message-002")
+    with _engine(tmp_path) as engine:
+        view = [_user(carrier, api_content=carrier + "\n\n" + steer)]
+        engine.ingest(view)
+        engine.ingest(view)
+        _assert_companion(engine, steer)
