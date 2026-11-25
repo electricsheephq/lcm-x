@@ -75,6 +75,18 @@ def test_emptied_redacted_note_keeps_sensitive_sidecar_out(open_engine):
         assert stored_rows(engine) == before
 
 
+def test_equal_literal_redaction_marker_keeps_safe_sidecar(open_engine):
+    tail = _user("The manual quotes [LCM sensitive redaction: example].", api_content="Independent synthetic API text")
+    host = [*_history(), tail]
+    _stamp(host)
+    with open_engine(**REDACTION) as engine:
+        engine.ingest(host)
+        returned = _compress(engine, host, force=True)
+        assert engine._last_compress_leaves[1] == 1
+        assert returned[-1]["api_content"] == tail["api_content"]
+        assert _cached_row(engine, tail["message_uid"])["api_content"] == tail["api_content"]
+
+
 def test_forced_leaf_keeps_repaired_api_text_after_late_stamp(open_engine):
     tail = _user("Current question", api_content="Synthetic API \ud800 text")
     host = [*_history(), tail]

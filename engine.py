@@ -3136,8 +3136,9 @@ class LCMEngine(
     def _compress_placeholder(self, host, row):
         """Keep protection rewrites and check the current host text before restoring it."""
         user = host.get("role") == "user"
-        refresh_redaction = user and _contains_sensitive_redaction(row.get("content"))
-        if not refresh_redaction and self._replay_diff_requests_ingest_cleanup([host], [row]):
+        cleanup = self._replay_diff_requests_ingest_cleanup([host], [row])
+        refresh_redaction = cleanup and user and _contains_sensitive_redaction(row.get("content"))
+        if cleanup and not refresh_redaction:
             return row
         if not (refresh_redaction or self._config.sensitive_patterns_enabled):
             return None
