@@ -6038,6 +6038,12 @@ class LCMEngine(
                     """SELECT 1 FROM lcm_lifecycle_state
                     WHERE conversation_id = ? AND current_session_id = ?
                       AND current_frontier_store_id = 0 AND last_finalized_session_id IS NULL
+                      AND last_finalized_frontier_store_id = 0
+                      AND last_finalized_at IS NULL
+                      AND last_rollover_at IS NULL
+                      AND last_maintenance_attempt_at IS NULL
+                      AND (debt_kind IS NULL OR debt_kind = '')
+                      AND debt_size_estimate = 0
                       AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id = ? OR conversation_id = ?)
                       AND NOT EXISTS (SELECT 1 FROM summary_nodes WHERE session_id IN (?, ?))""",
                     (retired._conversation_id, retired._session_id, retired._session_id,
