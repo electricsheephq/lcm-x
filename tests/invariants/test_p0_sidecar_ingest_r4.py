@@ -188,3 +188,14 @@ def test_carrier_delimiter_inside_steer_does_not_cut_block(tmp_path, hook):
         engine.ingest(view)
         engine.ingest(view)
         _assert_companion(engine, block)
+
+
+def test_content_that_is_a_block_keeps_hook_quote_out(tmp_path):
+    block = _block("use staging")
+    quoted = _block("synthetic quoted steer", message_id="synthetic-unseen-quote")
+    api = block + f"\n\n<lcm-answer-brief>{quoted}</lcm-answer-brief>"
+    with _engine(tmp_path) as engine:
+        view = [_user(block, api_content=api)]
+        engine.ingest(view)
+        engine.ingest(view)
+        assert engine._store.get_session_messages(COMPANION) == []

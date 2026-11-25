@@ -24,14 +24,14 @@ from tests.invariants.test_p0_sidecar_ingest import (
     _engine,
     _rows,
     _user,
-    host_uid,
+    host_uid,  # noqa: F401 (fixture)
 )
 from tests.test_787_slice1_background_leaf_prep import (
     _crossing_view,
     _engine as _leaf_engine,
-    _isolated,
+    _isolated,  # noqa: F401 (fixture)
     _turn_end,
-    provider,
+    provider,  # noqa: F401 (fixture)
 )
 from tests.test_compression_boundary import _compacted_engine
 
@@ -282,7 +282,7 @@ def _doctor_integrity(engine):
     return integrity_lines, [(check["check"], check["status"]) for check in checks]
 
 
-def test_companion_does_not_stall_background_leaf_publication(tmp_path, provider, _isolated):
+def test_companion_does_not_stall_background_leaf_publication(tmp_path, provider, _isolated):  # noqa: F811 (fixture)
     outcomes = []
     for extra in (False, True):
         directory = tmp_path / str(extra)
