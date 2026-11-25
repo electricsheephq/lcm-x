@@ -21,14 +21,6 @@ from .ingest_pem_scan import (
 )
 
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
-_SENSITIVE_PLACEHOLDER_RE = re.compile(
-    "(" + re.escape(_SENSITIVE_PLACEHOLDER_PREFIX) + r"[^][\r\n]*\])"
-)
-_SENSITIVE_PLACEHOLDER_FORMAT_RE = re.compile(
-    re.escape(_SENSITIVE_PLACEHOLDER_PREFIX)
-    + r" name=(?P<name>[a-z_]+); chars=[1-9][0-9]*; bytes=[1-9][0-9]*"
-    + r"(?P<digest>; sha256=[0-9a-f]{16})?\]"
-)
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
 # v3: single-pass PEM scanner (short-terminal-line bound, body-adjacent END
 # pairing, linear on pathological inputs) — output differs from v2 on
@@ -352,33 +344,7 @@ def _sensitive_pattern_for_key(key: Any, active_names: list[str]) -> str | None:
     return None
 
 
-def _is_well_formed_sensitive_placeholder(span: str) -> bool:
-    match = _SENSITIVE_PLACEHOLDER_FORMAT_RE.fullmatch(span)
-    if match is None:
-        return False
-    name = match["name"]
-    return name in _SENSITIVE_PATTERN_CATALOG and (
-        (match["digest"] is None) == (name == "password_assignment")
-    )
-
-
 def _redact_entire_sensitive_string(text: str, pattern_name: str) -> str:
-    if not text:
+    if not text or _SENSITIVE_PLACEHOLDER_PREFIX in text:
         return text
-    if _SENSITIVE_PLACEHOLDER_PREFIX not in text:
-        return _sensitive_placeholder(pattern_name, text)
-    spans = _SENSITIVE_PLACEHOLDER_RE.split(text)
-    if len(spans) == 1:
-        return _sensitive_placeholder(pattern_name, text)
-    # T1-613: Preserve first-pass text around emitted placeholders. A literal
-    # or malformed marker keeps the keyed redaction of all non-marker spans.
-    if all(_is_well_formed_sensitive_placeholder(span) for span in spans[1::2]):
-        return text
-    # Split captures marker spans at odd positions. Keep them and the whitespace.
-    for index in range(0, len(spans), 2):
-        span = spans[index]
-        secret = span.strip()
-        if secret:
-            start = len(span) - len(span.lstrip())
-            spans[index] = span[:start] + _sensitive_placeholder(pattern_name, secret) + span[start + len(secret):]
-    return "".join(spans)
+    return _sensitive_placeholder(pattern_name, text)

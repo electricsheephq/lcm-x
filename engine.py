@@ -132,7 +132,7 @@ from .adaptive_retrieval import AdaptiveRetrievalRegistry
 from .query_view_store import QueryViewStore
 from .tool_registry import TOOL_REGISTRY
 from .sanitize import (
-    _clean_active_assistant_message, _contains_sensitive_redaction,
+    _clean_active_assistant_message,
 )
 from .session_patterns import (
     build_session_match_keys,
@@ -3134,27 +3134,13 @@ class LCMEngine(
             sender_capture.retire(self, meta.get("turn_id"))
 
     def _compress_placeholder(self, host, row):
-        """Keep protection rewrites and check current user text before restoring it."""
-        cleanup = self._replay_diff_requests_ingest_cleanup([host], [row])
-        refresh_redaction = cleanup and _contains_sensitive_redaction(row.get("content"))
-        if cleanup and not refresh_redaction:
-            return self._protect_restored_replay_row(row)
-        protected = self._protect_restored_replay_row(host)
-        if not refresh_redaction and protected is host:
+        """Keep protection rewrites and repair invalid Unicode before restoring host text."""
+        if self._replay_diff_requests_ingest_cleanup([host], [row]):
+            return canonical_value(row)
+        repaired = canonical_value(host)
+        if repaired is host:
             return None
-        return self._user_replay_content(protected, row)
-
-    def _protect_restored_replay_row(self, row):
-        """Redact restored content and sidecars without modifying the host dict."""
-        if self._config.sensitive_patterns_enabled:
-            protected = self._redact_active_replay_messages([row])[0]
-            if "api_content" in row:
-                protected["api_content"] = redact_sensitive_value(
-                    row["api_content"], self._config, parse_json_strings=True,
-                )
-            if protected != row:
-                row = protected
-        return canonical_value(row)
+        return self._user_replay_content(repaired, row)
 
     @staticmethod
     def _user_replay_content(host, occurrence):
@@ -3239,24 +3225,17 @@ class LCMEngine(
                     continue
                 if role != "user":
                     cleaned_host = _clean_active_assistant_message(host) or host
-                    cosmetic = self._compression_rows_equal(row, cleaned_host)
-                    if not cosmetic and self._config.sensitive_patterns_enabled:
-                        cosmetic = self._compression_rows_equal(
-                            self._protect_restored_replay_row(row),
-                            self._protect_restored_replay_row(cleaned_host),
-                        )
-                    restored = host if cosmetic else row
-                    protected = self._protect_restored_replay_row(restored)
-                    if protected is not row:
-                        replacements[target] = protected
+                    restored = host if self._compression_rows_equal(row, cleaned_host) else row
+                    repaired = canonical_value(restored)
+                    if repaired is not row:
+                        replacements[target] = repaired
                     continue
                 if host is row:
                     continue
                 content = (host.get("content"), host.get("api_content"))
                 canonical = tuple(canonical_value(value) for value in content)
                 if canonical != content and canonical == (row.get("content"), row.get("api_content")):
-                    # Preserve the base's validity repair before redacting the sidecar.
-                    replacements[target] = self._protect_restored_replay_row(row)
+                    replacements[target] = canonical_value(row)
                     continue
                 placeholder = self._compress_placeholder(host, row)
                 if placeholder is not None:
@@ -3288,22 +3267,8 @@ class LCMEngine(
         if not with_api:
             return result
 
-        input_rows = [row for row in messages if isinstance(row, dict) and "api_content" in row]
-        input_pairs = [(row.get("content"), row["api_content"]) for row in input_rows]
-        if self._config.sensitive_patterns_enabled:
-            protected_pairs = []
-            for row, (content, api) in zip(input_rows, input_pairs):
-                protected_api = redact_sensitive_value(api, self._config, parse_json_strings=True)
-                protected_content = redact_sensitive_value(content, self._config, parse_json_strings=False)
-                if protected_api == api and protected_content != content and row.get("role") == "user":
-                    # Keep the placeholder rule when redaction replaces the user's own text.
-                    original = text_content_for_pattern_matching(content) or ""
-                    protected = text_content_for_pattern_matching(protected_content) or ""
-                    if _strip_volatile_host_scaffolding(original) != _strip_volatile_host_scaffolding(protected):
-                        continue
-                if protected_api != api or protected_content != content:
-                    protected_pairs.append((protected_content, protected_api))
-            input_pairs.extend(protected_pairs)
+        input_pairs = [(row.get("content"), row["api_content"]) for row in messages
+                       if isinstance(row, dict) and "api_content" in row]
         input_pairs += [(canonical_value(content), canonical_value(api)) for content, api in input_pairs]
         # Index ordinary text pairs, and compare structured values by equality.
         text_pairs = {(content, api) for content, api in input_pairs
@@ -6990,7 +6955,6 @@ class LCMEngine(
             else cached_row
             for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
         ]
-        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
         # Check the original cache too: zip may have hidden a length mismatch.
         if len(host_messages) == len(cached) == len(current):
             generated_ids = self._generated_ignored_active_replay_placeholder_message_ids
@@ -7000,7 +6964,7 @@ class LCMEngine(
                 "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
                 *IDENTITY_KEYS, *ADDRESS_KEYS,
             }
-            for index, (host, row) in enumerate(zip(host_messages, current)):
+            for host, row in zip(host_messages, current):
                 if row is host or id(row) in generated_ids:
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
@@ -7015,17 +6979,15 @@ class LCMEngine(
                         row["content"] = host["content"]
                     else:
                         row.pop("content", None)
-                same_content = row.get("content") == host.get("content")
-                if "api_content" in host and same_content:
+                if "api_content" in host and row.get("content") == host.get("content"):
                     row["api_content"] = host["api_content"]
-                    if compressing and row.get("role") != "user" and self._config.sensitive_patterns_enabled:
-                        current[index] = self._protect_restored_replay_row(row)
                 else:
                     row.pop("api_content", None)
             sync_cached_host_metadata(
                 host_messages, current, generated_ids,
             )
         view = current
+        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
         if len(host_messages) == len(cached) and compressing:
             for index, (host, row) in enumerate(zip(host_messages, current)):
                 if (host is row or host.get("role") != "user" or row.get("role") != "user"
@@ -7482,15 +7444,6 @@ class LCMEngine(
                     self._config,
                     parse_json_strings=True,
                 )
-            if self._config.sensitive_patterns_enabled and "api_content" in redacted_message:
-                # Fresh replay must protect the same keyed marker values as restored replay.
-                # The remaining sidecar redaction stays on the restored-row path.
-                api = redacted_message["api_content"]
-                protected_api = redact_sensitive_value(
-                    api, self._config, parse_json_strings=True, marker_keyed_only=True,
-                )
-                if protected_api != api:
-                    redacted_message["api_content"] = protected_api
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(redacted_message)] = redacted_message
