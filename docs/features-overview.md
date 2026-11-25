@@ -123,7 +123,8 @@ proactive recall counts it in `privacy_policy_errors` rather than injecting noth
 Known cloud providers receive unfiltered input by default under the
 `privacy:off` revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to
 the experimental provider-input filter. Durable redaction
-(`sensitive_patterns_enabled`) is a separate opt-in.
+(`sensitive_patterns_enabled`) is a separate opt-in, and it is unsupported: not maintained;
+do not enable.
 Provider input is transformed without
 rewriting durable messages, summaries, FTS rows, or payloads, and the effective
 privacy policy is part of vector identity. This is pattern-based protection,
