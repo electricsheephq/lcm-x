@@ -742,7 +742,7 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Sensitive-pattern redaction
 
-> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it. If you already enabled it, set it to `false`; rows it already redacted stay redacted.
+> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it. If you already enabled it, set it to `false`; rows it already redacted stay redacted, and new content is then stored without redaction.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
