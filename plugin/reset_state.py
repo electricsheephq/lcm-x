@@ -11,6 +11,14 @@ import uuid
 
 
 class ResetStateMixin:
+    def _reset_turn_start_deferred_checks(self) -> None:
+        gate = getattr(self, "_compaction_gate", None)  # Absent on a half-built engine, which has no gate hits to race.
+        if gate is None:
+            self._turn_start_deferred_checks = 0
+            return
+        with gate:
+            self._turn_start_deferred_checks = 0
+
     def _reset_session_counters(self) -> None:
         """Reset session-scoped counters and token tracking.
 
@@ -54,6 +62,9 @@ class ResetStateMixin:
         source lifecycle after rebinding.
         """
         # Each boundary exit counts its own outcome (#2055); a reset only drops the handle.
+        self._turn_start_defer_mid_turn_id = None
+        self._end_turn_start_defer_episode()
+        self._reset_turn_start_deferred_checks()
         self._emission_handle = None
         self._reset_session_counters()
         self._reset_compaction_progress()
@@ -76,6 +87,7 @@ class ResetStateMixin:
         self._no_progress_observed_tokens = self._no_progress_ingest_generation = None
         self._no_progress_hold_persisted = False
         self._zero_leaf_streaks = {}  # #1162: nor does its zero-leaf streak (a kept conversation id included)
+        self._hidden_only_streaks = {}  # #3081
         self._retained_escape_memos = {}
         self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""

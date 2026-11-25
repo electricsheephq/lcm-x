@@ -1,14 +1,24 @@
-"""Recognise a stored copy of LCM-X's own summary head (v0.30.3 hotfix).
+"""Recognise stored copies of LCM-X's own summary head.
 
-A stored user row is a known head copy when every leading summary part verifies byte for byte against this
-session's summary nodes, it carries the ``generated_unproven`` relation, and any carrier remainder binds to
-an earlier user occurrence outside those nodes' own source coverage. The store retains the original row.
-Read-only: nothing here writes.
+A marked user row is a known copy when its leading summary parts verify byte for byte
+against owned nodes. A carrier remainder must bind to an earlier user occurrence
+in the same normalised conversation, beyond the verified summaries' source coverage.
+The proof is read-only and leaves the stored row and its relations intact.
 """
 
 import json
 import sqlite3
+from functools import cache
 from types import SimpleNamespace
+
+from .summary_prefix import _LCM_SUMMARY_PART_HEADER_RE, complete_summary_coverage, verify_summary_prefix
+
+
+def _head_copy_shape_sql(prefix=""):
+    return (
+        f"{prefix}role='user' AND {prefix}content GLOB '[[]*' "
+        f"AND instr({prefix}content, '[Expand for details:') > 0"
+    )
 
 
 def _read_head_copy_candidates(conn, sql, args):
@@ -20,21 +30,25 @@ def _read_head_copy_candidates(conn, sql, args):
         return None  # Older stores may never have created the optional relation table.
 
 
-def is_known_head_copy(conn, row) -> bool:
-    """Prove this stored user occurrence is fully represented by earlier LCM context."""
-    content = row.get("content")
-    if (conn is None or row.get("role") != "user" or not isinstance(content, str) or not content.startswith("[")
-            or "[Expand for details:" not in content or not row.get("session_id") or not row.get("store_id")
-            or any(row.get(key) for key in ("tool_calls", "tool_call_id", "tool_name"))):
-        return False
-    store_id, session_id = row["store_id"], row["session_id"]
-    relation = _read_head_copy_candidates(
-        conn, "SELECT 1 FROM message_relations WHERE store_id=? AND kind='generated_unproven'", (store_id,)
-    )
-    if relation is None or relation.fetchone() is None:
-        return False
+def has_head_copy_shape(content) -> bool:
+    return isinstance(content, str) and content.startswith("[") and "[Expand for details:" in content
 
-    from .engine import LCMEngine
+
+def _could_be_head_copy(role, content) -> bool:
+    return role == "user" and has_head_copy_shape(content) and _LCM_SUMMARY_PART_HEADER_RE.match(content) is not None
+
+
+def _head_copy_candidate(row) -> bool:
+    return (
+        _could_be_head_copy(row.get("role"), row.get("content"))
+        and bool(row.get("session_id") and row.get("store_id"))
+        and not any(row.get(key) for key in ("tool_calls", "tool_call_id", "tool_name"))
+    )
+
+
+def _verify_marked_head_copy(conn, row) -> bool:
+    content = row["content"]
+    session_id = row["session_id"]
 
     def get_node(node_id):
         node = conn.execute(
@@ -43,60 +57,62 @@ def is_known_head_copy(conn, row) -> bool:
         return SimpleNamespace(node_id=node_id, session_id=node[0], depth=node[1],
                                summary=node[2], expand_hint=node[3] or "") if node else None
 
-    def owns_node(owner):
-        return owner == session_id or conn.execute(
-            "WITH RECURSIVE lineage(owner, hops) AS (VALUES (?, 0) UNION ALL "
-            "SELECT CASE WHEN json_valid(m.value) THEN json_extract(m.value, '$') END, hops+1 "
-            "FROM lineage JOIN metadata m ON m.key='rotation_predecessor_session:' || owner WHERE hops<32) "
-            "SELECT 1 FROM lineage WHERE owner=? LIMIT 1", (owner, session_id),
-        ).fetchone() is not None
+    @cache
+    def predecessors():
+        lineage = conn.execute(
+            "WITH RECURSIVE lineage(session, hops) AS (VALUES (?, 0) UNION ALL "
+            "SELECT CASE WHEN json_valid(m.value) THEN "
+            "CASE WHEN json_type(m.value)='text' THEN json_extract(m.value, '$') END END, hops+1 "
+            "FROM lineage JOIN metadata m ON m.key='rotation_predecessor_session:' || session WHERE hops<32) "
+            "SELECT session FROM lineage WHERE hops>0 ORDER BY hops", (session_id,),
+        )
+        found = []
+        for (predecessor,) in lineage:
+            if not predecessor or predecessor == session_id or predecessor in found:
+                break
+            found.append(predecessor)
+        return found
 
-    end, node_ids = LCMEngine._verify_summary_prefix(content, get_node, owns_node)
+    def owns_node(owner):
+        return owner == session_id or owner in predecessors()
+
+    end, node_ids = verify_summary_prefix(content, get_node, owns_node)
     if end is None or end == len(content):
         return end is not None
     suffix = content[end:]
     for separator in ("\n\n---\n\n", "\n\n"):
         if suffix.startswith(separator):
             remainder = suffix[len(separator):]
-            return bool(remainder.strip() and _carrier_remainder_is_replay(conn, row, remainder, node_ids))
+            return bool(remainder.strip() and _carrier_remainder_is_replay(
+                conn, row, remainder, node_ids, predecessors,
+            ))
     return False
 
 
-def _carrier_remainder_is_replay(conn, row, remainder, node_ids):
-    stamp = row.get("observed_at")
-    matches = dict(conn.execute(
-        """SELECT store_id, observed_at=? FROM messages
-           WHERE session_id=? AND store_id<? AND role='user'
-             AND COALESCE(conversation_id, '') IN ('', ?) AND content=?""",
-        (stamp, row["session_id"], row["store_id"], row.get("conversation_id") or "", remainder),
-    ))
+def _carrier_remainder_is_replay(conn, row, remainder, node_ids, predecessors):
+    if not {"observed_at", "conversation_id", "tool_call_id", "tool_calls", "tool_name"} <= row.keys():
+        return False
+    stamp = row["observed_at"]
+    conversation = (row["conversation_id"] or "").strip()
+    sessions = [row["session_id"], *predecessors()]
+    matches = [(store_id, session_id, same_stamp) for store_id, session_id, same_stamp, prior_conv in conn.execute(
+        "SELECT store_id, session_id, observed_at=?, conversation_id FROM messages "
+        f"WHERE session_id IN ({','.join('?' * len(sessions))}) AND store_id<? AND role='user' AND content=?",
+        (stamp, *sessions, row["store_id"], remainder),
+    ) if (prior_conv or "").strip() in ("", conversation)]
     if not matches:
         return False
-
-    uncovered = conn.execute(
-        """WITH RECURSIVE sources(kind, id) AS MATERIALIZED (
-               SELECT 'nodes', value FROM json_each(?)
-               UNION
-               SELECT n.source_type, source.value FROM sources s JOIN summary_nodes n ON n.node_id=s.id,
-                   json_each(n.source_ids) source WHERE s.kind='nodes'
-           ), matches(id) AS MATERIALIZED (
-               SELECT value FROM json_each(?)
-           ), covered(id) AS MATERIALIZED (
-               SELECT CAST(id AS INTEGER) FROM sources
-               WHERE kind='messages' AND CAST(id AS INTEGER) IN (SELECT id FROM matches)
-           )
-           SELECT m.id FROM matches m
-           WHERE EXISTS (SELECT 1 FROM sources WHERE kind='messages')
-             AND NOT EXISTS (
-                 SELECT 1 FROM sources s LEFT JOIN summary_nodes n ON n.node_id=s.id
-                 WHERE s.kind='nodes' AND n.node_id IS NULL
-             )
-             AND NOT EXISTS (SELECT 1 FROM covered c WHERE c.id=m.id)""",
-        (json.dumps(node_ids), json.dumps(list(matches))),
-    ).fetchall()
-    if stamp is not None and sum(matches[store_id] == 1 for store_id, in uncovered) == 1:
-        return True
-    return len(uncovered) == 1 and _recorded_carrier_emission(conn, row)
+    covered_through, covered_matches = complete_summary_coverage(
+        conn, node_ids, [store_id for store_id, _, _ in matches],
+    )
+    if covered_through is None:
+        return False
+    stamped = [store_id for store_id, _, same_stamp in matches if same_stamp]
+    if stamped:
+        return len(stamped) == 1 and stamped[0] > covered_through
+    uncovered = [(store_id, session_id) for store_id, session_id, _ in matches if store_id not in covered_matches]
+    return (len(uncovered) == 1 and uncovered[0][0] > covered_through and uncovered[0][1] == row["session_id"]
+            and _recorded_carrier_emission(conn, row))
 
 
 def _recorded_carrier_emission(conn, row):
@@ -131,6 +147,31 @@ def _recorded_carrier_emission(conn, row):
         return False
 
 
+def is_known_head_copy(conn, row) -> bool:
+    """Prove this stored user occurrence is fully represented by earlier LCM context."""
+    if conn is None or not _head_copy_candidate(row):
+        return False
+    relation = _read_head_copy_candidates(
+        conn, "SELECT 1 FROM message_relations WHERE store_id=? AND kind='generated_unproven'", (row["store_id"],)
+    )
+    return relation is not None and relation.fetchone() is not None and _verify_marked_head_copy(conn, row)
+
+
+def known_head_copies_in_rows(conn, rows) -> set[int]:
+    """Check a hydrated batch with one relation read, and only for shaped rows."""
+    if conn is None:
+        return set()
+    candidates = {row["store_id"]: row for row in rows if _head_copy_candidate(row)}
+    if not candidates:
+        return set()
+    marked = _read_head_copy_candidates(
+        conn, "SELECT DISTINCT store_id FROM message_relations WHERE kind='generated_unproven' "
+        "AND store_id IN (SELECT value FROM json_each(?))", (json.dumps(list(candidates)),)
+    )
+    return ({store_id for (store_id,) in marked if _verify_marked_head_copy(conn, candidates[store_id])}
+            if marked is not None else set())
+
+
 def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
     if conn is None or store_ids == []:
         return set()
@@ -139,10 +180,19 @@ def known_head_copy_ids(conn, session_id=None, *, store_ids=None) -> set[int]:
     args = ([] if session_id is None else [session_id]) + ([] if store_ids is None else [json.dumps(store_ids)])
     candidates = _read_head_copy_candidates(
         conn,
-        "SELECT DISTINCT m.* FROM message_relations r JOIN messages m USING (store_id) "
-        f"WHERE r.kind='generated_unproven' AND m.role='user' AND m.content GLOB '[[]*' {session_filter} {id_filter}", args
+        "SELECT DISTINCT m.store_id, m.session_id, m.conversation_id, m.role, m.content, "
+        "m.tool_call_id, m.tool_calls, m.tool_name, m.observed_at "
+        "FROM message_relations r JOIN messages m USING (store_id) "
+        f"WHERE r.kind='generated_unproven' AND {_head_copy_shape_sql('m.')} {session_filter} {id_filter}", args
     )
     if candidates is None:
         return set()
     columns = [column[0] for column in candidates.description]
-    return {row["store_id"] for raw in candidates if is_known_head_copy(conn, row := dict(zip(columns, raw)))}
+    return {row["store_id"] for raw in candidates if _head_copy_candidate(row := dict(zip(columns, raw)))
+            and _verify_marked_head_copy(conn, row)}
+
+
+def exclude_head_copies(where, args, copies, column="store_id"):
+    if copies:
+        where.append(f"{column} NOT IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(sorted(copies)))

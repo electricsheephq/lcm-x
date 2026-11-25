@@ -82,6 +82,7 @@ from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
+from .sidecar_ingest import SIDECAR_SESSION_PREFIX
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage, \
     run_session_purges
@@ -1562,7 +1563,8 @@ def _doctor_clean_apply_text(engine) -> str:
             "note: cleanup apply aborted before any rows were deleted",
         ])
 
-    candidates = scan["candidates"]
+    candidates = [item for item in scan["candidates"]
+                  if not item["session_id"].startswith(SIDECAR_SESSION_PREFIX)]
     if not candidates:
         return "\n".join([
             "LCM doctor clean apply",

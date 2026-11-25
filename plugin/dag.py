@@ -54,6 +54,7 @@ from .search_query import (
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
 from .sqlite_session import ConnectionPolicy, open_connection
 from .sqlite_util import _run_sqlite_write_with_snapshot_retry
+from .summary_prefix import summary_coverage_end
 
 
 logger = logging.getLogger(__name__)
@@ -856,17 +857,7 @@ class SummaryDAG:
     def coverage_end(self, node_ids: List[int]) -> Optional[int]:
         """The greatest store_id under ``node_ids``, walked down to the ``messages`` leaves."""
         with self._db_lock:
-            row = self._conn.execute(
-                f"""WITH RECURSIVE walk(source_type, source_id) AS (
-                        SELECT n.source_type, CAST(j.value AS INTEGER) FROM summary_nodes n, json_each(n.source_ids) j
-                        WHERE n.node_id IN ({",".join("?" * len(node_ids))})
-                        UNION SELECT child.source_type, CAST(j.value AS INTEGER) FROM summary_nodes child
-                        JOIN walk ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
-                        JOIN json_each(child.source_ids) j
-                    ) SELECT MAX(source_id) FROM walk WHERE source_type = 'messages'""",
-                [int(node_id) for node_id in node_ids],
-            ).fetchone()
-        return None if row is None or row[0] is None else int(row[0])
+            return summary_coverage_end(self._conn, node_ids)
 
     def source_message_ids(self, node_id: int, *, limit: int) -> List[int]:
         """Resolve a node to the store_ids of the messages underneath it.

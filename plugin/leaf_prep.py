@@ -36,6 +36,7 @@ from .ingest_protection import (
     quarantine_suspicious_assistant_messages,
     redact_sensitive_value,
 )
+from .sidecar_ingest import SIDECAR_SESSION_PREFIX
 from .tokens import count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
@@ -723,8 +724,8 @@ class _LeafPrep:
         }
         foreign = conn.execute(
             "SELECT MIN(store_id) FROM messages WHERE store_id > ? AND store_id <= ? AND session_id != ? "
-            "AND conversation_id = ?",
-            (job.frontier, ids[-1], job.session_id, job.conversation_id),
+            "AND conversation_id = ? AND session_id NOT GLOB ?",
+            (job.frontier, ids[-1], job.session_id, job.conversation_id, SIDECAR_SESSION_PREFIX + "*"),
         ).fetchone()
         foreign_id = int(foreign[0]) if foreign and foreign[0] is not None else None
         lead = 0  # a stored system prompt right above the frontier is the host's anchor: excluded, as there

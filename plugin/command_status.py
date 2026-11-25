@@ -8,6 +8,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_affected, sqlite_wal_reset_warning
+
 
 @dataclass(frozen=True)
 class StatusFacts:
@@ -17,6 +19,7 @@ class StatusFacts:
     db_path: Path
     db_exists: bool
     db_size: int
+    sqlite_warning: str
     session_id: str
     session_platform: str
     engine_name: str
@@ -49,6 +52,7 @@ def collect_status(engine: Any) -> StatusFacts:
     stem_index = command.stem_index_status(engine._store.connection)
     return StatusFacts(
         status=status, db_path=db_path, db_exists=db_exists, db_size=db_size,
+        sqlite_warning=sqlite_wal_reset_warning(sqlite3.sqlite_version) if sqlite_wal_reset_affected() else "",
         session_id=engine.current_session_id, session_platform=engine.current_session_platform,
         engine_name=engine.name, model=engine.model, provider=engine.provider,
         context_length_source=getattr(engine, "_context_length_source", ""),
@@ -68,10 +72,12 @@ def render_status(facts: StatusFacts) -> str:
     from .command import _fmt_bool, _fmt_size
 
     status = facts.status
+    defer_ceiling = status.get("turn_start_defer_ceiling")
     db_path = facts.db_path
     db_exists = facts.db_exists
     db_size = facts.db_size
     session_bound = bool(facts.session_id)
+    defer_ceiling_tokens = status.get("turn_start_defer_ceiling_tokens") if session_bound else None
     source_stats = status.get("source_lineage") or {}
     runtime_identity = status.get("runtime_identity") or {}
     source_stats = {
@@ -117,6 +123,7 @@ def render_status(facts: StatusFacts) -> str:
         f"database_path_source: {runtime_identity.get('database_path_source', '(unknown)')}",
         f"database_exists: {_fmt_bool(db_exists)}",
         f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
+        *([f"sqlite_wal_reset: warn {facts.sqlite_warning} {SQLITE_WAL_RESET_ACTION}"] if facts.sqlite_warning else []),
         f"compression_count: {facts.compression_count}",
         f"total_compactions: {status.get('total_compactions', 0)}",
         f"total_compactions_scope: {status.get('total_compactions_scope', 'current_conversation')}",
@@ -132,6 +139,11 @@ def render_status(facts: StatusFacts) -> str:
         f"context_threshold_source: {status.get('context_threshold_source', config_sources.get('context_threshold', 'manual_or_default'))}",
         f"context_threshold_autoraised: {status.get('context_threshold_autoraised') or '(none)'}",
         f"threshold_tokens: {facts.threshold_tokens if session_bound else '(uninitialized)'}",
+        *([
+            f"turn_start_defer_ceiling: {defer_ceiling}",
+            f"turn_start_defer_ceiling_tokens: {defer_ceiling_tokens or uninitialized}",
+            f"turn_start_deferred_checks: {status['turn_start_deferred_checks']}",
+        ] if defer_ceiling else []),
         f"cache_metrics_available: {_fmt_bool(status.get('cache_metrics_available'))}",
         f"last_input_tokens: {status.get('last_input_tokens', 0)}",
         f"last_output_tokens: {status.get('last_output_tokens', 0)}",
@@ -161,6 +173,13 @@ def render_status(facts: StatusFacts) -> str:
         f"source_legacy_blank_messages: {source_stats['legacy_blank_source_messages']}",
         f"source_effective_unknown_messages: {source_stats['effective_unknown_messages']}",
     ]
+
+    if failures := status.get("sidecar_recovery_failure_count"):
+        last_failure = datetime.fromtimestamp(status["sidecar_recovery_last_failure_at"], tz=timezone.utc)
+        lines.extend([
+            f"sidecar_recovery_failure_count: {failures}",
+            f"sidecar_recovery_last_failure_at: {last_failure.isoformat(timespec='seconds')}",
+        ])
 
     last_rotate_at = status.get("last_rotate_at")
     if last_rotate_at:
