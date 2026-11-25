@@ -313,11 +313,11 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-Example output for v0.30.2 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
+Example output for v0.30.4 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.2 (16 tools)
+  ✓ hermes-lcm-x v0.30.4 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -325,7 +325,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.30.2` is a patch release on
+and tag. `0.30.4` is a patch release on
+[v0.30.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.2) that also carries the v0.30.3 hotfix;
+its fixes were first tagged as `v0.30.4-rc1`. Its rollback target is `v0.30.2`, and it adds no schema change.
+`0.30.3` is a hotfix on v0.30.2, cut from its own branch. `0.30.2` is a patch release on
 [v0.30.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.1) with one fix and no
 rc tags. Its rollback target is `v0.30.1`, and it adds no schema change. The rollback
 target for v0.30.1 is

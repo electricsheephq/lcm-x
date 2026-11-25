@@ -6,6 +6,26 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.30.4 (a user message kept in the prompt and in the store after compaction)
+
+- Fix: a message the host carried only in a hidden `api_content` field is now stored once, as a recall-only row
+  (#3087, by #3089).
+- Fix: after a compaction pass that makes no progress, LCM-X hands the host back its own user rows unchanged (#3087,
+  by #3094).
+- Fix, the v0.30.3 hotfix carried on this line: a same-length compaction pass no longer makes the next ingest store
+  the summary head again (#3041).
+- Fix: a new user message that repeats an earlier one word for word stays in the prompt and in recall (#3061, by #3086).
+- Fix: the recall tools skip a proven copy of the summary head (#3047), and the head-copy check costs less (#3062, by #3086).
+- Fix: the stub-only exit keeps the host's rows and replaces only the stubbed tool outputs (#3067).
+- Fix: after the host refuses a compaction pass, the next pass drops a replayed row only when every row it absorbed is
+  covered by a summary (#3052).
+- New: `/lcm status` and the doctor warn about SQLite's WAL-reset bug (#3058, by #3085) and show compaction passes that
+  free nothing (#3081, by #3084).
+- New setting, off by default: `LCM_TURN_START_DEFER_CEILING` (#3084).
+- Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) is unsupported: not maintained; do not enable
+  (#3096).
+- No schema change. The known issues, including #3081's fix moving to v0.30.5, are in the v0.30.4 release notes.
+
 ## v0.30.2 (the merged-reply loss fix)
 
 - Fix: on both reproduced routes, an assistant reply that calls tools, at the start of a turn whose two user

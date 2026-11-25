@@ -12,13 +12,13 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.30.0@6260c31fbce11e4cd542878f1f6a37410d678ae8` (ships `hermes-lcm-x` / `lcm-x`; GA date 2026-11-12) |
+| Latest stable | `v0.30.4` (ships `hermes-lcm-x` / `lcm-x`; GA date on its release page) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is [v0.30.0](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.0), released 2026-11-12 at `6260c31fbce11e4cd542878f1f6a37410d678ae8`. The previous stable release is `v0.29.2` at `261d41ea928eec3dc5b8db13c70f044392adf124`.
+The latest stable release is [v0.30.4](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.4), a patch release on v0.30.2 that also carries the v0.30.3 hotfix. The previous stable releases are `v0.30.3` at `745cb090b69f99656e458e9d5b1d24a7a0f67f74` and `v0.30.2` at `f77d6ed98c8f2e896851b31720876e4c9d10f7b4`.
 
 The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.0) describe a minor release that works toward "nothing lost": storing each message once across retries, replays and restarts. The schema version stays 5, with no new columns in `messages`; the ingest ledger adds its own tables. Rolling back to v0.29.2 loses no rows; one case stores a copy (#2552). No answer-quality gain is claimed. Local semantic recall stays the shipped default, as from v0.29.0:
 
