@@ -248,9 +248,12 @@ def test_stub_first_exit_keeps_list_user_with_no_merge(open_engine, caplog):
         _stamp(rows)
         engine.ingest(rows)
         stored = engine._store.get_session_messages(engine._session_id)
-        assert engine._last_active_replay_messages[-2]["content"] == user["content"]
+        cached = engine._last_active_replay_messages[-2]
+        assert cached["content"] == user["content"]
+        ingest_keys = {key: value for key, value in cached.items() if key not in {"content", "api_content"}}
         # Fault seam: leave the stored occurrence and the cache's source key intact.
-        engine._last_active_replay_messages[-2]["content"] = ""
+        cached["content"] = ""
+        user["observed_at"] = 1720000000.0
         returned = _compress(engine, rows)
         assert "reason=stub_first_exit leaves=0 progress=none" in _stop_line(caplog)
         assert any(row["role"] == "tool" and row["content"].startswith("[Externalized tool output:")
@@ -258,8 +261,11 @@ def test_stub_first_exit_keeps_list_user_with_no_merge(open_engine, caplog):
         assert len(returned) == len(rows)
         assert not engine._dag.get_session_nodes(engine._session_id)
         assert engine._store.get_session_messages(engine._session_id) == stored
+        assert all(returned[-2] is not row for row in engine._last_active_replay_messages)
     assert returned[-2]["content"] == [{"type": "text", "text": text}]
-    assert returned[-2] is user
+    assert returned[-2]["api_content"] == user["api_content"]
+    assert returned[-2] is not cached
+    assert {key: value for key, value in returned[-2].items() if key not in {"content", "api_content"}} == ingest_keys
 
 
 def test_turn_end_native_image_rewrite_is_stored_once(open_engine):

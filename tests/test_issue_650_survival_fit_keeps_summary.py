@@ -11,6 +11,7 @@ import json
 import logging
 import sys
 import types
+from collections import Counter
 
 import pytest
 
@@ -82,6 +83,7 @@ def _spy(engine, monkeypatch, *, fit=True) -> dict:
     def spy_fit(messages, result, *args, **kwargs):
         seen["input"] = list(result) if isinstance(result, list) else result
         seen["output"] = real_fit(messages, result, *args, **kwargs) if fit else result
+        seen["fit_bytes"] = _wire_bytes(seen["output"])
         return seen["output"]
 
     def spy_budget(*args, **kwargs):
@@ -95,6 +97,23 @@ def _spy(engine, monkeypatch, *, fit=True) -> dict:
 
 def _left(before, after) -> list[dict]:
     return [m for m in before if all(m is not kept for kept in after)]
+
+
+def _wire_bytes(value) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _left_by_bytes(before, after) -> list[dict]:
+    """Count each surviving occurrence once, including byte-equal replay copies."""
+    kept = Counter(_wire_bytes(row) for row in after)
+    dropped = []
+    for row in before:
+        key = _wire_bytes(row)
+        if kept[key]:
+            kept[key] -= 1
+        else:
+            dropped.append(row)
+    return dropped
 
 
 def _today(pre, lead, budget, measure) -> list[dict]:
@@ -141,6 +160,7 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
         view = _hidden_backlog(engine, list_users=list_users)
         seen = _spy(engine, monkeypatch)
         result = engine.compress(view, current_tokens=host(view))
+        assert _wire_bytes(result) == seen["fit_bytes"]
         pre, budget = seen["input"], seen["budget"]
         assert pre[0]["role"] == "user" and "Summary (d" in str(pre[0]["content"])
         assert engine._survival_generated(pre[0])
@@ -150,14 +170,14 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
         store_ids = engine._get_store_id_map_for_messages(pre)
         if list_users:
             assert result[0] is pre[0], str(result[0]["content"])[:60]
-            dropped = _left(pre, result)
+            dropped = _left_by_bytes(pre, result)
         else:  # re-formed exactly as assembly forms a carrier: summary + the first kept raw user row
-            kept = _left(result, pre)
+            kept = _left_by_bytes(result, pre)
             assert kept == [result[0]] and _summary_part(engine, result[0]) == _summary_part(engine, pre[0])
             first = next(m for m in pre if m["role"] == "user" and m["content"] ==
                          engine._generated_context_carrier_remainder(result[0]))
             assert pre.index(first) > 1 and pre[pre.index(first) + 1] is result[1]
-            dropped = [m for m in _left(pre[1:], result) if m is not first]  # the first kept row is merged
+            dropped = [m for m in _left_by_bytes(pre[1:], result) if m is not first]  # the first kept row is merged
             dropped.insert(0, {"role": "user", "content": carrier})  # the carrier's row left with its turn
             assert pre[1]["role"] == "assistant" and all(pre[1] is not m for m in result)
             assert not (result[0]["role"] == "user" and result[1]["role"] == "user")
@@ -213,13 +233,14 @@ def test_t2_system_head_keeps_the_summary_after_it_and_the_notice_in_it(tmp_path
         view = _hidden_backlog(engine, system=True)
         seen = _spy(engine, monkeypatch)
         result = engine.compress(view, current_tokens=host(view))
+        assert _wire_bytes(result) == seen["fit_bytes"]
         pre, budget = seen["input"], seen["budget"]
         assert pre[0]["role"] == "system" and engine._survival_generated(pre[1])
         assert engine._survival_measure(pre) > budget and engine._last_survival_fit is not None
         assert result[0]["role"] == "system" and NOTICE in result[0]["content"]
         assert result[1] is pre[1]  # the summary, unedited, right after the system row
         assert not any(NOTICE in str(m.get("content")) for m in result[1:])
-        dropped = _left(pre, result)
+        dropped = _left_by_bytes(pre, result)
         store_ids = engine._get_store_id_map_for_messages(pre)
         assert dropped[0] is pre[0]  # the system row is replaced by its copy carrying the notice
         assert all(id(m) in store_ids and not engine._survival_generated(m) for m in dropped[1:])

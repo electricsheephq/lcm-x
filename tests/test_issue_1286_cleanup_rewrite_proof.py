@@ -1,9 +1,9 @@
 """#1286: a list the host commits in place of its own leaves a durable proof of that list, so a restart stores
 nothing again.
 
-An automatic below-threshold pass ends ``sanitized`` and hands the host a rewritten list: the replay view's
-externalized stub for an oversized payload, or an assistant row with its reasoning block stripped. Hermes commits
-it in place (``on_session_end`` on the list compress() was given, then the compression boundary). Before the fix
+The current automatic pass still adopts externalized stubs. The reasoning cases that need a committed
+cleanup proof model the earlier writer that also adopted reasoning strips on those passes. Hermes commits
+a rewritten list in place (``on_session_end`` on the list compress() was given, then the compression boundary). Before the fix
 the proof of that list stayed process-local, or was never built when the replay identities were equal (the stub
 swap), so a gateway restart left the cold bind no proof of the committed list: reconcile fell to cursor 0 and
 the unstamped rows already stored were stored again.
@@ -22,6 +22,7 @@ import logging
 import re
 from collections import Counter
 from copy import deepcopy
+from unittest.mock import patch
 
 import pytest
 
@@ -111,7 +112,7 @@ class Host:
         ]
         self.engine.ingest(self.live)
 
-    def cleanup_pass(self, preflight):
+    def cleanup_pass(self, preflight, *, keep_reasoning=False):
         """The engine-driven automatic compress() below the threshold, which is cleanup-only. Returns (result, the
         input). ``preflight`` asks through the host's preflight (deferred maintenance under critical pressure).
         Otherwise the engine's own request marker stands in: below the threshold the preflight defers a size-only
@@ -124,9 +125,20 @@ class Host:
         else:
             assert self.engine._mark_below_threshold_maintenance() is True
         before = deepcopy(self.live)
-        result = self.engine.compress(self.live, current_tokens=rough)
+        if not keep_reasoning and THINK in str(before):
+            # Model a proof written before cosmetic reasoning strips stopped
+            # triggering host commits. Ingest and proof recording still run.
+            keep_rows = self.engine._keep_host_compress_rows
+            with patch.object(self.engine, "_keep_host_compress_rows",
+                              side_effect=lambda messages, result, **_: keep_rows(messages, result)):
+                result = self.engine.compress(self.live, current_tokens=rough)
+        else:
+            result = self.engine.compress(self.live, current_tokens=rough)
         assert self.engine._last_compression_status == "sanitized"
-        assert result is not self.live and len(result) == len(before) and result != before
+        if keep_reasoning:
+            assert result is self.live and result == before
+        else:
+            assert result is not self.live and len(result) == len(before) and result != before
         return result, before
 
     def compact(self):
@@ -230,7 +242,7 @@ def test_the_boundary_makes_a_committed_cleanup_proof_durable(host, variant):
 @pytest.mark.parametrize("variant", ["stub", "reasoning"])
 def test_a_cleanup_rewrite_the_host_never_commits_stays_local(host, variant):
     _turns(host, variant)
-    host.cleanup_pass(preflight=variant == "reasoning")
+    host.cleanup_pass(preflight=variant == "reasoning", keep_reasoning=variant == "reasoning")
     rows = host.stored()
     host.turn()  # the host kept its own list
     assert host.engine._durable_commit_proof_payload() is None

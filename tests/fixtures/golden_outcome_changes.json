@@ -616,22 +616,6 @@
       "outcome_sha": "8f1d4a919c5533445740f48043c9e454dbf7ac96ad5c0b39579fd940d81f3c26",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
     },
-    "sequence-compaction": {
-      "outcome_sha": "967bb9a549facc0ae568b0f8c5eefc3ae48da1c29386b24f0336162340313783",
-      "reason": "#3087: returned user rows retain host dict identity in the compaction rewrite watch and cache snapshots"
-    },
-    "sequence-host-merge": {
-      "outcome_sha": "2191aed65af3a6db51f5f883f35860be471965bb317f7c98aa185ce874f81e47",
-      "reason": "#3087: returned user rows retain host dict identity in the compaction rewrite watch and cache snapshots"
-    },
-    "sequence-rewrite": {
-      "outcome_sha": "4de77238f47df075cef81af316d939717b721ccb9c36428b60064e236c930f34",
-      "reason": "#3087: returned user rows retain host dict identity in the compaction rewrite watch and cache snapshots"
-    },
-    "sequence-rotation": {
-      "outcome_sha": "39d58fab7750961d528c19becc2ca39944835fc4f88a80ed0a465b3fcf18e709",
-      "reason": "#3087: returned user rows retain host dict identity in the compaction rewrite watch and cache snapshots"
-    },
     "sqlite-append": {
       "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
       "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
