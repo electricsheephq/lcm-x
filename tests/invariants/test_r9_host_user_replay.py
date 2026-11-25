@@ -42,11 +42,15 @@ def test_marker_sidecar_is_dropped_on_cached_content_mismatch(open_engine, cache
         result = _compress(engine, host, force=True)
         assert hits and engine._last_compress_leaves[1] == 1
         uid = tail["message_uid"]
-        returned, = [row for row in result if row.get("message_uid") == uid]
-        assert (
-            "api_content" in returned,
-            "api_content" in _cached_row(engine, uid),
-        ) == (False, False)
+        for followup in (False, True):
+            if followup:
+                result = _cleanup(engine, host)
+            returned, = [row for row in result if row.get("message_uid") == uid]
+            assert returned["content"] == tail["content"]
+            cached = _cached_row(engine, uid)
+            assert cached["content"] == tail["content"]
+            assert ("api_content" in returned, "api_content" in cached) == (False, False)
+        assert len(hits) >= 2
 
 
 def test_cleanup_restores_reasoning_with_protected_sidecar(open_engine, cache_hits):
