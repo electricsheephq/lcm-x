@@ -1080,8 +1080,9 @@ class CompactionMixin:
                             budget.leaves, self._compress_hidden_rows_consumed)
             restore_no_progress_host_rows = (
                 budget.leaves == 0 and not budget.progress and not force and not bypass_cooldown
-                and not self._compress_forced_overflow and self._last_compression_status != "error"
+                and not self._compress_forced_overflow and self._last_compression_status in {"sanitized", "noop"}
                 and not self._stub_first_exit_now and result is before_survival_fit
+                and self._compress_host_rows_consumed == 0
             )
             result = self._keep_host_compress_rows(messages, result, no_progress=restore_no_progress_host_rows)
             if restore_no_progress_host_rows:

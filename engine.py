@@ -3213,31 +3213,33 @@ class LCMEngine(
                 target not in matched or matched[target] == source for source, target in zip(incoming, outgoing)
             ):
                 for source, target in zip(incoming, outgoing):
-                    if compatible(messages[source], result[target]):
-                        matched.setdefault(target, source)
+                    if target in matched or not compatible(messages[source], result[target]):
+                        continue
+                    if role == "user" and (
+                        self._message_replay_identity(messages[source]) != self._message_replay_identity(result[target])
+                    ):
+                        continue
+                    matched[target] = source
             for target, source in matched.items():
                 host, row = messages[source], result[target]
-                if host is row:
+                if host is row or self._compress_generated_row(row, generated):
                     continue
                 canonical = canonical_value(host)
-                if self._compress_generated_row(row, generated) or (canonical is not host and row == canonical):
-                    if no_progress:
-                        replacements[source] = row
-                    continue
+                if canonical is not host and row == canonical:
+                    continue  # Surrogate canonicalization is a validity repair.
                 placeholder = self._compress_placeholder(host, row)
                 if placeholder is not None:
-                    replacements[source if no_progress else target] = placeholder
+                    replacements[target] = placeholder
                 elif role == "user":
                     restored = self._user_replay_content(host, row)
-                    if no_progress:
-                        if restored != host:
-                            replacements[source] = restored
+                    if no_progress and restored == host:
+                        replacements[target] = host
                     elif restored != row:
                         replacements[target] = restored
-        if no_progress:
-            return [replacements.get(index, row) for index, row in enumerate(messages)] if replacements else messages
-        for index, row in replacements.items():
-            result[index] = row
+                elif no_progress and self._compression_rows_equal(row, _clean_active_assistant_message(host) or host):
+                    replacements[target] = host
+        if replacements:
+            result = [replacements.get(index, row) for index, row in enumerate(result)]
         if len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
             return messages
         return result
@@ -6925,17 +6927,18 @@ class LCMEngine(
             # UID and address fields still use the host-UID mode and placeholder rules.
             # Timestamp belongs to the cached occurrence established at ingest.
             excluded = {
-                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp", "observed_at",
+                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
                 *IDENTITY_KEYS, *ADDRESS_KEYS,
             }
             for host, row in zip(host_messages, current):
                 if row is host or id(row) in generated_ids:
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
-                # can later drop one. The engine writes only excluded keys on a kept row.
-                for key in [key for key in row if key not in excluded and key not in host]:
+                # can later drop one. User replay also retains its ingest observation.
+                kept_keys = excluded | {"observed_at"} if row.get("role") == "user" else excluded
+                for key in row.keys() - kept_keys - host.keys():
                     del row[key]
-                row.update((key, value) for key, value in host.items() if key not in excluded)
+                row.update((key, value) for key, value in host.items() if key not in kept_keys)
                 if not normalize_content_value(host.get("content")) and not normalize_content_value(row.get("content")):
                     # The replay identity reads "", None and no content as the same: keep the host's form.
                     if "content" in host:
