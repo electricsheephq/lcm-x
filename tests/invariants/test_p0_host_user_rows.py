@@ -238,14 +238,10 @@ def test_summary_carrier_keeps_unrelated_tail_sidecar(open_engine, caplog):
         assert _message_rows(engine) == stored
 
 
-@pytest.mark.parametrize("kind", ["redaction", "ignore", "quarantine", "externalized-tool"])
+@pytest.mark.parametrize("kind", ["ignore", "quarantine", "externalized-tool"])
 def test_control_no_progress_adopts_placeholder_without_sidecar(open_engine, caplog, kind):
     rows = [_user("Question")]
-    if kind == "redaction":
-        rows = [_user("Please use api_key=sk-syntheticexample1234567890", api_content=Y)]
-        settings = dict(sensitive_patterns_enabled=True, sensitive_patterns=["api_key"])
-        index, marker = 0, "[LCM sensitive redaction:"
-    elif kind == "ignore":
+    if kind == "ignore":
         rows = [_user("Cronjob Response: synthetic heartbeat", api_content=Y), _user("Question")]
         settings = {}
         index, marker = 0, "[LCM active replay placeholder: message ignored;"

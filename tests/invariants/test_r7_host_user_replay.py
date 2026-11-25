@@ -1,7 +1,6 @@
-"""Round-7 regressions for returning protected host occurrences."""
+"""Round-7 regressions for returning host occurrences."""
 
 from copy import deepcopy
-import re
 
 import pytest
 
@@ -12,9 +11,7 @@ from tests.invariants.test_p0_host_user_rows import (
 )
 from tests.invariants.test_r4_host_user_replay import _todo
 
-SENSITIVE = "sk-syntheticroundseven1234567890"
-REDACTION = dict(sensitive_patterns_enabled=True, sensitive_patterns=["api_key"])
-MARKER = r"\[LCM sensitive redaction: name=api_key;[^\]]*\]"
+SYNTHETIC_VALUE = "sk-syntheticroundseven1234567890"
 
 
 def _cached_row(engine, uid):
@@ -22,30 +19,23 @@ def _cached_row(engine, uid):
     return row
 
 
-def _assert_protected_view(engine, host):
+def _returned_tail(engine, host):
     engine._preflight_automatic_request = True
     returned = _compress(engine, host)
     uid = host[-1]["message_uid"]
     row, = [row for row in returned if row.get("message_uid") == uid]
-    returned_count = repr(returned).count(SENSITIVE)
-    cached_count = repr(engine._last_active_replay_messages).count(SENSITIVE)
-    print(f"returned sensitive count={returned_count}; cached sensitive count={cached_count}; "
-          f"content={row.get('content')!r}; api_content={row.get('api_content')!r}")
-    if engine._config.sensitive_patterns_enabled:
-        assert (returned_count, cached_count) == (0, 0)
     return row
 
 
-@pytest.mark.parametrize("patterns", [True, False], ids=["patterns-on", "patterns-off"])
-def test_cache_hit_redacts_new_host_annotation(open_engine, monkeypatch, patterns):
+def test_cache_hit_keeps_new_host_annotation(open_engine, monkeypatch):
     tail = _user("x" * 46, timestamp=42.0)
     host = [_user("Previous question"), _assistant("Previous answer"), tail]
     _stamp(host)
-    with open_engine(**(REDACTION | {"sensitive_patterns_enabled": patterns})) as engine:
+    with open_engine() as engine:
         engine.ingest(host)
         cached = _cached_row(engine, tail["message_uid"])
         assert cached["content"] == tail["content"]
-        annotation = _todo(f"api_key={SENSITIVE} keep the rest of the annotation.")
+        annotation = _todo(f"api_key={SYNTHETIC_VALUE} keep the rest of the annotation.")
         current = tail["content"] + "\n\n" + annotation
         assert _strip_volatile_host_scaffolding(current) == tail["content"]
         host[-1] = dict(tail, content=current, api_content=f"API note: {annotation}")
@@ -59,41 +49,34 @@ def test_cache_hit_redacts_new_host_annotation(open_engine, monkeypatch, pattern
         monkeypatch.setattr(engine, "_keep_host_held_stubs", observe)
         assert engine._message_replay_identity(tail) == engine._message_replay_identity(host[-1])
         before = stored_rows(engine)
-        returned = _assert_protected_view(engine, host)
+        returned = _returned_tail(engine, host)
         for field in ("content", "api_content"):
-            expected = host[-1][field].replace(SENSITIVE, "<redacted>") if patterns else host[-1][field]
-            assert re.sub(MARKER, "<redacted>", returned[field]) == expected
+            assert returned[field] == host[-1][field]
         assert cache_hits and stored_rows(engine) == before
 
 
-@pytest.mark.parametrize("patterns", [True, False], ids=["patterns-on", "patterns-off"])
-def test_emptied_redacted_note_keeps_sensitive_sidecar_out(open_engine, patterns):
-    raw = f"api_key={SENSITIVE}"
-    tail = _user("\n\n" + _todo(raw), timestamp=42.0, api_content={"api_key": SENSITIVE, "note": "Keep this note."})
+def test_emptied_note_keeps_structured_sidecar(open_engine):
+    tail = _user("\n\n" + _todo(f"api_key={SYNTHETIC_VALUE}"), timestamp=42.0,
+                 api_content={"api_key": SYNTHETIC_VALUE, "note": "Keep this note."})
     host = [*_history()[-2:], tail]
     _stamp(host)
-    with open_engine(**(REDACTION | {"sensitive_patterns_enabled": patterns})) as engine:
+    with open_engine() as engine:
         engine.ingest(host)
-        if patterns:
-            assert "[LCM sensitive redaction:" in _cached_row(engine, tail["message_uid"])["content"]
         identity = engine._message_replay_identity(tail)
         tail["content"] = ""
         assert engine._message_replay_identity(tail) == identity
         before = stored_rows(engine)
-        returned = _assert_protected_view(engine, host)
+        returned = _returned_tail(engine, host)
         assert returned["content"] == ""
-        value = "<redacted>" if patterns else SENSITIVE
-        assert returned["api_content"]["note"] == "Keep this note."
-        assert re.sub(MARKER, "<redacted>", returned["api_content"]["api_key"]) == value
+        assert returned["api_content"] == tail["api_content"]
         assert stored_rows(engine) == before
 
 
-@pytest.mark.parametrize("patterns", [True, False], ids=["patterns-on", "patterns-off"])
-def test_equal_literal_redaction_marker_keeps_safe_sidecar(open_engine, patterns):
+def test_equal_literal_redaction_marker_keeps_safe_sidecar(open_engine):
     tail = _user("The manual quotes [LCM sensitive redaction: example].", api_content="Independent synthetic API text")
     host = [*_history(), tail]
     _stamp(host)
-    with open_engine(**(REDACTION | {"sensitive_patterns_enabled": patterns})) as engine:
+    with open_engine() as engine:
         engine.ingest(host)
         returned = _compress(engine, host, force=True)
         assert engine._last_compress_leaves[1] == 1

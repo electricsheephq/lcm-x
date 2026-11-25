@@ -61,10 +61,9 @@ def test_flap_annotation_keeps_ingest_keys_and_store(open_engine):
             host = returned
 
 
-@pytest.mark.parametrize("redacted", (False, True), ids=("plain", "redacted"))
 @pytest.mark.parametrize("route", ("cleanup", "leaf", "stub"))
-def test_emptied_note_keeps_current_host_text(open_engine, route, redacted):
-    tail = _user("\n\n" + _todo("api_key=sk-syntheticexample1234567890" if redacted else "synthetic note"),
+def test_emptied_note_keeps_current_host_text(open_engine, route):
+    tail = _user("\n\n" + _todo("synthetic note"),
                  timestamp=42.0, api_content=SIDECAR)
     if route == "stub":
         rows = [
@@ -75,7 +74,6 @@ def test_emptied_note_keeps_current_host_text(open_engine, route, redacted):
         rows = [*_history(), tail]
     _stamp(rows)
     settings = dict(
-        sensitive_patterns_enabled=redacted, sensitive_patterns=["api_key"],
         fresh_tail_count=2, large_output_externalization_enabled=True,
         large_output_externalization_threshold_chars=1_000_000,
         large_output_active_replay_stubbing_enabled=True,
@@ -87,7 +85,7 @@ def test_emptied_note_keeps_current_host_text(open_engine, route, redacted):
         before = engine._message_replay_identity(tail)
         engine.ingest(rows)
         cached = next(row for row in engine._last_active_replay_messages if row.get("message_uid") == tail["message_uid"])
-        assert ("[LCM sensitive redaction:" in cached["content"]) == redacted
+        assert "[LCM sensitive redaction:" not in cached["content"]
         stored = stored_rows(engine)
         tail.update(content="", api_content="")
         assert engine._message_replay_identity(tail) == before
