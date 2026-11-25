@@ -131,7 +131,7 @@ from .adaptive_retrieval import AdaptiveRetrievalRegistry
 from .query_view_store import QueryViewStore
 from .tool_registry import TOOL_REGISTRY
 from .sanitize import (
-    _clean_active_assistant_message,
+    _clean_active_assistant_message, _contains_sensitive_redaction,
 )
 from .session_patterns import (
     build_session_match_keys,
@@ -3131,9 +3131,32 @@ class LCMEngine(
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
-    def _is_compress_placeholder(self, host, row):
-        return (id(row) in self._generated_ignored_active_replay_placeholder_message_ids
-                or self._replay_diff_requests_ingest_cleanup([host], [row]))
+    def _compress_placeholder(self, host, row):
+        """Keep protection rewrites and refresh a redaction against the current host content."""
+        if not self._replay_diff_requests_ingest_cleanup([host], [row]):
+            return None
+        if host.get("role") != "user" or not _contains_sensitive_redaction(row.get("content")):
+            return row
+        redacted = self._redact_active_replay_messages([host])[0]
+        if row.get("content") == redacted.get("content") and "api_content" not in row:
+            return row
+        redacted.pop("api_content", None)
+        return self._user_replay_content(redacted, row)
+
+    @staticmethod
+    def _user_replay_content(host, occurrence):
+        """Copy the cached occurrence and replace the two host content fields."""
+        replay = dict(occurrence)
+        for key in ("content", "api_content"):
+            if key in host:
+                replay[key] = host[key]
+            else:
+                replay.pop(key, None)
+        return replay
+
+    @staticmethod
+    def _compress_generated_row(row, generated):
+        return id(row) in generated or LCMEngine._lcm_generated_marker(row)
 
     def _keep_host_compress_rows(self, messages, result, *, no_progress=False):
         """Restore host occurrences and retain LCM's protection rewrites."""
@@ -3162,12 +3185,10 @@ class LCMEngine(
 
         # Match surviving occurrences by object, address and content in that order.
         # A role's remaining ordinal is usable when its aligned counts and anchors agree.
-        generated = set()
-        if not no_progress:
-            pending = getattr(self, "_pending_emission_candidates", None) or ()
-            generated = {id(candidate.get("row")) for candidate in pending}
-            if (fit := getattr(self, "_survival_fit_emission", None)) is not None:
-                generated.add(id(fit.get("row")))
+        generated = self._generated_ignored_active_replay_placeholder_message_ids.copy()
+        generated.update(id(candidate.get("row")) for candidate in getattr(self, "_pending_emission_candidates", None) or ())
+        if (fit := getattr(self, "_survival_fit_emission", None)) is not None:
+            generated.add(id(fit.get("row")))
         replacements = {}
         returned_roles = positions(result)
         for role, incoming in positions(messages).items():
@@ -3196,26 +3217,38 @@ class LCMEngine(
                         matched.setdefault(target, source)
             for target, source in matched.items():
                 host, row = messages[source], result[target]
-                if host is row or id(row) in generated:
+                if host is row:
                     continue
-                if self._is_compress_placeholder(host, row):
+                canonical = canonical_value(host)
+                if self._compress_generated_row(row, generated) or (canonical is not host and row == canonical):
                     if no_progress:
                         replacements[source] = row
-                elif not no_progress and (
-                    normalize_content_value(host.get("content")) == normalize_content_value(row.get("content"))
-                    or not self._lcm_generated_marker(row)
-                ):
-                    replacements[target] = host
+                    continue
+                placeholder = self._compress_placeholder(host, row)
+                if placeholder is not None:
+                    replacements[source if no_progress else target] = placeholder
+                elif role == "user":
+                    restored = self._user_replay_content(host, row)
+                    if no_progress:
+                        if restored != host:
+                            replacements[source] = restored
+                    elif restored != row:
+                        replacements[target] = restored
         if no_progress:
             return [replacements.get(index, row) for index, row in enumerate(messages)] if replacements else messages
-        for index, host in replacements.items():
-            result[index] = host
+        for index, row in replacements.items():
+            result[index] = row
+        if len(result) == len(messages) and all(row is host for row, host in zip(result, messages)):
+            return messages
         return result
 
     @wraps(CompactionMixin.compress)
     def compress(self, messages, *args, **kwargs):
-        # All compaction routes converge here, with the original host list still available.
-        result = self._keep_host_compress_rows(messages, super().compress(messages, *args, **kwargs))
+        # Share the actual admission decision with the backstop after the pass.
+        admission = []
+        result = super().compress(messages, *args, **kwargs, _lcm_admission=admission)
+        if admission != [True]:
+            result = self._keep_host_compress_rows(messages, result)
         if result is messages or not isinstance(result, list):
             return result
         with_api = {id(row): row for row in result if isinstance(row, dict) and "api_content" in row}
@@ -6872,6 +6905,7 @@ class LCMEngine(
         host_messages: List[Dict[str, Any]],
         cached: List[Dict[str, Any]],
         fresh: List[Dict[str, Any]],
+        snapshot: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """#772: a stub and its payload share an identity, so the cache would resurrect a host-held stub.
         #773: the host's pruned-tool placeholder shares its stored row's identity too, so the host keeps it."""
@@ -6891,16 +6925,11 @@ class LCMEngine(
             # UID and address fields still use the host-UID mode and placeholder rules.
             # Timestamp belongs to the cached occurrence established at ingest.
             excluded = {
-                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp",
+                "role", "content", "tool_calls", "tool_call_id", "api_content", "timestamp", "observed_at",
                 *IDENTITY_KEYS, *ADDRESS_KEYS,
             }
-            compressing = getattr(self._thread_context, "foreground_budget", None) is not None
-            for index, (host, row) in enumerate(zip(host_messages, current)):
+            for host, row in zip(host_messages, current):
                 if row is host or id(row) in generated_ids:
-                    continue
-                if (compressing and host.get("role") == row.get("role") == "user"
-                        and not self._is_compress_placeholder(host, row)):
-                    current[index] = host
                     continue
                 # Preflight can see a row before Hermes stamps its host fields, and the host
                 # can later drop one. The engine writes only excluded keys on a kept row.
@@ -6920,14 +6949,25 @@ class LCMEngine(
             sync_cached_host_metadata(
                 host_messages, current, generated_ids,
             )
-        # The copy loop captured the old fields. Hash the refreshed view on this pass
-        # so the next identical replay does not appear to change.
-        for row in current:
-            self._no_progress_public_rows[id(row)] = {
-                key: value for key, value in row.items()
-                if key != "timestamp" and not str(key).startswith("_")
-            }
-        return current
+        view = current
+        compressing = getattr(self._thread_context, "foreground_budget", None) is not None
+        if len(host_messages) == len(cached) and compressing:
+            for index, (host, row) in enumerate(zip(host_messages, current)):
+                if (host is row or host.get("role") != "user" or row.get("role") != "user"
+                        or self._compress_generated_row(row, generated_ids)):
+                    continue
+                placeholder = self._compress_placeholder(host, row)
+                restored = self._user_replay_content(host, row) if placeholder is None else placeholder
+                if view is current:
+                    view = current.copy()
+                current[index] = restored
+                view[index] = dict(restored)
+        if snapshot is not None:
+            snapshot.extend(current)
+        # Hash the refreshed cache and returned view, using their own object identities.
+        for row in (*current, *view) if view is not current else current:
+            self._no_progress_public_rows[id(row)] = self._public_compression_row(row)
+        return view
 
     def _cached_active_replay_messages(
         self,
@@ -6938,26 +6978,16 @@ class LCMEngine(
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
+                snapshot = []
                 current = self._keep_host_held_stubs(
                     original_messages,
                     self._copy_active_replay_messages_preserving_generated_ids(cached),
                     original_messages if fresh_replay_messages is None else fresh_replay_messages,
+                    snapshot,
                 )
-                # The returned view can borrow a host user dict. Keep our replay
-                # snapshot independent of edits the host may make after compress().
-                cached = current
-                for index, (host, row) in enumerate(zip(original_messages, current)):
-                    if row is host and row.get("role") == "user":
-                        if cached is current:
-                            cached = current.copy()
-                        cached[index] = copied = dict(row)
-                        self._no_progress_public_rows[id(copied)] = self._no_progress_public_rows[id(row)]
-                self._last_active_replay_messages = cached
-                self._refresh_generated_active_replay_placeholder_retention(
-                    original_messages,
-                    current,
-                )
-                self._observe_no_progress_replay(original_messages, current)
+                self._last_active_replay_messages = snapshot
+                self._refresh_generated_active_replay_placeholder_retention(original_messages, snapshot)
+                self._observe_no_progress_replay(original_messages, snapshot)
                 return current
         return None
 

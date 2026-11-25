@@ -96,13 +96,6 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 _OWNER_REFUSED = object()
 
 
-@dataclass
-class _RestoredHostRows:
-    """Return the original rows after bookkeeping used their canonical view."""
-
-    rows: list
-
-
 def _counted_compaction(operation):
     """Keep connections live through the entire pass, including its finalizers."""
     @wraps(operation)
@@ -127,11 +120,6 @@ def _counted_compaction(operation):
         else:
             # This call's generated pairs win over a caller-supplied keyword: they match the copy made here.
             result = operation(self, messages, *args, **{**kwargs, **host_view})
-            if isinstance(result, _RestoredHostRows):
-                if result.rows is messages:
-                    return raw
-                originals = {id(clean): original for original, clean in host_view.get("host_pairs", ())}
-                return [originals.get(id(row), row) for row in result.rows]
             return raw if result is _OWNER_REFUSED else result
         finally:
             with self._compaction_gate:
@@ -903,13 +891,15 @@ class CompactionMixin:
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
                  force: bool = False,
-                 bypass_cooldown: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
+                 bypass_cooldown: bool = False, *, host_pairs=(), _lcm_admission=None) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         if self._compaction_is_closing():
             return messages
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
+            if _lcm_admission is not None:
+                _lcm_admission.append(bypassed)
             if bypassed:
                 handle = self._emission_handle
                 if handle is not None and handle.session_id == self._bypass_lcm_session_id():
@@ -1133,8 +1123,6 @@ class CompactionMixin:
             except Exception:
                 logger.debug("LCM hidden-only streak update failed", exc_info=True)
             returned = result
-            if restore_no_progress_host_rows and host_pairs:
-                return _RestoredHostRows(result)
             return result
         except BaseException as exc:
             if binding_changed():
