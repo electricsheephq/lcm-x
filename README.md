@@ -142,7 +142,7 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 
 The latest stable release is
 [`v0.30.3`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.3),
-released 2026-11-23 (plugin `hermes-lcm-x`, engine `lcm-x`), a hotfix on v0.30.2.
+released 2026-11-25 (plugin `hermes-lcm-x`, engine `lcm-x`), a hotfix on v0.30.2.
 A same-length compaction pass no longer makes the next ingest store LCM-X's own
 summary head again as an extra user row, and a copy already stored stays out of
 the prompt and out of compaction. See [project status](docs/project-status.md) for the release summary,

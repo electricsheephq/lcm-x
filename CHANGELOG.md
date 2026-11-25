@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.30.3 (2026-11-23)
+## v0.30.3 (2026-11-25)
 
 - Fix: a same-length compaction pass (a stub-first exit, or a pass whose only leaf covers hidden rows) no longer
   makes the next ingest store LCM-X's own summary head again as an extra user row. For that pass LCM-X records, in
@@ -28,7 +28,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   earlier one (#3062; v0.30.4 reduces the cost, and a cache for the rest is planned). With `LCM_HOST_MESSAGE_UID=on`, a stub-first exit can return a
   summary together with the raw rows it covers, as on v0.30.2 (#3048, planned for v0.31.0). Passes in a row can free
   no host rows while compaction walks stored rows the host no longer shows (#3081: v0.30.4 is planned to show it in
-  `/lcm status` and the doctor, and the fix is planned for v0.31.0). The release notes list the rest.
+  `/lcm status` and the doctor, and the fix is planned for v0.30.5, a patch release after v0.30.4). Durable
+  sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) is unsupported: not maintained; do not enable (#3096).
+  The release notes list the rest.
 - Two crash-path fault cells still show their v0.30.2 behaviour, with no fix release set: a crash after a compaction
   rotation over ACP on upstream Hermes can store one user turn twice (#2507), and a crash during an upgrade from
   v0.27.0 keeps a composite row beside its replayed parts (#1506).

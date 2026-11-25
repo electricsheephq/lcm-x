@@ -12,13 +12,13 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.30.3` (ships `hermes-lcm-x` / `lcm-x`; GA date 2026-11-23) |
+| Latest stable | `v0.30.3` (ships `hermes-lcm-x` / `lcm-x`; GA date 2026-11-25) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is [v0.30.3](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.3), released 2026-11-23, a hotfix on v0.30.2. The previous stable release is `v0.30.2` at `f77d6ed98c8f2e896851b31720876e4c9d10f7b4`.
+The latest stable release is [v0.30.3](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.3), released 2026-11-25, a hotfix on v0.30.2. The previous stable release is `v0.30.2` at `f77d6ed98c8f2e896851b31720876e4c9d10f7b4`.
 
 The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.0) describe a minor release that works toward "nothing lost": storing each message once across retries, replays and restarts. The schema version stays 5, with no new columns in `messages`; the ingest ledger adds its own tables. Rolling back to v0.29.2 loses no rows; one case stores a copy (#2552). No answer-quality gain is claimed. Local semantic recall stays the shipped default, as from v0.29.0:
 
@@ -58,7 +58,7 @@ Issue #658 is the tracker, and [ROADMAP.md](../ROADMAP.md) lays the work out by 
 
 v0.29.0 shipped on 2026-10-28 (see above); this was its pre-release program, kept as history:<ul><li>local embeddings become the default and release-gate arm (#1186) only after #1586 passes, with embeddings off kept beside it;</li><li>delivery and abstention share one paired gate (#1591): more evidence than declared behaviour ships with a sufficiency signal or after its own unanswerable-question check passes; the declared-delivery defect fix in PR #1679 is judged on total utility with that guard disclosed;</li><li>sender provenance (#995), duplicate-hit collapse at delivery (#1681), and the continuity instrument and head-to-head (#1595, #1587);</li><li>measurement infrastructure: noise floor, second judge and nightly factorial runs;</li><li>offline reconstruction (#1598) and the user's current request kept verbatim (#1592).</li></ul>The ≤30-minute development loop is a kill/futility screen for large effects; a nightly factorial on ≥400 clustered questions promotes, and an untouched cohort confirms. Each screen gets a power check; no bar the baseline cannot meet. The noise floor and second judge are measured before ±2-point bars are used.
 
-The order after v0.29.2 is in the [roadmap](../ROADMAP.md#the-order-roadmap-v5) (roadmap v5, reconciled 2026-11-09): LCM-X for Claude Code as its own release unit, whose preview shipped on 2026-11-07 ([claude-code-v0.1.0](https://github.com/electricsheephq/lcm-x/releases/tag/claude-code-v0.1.0)), with GA and Grok Build capture by 2026-11-30; nothing lost (v0.30.0, by 2026-11-26, with its phase 2 in a v0.30.x train); cloud capture in two steps (by 2026-12-02 and 2026-12-09); facts that update (by 2026-12-16); more harnesses, Codex first (by 2026-12-23); and compaction you don't notice (by 2026-12-30). Each date means no later than, and each release ships as soon as its gate passes.
+The order after v0.29.2 is in the [roadmap](../ROADMAP.md#the-order-roadmap-v5) (roadmap v5, reconciled 2026-11-09): LCM-X for Claude Code as its own release unit, whose preview shipped on 2026-11-07 ([claude-code-v0.1.0](https://github.com/electricsheephq/lcm-x/releases/tag/claude-code-v0.1.0)), with GA and Grok Build capture by 2026-11-30; nothing lost (v0.30.0, by 2026-11-25, with its phase 2 in a v0.30.x train); cloud capture in two steps (by 2026-12-02 and 2026-12-09); facts that update (by 2026-12-16); more harnesses, Codex first (by 2026-12-23); and compaction you don't notice (by 2026-12-30). Each date means no later than, and each release ships as soon as its gate passes.
 
 The recall QA target is ≥90% on LongMemEval-S and LoCoMo (non-adversarial) under the matched public protocol; a rank is claimed only on matched rows that hold under a second judge. Two gate-adapter corrections are in flight: retaining conversation speaker names and carrying summary source lineage. Each lands with paired old-vs-new adapter rows on a fixed product release. Earlier gate rows remain as recorded and are compared only with rows from the same adapter.
 
