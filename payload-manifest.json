@@ -1,6 +1,6 @@
 {
-  "source_sha": "ffc5f9f8f05bfe4f24b400bfe9c62451feab8d20",
-  "tooling_sha": "ffc5f9f8f05bfe4f24b400bfe9c62451feab8d20",
+  "source_sha": "745cb090b69f99656e458e9d5b1d24a7a0f67f74",
+  "tooling_sha": "745cb090b69f99656e458e9d5b1d24a7a0f67f74",
   "allowlist_sha256": "83b8bf2418d229639abd5bd72bae468b6263549fa601bb763943864add830f07",
   "builder_version": 2,
   "tooling_dirty": false,
@@ -16,7 +16,7 @@
     {
       "path": "README.md",
       "bytes": 1094,
-      "sha256": "2857580d2af1975e12d7137eeaaed7fe08fb65e2356206321c97e4941dfec34e"
+      "sha256": "f29e8e6732168a5da2adf201412d1ed0990ca86afe4e213334cc72ab3166d053"
     },
     {
       "path": "__init__.py",
@@ -381,7 +381,7 @@
     {
       "path": "plugin.yaml",
       "bytes": 887,
-      "sha256": "458e93839a92446792fc83ec272954cbd3bd4944e82772794f10eb5f09be53d3"
+      "sha256": "b5148fead8e6c5df836af2a7e746b0c3ea57bfc4371ccb3751f5d59d42287183"
     },
     {
       "path": "plugin_identity.py",
