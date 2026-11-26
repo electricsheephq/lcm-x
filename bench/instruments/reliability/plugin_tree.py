@@ -83,12 +83,16 @@ def recovery_prefixes(tree: Path) -> tuple[str, ...]:
 
 
 def carrier_markers(tree: Path) -> tuple[re.Pattern, tuple[str, ...]]:
-    """The plugin's OWN generated-carrier markers at this tree: engine.py ``_LCM_SUMMARY_PART_HEADER_RE`` (the
-    ``[Recent|Session Arc|Durable|Depth-N Summary (dN, node N)]`` part header its carrier detection verifies) and every
-    ``_PRESERVED_*_PREFIX`` string constant in engine.py/reconcile.py (objective/todo carriers). Raises if absent."""
+    """The plugin's OWN generated-carrier markers at this tree: ``_LCM_SUMMARY_PART_HEADER_RE`` (the
+    ``[Recent|Session Arc|Durable|Depth-N Summary (dN, node N)]`` part header its carrier detection verifies), read from
+    engine.py, reconcile.py and, when the tree has it, summary_prefix.py (v0.30.4 moved the header there), and every
+    ``_PRESERVED_*_PREFIX`` string constant in those files (objective/todo carriers). Raises if absent."""
     header, prefixes = None, []
-    for name in ("engine.py", "reconcile.py"):
-        for node in ast.walk(ast.parse((Path(tree) / name).read_text())):
+    for name in ("engine.py", "reconcile.py", "summary_prefix.py"):
+        path = Path(tree) / name
+        if name == "summary_prefix.py" and not path.is_file():
+            continue  # Older plugin trees define the header in engine.py.
+        for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 target, value = node.targets[0].id, node.value
                 if target == "_LCM_SUMMARY_PART_HEADER_RE" and isinstance(value, ast.Call) and value.args:
