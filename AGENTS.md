@@ -247,7 +247,8 @@ gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(in
   upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
   from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7); from
   v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
-  the previous GA (KNOWN under #1674 and disclosed); and, for v0.30.0 only, the named
+  the previous GA (KNOWN under #1674 and disclosed), and for v0.30.4 alone the same copy in
+  the D9-D12 cells under the v0.30.4-only row's four conditions; and, for v0.30.0 only, the named
   duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
   stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
   is covered in the driven audit. From the 2026-11-11 amendment, and for v0.30.0 only, the
