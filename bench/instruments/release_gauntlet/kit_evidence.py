@@ -4,6 +4,7 @@ import builtins
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from contextlib import contextmanager
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -27,7 +28,17 @@ BUILTIN_EXCEPTIONS = frozenset(n for n, v in vars(builtins).items() if isinstanc
 SUB_EDGE = re.compile(r"[ \t]*\| \S")  # An exception group's final line: one space after "|"; source lines have more.
 MISSING = re.compile(r"No module named '([\w.]+)'")
 REFUSAL = "NotImplementedError: LCM-X cannot detach a context engine"
-THREAD = re.compile(r"thread=bg-review(?::([^\s]+))?")
+THREAD = re.compile(r"(?<!\S)thread=bg-review(?::([^\s]+))?(?=\s|$)")
+# The seven Phase C host pins construct one OpenAI-wire AIAgent per review fork.
+# Other client creation reasons (for example, an interrupt rebuild) can occur
+# inside that same fork. A completion without a matching constructor is unverified.
+REVIEW_START = re.compile(r"OpenAI client created \(agent_init, shared=True\) thread=bg-review:\d+(?:\s|$)")
+REVIEW_COMPLETE = "Background review complete: thread=bg-review"
+REVIEW_DETACH = "background-review compressor detachment failed"
+GITHUB_RELEASE_REF = re.compile(
+    r"""(https?://github\.com/[^/\s?#'"]+/[^/\s?#'"]+/(?:blob|tree|releases/tag|compare)/)"""
+    r"""v?\d+\.\d+\.\d+(?:-[\w-]+(?:\.[\w-]+)*)?(?=$|[/?#\s'"\]),]|\.\.\.)"""
+)
 SECTIONS = set("model providers custom_providers compression lcm context plugins mcp_servers auth telemetry "
                "terminal auxiliary platforms gateway cron memory display agent tools toolsets".split())
 
@@ -35,6 +46,11 @@ SECTIONS = set("model providers custom_providers compression lcm context plugins
 def _key_name(key):
     """Every doctor detail key is hashed: a key can be data (a session or table name), and a hash still matches."""
     return "h:" + _sha(str(key))[:12]
+
+
+def _detail_items(detail):
+    return ((key, value) for key, value in detail.items()
+            if not (isinstance(value, list) and re.fullmatch(r"sample_.*_ids", str(key))))
 
 
 def _cause(value):
@@ -47,18 +63,29 @@ def _cause(value):
     if isinstance(value, str):
         return "f:" + _fingerprint(value)
     if isinstance(value, dict):
-        return {_key_name(key): _cause(item) for key, item in sorted(value.items(), key=lambda kv: str(kv[0]))}
+        return {_key_name(key): _cause(item) for key, item in _detail_items(value)}
     if isinstance(value, list):
         return [_cause(item) for item in value]
     return "t:" + type(value).__name__
 
 
-def _fingerprint(entry):
-    """A doctor detail entry's hash after absolute paths and long numbers are masked, so one cause hashes alike
-    across cells. Short numbers (status codes) and URL hosts stay significant."""
-    text = entry if isinstance(entry, str) else json.dumps(entry, sort_keys=True, default=str)
-    text = re.sub(r"(?<![\w:/.])/[^\s'\"]+", "<path>", text)  # Absolute paths only, never a URL's path.
-    return _sha(re.sub(r"\d{4,}", "#", text))[:12]
+def _measurement_class(value, full):
+    # Zero, full, over the whole (usage above the window is its own state) or partial; status carries the threshold.
+    return "Z" if value == 0 else "F" if value == full else "O" if value > full else "P"
+
+
+def _fingerprint(entry, *, measurements=True):
+    """Hash doctor detail with paths, process IDs, and comparable measurements normalized."""
+    if not isinstance(entry, str):
+        return _sha(json.dumps(_cause(entry), sort_keys=True))[:12]
+    text = re.sub(r"(?<![\w:/.])/[^\s'\"]+", "<path>", entry)  # Absolute paths only, never a URL's path.
+    if not measurements:
+        return _sha(re.sub(r"\d{4,}", "#", text))[:12]  # Keep the trace fingerprint contract.
+    text = GITHUB_RELEASE_REF.sub(r"\1<ref>", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)%", lambda m: _measurement_class(Decimal(m[1]), 100) + "%", text)
+    text = re.sub(r"\b(\d+)/(\d+)\b", lambda m: _measurement_class(Decimal(m[1]), Decimal(m[2])) + "/#", text)
+    text = re.sub(r"(\b(?:pid|in process)\s+)\d+\b", r"\1#", text)  # Not "(process N)": a count in host_uid.
+    return _sha(text)[:12]
 
 
 def _sha(value):
@@ -80,49 +107,74 @@ def _log_event(line):
     return next((match for match in (form.match(line) for form in LOG_FORMATS) if match), None)
 
 
-def trace_events(log):
+def trace_events(log, *, strict=False):
     runs, outside, imports, other, events = [], Counter(), Counter(), Counter(), Counter()
     overlapping = ambiguous = unclosed = sequence = 0
+    complete_input = bool(log)
     per_event = defaultdict(Counter)  # (logger, module) -> {event ordinal: tracebacks}
     for path in log:
         active, logger, traceback, warning, counted, current = [], None, False, None, False, None
-        with Path(path).open(encoding="utf-8") as stream:
+        records = 0
+        try:
+            stream = Path(path).open(encoding="utf-8", errors="strict" if strict else "surrogateescape")
+        except OSError:
+            if strict:
+                raise
+            complete_input = False
+            continue
+        with stream:
             for raw in stream:
+                if not raw.endswith("\n"):
+                    complete_input = False
+                if re.search(r"[\udc80-\udcff]", raw):
+                    complete_input = False
+                    continue
                 line = raw.rstrip("\r\n")
+                if line == "[stderr]":  # The ACP driver starts a new block for each child process.
+                    unclosed += sum(bool(runs[i]["refusals"] or runs[i]["detach_warnings"]) for i in active)
+                    complete_input = complete_input and not active
+                    if traceback:
+                        other["(no final line)"] += 1
+                    active, logger, traceback, warning, counted, current = [], None, False, None, False, None
+                    continue
                 stripped = line.lstrip(" \t|")
                 event = _log_event(line)
+                message = line[event.end():] if event else ""
                 if event:
+                    records += 1
                     logger, sequence = event["logger"], sequence + 1
                     current = sequence
                     warning, counted = logger if event["level"] in {"WARNING", "ERROR"} else None, False
-                thread = THREAD.search(line)
-                if thread and "OpenAI client created" in line:
+                thread = THREAD.search(message)
+                if event and logger == "run_agent" and event["level"] == "INFO" and REVIEW_START.match(message):
                     overlapping += bool(active)
                     runs.append({"tid": thread[1], "refusals": 0, "detach_warnings": 0})
                     active.append(len(runs) - 1)
                 eligible = [i for i in active if not thread or not thread[1] or runs[i]["tid"] == thread[1]]
                 for name, seen in (("refusals", stripped.startswith(REFUSAL)),
-                                   ("detach_warnings", "background-review compressor detachment failed" in line)):
+                                   ("detach_warnings", event and logger == "agent.background_review"
+                                    and event["level"] == "WARNING" and message.startswith(REVIEW_DETACH))):
                     if seen:
                         if eligible:
                             runs[eligible[-1]][name] += 1
                         else:
                             outside[name] += 1
-                if "Background review complete:" in line:
-                    ambiguous += bool(len(active) > 1 and (not thread or not thread[1]))
-                    if eligible:
-                        active.remove(eligible[0])  # A tidless completion closes the oldest open run.
+                if (event and logger == "agent.background_review" and event["level"] == "INFO"
+                        and message.startswith(REVIEW_COMPLETE) and thread):
+                    ambiguous += len(eligible) != 1
+                    if len(eligible) == 1:
+                        active.remove(eligible[0])
                 header = stripped.endswith("Traceback (most recent call last):")
                 # A final line starts at column 0, or one space after an exception group's "|" prefix; an indented
                 # bare name is a source line inside the traceback, not its end.
                 piped = line.lstrip(" \t").startswith("|")
                 at_edge = bool(SUB_EDGE.match(line)) if piped else bool(line) and not line[0].isspace()
-                final = FINAL.match(stripped) if traceback and at_edge else None
+                final = FINAL.match(stripped) if traceback and at_edge and not event else None
                 if final:
-                    if stripped.startswith(("ModuleNotFoundError", "ImportError")):
+                    if final[1] in {"ModuleNotFoundError", "ImportError"}:
                         missing = MISSING.search(stripped)
                         # Any other import failure keeps a masked fingerprint, so two different failures never match.
-                        module = missing[1] if missing else "f:" + _fingerprint(stripped)
+                        module = missing[1] if missing else "f:" + _fingerprint(stripped, measurements=False)
                         imports[(logger, module)] += 1
                         per_event[(logger, module)][current] += 1
                         if warning is not None and not counted:
@@ -138,14 +190,15 @@ def trace_events(log):
                 traceback = traceback or header
             if traceback:
                 other["(no final line)"] += 1
-        # An open run at end of file may have absorbed events from outside any run.
+        complete_input &= bool(records) and not active
         unclosed += sum(1 for i in active if runs[i]["refusals"] or runs[i]["detach_warnings"])
-    determined = not (overlapping or ambiguous or unclosed)
+    determined = (complete_input and bool(runs or outside)
+                  and not (overlapping or ambiguous or other["(no final line)"]))
     holds = all(r["refusals"] == r["detach_warnings"] <= 1 for r in runs) and not any(outside.values())
     return {"bg_review_runs": len(runs), "refusals_total": sum(r["refusals"] for r in runs) + outside["refusals"],
             "detach_warnings_total": sum(r["detach_warnings"] for r in runs) + outside["detach_warnings"],
             "runs_by_refusal_count": dict(sorted(Counter(str(r["refusals"]) for r in runs).items())),
-            "per_run": [{k: v for k, v in r.items() if k != "tid"} for r in runs],
+            "per_run": [{k: v for k, v in r.items() if k != "tid"} for r in runs] if determined else None,
             "refusals_outside_runs": outside["refusals"], "detach_warnings_outside_runs": outside["detach_warnings"],
             "overlapping_runs": overlapping, "ambiguous_completions": ambiguous,
             "unclosed_runs_with_events": unclosed, "rule_determined": determined,
@@ -368,21 +421,28 @@ def config_diff(a, root_a, b, root_b):
             "verdict": "OTHER" if others else "PATHS_ONLY"}
 
 
+def doctor_close_checks(value):
+    """Read the last doctor snapshot in store order, or reject missing or malformed input."""
+    if isinstance(value, list):
+        value = value[-1] if value else None
+    rows = value.get("checks") if isinstance(value, dict) else None
+    if not isinstance(rows, list) or not rows or not all(
+            isinstance(row, dict) and isinstance(row.get("check"), str) and isinstance(row.get("status"), str)
+            for row in rows):
+        raise ValueError("doctor-close snapshot has no well-formed checks")
+    return rows
+
+
 def doctor_match(candidate, previous):
     checks = []
     for path in (candidate, previous):
         value = json.loads(Path(path).read_text(encoding="utf-8"))
-        if value == []:
-            raise ValueError("empty doctor input")
-        checks.append([{**row, "status": row["status"].lower()} for item in (value if isinstance(value, list) else [value])
-                       for row in item["checks"]])
-    if not checks[0]:
-        raise ValueError("empty doctor input")  # No candidate checks is missing evidence, never a match.
+        checks.append([{**row, "status": row["status"].lower()} for row in doctor_close_checks(value)])
 
     def signature(row):
         detail = row.get("detail")
         if isinstance(detail, dict):
-            shape = ("dict", tuple(sorted(detail)))
+            shape = ("dict", tuple(sorted(key for key, _ in _detail_items(detail))))
         elif isinstance(detail, (list, str)):  # Each entry's normalized text, as a hash: a new cause stays unmatched.
             shape = (type(detail).__name__, tuple(sorted(_fingerprint(entry) for entry in (
                 detail if isinstance(detail, list) else [detail]))))
@@ -391,13 +451,17 @@ def doctor_match(candidate, previous):
         conditions = ()
         if isinstance(detail, dict):  # Every dict value as a cause flag, so a new cause cannot hide in a warning.
             conditions = tuple(sorted((_key_name(key), json.dumps(_cause(value), sort_keys=True))
-                                      for key, value in detail.items()))
+                                      for key, value in _detail_items(detail)))
         return row["check"], row["status"], shape, conditions
 
     warnings = [Counter(signature(row) for row in rows if row["status"] == "warn") for rows in checks]
     results = [{"check": sig[0], "candidate": count, "previous": warnings[1][sig], "matched": count <= warnings[1][sig]}
                for sig, count in sorted(warnings[0].items(), key=lambda item: repr(item[0]))]
-    unmatched = sorted({row["check"] for row in results if not row["matched"]})
+    new_checks = {row["check"] for row in checks[0]} - {row["check"] for row in checks[1]}
+    skipped = {row["check"] for row in checks[0] if row["status"] == "skip"}
+    previous_problems = {row["check"] for row in checks[1] if row["status"] in {"warn", "fail"}}
+    unmatched = sorted(new_checks | (skipped & previous_problems) |
+                       {row["check"] for row in results if not row["matched"]})
     failed = sorted({row["check"] for rows in checks for row in rows if row["status"] == "fail"})
     statuses = {"pass", "warn", "fail", "ok", "skip"}
     unknown = sorted({row["check"] for rows in checks for row in rows if row["status"] not in statuses})
@@ -412,7 +476,7 @@ def doctor_match(candidate, previous):
             "verdict": "UNMATCHED" if unmatched or unknown or any(row["status"] == "fail" for row in checks[0]) else "MATCHED"}
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for name, flags in {"trace-events": ("log",), "lifecycle-rows": ("lcm-db",),
@@ -423,9 +487,16 @@ def main():
         for flag in flags:
             command.add_argument("--" + flag, required=True, **({"action": "append"} if flag == "log" else {}))
         command.add_argument("--out", required=True, type=Path)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = vars(parser.parse_args())
     command, out = args.pop("command"), args.pop("out")
     try:
+        if command == "trace-events":
+            args["strict"] = True
         result = globals()[command.replace("-", "_")](**args)
         encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
         out.write_text(encoded, encoding="utf-8")
