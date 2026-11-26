@@ -554,7 +554,10 @@ def test_empty_candidate_checks_are_refused(tmp_path, candidate):
     ({"count": -1}, {"count": 0}, "UNMATCHED"),
     ({"state_db_error": "locked at /a/x.db pid 48213"}, {"state_db_error": "locked at /b/y.db pid 51002"}, "MATCHED"),
     ({"notice": "LCM-X was not active in process 48213 (a)"}, {"notice": "LCM-X was not active in process 51002 (a)"}, "MATCHED"),
-], ids=["string-cause", "status-string", "nested-dict", "negative", "same-cause", "process-id"])
+    ({"notice": "LCM-X was not active in process 123 (a)"}, {"notice": "LCM-X was not active in process 4567 (a)"}, "MATCHED"),
+    ({"errors": "host_uid_errors: 5 (process 3)"}, {"errors": "host_uid_errors: 5 (process 4)"}, "UNMATCHED"),
+], ids=["string-cause", "status-string", "nested-dict", "negative", "same-cause", "process-id", "short-process-id",
+        "process-error-count"])
 def test_doctor_dict_string_causes(tmp_path, candidate, previous, verdict):
     def doctor(name, detail):
         return _write(tmp_path / name, json.dumps({"checks": [
