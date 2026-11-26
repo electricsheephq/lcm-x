@@ -243,11 +243,12 @@ gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(in
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
   respins. A duplicate on any path without an injected fault still respins. The spec records
-  three exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
+  four exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
   upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
   from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7); from
   v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
-  the previous GA (KNOWN under #1674 and disclosed); and, for v0.30.0 only, the named
+  the previous GA (KNOWN under #1674 and disclosed), and for v0.30.4 alone the same copy in
+  the D9-D12 cells under the v0.30.4-only row's four conditions; and, for v0.30.0 only, the named
   duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
   stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
   is covered in the driven audit. From the 2026-11-11 amendment, and for v0.30.0 only, the
@@ -261,7 +262,9 @@ gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(in
   probe cells, none in the driven audit;
   #2599's extra after a write fault clears may stay at v0.30.0's count in the same write-fault
   replay cells (KNOWN under #2605);
-  #2558 (fixed in v0.30.1) and the trade on rc-written stores are not covered. No other
+  #2558 (fixed in v0.30.1) and the trade on rc-written stores are not covered. The fourth, for
+  v0.30.4 only, is #3102's two companion-session shapes of a recovered block at their measured
+  counts, as the v0.30.4-only row records them. No other
   duplicate is covered. Separately, and for v0.30.0
   alone, the upgrade/rollback roundtrip row's 0-duplicated-rows bar excludes one named case
   (#2552), as the spec records where it adopts that row. From v0.29.2
