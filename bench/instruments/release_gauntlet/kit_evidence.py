@@ -70,7 +70,8 @@ def _cause(value):
 
 
 def _measurement_class(value, full):
-    return "Z" if value == 0 else "F" if value == full else "P"
+    # Zero, full, over the whole (usage above the window is its own state) or partial; status carries the threshold.
+    return "Z" if value == 0 else "F" if value == full else "O" if value > full else "P"
 
 
 def _fingerprint(entry, *, measurements=True):
