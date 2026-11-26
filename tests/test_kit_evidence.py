@@ -1,4 +1,5 @@
 """Synthetic fixtures for public-clean release-kit evidence records."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -28,8 +29,12 @@ def _trace(final):
     return 'Traceback (most recent call last):\n  File "synthetic.py", line 1\n    synthetic()\n' + final + "\n"
 
 
+def _recorded_review(reason, tid=12):
+    return _log("run_agent", f"OpenAI client created ({reason}, shared=True) thread=bg-review:{tid}", "INFO")
+
+
 def _run(count):
-    return (_log("agent.background_review", "thread=bg-review OpenAI client created", "INFO")
+    return (_recorded_review("agent_init")
             + _log("agent.background_review", "background-review compressor detachment failed") * count
             + _trace(kit.REFUSAL) * count
             + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO"))
@@ -172,9 +177,9 @@ def test_config_diff(tmp_path, changed, verdict):
 
 @pytest.mark.parametrize("candidate,previous,verdict,unmatched,failed", [
     (["warn"], ["warn"], "MATCHED", [], []),
-    (["warn"], [], "UNMATCHED", ["shape"], []),
+    (["warn"], ["pass"], "UNMATCHED", ["shape"], []),
     (["warn", "warn"], ["warn"], "UNMATCHED", ["shape"], []),
-    (["fail"], [], "UNMATCHED", [], ["shape"]),
+    (["fail"], ["pass"], "UNMATCHED", [], ["shape"]),
     (["pass"], ["fail"], "MATCHED", [], ["shape"]),
 ])
 def test_doctor_match(tmp_path, candidate, previous, verdict, unmatched, failed):
@@ -241,10 +246,12 @@ def test_lifecycle_affected_conversation(tmp_path):
                   "detail": {"empty_lifecycle_rows": 1, "state_db_error": False}}]},
      {"checks": [{"check": "lifecycle_fragmentation", "status": "warn",
                   "detail": {"empty_lifecycle_rows": 0, "state_db_error": True}}]}, "UNMATCHED"),
-    ({"checks": [{"check": "shape", "status": "unexpected"}]}, {"checks": []}, "UNMATCHED"),
-    ([{"checks": [{"check": "shape", "status": "FAIL"}]}, {"checks": []}], {"checks": []}, "UNMATCHED"),
+    ({"checks": [{"check": "shape", "status": "unexpected"}]},
+     {"checks": [{"check": "shape", "status": "pass"}]}, "UNMATCHED"),
+    ([{"checks": [{"check": "shape", "status": "FAIL"}]}, {"checks": [{"check": "shape", "status": "pass"}]}],
+     {"checks": [{"check": "shape", "status": "pass"}]}, "MATCHED"),
     ([{"checks": [{"check": "shape", "status": "warn"}]}] * 2,
-     {"checks": [{"check": "shape", "status": "warn"}]}, "UNMATCHED"),
+     {"checks": [{"check": "shape", "status": "warn"}]}, "MATCHED"),
 ])
 def test_doctor_signatures(tmp_path, candidate, previous, verdict):
     paths = [_write(tmp_path / name, json.dumps(value))
@@ -272,17 +279,17 @@ def test_doctor_signature_causes_hold_no_values(tmp_path):
 
 
 @pytest.mark.parametrize("text,holds,overlap,ambiguous,warnings,refusals", [
-    (_log("agent", "thread=bg-review:A OpenAI client created", "INFO") + _trace(kit.REFUSAL)
-     + _log("agent", "thread=bg-review:B OpenAI client created", "INFO") + _trace(kit.REFUSAL)
-     + _log("agent", "Background review complete: thread=bg-review", "INFO") * 2,
-     None, 1, 1, 0, 2),
+    (_recorded_review("agent_init", tid=12) + _trace(kit.REFUSAL)
+     + _recorded_review("agent_init", tid=13) + _trace(kit.REFUSAL)
+     + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO") * 2,
+     None, 1, 2, 0, 2),
     (_run(1).replace(_trace(kit.REFUSAL),
-                    _log("agent", "background-review compressor detachment failed") + _trace(kit.REFUSAL)),
+                    _log("agent.background_review", "background-review compressor detachment failed") + _trace(kit.REFUSAL)),
      False, 0, 0, 2, 1),
     (_run(1).replace(kit.REFUSAL, "  | " + kit.REFUSAL), True, 0, 0, 1, 1),
-    (_log("agent", "background-review compressor detachment failed"), False, 0, 0, 1, 0),
-    (_log("agent", "thread=bg-review:A OpenAI client created", "INFO") + _trace(kit.REFUSAL)
-     + _log("agent", "Background review complete: thread=bg-review:A", "INFO")
+    (_log("agent.background_review", "background-review compressor detachment failed"), False, 0, 0, 1, 0),
+    (_recorded_review("agent_init", tid=12) + _trace(kit.REFUSAL)
+     + _log("agent.background_review", "Background review complete: thread=bg-review:12", "INFO")
      + _trace(kit.REFUSAL), False, 0, 0, 0, 2),
 ], ids=["overlap", "warning-mismatch", "exception-group", "outside-warning", "explicit-completion"])
 def test_trace_interleaving_and_warnings(tmp_path, text, holds, overlap, ambiguous, warnings, refusals):
@@ -352,8 +359,8 @@ def test_cli(tmp_path):
 
 
 def test_unclosed_run_with_events_is_undetermined(tmp_path):
-    text = (_run(1) + _log("agent", "thread=bg-review OpenAI client created", "INFO")
-            + _log("host.fork", "background-review compressor detachment failed") + _trace(kit.REFUSAL))
+    text = (_run(1) + _recorded_review("agent_init")
+            + _log("agent.background_review", "background-review compressor detachment failed") + _trace(kit.REFUSAL))
     result = kit.trace_events([_write(tmp_path / "host.log", text)])
     assert result["unclosed_runs_with_events"] == 1
     assert result["rule_determined"] is False
@@ -466,6 +473,40 @@ def test_doctor_fingerprint_keeps_status_codes_and_url_hosts(tmp_path):
                             )["verdict"] == "MATCHED"
 
 
+@pytest.mark.parametrize("candidate,previous,verdict", [
+    ("72.6% used", "56.2% used", "MATCHED"),
+    ("0% used", "0.0% used", "MATCHED"),
+    ("0% used", "100% used", "UNMATCHED"),
+    ("100.0% used", "72.6% used", "UNMATCHED"),
+    ("0/15 summaries", "0/9 summaries", "MATCHED"),
+    ("0/15 summaries", "5/15 summaries", "UNMATCHED"),
+    ("15/15 summaries", "9/9 summaries", "MATCHED"),
+    ("5/15 summaries", "9/9 summaries", "UNMATCHED"),
+    *[(f"https://github.com/owner/repo/{path}/v0.30.4-rc.1/docs/x.md",
+       f"https://github.com/owner/repo/{path}/v0.30.3/docs/x.md", "MATCHED")
+      for path in ("blob", "tree", "releases/tag", "compare")],
+    ("https://github.com/owner/repo/blob/v0.30.4/docs/x.md",
+     "https://github.com/owner/repo/blob/v0.30.3/docs/x.md", "MATCHED"),
+    ("https://github.com.example/owner/repo/blob/v0.30.4/docs/x.md",
+     "https://github.com.example/owner/repo/blob/v0.30.3/docs/x.md", "UNMATCHED"),
+    ("http://127.0.0.1:8080", "http://10.0.0.5:8080", "UNMATCHED"),
+    ("http://127.0.0.1:8080", "http://127.0.0.1:8081", "UNMATCHED"),
+    ("plugin 0.30 incompatible", "plugin 0.31 incompatible", "UNMATCHED"),
+    ("SQLite 3.45.1", "SQLite 3.46.1", "UNMATCHED"),
+    ("observed 23042 rows", "observed 23043 rows", "UNMATCHED"),
+    ([{"ratio": 0.0}], [{"ratio": 0.75}], "UNMATCHED"),
+    ([{"ratio": 0.25}], [{"ratio": 0.75}], "MATCHED"),
+    ({"reason": "HTTP 401 from provider"}, {"reason": "HTTP 500 from provider"}, "UNMATCHED"),
+])
+def test_doctor_signature_masks_only_equivalent_measurements(tmp_path, candidate, previous, verdict):
+    paths = [_write(tmp_path / name, json.dumps({"checks": [
+        {"check": "synthetic", "status": "warn", "detail": detail}]}))
+             for name, detail in (("candidate.json", candidate), ("previous.json", previous))]
+    result = kit.doctor_match(*paths)
+    assert result["verdict"] == verdict
+    assert result["unmatched"] == ([] if verdict == "MATCHED" else ["synthetic"])
+
+
 def test_indented_bare_name_does_not_end_a_traceback(tmp_path):
     trace = ("Traceback (most recent call last):\n  File \"x.py\", line 1, in <module>\n    raise (\n"
              "    ValueError\n    )\nModuleNotFoundError: No module named 'opt'\n")
@@ -482,6 +523,17 @@ def test_doctor_dict_detail_new_cause_is_unmatched(tmp_path):
     result = kit.doctor_match(doctor("c1.json", 1), doctor("p1.json", 0))
     assert result["verdict"] == "UNMATCHED"
     assert result["candidate_signatures"][0]["check"] == "payload_storage"  # A detail key cannot overwrite it.
+
+
+@pytest.mark.parametrize("previous_status", ["warn", "fail"])
+def test_skipping_a_previous_doctor_warning_or_failure_is_unmatched(tmp_path, previous_status):
+    paths = [_write(tmp_path / name, json.dumps({"checks": [
+        {"check": "database_integrity", "status": "pass"},
+        {"check": "lifecycle_fragmentation", "status": status}]}))
+             for name, status in (("candidate.json", "skip"), ("previous.json", previous_status))]
+    result = kit.doctor_match(*paths)
+    assert result["verdict"] == "UNMATCHED"
+    assert result["unmatched"] == ["lifecycle_fragmentation"]
 
 
 @pytest.mark.parametrize("candidate", [{"checks": []}, [{"checks": []}, {"checks": []}]])
@@ -727,3 +779,224 @@ def test_credited_rows_out_of_host_order_are_reordered(tmp_path):
     host = _messages(tmp_path / "state.db", "id", [("s", "user", "a", None, None), ("s", "user", "go", None, None)])
     result = kit.reorder(_rewrites(lcm, [(1, "go", "go\n")]), host)
     assert (result["matched"], result["reordered_rows"], result["host_rewrites_credited"]) == (2, 1, 1)
+
+
+def test_recreated_client_is_not_a_second_review_start(tmp_path):
+    log = (_recorded_review("agent_init")
+           + _log("agent.background_review", "background-review compressor detachment failed; retaining disabled state")
+           + _trace(kit.REFUSAL)
+           + _recorded_review("interrupt_rebuild")
+           + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO"))
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["per_run"] == [{"refusals": 1, "detach_warnings": 1}]
+    assert result["rule_determined"] is True
+    assert result["per_event_rule_holds"] is True
+
+
+@pytest.mark.parametrize("content", [None, "", _recorded_review("agent_init"), "invalid log\n"],
+                         ids=["missing", "empty", "truncated", "unparseable"])
+def test_unusable_trace_input_is_not_evaluated(tmp_path, content):
+    path = tmp_path / "raw.log"
+    if content is not None:
+        _write(path, content)
+    result = kit.trace_events([path])
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_trace_cli_counts_unterminated_import_line(tmp_path):
+    text = _log("agent.optional", "missing") + _trace("ModuleNotFoundError: No module named demo")
+    raw = _write(tmp_path / "raw.log", text.rstrip("\n"))
+    out = tmp_path / "trace.json"
+    subprocess.run([sys.executable, kit.__file__, "trace-events", "--log", str(raw), "--out", str(out)],
+                   capture_output=True, check=True)
+    result = json.loads(out.read_text())
+    assert result["optional_import_traces_total"] == 1
+    assert result["by_event"][0]["count"] == 1
+    assert result["rule_determined"] is False
+
+
+def test_completion_without_constructor_record_does_not_evaluate(tmp_path):
+    log = (_recorded_review("interrupt_rebuild")
+           + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO"))
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["per_run"] is None
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_cut_trace_followed_by_host_record_does_not_evaluate(tmp_path):
+    log = (_recorded_review("agent_init")
+           + "Traceback (most recent call last):\n  File \"x.py\", line 1\n"
+           + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO"))
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_syntactically_complete_last_record_without_newline_does_not_evaluate(tmp_path):
+    log = (_recorded_review("agent_init")
+           + _log("agent.background_review", "Background review complete: thread=bg-review", "INFO")).rstrip("\n")
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_unrelated_log_records_do_not_pass_without_review_evidence(tmp_path):
+    result = kit.trace_events([_write(tmp_path / "raw.log", _log("agent", "unrelated", "INFO"))])
+    assert result["rule_determined"] is False
+    assert result["per_event_rule_holds"] is None
+
+
+def test_stderr_process_boundary_does_not_join_a_start_and_completion(tmp_path):
+    log = _run(1).replace("2026-01-01 01:02:03,123 [INFO] agent.background_review:",
+                          "[stderr]\n2026-01-01 01:02:03,123 [INFO] agent.background_review:")
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["unclosed_runs_with_events"] == 1
+    assert result["per_event_rule_holds"] is None
+
+
+def _compare_doctor_captures(tmp_path, candidate, previous):
+    return kit.doctor_match(*[
+        _write(tmp_path / name, json.dumps(value))
+        for name, value in (("candidate.json", candidate), ("previous.json", previous))
+    ])
+
+
+def test_doctor_signature_ignores_identifier_samples(tmp_path):
+    def capture(samples):
+        return {"checks": [{"check": "lifecycle_fragmentation", "status": "warn", "detail": {
+            "classification": {"categories": [{"name": "stale_lifecycle_current", "severity": "warning",
+                                                "sample_session_ids": samples}]}}}]}
+
+    first = capture(["20260101_010203_abcdef"])
+    second = capture(["20260101_010203_12ffee", "20260101_010204_abcd01"])
+    result = _compare_doctor_captures(tmp_path, first, second)
+    assert result["verdict"] == "MATCHED"
+    assert result["candidate_signatures"] == _compare_doctor_captures(tmp_path, second, first)["candidate_signatures"]
+
+
+@pytest.mark.parametrize("first,second,verdict", [
+    ("72.6% used, compaction triggers at 50.0%", "56% used, compaction triggers at 50%", "MATCHED"),
+    ("72.6 elapsed", "56.2 elapsed", "UNMATCHED"),
+])
+def test_doctor_signature_masks_measurements(tmp_path, first, second, verdict):
+    def capture(detail):
+        return {"checks": [{"check": "context_pressure", "status": "warn", "detail": detail}]}
+
+    assert _compare_doctor_captures(tmp_path, capture(first), capture(second))["verdict"] == verdict
+
+
+def test_doctor_compares_only_close_snapshots(tmp_path):
+    warn = {"checks": [{"check": "shape", "status": "warn"}]}
+    passed = {"checks": [{"check": "shape", "status": "pass"}]}
+    assert _compare_doctor_captures(tmp_path, [warn, warn], [warn])["verdict"] == "MATCHED"
+    assert _compare_doctor_captures(tmp_path, [warn], [warn, passed])["verdict"] == "UNMATCHED"
+
+
+@pytest.mark.parametrize("candidate,previous", [
+    ([{"checks": [{"check": "shape", "status": "warn"}]}, None],
+     [{"checks": [{"check": "shape", "status": "warn"}]}]),
+    ([{"checks": [{"check": "shape", "status": "pass"}]}], [{"checks": []}]),
+])
+def test_doctor_close_requires_checks_in_both_arms(tmp_path, candidate, previous):
+    with pytest.raises(ValueError, match="doctor"):
+        _compare_doctor_captures(tmp_path, candidate, previous)
+
+
+def test_doctor_close_new_check_is_unmatched_even_if_passing(tmp_path):
+    original = [{"check": "shape", "status": "pass"}]
+    candidate = original + [{"check": "new_check", "status": "pass"}]
+    result = _compare_doctor_captures(tmp_path, {"checks": candidate}, {"checks": original})
+    assert result["verdict"] == "UNMATCHED"
+    assert result["unmatched"] == ["new_check"]
+
+
+@pytest.mark.parametrize("invalid_bytes", [None, b"\xff\n"], ids=["missing", "undecodable"])
+def test_trace_cli_rejects_unreadable_log(tmp_path, invalid_bytes):
+    path, out = tmp_path / "unreadable.log", tmp_path / "result.json"
+    if invalid_bytes is not None:
+        path.write_bytes(invalid_bytes)
+    proc = subprocess.run([sys.executable, str(Path(kit.__file__)), "trace-events", "--log", str(path),
+                           "--out", str(out)], capture_output=True, text=True)
+    assert proc.returncode == 2
+    assert not proc.stdout and not out.exists()
+    assert proc.stderr == "Evidence input/output error\n"
+
+
+def test_undetermined_trace_has_null_per_run_with_nonzero_counts(tmp_path):
+    log = _recorded_review("agent_init") + _trace(kit.REFUSAL)
+    result = kit.trace_events([_write(tmp_path / "raw.log", log)])
+    assert result["bg_review_runs"] == result["refusals_total"] == 1
+    assert result["rule_determined"] is False
+    assert result["per_run"] is None
+
+
+def test_cli_literal_contract(tmp_path):
+    log = _write(tmp_path / "host.log", _run(1) + _log("agent.optional", "missing")
+                 + _trace("ModuleNotFoundError: No module named 'demo'"))
+    messages = [("s", "user", "demo", None, None)]
+    lcm = _messages(tmp_path / "lcm.db", "store_id", messages)
+    host = _messages(tmp_path / "state.db", "id", messages)
+    with sqlite3.connect(lcm) as conn:
+        conn.execute("ALTER TABLE messages ADD COLUMN conversation_id TEXT")
+        conn.execute("CREATE TABLE summary_nodes (session_id TEXT)")
+        conn.execute("CREATE TABLE lcm_lifecycle_state (conversation_id TEXT, current_session_id TEXT, "
+                     "last_finalized_session_id TEXT)")
+        conn.execute("INSERT INTO lcm_lifecycle_state VALUES ('empty', 'fork', NULL)")
+    config = _write(tmp_path / "config.yaml", "model: demo\n")
+    doctor = _write(tmp_path / "doctor.json", '{"checks":[{"check":"shape","status":"warn","detail":"demo"}]}')
+    out = tmp_path / "out.json"
+    commands = {
+        "trace-events": ({"--log": log}, """
+            bg_review_runs refusals_total detach_warnings_total runs_by_refusal_count per_run refusals_outside_runs
+            detach_warnings_outside_runs overlapping_runs ambiguous_completions unclosed_runs_with_events
+            rule_determined per_event_rule_holds optional_import_traces_total events_by_logger by_event unattributed
+            other_tracebacks
+        """),
+        "lifecycle-rows": ({"--lcm-db": lcm}, """
+            lifecycle_rows empty_lifecycle_rows empty_rows conversation_column affected_stored_rows
+            blank_conversation_rows identity_order_check
+        """),
+        "reorder": ({"--lcm-db": lcm, "--state-db": host}, """
+            sessions per_session identity_degraded host_copies_resolved sessions_not_definitive missing_columns
+            lcm_rows host_rows matched lcm_only host_only reordered_rows host_stamp_repeat_rows host_generation_rows
+            host_rewrites_credited repeated_identity_rows lcm_only_sessions lcm_only_sessions_h12
+            host_only_sessions host_only_sessions_h12
+        """),
+        "config-diff": ({"--a": config, "--root-a": tmp_path, "--b": config, "--root-b": tmp_path},
+                        "differing_keys path_only_keys other_keys verdict"),
+        "doctor-match": ({"--candidate": doctor, "--previous": doctor},
+                         "warnings unmatched failed_checks unknown_status candidate_signatures verdict"),
+    }
+    nested = {
+        "trace-events": {"per_run": "refusals detach_warnings", "by_event": "logger missing_module count per_event_counts"},
+        "lifecycle-rows": {"empty_rows": """
+            conversation_id_h12 current_session_h12 last_finalized_session_h12 messages_in_referenced_sessions
+            nodes_in_referenced_sessions affected_stored_rows
+        """},
+        "reorder": {"per_session": """
+            session_h12 lcm_rows host_rows matched lcm_only host_only reordered_rows host_stamp_repeat_rows
+            host_generation_rows host_rewrites_credited counts_definitive repeated_identity_rows columns_compared
+        """},
+        "doctor-match": {
+            "warnings": "check candidate previous matched",
+            "candidate_signatures": "check status detail_keys detail_fingerprints detail_type causes",
+        },
+    }
+
+    def invoke(*args):
+        return subprocess.run([sys.executable, str(Path(kit.__file__)), *args],
+                              text=True, capture_output=True, check=True).stdout
+
+    parser = kit.build_parser()
+    subcommands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    assert set(subcommands.choices) == set(commands)
+    for command, (flags, expected_keys) in commands.items():
+        actions = subcommands.choices[command]._actions
+        assert {flag for action in actions for flag in action.option_strings} == set(flags) | {"-h", "--help", "--out"}
+        args = [arg for flag, value in flags.items() for arg in (flag, str(value))]
+        result = json.loads(invoke(command, *args, "--out", str(out)))
+        assert set(result) == set(expected_keys.split()), command
+        for field, keys in nested.get(command, {}).items():
+            assert set(result[field][0]) == set(keys.split()), (command, field)
