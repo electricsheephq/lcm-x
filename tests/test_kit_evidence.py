@@ -1,6 +1,7 @@
 """Synthetic fixtures for public-clean release-kit evidence records."""
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sqlite3
@@ -995,6 +996,8 @@ def test_cli_literal_contract(tmp_path):
     for command, (flags, expected_keys) in commands.items():
         actions = subcommands.choices[command]._actions
         assert {flag for action in actions for flag in action.option_strings} == set(flags) | {"-h", "--help", "--out"}
+        if command == "config-diff" and importlib.util.find_spec("yaml") is None:
+            continue  # config-diff reads YAML; CI's main test job installs no PyYAML (the YAML tests skip there too)
         args = [arg for flag, value in flags.items() for arg in (flag, str(value))]
         result = json.loads(invoke(command, *args, "--out", str(out)))
         assert set(result) == set(expected_keys.split()), command
