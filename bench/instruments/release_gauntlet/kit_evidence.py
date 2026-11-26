@@ -83,7 +83,7 @@ def _fingerprint(entry, *, measurements=True):
     text = GITHUB_RELEASE_REF.sub(r"\1<ref>", text)
     text = re.sub(r"(\d+(?:\.\d+)?)%", lambda m: _measurement_class(Decimal(m[1]), 100) + "%", text)
     text = re.sub(r"\b(\d+)/(\d+)\b", lambda m: _measurement_class(Decimal(m[1]), Decimal(m[2])) + "/#", text)
-    text = re.sub(r"(\bpid\s+)\d{4,}\b", r"\1#", text)
+    text = re.sub(r"(\b(?:pid|process)\s+)\d{4,}\b", r"\1#", text)
     return _sha(text)[:12]
 
 
