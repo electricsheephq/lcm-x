@@ -18,6 +18,50 @@ RESUMED_USER = "User turn after restart"
 CONTEXT = "Synthetic café context\nSecond line."
 
 
+@pytest.fixture(autouse=True)
+def _contain_host_imports(host_root):
+    """Host modules this test imports in-process must not outlive it.
+
+    Later tests stub host modules such as agent.context_compressor; a real module left in sys.modules, or as an
+    attribute of its parent package, bypasses those stubs. Pattern: tests/test_host_stub_parity.py.
+    """
+    import os
+    import sys
+    from pathlib import Path
+
+    from hermes_lcm import compaction as compaction_module
+    from hermes_lcm import engine as engine_module
+    from hermes_lcm import host_uid_emit
+
+    root = Path(os.path.realpath(host_root))
+    before = dict(sys.modules)
+    uid_capability = host_uid_emit._host_uid_capability
+    yield
+    leaked = []
+    for name, module in list(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if module is before.get(name) or not path or not Path(os.path.realpath(path)).is_relative_to(root):
+            continue
+        if name in before:
+            sys.modules[name] = before[name]
+        else:
+            del sys.modules[name]
+        leaked.append((name, module))
+    for name, module in leaked:
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        if getattr(parent, child, None) is module:
+            if name in before:
+                setattr(parent, child, before[name])
+            else:
+                delattr(parent, child)
+    # Process-wide host probes this test answers from the real host; later tests run against stubs and never expect
+    # those answers (the compressor's metadata key, the post-tool reanchor parameter, the message UID contract).
+    engine_module._model_only_display_metadata_key.cache_clear()
+    compaction_module._host_has_post_tool_reanchor.cache_clear()
+    host_uid_emit._host_uid_capability = uid_capability
+
+
 def _user_sidecars(rows):
     return [
         (row["content"], row["api_content"].encode("utf-8") if row.get("api_content") is not None else None)
