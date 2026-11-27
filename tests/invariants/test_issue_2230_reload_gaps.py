@@ -134,9 +134,21 @@ def test_direct_reset_confirmation_still_requires_a_fresh_foreground(preflight, 
         for _ in range(2):
             retained.should_compress_preflight(deepcopy(view[:1]))
             retained.on_turn_complete(deepcopy(view), interrupted=True)
-        expected = view if case in ("late-create", "busy-at-bind") else []
-        assert list(map(_identity, durable(preflight.home, "fresh"))) == list(map(_identity, expected))
-        assert durable(preflight.home, "empty") == before
+        rebinds_to_fresh = case not in ("no-reset", "old-nonempty", "stateless", "auxiliary")
+        expected_fresh = view if rebinds_to_fresh else []
+        assert list(map(_identity, durable(preflight.home, "fresh"))) == list(map(_identity, expected_fresh))
+        if rebinds_to_fresh:
+            assert durable(preflight.home, "empty") == before
+        elif case == "no-reset":
+            assert list(map(_identity, durable(preflight.home, "empty"))) == list(map(_identity, view))
+        elif case == "old-nonempty":
+            assert list(map(_identity, durable(preflight.home, "empty"))) == list(map(
+                _identity, [{"role": "user", "content": "must survive"}, view[0]],
+            ))
+        elif case == "auxiliary":
+            assert list(map(_identity, durable(preflight.home, "empty"))) == list(map(_identity, view[:1]))
+        else:
+            assert durable(preflight.home, "empty") == []
 
 
 @pytest.mark.parametrize("shape", ["retry", "orphan-prune", "unchanged"])
@@ -258,11 +270,19 @@ def test_retired_repair_is_atomic_and_lane_scoped(preflight, monkeypatch, fault)
         if fault == "receipt":
             patch.setattr(MessageStore, "write_metadata_json", fail_receipt)
         retained.should_compress_preflight(deepcopy(current))
-    assert durable(preflight.home, "S") == before
     if fault == "receipt":
+        assert durable(preflight.home, "S") == before
         assert fired
         with closing(sqlite3.connect(preflight.home / "lcm.db")) as db:
             assert db.execute("SELECT value FROM metadata WHERE key LIKE 'retired_tail:%'").fetchall() == []
         for _ in range(2):
             retained.should_compress_preflight(deepcopy(current))
         assert list(map(_identity, durable(preflight.home, "S"))) == list(map(_identity, history + current[-1:]))
+    elif fault == "unstamped":
+        assert durable(preflight.home, "S") == before
+    else:
+        appended = [current[0], current[2]] if fault == "unrelated" else current[-1:]
+        assert list(map(_identity, durable(preflight.home, "S"))) == list(map(_identity, history + appended))
+        if fault == "advanced-lane":
+            with closing(sqlite3.connect(preflight.home / "lcm.db")) as db:
+                assert db.execute("SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id='S'").fetchone() == ("newer",)

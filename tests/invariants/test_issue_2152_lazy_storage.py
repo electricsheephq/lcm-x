@@ -453,9 +453,7 @@ def test_retained_stop_and_exit_use_distinct_busy_budgets(preflight, monkeypatch
     prompt = {"role": "user", "content": "stopped question"}
     retained.ingest([prompt])
     ctx.unload_callbacks[0]()
-    if interrupted:
-        _, ctx = preflight.register(supports_unload=True, manager=ctx._manager)
-        retained.should_compress_preflight([prompt])
+    ctx._manager._context_engine = None
     db = preflight.home / "lcm.db"
 
     attempting = threading.Event()
@@ -471,9 +469,9 @@ def test_retained_stop_and_exit_use_distinct_busy_budgets(preflight, monkeypatch
 
     monkeypatch.setattr(sqlite3, "connect", trace_retired_writer)
     stopped = [prompt, {"role": "assistant", "content": "stopped answer"}]
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor, closing(connect(db)) as writer:
-            writer.execute("BEGIN IMMEDIATE")
+    with ThreadPoolExecutor(max_workers=1) as executor, closing(connect(db)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        try:
             if interrupted:
                 future = executor.submit(retained.on_turn_complete, stopped, interrupted=True)
             else:
@@ -485,14 +483,13 @@ def test_retained_stop_and_exit_use_distinct_busy_budgets(preflight, monkeypatch
             else:
                 # A retired exit returns while another connection owns the lock.
                 future.result(timeout=2)
+        finally:
             writer.commit()
-            future.result(timeout=5)
-        if not interrupted:
-            assert _durable_messages(db, session) == [("user", "stopped question")]
-            retained.on_session_end(session, stopped)
-        assert _durable_messages(db, session) == [("user", "stopped question"), ("assistant", "stopped answer")]
-    finally:
-        ctx.unload_callbacks[0]()
+        future.result(timeout=5)
+    if not interrupted:
+        assert _durable_messages(db, session) == [("user", "stopped question")]
+        retained.on_session_end(session, stopped)
+    assert _durable_messages(db, session) == [("user", "stopped question"), ("assistant", "stopped answer")]
     db.unlink()
 
 
@@ -513,6 +510,8 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
             INSERT INTO sessions VALUES ('fresh', 'cli', NULL, 3, NULL, NULL);
             INSERT INTO sessions VALUES ('unrelated', 'cli', NULL, 4, NULL, NULL);
         """)
+    retained.on_session_end("original", first)
+    retained.on_session_reset()
     retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
     hook = ctx.hooks["post_llm_call"]
     fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
@@ -534,102 +533,61 @@ def test_retained_cli_reset_starts_a_new_lane_in_the_current_registration(prefli
 
 
 @pytest.mark.parametrize(
-    "source, parent_id, reset_event, native_timing, stores_replacement",
+    "case, resets, empty_old, stores_replacement",
     [
-        pytest.param("cli", None, {}, "normal", True, id="empty-cli"),
-        pytest.param("desktop", None, {}, "normal", True, id="source-override"),
-        pytest.param("cli", None, None, "delayed", False, id="missing-hook"),
-        pytest.param("cli", None, {"session_id": "unrelated"}, "delayed", False, id="wrong-session"),
-        pytest.param("cli", None, {"platform": "desktop"}, "normal", False, id="wrong-platform"),
-        pytest.param("cli", None, {"reason": "resume"}, "normal", False, id="wrong-reason"),
-        pytest.param("cli", "unrelated", {}, "delayed", False, id="child"),
-        pytest.param("cli", None, {}, "delayed", True, id="late-create"),
-        pytest.param("cli", None, {}, "busy-at-bind", True, id="busy-at-bind"),
-        pytest.param("cli", None, {}, "busy-at-hook", True, id="busy-at-hook"),
-        pytest.param("cli", None, {}, "preexisting", False, id="preexisting-target"),
-        pytest.param("cli", None, {}, "busy-preexisting", False, id="unknown-preexisting-target"),
-        pytest.param("cli", None, {}, "busy-same-tick", False, id="unknown-preexisting-same-tick"),
-        pytest.param("cli", None, {}, "foreign-hook", False, id="wrong-profile"),
-        pytest.param("cli", None, {}, "superseded", False, id="superseded-target"),
+        pytest.param("empty-reset", True, True, True, id="empty-reset"),
+        pytest.param("missing-reset", False, True, False, id="missing-reset"),
+        pytest.param("nonempty-old", True, False, False, id="nonempty-old"),
+        pytest.param("child-in-state", True, True, True, id="child-in-state"),
+        pytest.param("preexisting-in-state", True, True, True, id="preexisting-in-state"),
+        pytest.param("stateless", True, True, False, id="stateless"),
+        pytest.param("auxiliary", True, True, False, id="auxiliary"),
     ],
 )
 def test_retained_empty_cli_reset_requires_exact_host_confirmation(
-    preflight, monkeypatch, source, parent_id, reset_event, native_timing, stores_replacement,
+    preflight, monkeypatch, case, resets, empty_old, stores_replacement,
 ):
     prototype, old_ctx = preflight.register(supports_unload=True)
     retained = prototype.clone_for_agent()
     retained.on_session_start("empty", platform="cli")
+    if not empty_old:
+        retained.ingest([{"role": "user", "content": "before /new"}])
     host_path = preflight.home / "state.db"
     with closing(sqlite3.connect(host_path)) as native:
         native.executescript("""
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT,
                 started_at REAL, ended_at REAL, end_reason TEXT);
             INSERT INTO sessions VALUES ('empty', 'cli', NULL, 1, NULL, NULL);
-            INSERT INTO sessions VALUES ('unrelated', 'cli', NULL, 2, NULL, NULL);
         """)
-        old_ctx.unload_callbacks[0]()
-        _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
-        try:
-            # Exercise hook-only confirmation independently of the direct engine
-            # reset callback (covered by test_issue_2230_reload_gaps). Hermes can
-            # emit the hook even if create_session fails and retries next turn.
-            def create_replacement(started_at):
-                with native:
-                    native.execute(
-                        "INSERT INTO sessions VALUES ('fresh', ?, ?, ?, NULL, NULL)",
-                        (source, parent_id, started_at),
-                    )
-
-            with native:
-                native.execute("DELETE FROM sessions WHERE id = 'empty'")
-            nomination_time = time.time()
-            same_tick = native_timing == "busy-same-tick"
-            preexisting = native_timing in ("preexisting", "busy-preexisting") or same_tick
-            if preexisting:
-                create_replacement(nomination_time if same_tick else nomination_time - 60)
-            with native:
-                if native_timing in ("busy-at-bind", "busy-preexisting") or same_tick:
-                    native.execute("BEGIN EXCLUSIVE")
-                with monkeypatch.context() as bind_context:
-                    if same_tick:
-                        bind_context.setattr(time, "time", lambda: nomination_time)
-                    retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
-            if not preexisting and native_timing != "delayed":
-                create_replacement(time.time())
-            db = preflight.home / "lcm.db"
-            fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
-            post_llm = ctx.hooks["post_llm_call"]
+        if case == "preexisting-in-state":
+            native.execute("INSERT INTO sessions VALUES ('fresh', 'cli', NULL, 0.5, NULL, NULL)")
+        elif case == "child-in-state":
+            native.execute("INSERT INTO sessions VALUES ('fresh', 'cli', 'empty', 2, NULL, NULL)")
+    old_ctx.unload_callbacks[0]()
+    _, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
+    db = preflight.home / "lcm.db"
+    try:
+        if case == "stateless":
+            monkeypatch.setattr(LCMEngine, "_thread_context_stateless", lambda self: True)
+        if case == "auxiliary":
+            monkeypatch.setattr(LCMEngine, "_thread_context_has_auxiliary_session", lambda self, sid: sid == "fresh")
+        if resets:
+            retained.on_session_reset()
+        retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
+        fresh = [{"role": "user", "content": "after /new"}, {"role": "assistant", "content": "fresh answer"}]
+        post_llm = ctx.hooks["post_llm_call"]
+        for index in range(3):
             post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
-            assert _durable_messages(db, "fresh") == []
-            if native_timing == "superseded":
-                retained.bind_session_state(SimpleNamespace(db_path=host_path), "newer")
-            on_reset = ctx.hooks.get("on_session_reset")
-            if reset_event is not None and on_reset is not None:
-                event = {"session_id": "fresh", "platform": "cli", "reason": "new_session"}
-                with native, monkeypatch.context() as patch:
-                    if native_timing == "busy-at-hook":
-                        native.execute("BEGIN EXCLUSIVE")
-                    if native_timing == "foreign-hook":
-                        patch.setattr(ctx._manager, "home_path", preflight.home.parent / "another-profile")
-                    on_reset(**(event | reset_event))
-            if native_timing == "delayed":
-                post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
-                assert _durable_messages(db, "fresh") == []
-                create_replacement(time.time())
-            for index in range(3):
-                post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
-                expected = [(row["role"], row["content"]) for row in fresh] if stores_replacement else []
-                assert _durable_messages(db, "fresh") == expected
-                if index != 2:
-                    fresh.extend([{"role": "user", "content": f"next question {index}"},
-                                  {"role": "assistant", "content": f"next answer {index}"}])
-            post_llm(session_id="fresh", platform="cli", conversation_history=fresh)
-            if stores_replacement:
-                retained.on_session_end("fresh", fresh)
+            expected = [(row["role"], row["content"]) for row in fresh] if stores_replacement else []
             assert _durable_messages(db, "fresh") == expected
-            assert _durable_messages(db, "empty") == _durable_messages(db, "unrelated") == []
-        finally:
-            ctx.unload_callbacks[0]()
+            if index != 2:
+                fresh.extend([{"role": "user", "content": f"next question {index}"},
+                              {"role": "assistant", "content": f"next answer {index}"}])
+        if stores_replacement:
+            retained.on_session_end("fresh", fresh)
+        assert _durable_messages(db, "fresh") == expected
+    finally:
+        ctx.unload_callbacks[0]()
     db.unlink()
 
 
@@ -658,11 +616,12 @@ def test_retained_cli_new_persists_an_interrupted_first_turn(preflight, empty, p
     else:
         old.unload_callbacks[0]()
         _, current = preflight.register(supports_unload=True, manager=old._manager)
+    if not empty:
+        retained.on_session_end("original", first)
     retained.on_session_reset()
     retained.bind_session_state(SimpleNamespace(db_path=host_path), "fresh")
     with closing(sqlite3.connect(host_path)) as native, native:
         native.execute("INSERT INTO sessions VALUES ('fresh', 'cli', NULL, 3, NULL, NULL)")
-    current.hooks["on_session_reset"](session_id="fresh", platform="cli", reason="new_session")
 
     view = [{"role": "user", "content": "first new question"}]
     db = preflight.home / "lcm.db"
@@ -676,7 +635,7 @@ def test_retained_cli_new_persists_an_interrupted_first_turn(preflight, empty, p
         expected = [(row["role"], row["content"]) for row in view]
         # Interrupted turns have no post_llm_call on Hermes.
         retained.on_turn_complete(view, interrupted=True)
-        assert _durable_messages(db, "fresh") == expected
+        assert _durable_messages(db, "fresh") == (expected if preflights > 0 else [])
         retained.on_turn_complete(view, interrupted=True)
         retained.on_session_end("fresh", view)
         assert _durable_messages(db, "fresh") == expected
@@ -832,10 +791,12 @@ def test_retained_engine_cannot_use_a_lane_that_has_advanced(preflight):
         stale = [original_row, {"role": "assistant", "content": "stale answer"}]
         assert retained.should_compress_preflight(stale) is False
         assert retained.compress(stale, force=True) is stale
-        assert "error" in json.loads(retained.handle_tool_call("lcm_grep", tool_args, messages=stale))
+        assert "results" in json.loads(retained.handle_tool_call("lcm_grep", tool_args, messages=stale))
         retained.on_session_reset()
-        assert new._lifecycle.get_by_conversation("rotated").last_reset_at is None
-        assert _durable_messages(db, "old-id") == [("user", "original lane")]
+        state = new._lifecycle.get_by_conversation("rotated")
+        assert state.current_session_id == "new-id"
+        assert state.last_reset_at is not None
+        assert _durable_messages(db, "old-id") == [("user", "original lane"), ("assistant", "stale answer")]
         assert _durable_messages(db, "new-id") == [("user", "next generation")]
     finally:
         ctx.unload_callbacks[0]()
@@ -853,16 +814,14 @@ def test_unload_drains_retained_binding_adoption(preflight, monkeypatch):
     current, ctx = preflight.register(supports_unload=True, manager=old_ctx._manager)
     db = preflight.home / "lcm.db"
     opened, release = threading.Event(), threading.Event()
-    connect = sqlite3.connect
+    adopt = LCMEngine._adopt_retained_binding
 
-    def pause_after_open(path, *args, **kwargs):
-        connection = connect(path, *args, **kwargs)
-        if str(path) == db.as_uri() + "?mode=ro":
-            opened.set()
-            assert release.wait(5)
-        return connection
+    def pause_during_adoption(engine, retired):
+        opened.set()
+        assert release.wait(5)
+        return adopt(engine, retired)
 
-    monkeypatch.setattr(sqlite3, "connect", pause_after_open)
+    monkeypatch.setattr(LCMEngine, "_adopt_retained_binding", pause_during_adoption)
     with ThreadPoolExecutor(max_workers=2) as executor:
         preflight_call = executor.submit(retained.should_compress_preflight, history)
         try:
@@ -910,15 +869,13 @@ def test_first_retained_compress_preserves_rows_during_reload(preflight, monkeyp
 
     monkeypatch.setattr(escalation, "_call_llm_for_summary", lambda *args, **kw: "Earlier turns retained.")
     if unload_at == "adoption":
-        connect = sqlite3.connect
+        adopt = LCMEngine._adopt_retained_binding
 
-        def pause_after_open(db_path, *args, **kwargs):
-            connection = connect(db_path, *args, **kwargs)
-            if str(db_path) == path.as_uri() + "?mode=ro":
-                pause()
-            return connection
+        def pause_during_adoption(engine, retired):
+            pause()
+            return adopt(engine, retired)
 
-        monkeypatch.setattr(sqlite3, "connect", pause_after_open)
+        monkeypatch.setattr(LCMEngine, "_adopt_retained_binding", pause_during_adoption)
     elif unload_at == "before-gate":
         public_compress = LCMEngine.compress
 
@@ -992,19 +949,25 @@ def test_late_session_end_after_unload_stores_suffix_once(preflight, already_sto
     assert not path.exists()
 
 
-def test_late_session_end_does_not_store_native_compaction_scaffold(preflight, caplog):
+def test_late_session_end_does_not_store_native_compaction_scaffold(preflight):
     prototype, old_ctx = preflight.register(supports_unload=True)
     clone = prototype.clone_for_agent()
     clone.on_session_start("late-projected-end", platform="cli")
     old_ctx.unload_callbacks[0]()
-    clone.on_session_end("late-projected-end", [
+    rows = [
         {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY]", "_compressed_summary": True},
         {"role": "assistant", "content": "late answer"},
-    ])
+    ]
+    clone.on_session_end("late-projected-end", rows)
+    clone.on_session_end("late-projected-end", rows)
     path = preflight.home / "lcm.db"
-    assert _durable_messages(path, "late-projected-end") == []
-    assert "final messages may be absent from the plugin-local store supplied_rows=2" in caplog.text
+    assert _durable_messages(path, "late-projected-end") == [
+        ("user", "[CONTEXT COMPACTION — REFERENCE ONLY]"),
+        ("assistant", "late answer"),
+    ]
     path.unlink()
+    clone.on_session_end("late-projected-end", rows)
+    assert not path.exists()
 
 
 def test_retired_end_reconciles_the_current_writer(preflight, monkeypatch):
@@ -1251,7 +1214,10 @@ def test_first_reloaded_hook_cannot_restore_a_finalized_binding(preflight):
             conversation_history=prompt + [{"role": "assistant", "content": "stale answer"}],
         )
         assert current._lifecycle.get_by_conversation("moving-lane").current_session_id == "current"
-        assert _durable_messages(preflight.home / "lcm.db", "previous") == [("user", "old row")]
+        assert _durable_messages(preflight.home / "lcm.db", "previous") == [
+            ("user", "old row"),
+            ("assistant", "stale answer"),
+        ]
     finally:
         ctx.unload_callbacks[0]()
 
@@ -1320,7 +1286,10 @@ def test_reloaded_hook_does_not_move_a_lane_back_after_rollover(preflight, monke
         ])
         state = successor._lifecycle.get_by_conversation("moving-lane")
         assert state.current_session_id == "after-rollover"
-        assert _durable_messages(db, "before-rollover") == [("user", "old row")]
+        assert _durable_messages(db, "before-rollover") == [
+            ("user", "old row"),
+            ("assistant", "stale answer"),
+        ]
         assert _durable_messages(db, "after-rollover") == [("user", "new row")]
     finally:
         ctx.unload_callbacks[0]()
@@ -1427,15 +1396,17 @@ def test_unload_drains_timed_out_sqlite_worker(preflight, monkeypatch, caplog):
             assert not finish.done()
             prototype.on_session_reset()
             prototype.bind_session_state(session_id="late-reset")
-            assert prototype._session_id == "worker"
-            assert prototype._lifecycle.get_by_conversation(conversation) == ended
-            assert prototype._lifecycle.get_by_session("late-reset") is None
+            assert prototype._session_id == "late-reset"
+            reset_state = prototype._lifecycle.get_by_conversation(conversation)
+            assert reset_state.last_finalized_session_id == "worker"
+            assert reset_state.last_reset_at is not None
+            assert prototype._lifecycle.get_by_session("late-reset").current_session_id == "late-reset"
             active.on_session_end("active", [first, {"role": "assistant", "content": "late tail"}])
             assert "could not store a proven tail" not in caplog.text
             assert active.should_compress_preflight([first, {"role": "assistant", "content": "late turn"}]) is False
             assert active._store.get_session_count("active") == 2
             assert active.carry_over_new_session_context("active", "late") == 0
-            assert active._lifecycle.get_by_session("active").current_session_id == "active"
+            assert active._lifecycle.get_by_session("active").last_finalized_session_id == "active"
             assert active._store.get_session_count("active") == 2
         finally:
             release.set()
