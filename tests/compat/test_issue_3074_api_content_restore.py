@@ -29,10 +29,13 @@ def _contain_host_imports(host_root):
     import sys
     from pathlib import Path
 
+    from hermes_lcm import compaction as compaction_module
     from hermes_lcm import engine as engine_module
+    from hermes_lcm import host_uid_emit
 
     root = Path(os.path.realpath(host_root))
     before = dict(sys.modules)
+    uid_capability = host_uid_emit._host_uid_capability
     yield
     leaked = []
     for name, module in list(sys.modules.items()):
@@ -52,8 +55,11 @@ def _contain_host_imports(host_root):
                 setattr(parent, child, before[name])
             else:
                 delattr(parent, child)
-    # Process-wide: with the real compressor loaded it caches the host's key, which later byte pins never expect.
+    # Process-wide host probes this test answers from the real host; later tests run against stubs and never expect
+    # those answers (the compressor's metadata key, the post-tool reanchor parameter, the message UID contract).
     engine_module._model_only_display_metadata_key.cache_clear()
+    compaction_module._host_has_post_tool_reanchor.cache_clear()
+    host_uid_emit._host_uid_capability = uid_capability
 
 
 def _user_sidecars(rows):
