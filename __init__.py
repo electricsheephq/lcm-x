@@ -620,6 +620,7 @@ def register(ctx):
             if not hasattr(manager, "_lcm_x_known_sessions"):
                 manager._lcm_x_known_sessions = set()
             engine._unload_group.retained_engines = manager._lcm_x_retained_engines
+            engine._unload_group.retained_engines.add(engine)
             engine._unload_group.bound_sessions = manager._lcm_x_known_sessions
             engine._unload_group.current_prototype = lambda: getattr(manager, "_context_engine", None)
 
@@ -1098,7 +1099,7 @@ def register(ctx):
                                 if _use_scoped_writer(_replay_existing_lane):
                                     return
                             has_same_module_retained = any(
-                                type(r) is type(engine)
+                                getattr(r, "_origin_engine_type", type(r)) is type(engine)
                                 and (r._reload_successor or r)._session_id
                                 and _resolved_profile_home((r._reload_successor or r)._hermes_home)
                                 == _resolved_profile_home(engine._hermes_home)
@@ -1114,12 +1115,14 @@ def register(ctx):
                                 # unattached session. Older hosts emit the
                                 # same post payload for another profile.
                                 def _ingest_fresh_lane(selected):
+                                    if str(getattr(selected, "_session_id", "") or ""):
+                                        return False
                                     if not selected._start_fresh_reload_lane(session_id, conversation_id, platform):
                                         return False
                                     _ingest_and_note(selected)
                                     return True
 
-                                cold = use_cold_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
+                                cold = use_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
                                 if cold.used and cold.value:
                                     return
                         child_fallback = (

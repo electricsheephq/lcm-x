@@ -5815,7 +5815,7 @@ class LCMEngine(
             "_generated_ignored_active_replay_placeholder_hash_counts",
             "_generated_ignored_active_replay_placeholder_hash_ordinals",
             "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
-            "_saved_context_window_tokens", "_auxiliary_session_ids", "_auxiliary_lineage_session_ids",
+            "_saved_context_window_tokens", "_seen_retired_tail", "_auxiliary_session_ids", "_auxiliary_lineage_session_ids",
             "_auxiliary_last_prompt_tokens", "_auxiliary_direct_end_guard_session_ids",
             "_auxiliary_handoff_parent_session_ids", "_delegate_child_bind_parent_ids",
             "_auxiliary_foreground_reused_session_ids", "_lcm_bypass_lineage_session_ids",
@@ -6072,6 +6072,7 @@ class LCMEngine(
         if str(retired._db_path) != ":memory:" and not retired._db_path.is_file():
             return False
         self._copy_retained_state(retired)
+        self._origin_engine_type = getattr(retired, "_origin_engine_type", type(retired))
         store = self._store
         store._context_window_tokens.update(getattr(retired, "_saved_context_window_tokens", {}) or {})
         refusal = getattr(self, "_compress_refusal", None)
@@ -9092,12 +9093,15 @@ class LCMEngine(
                         try:
                             while True:
                                 try:
-                                    retired_key, retired_tail = None, None
+                                    retired_key = seen_key = retired_tail = None
                                     if self._unload_group is not None:
                                         retired_key = self._retired_tail_key(self._session_id, self._conversation_id)
                                         retired_tail = self._store.read_metadata_json(retired_key)
-                                    reconcile_retired = type(retired_tail) is int and (
-                                        getattr(self, "_seen_retired_tail", None) != (self._store, retired_key, retired_tail)
+                                        seen_key = (self._store.db_identity, retired_key)
+                                    seen_tails = getattr(self, "_seen_retired_tail", None)
+                                    reconcile_retired = (
+                                        type(retired_tail) is int
+                                        and not (isinstance(seen_tails, dict) and seen_tails.get(seen_key) == retired_tail)
                                     )
                                     retired_prefix = (
                                         self._retired_tail_replay_prefix(messages, retired_tail) if reconcile_retired else None
@@ -9125,11 +9129,19 @@ class LCMEngine(
                                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                                     self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
                                     if self._plugin_is_unloading() and (stored := prepared.get("stored_at")):
-                                        key = self._retired_tail_key(self._session_id, self._conversation_id)
-                                        self._store.write_metadata_json([key], json.dumps(max(stored.values())))
-                                    if retired_prefix is not None and retired_prefix[1]:
-                                        after_commit.append(lambda: setattr(
-                                            self, "_seen_retired_tail", (self._store, retired_key, retired_tail),
+                                        written_key = self._retired_tail_key(self._session_id, self._conversation_id)
+                                        written_tail = max(stored.values())
+                                        self._store.write_metadata_json([written_key], json.dumps(written_tail))
+                                        after_commit.append(lambda k=(self._store.db_identity, written_key), v=written_tail: (
+                                            setattr(self, "_seen_retired_tail", {
+                                                **(getattr(self, "_seen_retired_tail", None) or {}), k: v,
+                                            })
+                                        ))
+                                    elif retired_prefix is not None and retired_prefix[1]:
+                                        after_commit.append(lambda k=seen_key, v=retired_tail: (
+                                            setattr(self, "_seen_retired_tail", {
+                                                **(getattr(self, "_seen_retired_tail", None) or {}), k: v,
+                                            })
                                         ))
                                     self._store._finish_ingest_prelock()
                                     break
