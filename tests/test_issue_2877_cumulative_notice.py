@@ -79,9 +79,9 @@ def _syspaths() -> list[str]:
     return found
 
 
-def _walk(tmp_path: Path, name: str, patch: str = "") -> list[dict]:
+def _walk(tmp_path: Path, name: str, patch: str = "", *, cell: dict | None = None) -> list[dict]:
     cells, out, home = tmp_path / f"{name}-cells.json", tmp_path / f"{name}.json", tmp_path / f"{name}-home"
-    cells.write_text(json.dumps([CELL]))
+    cells.write_text(json.dumps([CELL if cell is None else cell]))
     home.mkdir()
     command = [sys.executable, "-I", "-B", str(RUNNER), "--tree", str(TREE), "--cells", str(cells), "--out", str(out),
                "--workdir", str(tmp_path / f"{name}-work")]
@@ -116,6 +116,26 @@ def test_a_two_fits_in_a_row_leave_no_row_without_a_pointer(tmp_path):
         assert loss["missing_count_by_id"] == 0, r["pass"]
         base = t["loss"] or {"missing_count": 0, "behind_notice_count": 0}
         assert loss["behind_notice_count"] <= base["missing_count"] + base["behind_notice_count"], r["pass"]
+
+
+@NO_GRID  # port onto the release line: the grid runner is main-only, as for the other part (a) cells
+def test_a_depth_catchup_walk_leaves_no_row_without_a_pointer(tmp_path):
+    """With the 0.4 depth target, catch-up runs past 120 s and the walk needs no survival fits.
+
+    Neither walk leaves rows without a pointer, and the two-fit premise of the default cell
+    never arises with catch-up active.
+    """
+    cell = {**CELL, "depth_ratio": 0.4}
+    today = _walk(tmp_path, "depth-today", TODAY, cell=cell)
+    n1 = _walk(tmp_path, "depth-n1", cell=cell)
+    assert any(r["wall"] - cell["finalize"] > 120 and r["calls_started"] > 1 for r in n1)
+    for r in n1:
+        if (loss := r["loss"]) is not None:
+            assert loss["missing_count"] == loss["missing_count_by_id"] == 0 and not loss["unpaired"], r
+            assert not loss["noop_not_identical"] and not loss["noop_changed"], r
+    fits = [r["pass"] for r in n1 if r["loss"] and r["loss"]["survival_fit_notice"]]
+    lost = {r["pass"]: r["loss"]["missing_count"] for r in today if r["loss"] and r["loss"]["missing_count"]}
+    assert not fits and not lost, (fits, lost)
 
 
 # -- direct constructions ------------------------------------------------------------------------------------------

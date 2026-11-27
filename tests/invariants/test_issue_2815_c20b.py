@@ -85,6 +85,9 @@ def _early_exit(home, monkeypatch, mode, exit_case):
         def admit(state, leaf, passes, step_done):
             if exit_case == "sweep":
                 state.sweep_deadline = 0
+                # Since the #3050 port the sweep's step checks read budget.step_deadline (t0 + hard while no
+                # catch-up is open, the value sweep_deadline holds), so the expired deadline is set there too.
+                fault.setattr(type(state.budget), "step_deadline", property(lambda budget: 0.0))
             if exit_case == "foreground":
                 state.budget.progress = "condensation"
 

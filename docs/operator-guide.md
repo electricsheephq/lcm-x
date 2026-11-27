@@ -565,7 +565,7 @@ Useful environment variables:
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
-| `LCM_DEPTH_TARGET_RATIO` | `0` | Whole-prompt target as a share of the model window for automatic threshold sweeps. Env only, off at `0`, and active only below the compaction trigger |
+| `LCM_DEPTH_TARGET_RATIO` | `0` | Whole-prompt target as a share of the model window for automatic threshold sweeps. Env only, off at `0`, and active only below the compaction trigger. While active (with the foreground settings at their defaults), it also enables a bounded catch-up: once the pass has stored progress, it may keep admitting summary calls up to about 210 s from `compress()` entry, minus the finalization reserve (at least 20 s); forced, overflow and recovery passes are not lengthened |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Removed in v0.30.0; parsed and ignored (#1246). Setting it true logs one warning per process; summarized tool rows are no longer rewritten |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
@@ -1095,8 +1095,9 @@ What the main knobs do:
   and publishes one active context at the end. It remains synchronous and does
   not enable deferred/background maintenance.
 - With depth targeting active, the `lcm_status` sweep block reports
-  `depth_target_tokens`, `fixed_load_tokens`, `whole_prompt_tokens_after`, and
-  `depth_target_met`. The pass estimate determines whether the target was met.
+  `depth_target_tokens`, `fixed_load_tokens`, `whole_prompt_tokens_after`,
+  `depth_target_met`, and `depth_token_scale`. The pass estimate determines
+  whether the target was met.
   The reported size after compaction is measured from the returned context plus
   fixed load.
 - Its time is one budget counted from `compress()` entry (#605). The progress
