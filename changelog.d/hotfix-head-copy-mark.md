@@ -1,0 +1,1 @@
+- Fix: LCM-X leaves a proven extra copy of its own summary head in the message store and skips it when building the prompt, compacting context, and recalling messages. A user message with unique text remains available.

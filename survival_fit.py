@@ -33,6 +33,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from .config import survival_reserve_fraction
 from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_analysis import _is_codex_interim
@@ -263,11 +264,6 @@ class FitPlan:
     notice: str
     emergency: bool
     emergency_span: List[Dict[str, Any]]
-
-
-def survival_reserve_fraction(config: Any) -> float:
-    """Resolve the survival reserve with the existing default, coercion and clamp."""
-    return min(0.9, max(0.0, float(getattr(config, "survival_reserve", 0.15) or 0.0)))
 
 
 class SurvivalFitMixin:

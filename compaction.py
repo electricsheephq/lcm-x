@@ -24,6 +24,7 @@ from threading import get_ident
 from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from functools import lru_cache, partial, wraps
 from inspect import signature
 from types import SimpleNamespace
@@ -40,13 +41,13 @@ from .escalation import (
     UnattributedRescueRefused,
     _summary_call,
 )
-from .externalize import ingest_payload_writes, payload_lookup_scope
+from .externalize import ingest_payload_writes, is_externalized_placeholder, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .host_uid import _uid_recognition_pass
 from .ingest_protection import redact_sensitive_value
 from . import ingest_ledger, leaf_prep
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from .message_analysis import _is_codex_interim
+from .message_analysis import _is_codex_interim, _tool_call_id
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
@@ -54,6 +55,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
     _carrier_emission_key,
     _commit_proof_identity_digest,
+    _emitted_user_replay_digest,
     _emission_identity,
     _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
@@ -61,7 +63,7 @@ from .reconcile import (
     _project_emitted_occurrences,
     _proof_user_identity,
 )
-from .sanitize import _contains_sensitive_redaction
+from .sanitize import _clean_active_assistant_message, _contains_sensitive_redaction
 from .sqlite_util import PhaseSqlTrace, _is_sqlite_locked_error
 from .store_complete import _UID_COPY_SOURCES, _UID_DROP_INPUT, _UidDropState
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
@@ -110,6 +112,12 @@ def _counted_compaction(operation):
         try:
             messages, host_view = self._canonical_host_view(messages)
         except Exception as exc:
+            # On this line canonicalization precedes foreground admission, even on errors.
+            if self._config.turn_start_defer_ceiling:
+                self._maybe_reclassify_late_auxiliary_before_compaction_write()
+                with self._bypass_compression_binding() as bypassed, self._compaction_gate:
+                    if not bypassed and self._compress_owner in (None, get_ident()):
+                        self._clear_turn_start_defer_phase()
             self._last_compression_status = "error"
             self._record_ingest_failure("compress", exc)
             return messages
@@ -333,6 +341,16 @@ class CompactionMixin:
         if callable(maybe_reclassify):
             maybe_reclassify()
 
+    @staticmethod
+    def _turn_start_defer_ceiling_tokens(ceiling: float, context_length: int) -> Decimal:
+        return Decimal(str(ceiling)) * context_length
+
+    def _end_turn_start_defer_episode(self) -> None:
+        # Reset sites also run on half-built engines (tests/test_frontier_state.py); only a gate hit sets the flag.
+        if getattr(self, "_turn_start_defer_logged", False):
+            with self._compaction_gate:
+                self._turn_start_defer_logged = False
+
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._bypasses_lcm_context_management():
             if self._compression_boundary_cooldown_active():
@@ -352,14 +370,37 @@ class CompactionMixin:
                 return False
             return tokens >= self.threshold_tokens
         if self._compression_boundary_cooldown_active():
+            self._end_turn_start_defer_episode()
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         self._last_gate_tokens = int(tokens or 0)
         self._no_progress_observed_tokens = int(tokens or 0)
         if self._should_force_overflow_recovery(observed_tokens=tokens):
+            self._end_turn_start_defer_episode()
             return True
         if self.threshold_tokens <= 0:
+            self._end_turn_start_defer_episode()
             return False
+        ceiling = self._config.turn_start_defer_ceiling
+        if ceiling and self.context_length > 0:
+            self._warn_turn_start_defer_ceiling()
+            if tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
+                ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, self.context_length)
+                if tokens < ceiling_tokens:
+                    with self._compaction_gate:
+                        level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
+                        self._turn_start_defer_logged = True
+                        self._turn_start_deferred_checks += 1
+                    try:
+                        logger.log(
+                            level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
+                            "prompt_tokens=%d ceiling_tokens=%s",
+                            ceiling, tokens, ceiling_tokens,
+                        )
+                    except Exception:
+                        pass  # A diagnostic handler cannot change the gate result.
+                    return False
+        self._end_turn_start_defer_episode()
         return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
@@ -394,7 +435,7 @@ class CompactionMixin:
         self._no_progress_observed_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
-            self.__dict__.get("_zero_leaf_streaks", {}).pop(self._hold_conversation_key(), None)  # #1162
+            self._clear_compaction_streaks_below_threshold()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
         pre_ingest_placeholder_cleanup_requested = False
@@ -724,6 +765,7 @@ class CompactionMixin:
         so the pressure-yield gate judges tail blockage from the numbers the
         compaction pass would actually see.
         """
+        messages = self._without_known_head_copies(messages)
         if not messages:
             return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
@@ -857,13 +899,15 @@ class CompactionMixin:
                  current_tokens: int = None,
                  focus_topic: Optional[str] = None,
                  force: bool = False,
-                 bypass_cooldown: bool = False, *, host_pairs=()) -> List[Dict[str, Any]]:
+                 bypass_cooldown: bool = False, *, host_pairs=(), _lcm_admission=None) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         if self._compaction_is_closing():
             return messages
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         with self._bypass_compression_binding() as bypassed:
+            if _lcm_admission is not None:
+                _lcm_admission.append(bypassed)
             if bypassed:
                 handle = self._emission_handle
                 if handle is not None and handle.session_id == self._bypass_lcm_session_id():
@@ -877,11 +921,18 @@ class CompactionMixin:
             if not (self._compress_refusal or {}).get("refused"):
                 self._compress_refusal = None
         try:
+            # Inside the try whose finally releases the owner, as on main: a raise here cannot leak the owner.
+            self._clear_turn_start_defer_phase()
             return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                         **({"host_pairs": host_pairs} if host_pairs else {}))
         finally:
             with self._compaction_gate:
                 self._release_compress_owner()
+
+    def _clear_turn_start_defer_phase(self) -> None:
+        # A foreground pass reopens the gate for the host's overflow recheck.
+        self._turn_start_defer_mid_turn_id = None
+        self._end_turn_start_defer_episode()
 
     @_uid_recognition_pass
     def _compress_owned(self, messages, current_tokens, focus_topic, force, bypass_cooldown, *, host_pairs=()):
@@ -1014,6 +1065,7 @@ class CompactionMixin:
             ):
                 result = messages
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
+            before_survival_fit = result
             result = self._survival_fit(messages, result, current_tokens,
                                         summary_failure=budget.summary_failure if not self._survival_fit_reason else "",
                                         fit_cause=self._last_compression_noop_reason if not self._survival_fit_reason else "",
@@ -1023,9 +1075,10 @@ class CompactionMixin:
             if binding_changed():
                 return messages
             comparison = guarded_restore if guarded_restore is not None and result is stubbed_guard_restore else result
-            if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
-                    and len(comparison) >= len(messages)
-                    and count_messages_tokens(comparison) >= count_messages_tokens(messages)):
+            hidden_only = (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
+                           and len(comparison) >= len(messages)
+                           and count_messages_tokens(comparison) >= count_messages_tokens(messages))
+            if hidden_only:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 sanitized = self._sanitize_active_context_messages(messages)
                 result = messages if sanitized == messages else sanitized
@@ -1034,6 +1087,15 @@ class CompactionMixin:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
+            restore_no_progress_host_rows = (
+                budget.leaves == 0 and not budget.progress and not force and not bypass_cooldown
+                and not self._compress_forced_overflow and self._last_compression_status in {"sanitized", "noop"}
+                and not self._stub_first_exit_now and result is before_survival_fit
+                and getattr(self, "_compress_host_rows_consumed", 0) == 0
+            )
+            result = self._keep_host_compress_rows(messages, result, no_progress=restore_no_progress_host_rows)
+            if restore_no_progress_host_rows:
+                self._ingest_cursor = len(result)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
@@ -1055,6 +1117,21 @@ class CompactionMixin:
                 # Persist only after the complete successful pass, including proof bookkeeping.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
                                              persist=self._no_progress_proof_complete)
+            try:
+                if budget.leaves:
+                    streaks, key = self.__dict__.setdefault("_hidden_only_streaks", {}), self._hold_conversation_key()
+                    if hidden_only:
+                        streaks[key] = {
+                            "passes": streaks.get(key, {}).get("passes", 0) + 1,
+                            # The last committed leaf already advanced this marker.
+                            "frontier_store_id": self._last_compacted_store_id,
+                            "leaves": budget.leaves,
+                            "hidden_rows": self._compress_hidden_rows_consumed,
+                        }
+                    elif self._compress_host_rows_consumed > 0:
+                        streaks.pop(key, None)
+            except Exception:
+                logger.debug("LCM hidden-only streak update failed", exc_info=True)
             returned = result
             return result
         except BaseException as exc:
@@ -1442,6 +1519,15 @@ class CompactionMixin:
             # #671: a stub-first exit hands the host a rewritten list (summary prefix re-emitted from the DAG, stubs);
             # once the host commits it, the durable proof must describe that list, or a cold rebind reads a stale one.
             proof["stub_first"] = bool(getattr(self, "_stub_first_exit_now", None))
+            if len(result) == len(messages) and (proof["stub_first"] or (
+                    proof["published"] and getattr(self, "_compress_host_rows_consumed", None) == 0)):
+                # A same-length reassembly can replace the occurrence at the old
+                # head's index. Keep literal identities of its fresh user emissions
+                # for the warm ingest check, separate from the normalized replay keys.
+                for item in fresh:
+                    if item["role"] == "user" and item["kind"] in {"summary", "carrier", "objective"}:
+                        index = item["output_occurrence"]["index"]
+                        proof.setdefault("emitted_user_digests", {})[index] = _emitted_user_replay_digest(result[index])
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
             # not identity (a gateway may send only a new turn), so the proof binds each row's host key
@@ -2097,6 +2183,7 @@ class CompactionMixin:
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
         persist: bool = True,
+        choose_stub_replay: Callable | None = None,
     ) -> List[Dict[str, Any]]:
         """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -2109,6 +2196,7 @@ class CompactionMixin:
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
                 **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
+                **({"_choose_stub_replay": choose_stub_replay} if choose_stub_replay is not None else {}),
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -2119,6 +2207,60 @@ class CompactionMixin:
             self._pending_context_anchor_messages = None
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
+
+    def _splice_stub_replay(self, messages, assembled, summary, carried_tail):
+        """Use the host's rows when assembly proved the same replay with tool stubs."""
+        head_index = 1 if messages and messages[0].get("role") == "system" else 0
+        split = carried_tail is not None and len(messages) == len(assembled) + 1
+        if split:
+            if (summary is None or len(assembled) <= head_index
+                    or not self._is_verified_replay_scaffold_message(messages[head_index])
+                    or assembled[head_index].get("content") != f"{summary['content']}\n\n{carried_tail['content']}"):
+                return None
+            assembled = [*assembled[:head_index], summary, carried_tail, *assembled[head_index + 1:]]
+        if len(messages) != len(assembled):
+            return None
+
+        spliced = []
+        for index, (original, rendered) in enumerate(zip(messages, assembled)):
+            comparison = rendered
+            if index == 0 and original.get("role") == "system" and rendered.get("role") == "system":
+                if rendered.get("content") == self._append_lcm_note_to_content(original.get("content")):
+                    comparison = {**rendered, "content": original.get("content")}
+            if index == head_index and (
+                carried_tail is not None
+                or (head_index == 1 and summary is not None and rendered.get("content") == summary["content"]
+                    and self._is_verified_replay_scaffold_message(original))
+            ):
+                # The renderer may use a different UID for the generated row. Keep the host occurrence.
+                comparison = {**comparison, "message_uid": original.get("message_uid")}
+                original_for_comparison = {**original, "message_uid": original.get("message_uid")}
+            else:
+                original_for_comparison = original
+            if self._compression_rows_equal(comparison, original_for_comparison):
+                spliced.append(original)
+                continue
+            content = rendered.get("content")
+            if (
+                original.get("role") != "tool"
+                or not is_externalized_placeholder(text_content_for_pattern_matching(content) or "")
+                or is_externalized_placeholder(text_content_for_pattern_matching(original.get("content")) or "")
+            ):
+                return None
+            replacement = {**original, "content": content}
+            if rendered != replacement:
+                return None
+            spliced.append(replacement)
+        return spliced if any(a is not b for a, b in zip(spliced, messages)) else None
+
+    def _choose_stub_replay(self, messages, cap, overhead, target, reserve, assembled, summary, carried_tail):
+        replay = self._splice_stub_replay(messages, assembled, summary, carried_tail)
+        if (
+            replay is None or self._survival_measure(replay) + overhead + reserve > target
+            or (cap is not None and count_messages_tokens(replay) + reserve > cap)
+        ):
+            return None
+        return replay
 
     @payload_lookup_scope()
     def _stub_first_exit(
@@ -2171,9 +2313,15 @@ class CompactionMixin:
         # writes nothing and runs no proactive recall (its block is reserved at its budget); a taken exit assembles
         # once more with the writes and the recall a final assembly makes.
         override = None if cap is None else sys.maxsize
-        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override, persist=False)
         recall = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
         overhead = self._survival_host_overhead(messages, observed_tokens)
+        # Prefer a splice that fits the depth target. If the regular rendering fits there instead,
+        # it can exit now. Otherwise keep the existing, less restrictive zero-leaf fallback.
+        trial_target = min(target, depth_target_tokens) if fallback_state is not None else target
+        candidate = self._assemble_committed_compaction_context(
+            rows, anchor_source_messages, override, persist=False,
+            choose_stub_replay=partial(self._choose_stub_replay, messages, cap, overhead, trial_target, recall),
+        )
         trial_tokens = self._survival_measure(candidate) + overhead + recall
         if (
             trial_tokens > target
@@ -2186,14 +2334,18 @@ class CompactionMixin:
             # Keep the validated free cuts; write their assembly only if no leaf lands.
             fallback_state.stub_first_fallback = partial(
                 self._finalize_stub_first_exit, rows, anchor_source_messages, observed_tokens, cap, overhead, target,
+                messages=messages,
             )
             if trial_tokens > depth_target_tokens:
                 return None
             target = depth_target_tokens
-        return self._finalize_stub_first_exit(rows, anchor_source_messages, observed_tokens, cap, overhead, target)
+        return self._finalize_stub_first_exit(
+            rows, anchor_source_messages, observed_tokens, cap, overhead, target, messages=messages,
+        )
 
     @payload_lookup_scope()
-    def _finalize_stub_first_exit(self, rows, anchor_source_messages, observed_tokens, cap, overhead, target):
+    def _finalize_stub_first_exit(self, rows, anchor_source_messages, observed_tokens, cap, overhead, target, *,
+                                  messages):
         if self._compress_binding_changed():
             return None
         override = None if cap is None else sys.maxsize
@@ -2201,7 +2353,10 @@ class CompactionMixin:
         keys = [self._folded_tail_lineage_metadata_key(), self._active_replay_snapshot_metadata_key()]
         saved = [self._store.read_metadata_json(key) for key in keys]
         pending = list(getattr(self, "_pending_emission_candidates", None) or [])
-        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override)
+        candidate = self._assemble_committed_compaction_context(
+            rows, anchor_source_messages, override,
+            choose_stub_replay=partial(self._choose_stub_replay, messages, cap, overhead, target, 0),
+        )
         after = self._survival_measure(candidate) + overhead
         if after > target or (cap is not None and count_messages_tokens(candidate) > cap):
             for key, value in zip(keys, saved):
@@ -2291,24 +2446,63 @@ class CompactionMixin:
     def _plain_assistant_replay_text(row, *, stored_row=False):
         content = row.get("content")
         if (row.get("role") != "assistant" or not isinstance(content, str)
-                or row.get("tool_calls") or row.get("tool_call_id") or _is_codex_interim(row)):
-            return ""
+                or (not stored_row and row.get("tool_calls")) or row.get("tool_call_id") or _is_codex_interim(row)):
+            return None
         text = content.strip()
         if _contains_sensitive_redaction(text):
-            return ""
+            return None
         # The store serializes structured content as JSON.
         if stored_row and text.startswith(("[", "{")):
             try:
                 if isinstance(json.loads(text), (list, dict)):
-                    return ""
+                    return None
             except json.JSONDecodeError:
                 pass
             except (ValueError, RecursionError):
-                return ""
+                return None
+        if stored_row:
+            cleaned = _clean_active_assistant_message(row)
+            if cleaned is None and row.get("api_content"):
+                return None
+            return cleaned["content"].strip() if cleaned is not None else ""
         return text
 
+    def _refused_assistant_run_start(self, text, raw_tail, upper):
+        """Walk the assembly join backwards, retaining its contiguous raw span."""
+        remaining = len(text)
+        tool_results = set()
+        seen_text = False
+        for lower in range(upper - 1, -1, -1):
+            row = raw_tail[lower]
+            if row.get("role") == "tool":
+                tool_results.add(str(row.get("tool_call_id") or "").strip())
+                continue
+            part = self._plain_assistant_replay_text(row, stored_row=True)
+            calls = row.get("tool_calls") or ()
+            # A stripped call must be part of a dropped tool group. At the end
+            # of the run, tool results must belong to its last assistant row.
+            if part is None or (calls and (not isinstance(calls, list) or any(
+                not (call_id := _tool_call_id(call)) or call_id not in tool_results for call in calls
+            ))) or (not seen_text and tool_results and not calls):
+                break
+            tool_results.clear()
+            if not part and seen_text:
+                continue
+            if not part or not text.endswith(part, 0, remaining):
+                break
+            remaining -= len(part)
+            if not remaining:
+                return lower if seen_text else None
+            # _merge_adjacent_assistant_messages joins the stripped nonempty
+            # parts with a single newline. Empty parts add no separator.
+            if text[remaining - 1] != "\n":
+                break
+            remaining -= 1
+            seen_text = True
+        return None
+
     def _match_refused_assistant_replay(self, working, raw_tail, *, carrier):
-        """Match the suffix through the frontier, retaining both ids for each merged reply."""
+        """Match the suffix through the frontier, retaining every id a reply absorbed."""
         self._load_host_rewrite_overrides(raw_tail)
         upper = len(raw_tail)
         merged_ids = set()
@@ -2323,14 +2517,12 @@ class CompactionMixin:
                 return [], set()
             if exact:
                 upper -= 1
-            elif upper >= 2 and self._plain_assistant_replay_text(message):
-                base = raw_tail[upper - 2]
-                left = self._plain_assistant_replay_text(base, stored_row=True)
-                right = self._plain_assistant_replay_text(row, stored_row=True)
-                if not (left and right and message["content"] == left + "\n" + right):
+            elif self._plain_assistant_replay_text(message):
+                lower = self._refused_assistant_run_start(message["content"], raw_tail, upper)
+                if lower is None:
                     return [], set()
-                merged_ids.update((int(base["store_id"]), int(row["store_id"])))
-                upper -= 2
+                merged_ids.update(int(source["store_id"]) for source in raw_tail[lower:upper])
+                upper = lower
             else:
                 return [], set()
             matched.append(row)
@@ -2340,6 +2532,7 @@ class CompactionMixin:
         # The existing emission mark survives a clean restart. It gates only
         # this compaction fallback and never changes cold ingest's proof.
         try:
+            self._retry_refused_emissions()
             if ingest_ledger_mode() == "off" or self._store.ingest_ledger_state() != "ready":
                 return False
             conn = self._store._conn
@@ -2392,6 +2585,7 @@ class CompactionMixin:
             len(working),
         )
         merged_ids: set[int] = set()
+        refused_replay = False
         for collapse in (False, True):  # #535: raw rows first, then a stored merge-append pair as one row
             raw_tail = rows = self._store.get_session_rows_through(self._session_id, frontier, (1 + collapse) * (end - start))
             rows = self._collapse_merge_append_bases(rows)[-(end - start):] if collapse and end > start else rows
@@ -2421,14 +2615,20 @@ class CompactionMixin:
             )
             if not has_joined_reply or not self._latest_compaction_was_refused():
                 return [], ids, 0, 0
-            rows, merged_ids = self._match_refused_assistant_replay(replay, raw_tail, carrier=carrier)
-            if not merged_ids:
-                return [], ids, 0, 0
+            refused_replay = True
         after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
         if [int(row["store_id"]) for row in after] != ([ids[id(working[end])]] if end < len(working) else []):
             return [], ids, 0, 0
         leaf_sources = self._dag.get_leaf_sources_through(self._session_id, frontier)
         lineage = {store_id for _node, _tokens, store_id in leaf_sources}
+        if refused_replay:
+            # Extra rows are admissible only inside a fully covered merge.
+            limit = len(replay) + len(lineage)
+            if limit > 2 * len(replay):
+                raw_tail = self._store.get_session_rows_through(self._session_id, frontier, limit)
+            rows, merged_ids = self._match_refused_assistant_replay(replay, raw_tail, carrier=carrier)
+            if not merged_ids:
+                return [], ids, 0, 0
         replies = {"assistant", "tool"}
         low, high = (min(lineage), max(lineage)) if lineage else (0, 0)
         if not lineage or not merged_ids <= lineage or any(
@@ -2440,7 +2640,8 @@ class CompactionMixin:
             start + offset: int(row["store_id"])
             for offset, row in enumerate(rows)
             if int(row["store_id"]) in lineage
-            or (int(row["store_id"]) > low and str(row.get("role") or "") in replies)
+            # After a refusal, consume only rows leaf lineage covers (#3006), never an uncovered reply.
+            or (not refused_replay and int(row["store_id"]) > low and str(row.get("role") or "") in replies)
         }
         dropped_ids = set(dropped.values()) | merged_ids
         covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}
@@ -2566,6 +2767,7 @@ class CompactionMixin:
         if self._compress_binding_changed():
             return "return", messages
         self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
+        state.working_messages = self._without_known_head_copies(state.working_messages)
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow

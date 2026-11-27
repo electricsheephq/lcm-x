@@ -49,13 +49,15 @@ TURN_PATH_FILES = {
     "host_row_recovery.py",  # Off by default; when on, recovery stores turn content under its original session/conversation.
     "unended_catchup.py",  # Off by default; when on, the #2042 catch-up stores failed-turn sessions' content under their own ids.
     "ingest_ledger.py",  # Transaction-owned shadow ledger writes on foreground ingest.
+    "sidecar_ingest.py",  # v0.30.4: foreground ingest stores complete out-of-band steer blocks in the companion session.
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
+    "head_copy.py",  # v0.30.3: a stored copy of the summary head stays out of assembly and compaction input.
     "host_rewrite.py", "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
-    "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
+    "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "summary_prefix.py", "survival_codec.py",
     "survival_fit.py", "tokens.py", "tool_pairs.py",
     "config.py",  # Defaults and loaders set fresh-tail cuts, filters and summary requests.
     "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.

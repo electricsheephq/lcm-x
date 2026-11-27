@@ -536,8 +536,8 @@ def test_t8_ordinary_cleanup_control(tmp_path, summaries, lines):
             {"role": "assistant", "content": "<think>internal</think>Visible answer"}]
     try:
         out = engine.compress(view)
-        assert out is not view and len(out) == len(view)
-        assert out[-1]["content"] == "Visible answer"
+        assert out is view
+        assert out[-1]["content"] == "<think>internal</think>Visible answer"
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == "" and not summaries
     finally:

@@ -1529,7 +1529,7 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
 
     assert identity["engine"] == "lcm-x"
     assert identity["plugin_name"] == "hermes-lcm-x"
-    assert identity["plugin_version"] == "0.30.2"
+    assert identity["plugin_version"] == "0.30.4"
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1557,11 +1557,11 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
 
     initial = identity_mod._plugin_metadata()
     assert initial["name"] == "hermes-lcm-x"
-    assert initial["version"] == "0.30.2"
+    assert initial["version"] == "0.30.4"
 
-    updated = original.replace('version: "0.30.2"', 'version: "9.9.9-test"')
+    updated = original.replace('version: "0.30.4"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 0.30.2', 'version: 9.9.9-test')
+        updated = original.replace('version: 0.30.4', 'version: 9.9.9-test')
     assert updated != original
 
     manifest.write_text(updated, encoding="utf-8")
@@ -1592,7 +1592,7 @@ def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-x"
-    assert payload["runtime_identity"]["plugin_version"] == "0.30.2"
+    assert payload["runtime_identity"]["plugin_version"] == "0.30.4"
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 
@@ -11350,9 +11350,11 @@ class TestEngineCompress:
         result = engine.compress(messages)
 
         assert len(result) == len(messages)
-        assert result[-1]["content"] == "Visible answer"
+        # T1-606 F1/F1b: a no-progress pass keeps the host reasoning.
+        assert result[-1] is messages[-1]
         assert engine._last_compression_status == "sanitized"
         assert engine._last_compression_noop_reason == ""
+        assert engine.compress(messages, force=True)[-1]["content"] == "Visible answer"
 
     def test_compress_drops_unbacked_active_summary_marker_without_leaf_node(
         self,
@@ -22774,6 +22776,11 @@ class TestAssemblyToolPairGuardrail:
 
         active_context = instance.compress(messages)
 
+        # T1-606 F1/F1b: structured and string reasoning are stripped on adoption.
+        assert active_context[2] is messages[2]
+        assert active_context[3] is messages[3]
+        active_context = instance.compress(messages, force=True)
+
         assert active_context[2] == {
             "role": "assistant",
             "content": [{"type": "text", "text": "visible final"}],
@@ -22805,6 +22812,10 @@ class TestAssemblyToolPairGuardrail:
         first = LCMEngine(config=config)
         first.on_session_start(session_id, context_length=200000)
         active_context = first.compress(messages)
+
+        # T1-606 F1/F1b: first keep host reasoning, then rebind the committed strip.
+        assert active_context is messages
+        active_context = first.compress(messages, force=True)
 
         assert active_context == [
             {"role": "system", "content": "sys"},
@@ -22855,6 +22866,9 @@ class TestAssemblyToolPairGuardrail:
 
         active_context = instance.compress(messages)
 
+        # T1-606 F1/F1b: tool-call reasoning is cosmetic on the no-progress pass.
+        assert active_context[2] is messages[2]
+        active_context = instance.compress(messages, force=True)
         assert active_context[2] == {"role": "assistant", "content": "", "tool_calls": [tool_call]}
         assert active_context[3] == {"role": "tool", "tool_call_id": "call_lookup", "content": "result"}
         rows = instance._store.get_session_messages(session_id)
@@ -22885,6 +22899,9 @@ class TestAssemblyToolPairGuardrail:
         first = LCMEngine(config=config)
         first.on_session_start(session_id, context_length=200000)
         active_context = first.compress(messages)
+        # T1-606 F1/F1b: verify rebind against the tool call stripped on adoption.
+        assert active_context is messages
+        active_context = first.compress(messages, force=True)
         assert active_context[2]["content"] == ""
         assert first._store.get_session_count(session_id) == 4
         first.shutdown()
@@ -23025,6 +23042,10 @@ class TestAssemblyToolPairGuardrail:
         active_context = instance.compress(messages)
         rows = instance._store.get_session_messages(session_id)
 
+        # T1-606 F1/F1b: the host reasoning and its committed strip map to one source.
+        assert active_context[2] is messages[2]
+        assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]
+        active_context = instance.compress(messages, force=True)
         assert active_context[2]["content"] == [{"type": "text", "text": "visible final"}]
         assert rows[2]["content"] == json.dumps(mixed_content, ensure_ascii=False, sort_keys=True)
         assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]
@@ -23054,6 +23075,10 @@ class TestAssemblyToolPairGuardrail:
         active_context = instance.compress(messages)
         rows = instance._store.get_session_messages(session_id)
 
+        # T1-606 F1/F1b: both tool-call forms map back to the stored source.
+        assert active_context[2] is messages[2]
+        assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]
+        active_context = instance.compress(messages, force=True)
         assert active_context[2]["content"] == ""
         assert rows[2]["content"] == "<think>hidden</think>"
         assert instance._get_store_ids_for_messages([active_context[2]]) == [rows[2]["store_id"]]

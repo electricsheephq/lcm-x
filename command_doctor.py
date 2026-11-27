@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from .config import companion_enable_command
-from .diagnostics import fresh_sqlite_check
+from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_warning
+from .diagnostics import fresh_sqlite_check, sqlite_wal_reset_check
 
 
 @dataclass(frozen=True)
@@ -346,11 +347,13 @@ def collect_doctor(engine: Any) -> DoctorFacts:
     if embedding_check and embedding_check["status"] in {"warn", "fail"}:
         triage_checks.append(embedding_check)
         embedding_action = command.doctor_guidance_for_check(embedding_check)["operator_action"]
+    wal_reset_affected = command.sqlite_wal_reset_affected()
+    sqlite_version = command.sqlite3.sqlite_version
+    if wal_reset_affected:
+        triage_checks.append(sqlite_wal_reset_check(sqlite_version))
     triage_guidance = command.doctor_guidance_for_checks(triage_checks)
 
     # Keep these P4 reads after guidance, in their original order.
-    wal_reset_affected = command.sqlite_wal_reset_affected()
-    sqlite_version = command.sqlite3.sqlite_version
     stem_index = command.stem_index_status(store_conn)
     host_uid_lines = tuple(command.host_uid_doctor_lines(engine))
     from .tokens import token_counter_status
@@ -656,6 +659,8 @@ def render_doctor(facts: DoctorFacts) -> str:
                      and facts.embedding_check["detail"].get("informational"))):
         issues.append("embedding_provider_health")
         recommended_actions.append(facts.embedding_action)
+    if facts.wal_reset_affected:
+        recommended_actions.append(SQLITE_WAL_RESET_ACTION)
 
     doctor_status = "issues-found" if not facts.integrity_ok or issues else (
         "action-recommended" if recommended_actions else "ok"
@@ -679,8 +684,8 @@ def render_doctor(facts: DoctorFacts) -> str:
         f"schema_existing_tables: {', '.join(facts.schema_existing_tables) or '(none)'}",
         f"journal_mode: {facts.journal_mode}; sqlite_mmap_bytes={facts.sqlite_mmap_bytes}",
         f"sqlite_library: {facts.sqlite_version} (WAL-reset bug: {'affected' if facts.wal_reset_affected else 'not affected'})",
-        *(["sqlite_wal_reset_advice: upgrade Python/SQLite to 3.51.3+; see https://sqlite.org/wal.html#walresetbug"]
-          if facts.wal_reset_affected and facts.journal_mode.lower() == "wal" else []),
+        *([f"sqlite_wal_reset: warn {sqlite_wal_reset_warning(facts.sqlite_version)}"]
+          if facts.wal_reset_affected else []),
         f"quick_check: {facts.quick_check}",
         f"sqlite_integrity: {facts.integrity}",
         f"messages_total: {facts.total_messages}",

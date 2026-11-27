@@ -64,6 +64,8 @@ DIAGNOSTIC_ATTRIBUTES = frozenset({
     "_replay_identity_memo", "_storage_ready",
     # Ingest restores these labels for the session-end diagnostic; the proof itself is observed.
     "_compress_commit_publication", "_compress_commit_reason",
+    # T1-604b checks the runtime counter and wall-clock time through /lcm status.
+    "_sidecar_recovery_failures",
 })
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({

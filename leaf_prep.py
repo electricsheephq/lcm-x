@@ -36,6 +36,7 @@ from .ingest_protection import (
     quarantine_suspicious_assistant_messages,
     redact_sensitive_value,
 )
+from .sidecar_ingest import SIDECAR_SESSION_PREFIX
 from .tokens import count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
@@ -531,6 +532,7 @@ class _LeafPrep:
             summarize_leaf_chunk_with_rescue,
         )
         from .escalation import summary_route_available
+        from .head_copy import is_known_head_copy
 
         config = job.config
         if not self._current(job, conn):
@@ -546,7 +548,7 @@ class _LeafPrep:
         )
         if len(raw) >= _SCAN_LIMIT:
             return  # the newest rows (the fresh tail) were not read
-        rows = [_decode_row(row) for row in raw]
+        rows = [row for raw_row in raw if not is_known_head_copy(conn, row := _decode_row(raw_row))]
         following = {  # the next stored row, tail included: what the host could merge a chunk end with
             int(row["store_id"]): rows[index + 1] if index + 1 < len(rows) else None
             for index, row in enumerate(rows)
@@ -722,8 +724,8 @@ class _LeafPrep:
         }
         foreign = conn.execute(
             "SELECT MIN(store_id) FROM messages WHERE store_id > ? AND store_id <= ? AND session_id != ? "
-            "AND conversation_id = ?",
-            (job.frontier, ids[-1], job.session_id, job.conversation_id),
+            "AND conversation_id = ? AND session_id NOT GLOB ?",
+            (job.frontier, ids[-1], job.session_id, job.conversation_id, SIDECAR_SESSION_PREFIX + "*"),
         ).fetchone()
         foreign_id = int(foreign[0]) if foreign and foreign[0] is not None else None
         lead = 0  # a stored system prompt right above the frontier is the host's anchor: excluded, as there

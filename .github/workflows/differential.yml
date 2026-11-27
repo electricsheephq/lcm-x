@@ -43,6 +43,7 @@ jobs:
             extraction.py
             frontier_state.py
             fresh_tail.py
+            head_copy.py
             host_rewrite.py
             host_row_recovery.py
             host_uid.py
@@ -51,6 +52,7 @@ jobs:
             ingest_content.py
             ingest_integrity.py
             ingest_ledger.py
+            sidecar_ingest.py
             ingest_pem_model.py
             ingest_pem_scan.py
             ingest_persisted.py
@@ -82,6 +84,7 @@ jobs:
             summary_attempt.py
             summary_input_clip.py
             summary_outcome.py
+            summary_prefix.py
             survival_codec.py
             survival_fit.py
             tokens.py
