@@ -695,7 +695,9 @@ def _seed_prepared_chain(engine, view, monkeypatch, count):
             summary_tokens=count_tokens(SUMMARY), excluded_store_ids=(rows[0]["store_id"],) if not index else (),
         ))
         start = ids[-1]
-    cache._cache[(str(engine._store.db_path), engine._conversation_id)] = chain
+    cache._cache[
+        (str(engine._store.db_path), engine._conversation_id, getattr(engine, "_unload_group", None))
+    ] = chain
 
 
 @pytest.mark.parametrize("trigger, start, prepared", [(0.50, 62_500, 16), (0.75, 80_000, 30), (0.75, 80_000, 24)])

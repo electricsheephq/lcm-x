@@ -677,11 +677,11 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         active_at_close.append(active.is_set())
         close()
 
-    def retire_and_record(wait):
+    def retire_and_record(wait, **kwargs):
         if wait:  # shutdown's retire step; session end's does not wait
             active_at_retire.append(active.is_set())
             retiring.set()
-        retire(wait=wait)
+        retire(wait=wait, **kwargs)
 
     def shut_down():
         try:
