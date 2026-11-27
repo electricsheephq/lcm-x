@@ -44,7 +44,7 @@ class EngineUnloadGroup:
         self._rollup_owners: set[object] = set()
         self._retired_embedding_owners: set[object] = set()
         self._deferred = weakref.WeakSet()
-        self.retired_session_starts: weakref.WeakValueDictionary | None = None
+        self.retained_engines: weakref.WeakSet | None = None
         # Only ids, never engines or storage handles. A manager may share this
         # set across module re-imports to recognize a late compressor-less turn.
         self.bound_sessions: set[str] = set()

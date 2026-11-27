@@ -13,7 +13,7 @@ import logging
 import os
 import sys
 import time
-from weakref import WeakValueDictionary
+from weakref import WeakSet
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -615,11 +615,11 @@ def register(ctx):
         shutdown = engine._enable_plugin_unload()
         manager = getattr(ctx, "_manager", None)
         if manager is not None:
-            if not hasattr(manager, "_lcm_x_retired_session_starts"):
-                manager._lcm_x_retired_session_starts = WeakValueDictionary()
+            if not hasattr(manager, "_lcm_x_retained_engines"):
+                manager._lcm_x_retained_engines = WeakSet()
             if not hasattr(manager, "_lcm_x_known_sessions"):
                 manager._lcm_x_known_sessions = set()
-            engine._unload_group.retired_session_starts = manager._lcm_x_retired_session_starts
+            engine._unload_group.retained_engines = manager._lcm_x_retained_engines
             engine._unload_group.bound_sessions = manager._lcm_x_known_sessions
             engine._unload_group.current_prototype = lambda: getattr(manager, "_context_engine", None)
 
@@ -988,85 +988,29 @@ def register(ctx):
                     finally:
                         replacement.shutdown()
 
-            def _replay_cli_reset(retired):
-                if (conversation_id not in ("", session_id)
-                        or getattr(retired, "_retired_session_start", None) != session_id
-                        or _resolved_profile_home(retired._hermes_home) != _resolved_profile_home(engine._hermes_home)
-                        or retired._db_path != engine._db_path):
-                    return False
-
-                def replay(active_engine):
-                    reason = retired._confirmed_retired_cli_switch(session_id, platform)
-                    if reason is None or not active_engine._adopt_retained_binding(
-                        retired._reload_successor or retired, reset_session_id=session_id,
-                        start_reset=True, resume=reason == "resumed_other",
-                    ):
-                        return False
-                    return _ingest_retained(active_engine)
-
-                return _use_scoped_writer(replay)
+            def _invoke_retained(candidate, operation):
+                if candidate._plugin_is_unloading():
+                    ok, _ = candidate._run_retained_or_dormant(operation)
+                    return ok
+                return use_lcm_engine(candidate, operation, timeout=None).used
 
             try:
                 if host_engine is not None:
-                    if (getattr(host_engine, "_reload_successor", None) is not None
-                            or getattr(host_engine, "_reload_compression_boundary", None) is not None):
-                        attached = host_engine._retained_successor()
-                        if (attached is not None and attached._session_id == session_id
-                                and conversation_id in ("", attached._conversation_id)
-                                and attached._db_path == engine._db_path
-                                and _callback_profile_home(getattr(ctx, "_manager", None))
-                                == _resolved_profile_home(attached._hermes_home)):
-                            result = attached._use_retained_binding(_ingest_retained, timeout=None)
-                            if result.used and result.value:
-                                return
-                        if _forward_reloaded_post_llm_call(kwargs):
-                            return
                     result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
                     if (result.status == ActiveEngineUseStatus.CLOSED_ENGINE
                             and getattr(host_engine, "_plugin_is_unloading", lambda: False)()
                             and session_id
                             and _resolved_profile_home(host_engine._hermes_home) == _resolved_profile_home(engine._hermes_home)
-                            and host_engine._db_path == engine._db_path):
-                        with engine._admit_plugin_operation() as admitted:
-                            if admitted and host_engine._flush_retired_delegate_child(session_id, history, platform):
-                                return
-                        if (_engine_bound_session_id(host_engine) != session_id
-                                or (conversation_id and conversation_id != host_engine._conversation_id)):
-                            manager = getattr(ctx, "_manager", None)
-                            if (_callback_profile_home(manager) == _resolved_profile_home(engine._hermes_home)
-                                    and _replay_cli_reset(host_engine)):
-                                return
-                            logger.warning("LCM post_llm_call skipped ingest: retired binding differs")
+                            and host_engine._db_path.resolve() == engine._db_path.resolve()):
+                        if host_engine._flush_retired_delegate_child(session_id, history, platform):
                             return
-                        conversation_id = conversation_id or host_engine._conversation_id
-                        # Reuse the normal ingest path once a current engine
-                        # owns this lane. Never rebind an unrelated engine.
-                        def use_current(selected):
-                            if (selected._conversation_id == conversation_id
-                                    and _resolved_profile_home(selected._hermes_home)
-                                    == _resolved_profile_home(host_engine._hermes_home)
-                                    and selected._db_path == host_engine._db_path):
-                                _ingest_and_note(selected)
-                                return True
-                            return False
-
-                        current = use_active_lcm_engine(
-                            use_current, session_id=session_id, conversation_id=conversation_id, timeout=None,
-                        )
-                        if current.used and current.value:
+                        if (hasattr(host_engine, "_run_retained_or_dormant")
+                                and host_engine._run_retained_or_dormant(
+                                    lambda active_engine: (_bind_and_ingest(active_engine), True)[1],
+                                )[0]):
                             return
-                        if current.status in (ActiveEngineUseStatus.ENGINE_NOT_RESIDENT,
-                                              ActiveEngineUseStatus.CLOSED_ENGINE):
-                            # The old binding's proven prefix permits a write
-                            # without creating a new resident engine. A
-                            # compacted or first view needs normal ingest.
-                            with engine._admit_plugin_operation() as admitted:
-                                # The detached writer and pending-tail retry
-                                # both reconcile under BEGIN IMMEDIATE.
-                                if admitted and host_engine._flush_retired_session_end(session_id, history, warn=False):
-                                    return
-                            if _use_scoped_writer(_replay_existing_lane):
-                                return
+                        if _forward_reloaded_post_llm_call(kwargs):
+                            return
                 else:
                     unload_capable = engine._unload_group is not None
                     manager = getattr(ctx, "_manager", None)
@@ -1082,7 +1026,7 @@ def register(ctx):
                     def _ingest_bound_engine(selected):
                         if unload_capable and (
                             _resolved_profile_home(selected._hermes_home) != _resolved_profile_home(engine._hermes_home)
-                            or selected._db_path != engine._db_path
+                            or selected._db_path.resolve() != engine._db_path.resolve()
                         ):
                             return False
                         if (getattr(selected, "_fresh_reload_hook_binding", None)
@@ -1108,10 +1052,42 @@ def register(ctx):
                             _bind_and_ingest,
                             timeout=None,
                         )
-                    if result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
-                                         ActiveEngineUseStatus.CLOSED_ENGINE,
-                                         ActiveEngineUseStatus.ENGINE_NOT_RESIDENT):
-                        if unload_capable and session_id:
+                    if (result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                          ActiveEngineUseStatus.CLOSED_ENGINE,
+                                          ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
+                            and unload_capable and session_id):
+                        owner = engine._unload_group
+                        retained_pool = list(owner.retained_engines or ()) if owner is not None else ()
+                        matched = None
+                        for candidate in retained_pool:
+                            latest = candidate._reload_successor or candidate
+                            if (latest._session_id == session_id
+                                    and (not conversation_id or latest._conversation_id == conversation_id)
+                                    and _resolved_profile_home(latest._hermes_home) == _resolved_profile_home(engine._hermes_home)
+                                    and latest._db_path.resolve() == engine._db_path.resolve()):
+                                matched = candidate
+                                if conversation_id and latest._conversation_id == conversation_id:
+                                    break
+                        if matched is not None:
+                            latest = matched._reload_successor or matched
+                            if (getattr(latest, "_fresh_reload_hook_binding", None)
+                                    == (session_id, latest._conversation_id)
+                                    and not latest._proves_local_hook_turn(session_id, history)):
+                                matched = None
+                        if matched is not None:
+                            if matched._plugin_is_unloading():
+                                if matched._retained_successor() is None and _forward_reloaded_post_llm_call(kwargs):
+                                    return
+                                if _invoke_retained(matched, _ingest_retained):
+                                    return
+                            elif _invoke_retained(matched, _ingest_retained):
+                                return
+                        if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT or (
+                            matched is None and result.status in (
+                                ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                ActiveEngineUseStatus.CLOSED_ENGINE,
+                            )
+                        ):
                             lane = use_lcm_engine(
                                 engine,
                                 lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
@@ -1121,15 +1097,16 @@ def register(ctx):
                                 conversation_id = lane.value
                                 if _use_scoped_writer(_replay_existing_lane):
                                     return
-                            owner = engine._unload_group
-                            starts = owner.retired_session_starts if owner is not None else None
-                            retired = starts.get(session_id) if starts is not None else None
+                            has_same_module_retained = any(
+                                type(r) is type(engine)
+                                and (r._reload_successor or r)._session_id
+                                and _resolved_profile_home((r._reload_successor or r)._hermes_home)
+                                == _resolved_profile_home(engine._hermes_home)
+                                and (r._reload_successor or r)._db_path.resolve() == engine._db_path.resolve()
+                                for r in retained_pool
+                            )
                             if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
-                                    and retired is not None
-                                    and _replay_cli_reset(retired)):
-                                return
-                            if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
-                                    and reloaded and retired is None
+                                    and reloaded and not has_same_module_retained
                                     and session_id not in owner.bound_sessions
                                     and engine._proves_local_hook_turn(session_id, history)):
                                 # Require local Hermes ownership when the
@@ -1145,12 +1122,11 @@ def register(ctx):
                                 cold = use_cold_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
                                 if cold.used and cold.value:
                                     return
-                        child_fallback = result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT
-                        if unload_capable:
-                            child_fallback = (
-                                (child_fallback or result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
-                                and (engine._storage_ready or engine._db_path.is_file())
-                            )
+                        child_fallback = (
+                            result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                              ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
+                            and (engine._storage_ready or engine._db_path.is_file())
+                        )
                         if child_fallback:
                             # No engine of the child's own: store its rows without binding one.
                             stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
@@ -1177,22 +1153,6 @@ def register(ctx):
         if callable(register_hook):
             if engine._unload_group is not None and active:
                 engine._lcm_registered_post_llm_call = _on_post_llm_call
-                def _on_cli_reset(*, session_id=None, platform=None, reason=None, **_):
-                    if (engine._plugin_is_unloading() or platform != "cli" or reason != "new_session"
-                            or _callback_profile_home(getattr(ctx, "_manager", None))
-                            != _resolved_profile_home(engine._hermes_home)):
-                        return
-                    starts = engine._unload_group.retired_session_starts
-                    retired = starts.get(session_id) if starts is not None else None
-                    if (retired is not None and retired._db_path == engine._db_path
-                            and _resolved_profile_home(retired._hermes_home)
-                            == _resolved_profile_home(engine._hermes_home)):
-                        retired._note_retired_cli_reset_hook(session_id)
-
-                try:
-                    register_hook("on_session_reset", _on_cli_reset)
-                except Exception:
-                    logger.debug("LCM could not register the CLI reset proof hook", exc_info=True)
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
             try:

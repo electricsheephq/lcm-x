@@ -61,7 +61,7 @@ DIAGNOSTIC_ATTRIBUTES = frozenset({
     "_session_diagnostic_logs", "_thread_context",
     # Reload-only lifecycle state is verified by the separate pinned reload
     # regressions. This trace records the resulting SQL and durable rows.
-    "_reload_lane_guard", "_seen_retired_tail", "_unload_group",
+    "_seen_retired_tail", "_unload_group",
     # #2856: read by the replay-identity wrapper only, never an ingest outcome: the live identity memo
     # (output-neutral by its own oracle and the session differential) and the storage-open flag that gates it.
     "_replay_identity_memo", "_storage_ready",

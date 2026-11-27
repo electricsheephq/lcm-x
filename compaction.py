@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
 from .config import ingest_ledger_mode
-from .engine_registry import engine_unload_group
+from .engine_registry import engine_unload_group, use_lcm_engine
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
@@ -96,8 +96,8 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
 })
 
 
-def _counted_compaction(*, return_messages: bool):
-    """Keep connections live through preflight and compaction, including finalizers."""
+def _counted_compaction():
+    """Keep connections live through preflight, delegating retired engines to main-parity execution."""
     def decorate(operation):
         @wraps(operation)
         def counted(self, messages, *args, **kwargs):
@@ -105,58 +105,20 @@ def _counted_compaction(*, return_messages: bool):
                 unloading = self._plugin_is_unloading()
                 if not unloading:
                     if self._compaction_closing:
-                        return messages if return_messages else False
+                        return False
                     self._compaction_inflight += 1
             if unloading:
-                def invoke(engine):
-                    # The successor's stable lease already covers this call and
-                    # keeps storage live if the unload gate closes mid-pass.
-                    result = messages
-                    if not engine._compaction_is_closing():
-                        try:
-                            result = engine.compress(messages, *args, **kwargs)
-                        except LifecycleBindingChangedError:
-                            return messages
-                        except Exception as exc:
-                            # Let the host handle a compression failure after
-                            # the lease exits, as it does for a live engine.
-                            return exc
-                    if result is messages and engine._compaction_is_closing():
-                        # Compaction can stop before it reaches ingest. Persist
-                        # the original view under the existing lease.
-                        if engine._retained_binding_is_current():
-                            engine.ingest(messages)
-                        engine._stop_pass_for_shutdown()
-                    self._last_compression_status = engine.last_compression_status
-                    self._last_compression_noop_reason = engine.last_compression_noop_reason
-                    self.compression_count = engine.compression_count
-                    return result
-
-                if return_messages:
-                    result = self._run_retained_view_operation(messages, invoke, allow_empty_prefix=True)
-                    if isinstance(result, Exception):
-                        raise result
-                    return result if isinstance(result, list) else messages
-
                 def preflight(engine):
-                    # A stable-use lease covers this operation, including when
-                    # it was acquired for adoption before the gate closed.
                     with engine._fresh_tail_pressure_yield_invocation():
                         result = engine._should_compress_preflight_impl(messages)
                     self._last_compression_status = engine.last_compression_status
                     self._last_compression_noop_reason = engine.last_compression_noop_reason
-                    return result
+                    return bool(result)
 
-                return bool(self._run_retained_view_operation(messages, preflight, allow_empty_prefix=True))
-            binding = (self._session_id, self._conversation_id, self._db_path) if return_messages else None
+                ok, value = self._run_retained_or_dormant(preflight)
+                return bool(value) if ok else False
             try:
-                result = operation(self, messages, *args, **kwargs)
-                if return_messages and result is messages and self._plugin_is_unloading():
-                    # Shutdown drains this admitted call before closing storage.
-                    # Use the proven lane without taking shutdown's lifecycle lock.
-                    if binding == (self._session_id, self._conversation_id, self._db_path):
-                        self._save_retained_view(messages, allow_empty_prefix=True)
-                return result
+                return operation(self, messages, *args, **kwargs)
             finally:
                 with self._compaction_gate:
                     self._compaction_inflight -= 1
@@ -381,48 +343,55 @@ class CompactionMixin:
     def should_compress(self, prompt_tokens: int = None) -> bool:
         if self._plugin_is_unloading():
             successor = self._retained_successor()
-            return successor is not None and bool(successor._use_retained_binding(
-                lambda engine: engine.should_compress(prompt_tokens),
-            ).value)
-        if self._bypasses_lcm_context_management():
-            if self._compression_boundary_cooldown_active():
+            if successor is not None:
+                return bool(use_lcm_engine(successor, lambda engine: engine.should_compress(prompt_tokens)).value)
+            latest = self._reload_successor or self
+            if latest._stable_use_closed:
+                return False
+            return self._should_compress_unlocked(latest, prompt_tokens)
+        return self._should_compress_unlocked(self, prompt_tokens)
+
+    @staticmethod
+    def _should_compress_unlocked(engine, prompt_tokens: int = None) -> bool:
+        if engine._bypasses_lcm_context_management():
+            if engine._compression_boundary_cooldown_active():
                 return False
             if prompt_tokens is not None:
                 tokens = prompt_tokens
             else:
-                auxiliary_session_id = self._thread_context_session_id()
+                auxiliary_session_id = engine._thread_context_session_id()
                 if auxiliary_session_id:
-                    tokens = self._current_auxiliary_prompt_tokens(auxiliary_session_id)
+                    tokens = engine._current_auxiliary_prompt_tokens(auxiliary_session_id)
                 else:
-                    tokens = self.last_prompt_tokens
-            self._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
-            if self._should_force_overflow_recovery(observed_tokens=tokens):
+                    tokens = engine.last_prompt_tokens
+            engine._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
+            if engine._should_force_overflow_recovery(observed_tokens=tokens):
                 return True
-            if self.threshold_tokens <= 0:
+            if engine.threshold_tokens <= 0:
                 return False
-            return tokens >= self.threshold_tokens
-        if self._compression_boundary_cooldown_active():
-            self._end_turn_start_defer_episode()
+            return tokens >= engine.threshold_tokens
+        if engine._compression_boundary_cooldown_active():
+            engine._end_turn_start_defer_episode()
             return False
-        tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
-        self._last_gate_tokens = int(tokens or 0)
-        self._no_progress_observed_tokens = int(tokens or 0)
-        if self._should_force_overflow_recovery(observed_tokens=tokens):
-            self._end_turn_start_defer_episode()
+        tokens = prompt_tokens if prompt_tokens is not None else engine.last_prompt_tokens
+        engine._last_gate_tokens = int(tokens or 0)
+        engine._no_progress_observed_tokens = int(tokens or 0)
+        if engine._should_force_overflow_recovery(observed_tokens=tokens):
+            engine._end_turn_start_defer_episode()
             return True
-        if self.threshold_tokens <= 0:
-            self._end_turn_start_defer_episode()
+        if engine.threshold_tokens <= 0:
+            engine._end_turn_start_defer_episode()
             return False
-        ceiling = self._config.turn_start_defer_ceiling
-        if ceiling and self.context_length > 0:
-            self._warn_turn_start_defer_ceiling()
-            if tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
-                ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, self.context_length)
+        ceiling = engine._config.turn_start_defer_ceiling
+        if ceiling and engine.context_length > 0:
+            engine._warn_turn_start_defer_ceiling()
+            if tokens >= engine.threshold_tokens and engine._turn_start_defer_is_mid_turn():
+                ceiling_tokens = engine._turn_start_defer_ceiling_tokens(ceiling, engine.context_length)
                 if tokens < ceiling_tokens:
-                    with self._compaction_gate:
-                        level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
-                        self._turn_start_defer_logged = True
-                        self._turn_start_deferred_checks += 1
+                    with engine._compaction_gate:
+                        level = logging.DEBUG if engine._turn_start_defer_logged else logging.INFO
+                        engine._turn_start_defer_logged = True
+                        engine._turn_start_deferred_checks += 1
                     try:
                         logger.log(
                             level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
@@ -432,10 +401,10 @@ class CompactionMixin:
                     except Exception:
                         pass  # A diagnostic handler cannot change the gate result.
                     return False
-        self._end_turn_start_defer_episode()
-        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
+        engine._end_turn_start_defer_episode()
+        return tokens >= engine.threshold_tokens and not engine._sweep_budget_hold_applies(tokens, managed_scope=True)
 
-    @_counted_compaction(return_messages=False)
+    @_counted_compaction()
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
         with self._fresh_tail_pressure_yield_invocation():
@@ -947,36 +916,38 @@ class CompactionMixin:
                 self._compaction_inflight += 1
         if unloading:
             def invoke(engine):
-                # The successor's stable lease already covers this call and
-                # keeps storage live if the unload gate closes mid-pass.
-                result = messages
-                if not engine._compaction_is_closing():
-                    try:
-                        result = engine.compress(
-                            messages, current_tokens, focus_topic, force, bypass_cooldown,
-                            host_pairs=host_pairs, caller_messages=caller_messages,
-                        )
-                    except LifecycleBindingChangedError:
-                        return messages
-                    except Exception as exc:
-                        # Let the host handle a compression failure after
-                        # the lease exits, as it does for a live engine.
-                        return exc
+                # Run full compaction on a live successor; in dormant gap/drain,
+                # preserve the incoming view directly via main's ingest path.
+                if engine._compaction_is_closing():
+                    engine._ingest_unloaded_compress_view(messages, host_pairs=host_pairs)
+                    engine._compress_occurrences = None
+                    engine._last_compression_status = "noop"
+                    engine._last_compression_noop_reason = "engine shutting down"
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    self.compression_count = engine.compression_count
+                    return messages
+                try:
+                    result = engine.compress(
+                        messages, current_tokens, focus_topic, force, bypass_cooldown,
+                        host_pairs=host_pairs, caller_messages=caller_messages,
+                    )
+                except Exception as exc:
+                    return exc
                 if result is messages and engine._compaction_is_closing():
-                    # Compaction can stop before it reaches ingest. Persist
-                    # the original view under the existing lease.
-                    if engine._retained_binding_is_current():
-                        engine.ingest(messages)
-                    engine._stop_pass_for_shutdown()
+                    engine._ingest_unloaded_compress_view(messages, host_pairs=host_pairs)
+                    engine._compress_occurrences = None
+                    engine._last_compression_status = "noop"
+                    engine._last_compression_noop_reason = "engine shutting down"
                 self._last_compression_status = engine.last_compression_status
                 self._last_compression_noop_reason = engine.last_compression_noop_reason
                 self.compression_count = engine.compression_count
                 return result
 
-            result = self._run_retained_view_operation(messages, invoke, allow_empty_prefix=True)
-            if isinstance(result, Exception):
+            ok, result = self._run_retained_or_dormant(invoke)
+            if ok and isinstance(result, Exception):
                 raise result
-            return result if isinstance(result, list) else messages
+            return result if ok and isinstance(result, list) else messages
         binding = (self._session_id, self._conversation_id, self._db_path)
         input_messages = messages
         try:
@@ -1016,10 +987,10 @@ class CompactionMixin:
                     result = self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
                                                   host_pairs=host_pairs, caller_messages=caller_messages)
             if (result is input_messages or result is messages) and self._plugin_is_unloading():
-                # Shutdown drains this admitted call before closing storage.
-                # Use the proven lane without taking shutdown's lifecycle lock.
+                # Shutdown drains this admitted call (_compaction_inflight == 1)
+                # while holding _stable_use_lock; ingest on the open store directly.
                 if binding == (self._session_id, self._conversation_id, self._db_path):
-                    self._save_retained_view(input_messages, allow_empty_prefix=True)
+                    self._ingest_unloaded_compress_view(input_messages, host_pairs=host_pairs)
             return result
         finally:
             # Keep the store open and the owner held through the pass's finalizers.
