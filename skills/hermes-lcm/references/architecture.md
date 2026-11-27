@@ -36,7 +36,7 @@ note only if that row does not already contain the LCM phrase.
 
 The experimental provider-input filter is off by default. Set
 `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in for known cloud providers.
-`LCM_SENSITIVE_PATTERNS_ENABLED` (default off) separately governs durable
+`LCM_SENSITIVE_PATTERNS_ENABLED` (default off; unsupported, do not enable) separately governs durable
 redaction. While the provider-input filter is on, LCM
 requires a nonempty recognized `LCM_SENSITIVE_PATTERNS` catalog; canonicalizes existing
 placeholders; replaces matches with pattern-only placeholders; scans for residual matches;

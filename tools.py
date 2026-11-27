@@ -40,6 +40,7 @@ from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
+    sqlite_wal_reset_check,
     survival_fit_count,
 )
 from .dag import build_nodes_fts_spec
@@ -47,6 +48,7 @@ from .db_bootstrap import (
     check_external_content_fts_integrity,
     inspect_lcm_schema_health,
     load_integrity_failed,
+    sqlite_wal_reset_affected,
 )
 from .extraction import sanitize_pre_compaction_content
 from .inactive_record import inactive_record_notice
@@ -101,6 +103,8 @@ from .search_query import (
     normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
+from .head_copy import _head_copy_candidate, exclude_head_copies, known_head_copies_in_rows, known_head_copy_ids
+from .sidecar_ingest import sidecar_session_id
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
@@ -762,6 +766,7 @@ def _expand_message_sources(
     content_offset = max(0, content_offset)
     source_ids = node.source_ids[source_offset:source_offset + source_limit]
     stored_by_id = engine._store.get_batch(source_ids)
+    copies = known_head_copies_in_rows(getattr(engine._store, "connection", None), stored_by_id.values())
 
     messages: list[dict[str, Any]] = []
     budget_used = 0
@@ -778,7 +783,7 @@ def _expand_message_sources(
             has_more = True
             break
         stored = stored_by_id.get(store_id)
-        if not stored:
+        if not stored or store_id in copies:
             next_source_offset = source_index + 1
             next_content_offset = 0
             has_more = next_source_offset < total_sources
@@ -1079,13 +1084,7 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "include_exact_ref must be a boolean"})
     include_exact_ref = raw_include_exact_ref
 
-    total_messages = engine._store.count_session_load_messages(
-        session_id,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    rows = engine._store.load_session_page(
+    total_messages, rows = engine._store.load_recall_session_page(
         session_id,
         after_store_id=after_store_id,
         limit=limit + 1,
@@ -1289,6 +1288,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     excluded_session_ids = set(args.get("_excluded_session_ids") or ())
+    excluded_session_ids.update(sidecar_session_id(sid) for sid in tuple(excluded_session_ids))
     results: list[Dict[str, Any]] = []
     message_search_error: str | None = None
 
@@ -1303,6 +1303,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 scoped_id for scoped_id in (search_session_id, *descendant_ids)
                 if scoped_id not in excluded_session_ids
             ]
+            has_messages = getattr(engine._store, "has_session_messages", None)
+            if has_messages is not None:
+                for sid in tuple(scoped_session_ids):
+                    if sid and has_messages(companion := sidecar_session_id(sid)):
+                        scoped_session_ids.append(companion)
             for scoped_session_id in scoped_session_ids:
                 msg_hits = engine._store.search(
                     query,
@@ -3699,10 +3704,11 @@ def _lcm_recall_summary_source_hits(
         rows = (
             read_store.get_batch(ordered_ids[:candidate_limit]) if ordered_ids else {}
         )
+        copies = known_head_copies_in_rows(getattr(read_store, "connection", None), rows.values())
         for store_id in ordered_ids[:candidate_limit]:
             require_remaining("message shaping")
             row = rows.get(store_id)
-            if row is None:
+            if row is None or store_id in copies:
                 continue
             content = str(row.get("content") or "")
             if not content:
@@ -4275,16 +4281,26 @@ def default_semantic_cpu_limited(config) -> bool:
 
 
 _LCM_RECALL_ADJACENT_SQL = (
-    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
-    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
-    "ORDER BY store_id LIMIT 1"
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, tool_call_id, tool_name, content, "
+    "timestamp, observed_at FROM messages WHERE {where} ORDER BY store_id LIMIT 1"
 )
 
 
 def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
-    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
-    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
-    return dict(found) if found is not None else None
+    """The next recallable row of ``session_id`` after ``store_id``."""
+    where, args = ["session_id = ?", "store_id > ?"], [session_id, int(store_id)]
+
+    def read():
+        row = conn.execute(_LCM_RECALL_ADJACENT_SQL.format(where=" AND ".join(where)), args).fetchone()
+        return dict(row) if row is not None else None
+
+    row = read()
+    if row is not None and _head_copy_candidate(row):
+        copies = known_head_copy_ids(conn, session_id)
+        if row["store_id"] in copies:
+            exclude_head_copies(where, args, copies)
+            return read()
+    return row
 
 
 def _lcm_recall_adjacent_reply(
@@ -4320,6 +4336,7 @@ def _lcm_recall_adjacent_reply(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                conn.execute("BEGIN")
                 read_next = partial(_lcm_recall_next_row, conn)
             neighbour = read_next(session_id, int(hit["store_id"]))
             if time.monotonic() >= deadline:
@@ -5582,6 +5599,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         **({"background_leaf_prep": full_status["background_leaf_prep"]}  # #787; absent while off
            if "background_leaf_prep" in full_status else {}),
         "zero_leaf_streak": full_status.get("zero_leaf_streak"),  # #1162
+        "hidden_only_streak": full_status.get("hidden_only_streak", 0),
+        **({"hidden_only_last_pass": full_status["hidden_only_last_pass"]}
+           if "hidden_only_last_pass" in full_status else {}),
         "model": full_status.get("model", ""),
         "provider": full_status.get("provider", ""),
         "raw_context_length": full_status.get("raw_context_length", engine.context_length),
@@ -6112,13 +6132,22 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception:
         survival_fit = None
 
-    # 8. Compaction progress (#1162): consecutive over-threshold passes that stored no leaf
+    # 8. Compaction progress: no stored leaf (#1162) or only hidden leaves (#3081).
     streak = engine._zero_leaf_streak_status() if hasattr(engine, "_zero_leaf_streak_status") else None
+    hidden = engine._hidden_only_streak_status() if hasattr(engine, "_hidden_only_streak_status") else {}
+    zero_leaf_warning = bool(streak and streak.get("passes", 0) >= 3)
+    hidden_warning = hidden.get("hidden_only_streak", 0) >= 3
+    detail = streak or {"passes": 0}
+    if hidden_warning:
+        detail = {**(detail if zero_leaf_warning else {}), **hidden}
     checks.append({
         "check": "compaction_progress",
-        "status": "warn" if streak and streak.get("passes", 0) >= 3 else "pass",
-        "detail": streak or {"passes": 0},
+        "status": "warn" if hidden_warning or zero_leaf_warning else "pass",
+        "detail": detail,
     })
+
+    if sqlite_wal_reset_affected():
+        checks.append(sqlite_wal_reset_check(sqlite3.sqlite_version))
 
     overall = "healthy"
     if any(ch["status"] == "fail" for ch in checks):

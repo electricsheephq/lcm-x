@@ -313,11 +313,11 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-Example output for v0.30.2 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
+Example output for v0.30.4 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.2 (16 tools)
+  ✓ hermes-lcm-x v0.30.4 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -325,7 +325,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.30.2` is a patch release on
+and tag. `0.30.4` is a patch release on
+[v0.30.2](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.2) that also carries the v0.30.3 hotfix, rebuilt for this line;
+its own fixes were first tagged as `v0.30.4-rc1`. Its rollback target is `v0.30.2`, and it adds no schema change.
+`0.30.3` is a hotfix on v0.30.2, cut from its own branch. `0.30.2` is a patch release on
 [v0.30.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.1) with one fix and no
 rc tags. Its rollback target is `v0.30.1`, and it adds no schema change. The rollback
 target for v0.30.1 is
@@ -525,11 +528,26 @@ compaction summarises is set by `LCM_LEAF_CHUNK_TOKENS`, and how long it may tak
 `LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`; the summary DAG depth
 is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
 
+With `LCM_TURN_START_DEFER_CEILING` enabled, LCM-X checks the ceiling against the
+live compaction trigger, including after Hermes or the LCM assembly cap lowers
+it. The effective ceiling is the lower of the configured ceiling and any
+assembly cap, where forced overflow takes over. LCM-X warns when the effective
+ceiling is at or below the trigger (inert) or above an absolute or lowered
+trigger (unanchored). Global and per-model ratio triggers below the effective
+ceiling are quiet while they retain their window-derived value. Both warnings
+include the token values and name the cap when it limits deferral. The first
+deferral in each episode logs at INFO and subsequent deferrals log at DEBUG.
+`/lcm status` shows the configured ceiling as a share and in tokens beside the
+trigger, plus `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too).
+
 Useful environment variables:
 
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in fraction of the current model window. Below this ceiling, the automatic gate defers a pass after a tool-use response. Starting a foreground compaction pass clears that phase until the next tool-use response. So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the trigger, the host's next pre-API check in the same turn can start another pass, as with the setting off. The host's progress latch and attempt cap bound it; that pass logs no deferral line and does not move `turn_start_deferred_checks`. Turn starts, forced overflow and pressure at or above the ceiling use the normal gates. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold fractions, for example `"glm-5.3:0.115"`. Each key is matched as a substring of the active route's model name (the longest key wins) and takes priority over `LCM_CONTEXT_THRESHOLD`. Also settable as `lcm.model_thresholds` in config.yaml |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -555,7 +573,7 @@ Useful environment variables:
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content (plain text, extracted text parts for structured/multimodal content, or normalized JSON fallback when no text parts exist) is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | **Unsupported/experimental: not maintained; do not enable.** Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | off (unset or `false`) | Experimental filter for provider-bound copies on known cloud embedding providers. Opt in with `true`. The default sends unfiltered input under the `privacy:off` vector revision |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
@@ -824,6 +842,8 @@ or its tables are empty, the block remains present with zero counts and null
 age/cursor/error values so monitoring consumers do not need a second schema.
 
 <a id="sensitive-pattern-redaction"></a>
+
+> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it. If you already enabled it, set it to `false`; rows it already redacted stay redacted, and new content is then stored without redaction.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
@@ -1343,6 +1363,9 @@ Doctor output is metadata-only for these scans; it intentionally does not print
 raw payload previews.
 
 The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#install-consent-updates-and-recovery).
+
+`lcm_status` reports `hidden_only_streak`, which counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` gives the latest `frontier_store_id`, `leaves`, and `hidden_rows`.
+The `lcm_doctor` check `compaction_progress` warns at three hidden-only passes and shows the streak and latest pass. Compaction is summarising stored rows the host no longer shows, so this work cannot shrink host context until it reaches rows the host still holds.
 
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning

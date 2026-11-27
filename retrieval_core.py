@@ -27,6 +27,8 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Dict, Iterator, TYPE_CHECKING
 
+from .head_copy import _could_be_head_copy, known_head_copy_ids
+
 if TYPE_CHECKING:
     from .engine import LCMEngine
 
@@ -403,6 +405,7 @@ def hydrate_chunk_hits(
                 break
         if not ordered_ids:
             return []
+        conn.execute("BEGIN")
         rows_by_id: dict[str, sqlite3.Row] = {}
         # Chunk in bounded batches so the IN(...) placeholder list stays well
         # under SQLite's variable limit even for a large knn_limit.
@@ -424,9 +427,13 @@ def hydrate_chunk_hits(
             ):
                 rows_by_id.setdefault(str(row["chunk_id"]), row)
         hydrated: list[tuple[dict[str, Any], float]] = []
+        candidate_ids = sorted({
+            int(row["store_id"]) for row in rows_by_id.values() if _could_be_head_copy(row["role"], row["content"])
+        })
+        copies = known_head_copy_ids(conn, store_ids=candidate_ids)
         for cid in ordered_ids:  # preserve KNN rank order
             row = rows_by_id.get(cid)
-            if row is None:
+            if row is None or row["store_id"] in copies:
                 continue
             content = str(row["content"] or "")
             char_start = int(row["char_start"])

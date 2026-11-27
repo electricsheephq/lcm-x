@@ -1,5 +1,6 @@
 """#1084: report SQLite WAL-reset exposure without changing DB behavior."""
 
+import json
 import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ import hermes_lcm.command as command
 import hermes_lcm.db_bootstrap as bootstrap
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.tools import lcm_doctor
 
 
 @pytest.mark.parametrize("version, affected", [
@@ -64,19 +66,31 @@ def test_warning_once_per_process(tmp_path, monkeypatch, caplog, affected, concu
     if affected:
         assert warnings[0].levelno == logging.WARNING
         assert warnings[0].message == (
-            f"LCM-X: the linked SQLite {sqlite3.sqlite_version} has the WAL-reset bug "
-            "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
-            "a WAL database written by several connections; upgrade to a Python "
-            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch)."
+            f"LCM-X: Linked SQLite {sqlite3.sqlite_version} has the WAL-reset bug (#1085). "
+            "In WAL mode with several connections, whole recently committed transactions can vanish. "
+            "Fixed in SQLite 3.51.3. Upgrade to a Python whose SQLite is 3.51.3 or newer "
+            "(or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch). "
+            "See https://sqlite.org/wal.html#walresetbug."
         )
     else:
         assert caplog.records == []
 
 
 @pytest.mark.parametrize("journal_mode", ["wal", "delete"])
-def test_doctor_advisory_preserves_verdict_and_other_lines(tmp_path, monkeypatch, journal_mode):
+@pytest.mark.parametrize("version, affected", [
+    ((3, 46, 1), True), ((3, 51, 3), False), ((3, 53, 1), False),
+    ((3, 50, 7), False), ((3, 44, 6), False),
+])
+def test_linked_version_on_all_warning_surfaces(
+    tmp_path, monkeypatch, caplog, journal_mode, version, affected,
+):
+    version_text = ".".join(map(str, version))
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", version)
+    monkeypatch.setattr(sqlite3, "sqlite_version", version_text)
+    monkeypatch.setattr(bootstrap, "_wal_reset_warned", False)
     engine = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "doctor.db"), temporal_rollups_enabled=False,
+        embeddings_enabled=False,
     ), hermes_home=str(tmp_path))
     try:
         # Only substitute the journal-mode read; never convert the test database.
@@ -92,18 +106,23 @@ def test_doctor_advisory_preserves_verdict_and_other_lines(tmp_path, monkeypatch
                 return getattr(real_conn, name)
 
         monkeypatch.setattr(engine._store, "_conn", JournalReadProxy())
-        monkeypatch.setattr(command, "sqlite_wal_reset_affected", lambda: False)
-        baseline = command._doctor_text(engine).splitlines()
-        assert f"sqlite_library: {sqlite3.sqlite_version} (WAL-reset bug: not affected)" in baseline
-        assert not any(line.startswith("sqlite_wal_reset_advice:") for line in baseline)
-        monkeypatch.setattr(command, "sqlite_wal_reset_affected", lambda: True)
-        affected = command._doctor_text(engine).splitlines()
-        assert f"sqlite_library: {sqlite3.sqlite_version} (WAL-reset bug: affected)" in affected
-        advice = "sqlite_wal_reset_advice: upgrade Python/SQLite to 3.51.3+; see https://sqlite.org/wal.html#walresetbug"
-        assert (advice in affected) is (journal_mode == "wal")
-        # This compares status, issues, recommended_actions and every old line byte for byte.
-        def old_lines(lines):
-            return [line for line in lines if not line.startswith(("sqlite_library:", "sqlite_wal_reset_advice:"))]
-        assert old_lines(affected) == old_lines(baseline)
+        status = command._status_text(engine)
+        doctor = command._doctor_text(engine).splitlines()
+        tool = json.loads(lcm_doctor({}, engine=engine))
+        startup = [record.message for record in caplog.records
+                   if record.name == bootstrap.__name__ and "WAL-reset bug" in record.message]
+        library_status = "affected" if affected else "not affected"
+        assert f"sqlite_library: {version_text} (WAL-reset bug: {library_status})" in doctor
+        assert ("sqlite_wal_reset: warn " in status) is affected
+        assert any(line.startswith("sqlite_wal_reset: warn ") for line in doctor) is affected
+        assert doctor[1] == ("status: action-recommended" if affected else "status: ok"), "\n".join(doctor)
+        assert "issues: none" in doctor, "\n".join(doctor)
+        assert tool["overall"] == ("warnings" if affected else "healthy"), tool["guidance"]
+        assert [check["status"] for check in tool["checks"] if check["check"] == "sqlite_wal_reset"] == (
+            ["warn"] if affected else []
+        )
+        assert bool(startup) is affected
+        if affected:
+            assert "whole recently committed transactions can vanish" in startup[0]
     finally:
         engine.shutdown()

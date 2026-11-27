@@ -9,6 +9,7 @@ from typing import Any
 
 from .runtime_identity import _plugin_metadata, plugin_docs_url
 from .config import companion_enable_command, containment_base_dir
+from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_warning
 
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
@@ -109,6 +110,10 @@ def survival_fit_count(record: Any) -> int | None:
     return count
 
 
+def sqlite_wal_reset_check(version: str) -> dict[str, str]:
+    return {"check": "sqlite_wal_reset", "status": "warn", "detail": sqlite_wal_reset_warning(version)}
+
+
 def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     """Return operator triage guidance for one lcm_doctor check.
 
@@ -152,6 +157,10 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
             command = "run `/lcm doctor repair` first; if it still recommends repair, run `/lcm backup` before `/lcm doctor repair apply`"
             rationale = "FTS repair is rebuildable, but it still mutates SQLite indexes"
+    elif name == "sqlite_wal_reset":
+        command = SQLITE_WAL_RESET_ACTION
+        warning_only = True
+        rationale = "the linked SQLite version can lose whole recently committed transactions in WAL mode with several connections"
     elif name == "sqlite_storage":
         command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
                    if "long-lived connection; unconfirmed" in str(detail) else
@@ -293,6 +302,21 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")
+        if isinstance(detail, dict) and (latest := detail.get("hidden_only_last_pass")):
+            leaves = latest["leaves"]
+            leaf_label = "leaf" if leaves == 1 else "leaves"
+            hidden_command = "inspect lcm_status hidden_only_streak and hidden_only_last_pass to track the frontier"
+            hidden_rationale = (
+                "Compaction is summarising stored rows the host no longer shows, so the host's context will not "
+                "shrink until the walk reaches rows the host still holds "
+                f"({detail['hidden_only_streak']} hidden-only passes, frontier store id {latest['frontier_store_id']}, "
+                f"latest pass published {leaves} {leaf_label}) (#3081)."
+            )
+            if detail.get("passes", 0) >= 3:
+                command = f"{hidden_command}. Also {command}"
+                rationale = f"{hidden_rationale} Also, {rationale}"
+            else:
+                command, rationale = hidden_command, hidden_rationale
     elif name == "survival_fit":
         detail = detail if isinstance(detail, dict) else {}
         within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "

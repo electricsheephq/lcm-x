@@ -2,7 +2,7 @@
 from collections import deque
 from contextlib import ExitStack
 import copy
-from functools import partial
+from functools import cache, partial
 import json
 from pathlib import Path
 import sqlite3
@@ -13,6 +13,7 @@ from .message_analysis import _tool_call_id
 from .reasoning import resolve_occurrence_time
 from .recall_delivery import _without_event_time
 from .retrieval_context import RetrievalContext
+from .head_copy import known_head_copies_in_rows, known_head_copy_ids
 
 TOKEN_BUDGET, CHAR_BUDGET = 16_000, 64_000
 
@@ -124,9 +125,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 return False
         return True
 
+    snapshot_copy_ids = None
+
     def window(sid, anchor):
         check()
-        page = store.load_session_window(sid, anchor_store_id=anchor, before=1, after=1)
+        page = store.load_session_window(
+            sid, anchor_store_id=anchor, before=1, after=1, _snapshot_copy_ids=snapshot_copy_ids,
+        )
         check()
         if any(r["session_id"] != sid for r in page):
             raise ValueError("session reader identity mismatch")
@@ -231,6 +236,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             conn.execute("PRAGMA query_only=ON")
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
             conn.execute("BEGIN")
+            snapshot_copy_ids = cache(partial(known_head_copy_ids, conn))
             io = RetrievalContext(engine._store, engine._dag).bind(conn, conn)
         store = io.store
         sessions = {}
@@ -245,7 +251,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 node = io.dag.get_node(int(hit["node_id"]))
                 ids = io.dag.source_message_ids(node.node_id, limit=25) if node and node.session_id == sid else []
                 sources = store.get_batch(ids) if ids else {}
-                row = next((sources[i] for i in ids if i in sources and sources[i]["session_id"] == sid), None)
+                copies = known_head_copies_in_rows(getattr(store, "connection", None), sources.values())
+                row = next((sources[i] for i in ids if i in sources and sources[i]["session_id"] == sid
+                            and i not in copies), None)
                 if row is not None:
                     resolved_summaries.add((sid, hit["node_id"]))
                 if row is None and len(delivery["summary_leads"]) < response["limit"]:

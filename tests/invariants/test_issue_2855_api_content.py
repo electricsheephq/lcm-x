@@ -64,8 +64,12 @@ def test_rewritten_assistant_drops_late_api_text(engine, kind):
     output = _cleanup(engine, rows)
 
     assistant, = [row for row in output if row["role"] == "assistant"]
-    assert assistant["content"] == expected
-    assert "api_content" not in assistant
+    if kind == "merge":
+        assert assistant["content"] == expected
+        assert "api_content" not in assistant
+    else:
+        assert assistant is source
+        assert assistant["api_content"] == "previous API text"
 
 
 @pytest.mark.parametrize("role", ["user", "assistant"])
@@ -145,8 +149,8 @@ def test_returned_api_text_has_an_exact_input_pair(engine):
     output = _cleanup(engine, rows)
 
     _assert_host_keys([(kept, output[0]), (empty, output[1])])
-    shared, = [row for row in output if row["role"] == "assistant" and row["content"] == "shared text"]
-    assert shared["api_content"] == matching["api_content"]  # The matching pair is on a different input row.
+    assert output[4] is matching
+    assert output[6] is mismatching
     assert len(rows) == len(output)
     assert all(any("api_content" in source and source.get("content") == row.get("content")
                    and source["api_content"] == row["api_content"] for source in rows)

@@ -140,12 +140,14 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 
 ## Project status
 
-The latest stable release is
-[`v0.29.2`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.29.2)
-at `261d41ea928eec3dc5b8db13c70f044392adf124`, released 2026-11-09 (plugin `hermes-lcm-x`, engine `lcm-x`).
-Compaction retries past a contiguity stop at the scan limit and keeps its exit
-headroom, shutdown waits for a running compaction, and a profile's storage opens
-only when that profile is used. See [project status](docs/project-status.md) for the release summary,
+This tree is
+[`v0.30.4`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.30.4)
+(plugin `hermes-lcm-x`, engine `lcm-x`), a patch release on v0.30.2 that also carries the v0.30.3 hotfix,
+first tagged as the `v0.30.4-rc1` release candidate. The [releases page](https://github.com/electricsheephq/lcm-x/releases) marks the latest stable release.
+After a compaction pass that makes no progress, LCM-X hands the host back its own user rows unchanged;
+a message the host carried only in a hidden `api_content` field is now stored; and the recall tools skip a
+proven copy of the summary head.
+See [project status](docs/project-status.md) for the release summary,
 the disclosed qualification decisions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
@@ -162,7 +164,7 @@ installed stable product.
 
 v0.30.0 was cut on the `release/v0.30.x` maintenance branch (its candidates from rc4 on),
 not from `main`; v0.30.x patch releases are cut from that line. Its first patch release, v0.30.1 (the first v0.30.x release train),
-carries `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`. The `v0.30.0` tag carries
+carries `hermes-lcm-x v0.30.1`, which the `v0.30.1-rc1` tag carried first, on top of `v0.30.0`; the `v0.30.2` patch release carries `hermes-lcm-x v0.30.2`; the `v0.30.3` hotfix, cut from its own branch, carries `hermes-lcm-x v0.30.3`; and the `v0.30.4` patch release carries `hermes-lcm-x v0.30.4`, which the `v0.30.4-rc1` tag carried first. The `v0.30.0` tag carries
 `hermes-lcm-x v0.30.0`, and the `main` line keeps that identity in `plugin.yaml` until its
 own next release.
 An identity is never a restamp of any past commit's own recorded identity
@@ -342,11 +344,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-Example output for v0.30.2 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
+Example output for v0.30.4 from a host that registers all 16 tools and lists only LCM-X, with all three opt-in flags enabled:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.30.2 (16 tools)
+  ✓ hermes-lcm-x v0.30.4 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -559,9 +561,9 @@ The manifest still declares all 16 tools.
 | `lcm_describe` | Inspect the current-session DAG or preview an `externalized_ref` without loading full content. |
 | `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message from a cross-session `lcm_grep` result and `include_exact_ref=true` when its returned slice must be cited or computed. |
 | `lcm_expand_query` | Answer a question using expanded current-session LCM context while returning a bounded answer. |
-| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
+| `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. `hidden_only_streak` counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` shows the latest frontier store ID, leaves, and hidden rows. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
-| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. `compaction_progress` warns at three hidden-only passes because the host context can only shrink once compaction reaches rows the host still holds. |
 | `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ## Recall skill and policy
@@ -660,6 +662,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
+| `LCM_TURN_START_DEFER_CEILING` | `0` | Opt-in share of the model window below which automatic compaction waits during a tool turn. Requires host response stop reasons. Use `0` to disable or a finite ratio greater than zero and below `1 - LCM_SURVIVAL_RESERVE`. |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
@@ -699,7 +702,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | **Unsupported/experimental: not maintained; do not enable.** Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | off (unset or `false`) | Experimental filter for provider-bound copies on known cloud embedding providers. Opt in with `true`. The default sends unfiltered input under the `privacy:off` vector revision |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_HOST_ROW_RECOVERY_ENABLED` | `false` | Off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042). `true` enables host-row recovery, recent unended failed-turn catch-up, and the ingest guard together; recovery uses background host reads and a strict durable proof. |
@@ -742,6 +745,8 @@ assistant even when doing so exceeds a configured bound.
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Sensitive-pattern redaction
+
+> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it. If you already enabled it, set it to `false`; rows it already redacted stay redacted, and new content is then stored without redaction.
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
 remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
@@ -861,6 +866,34 @@ Examples, as math rather than universal recommendations:
 | `1000000` | `250000` | `0.25` |
 | `1000000` | `400000` | `0.40` |
 | `1000000` | `600000` | `0.60` |
+
+With a host that passes response stop reasons, this profile example defers
+eligible mid-turn passes from 500,000 up to 700,000 prompt tokens on a
+1M-token window. At 700,000, on forced overflow, or at the next turn start,
+the normal gates decide whether to compact.
+
+```dotenv
+LCM_CONTEXT_THRESHOLD=0.50
+LCM_TURN_START_DEFER_CEILING=0.70
+```
+
+LCM-X checks the ceiling against the live compaction trigger, including after
+Hermes or the LCM assembly cap lowers it. The effective ceiling is the lower of
+the configured ceiling and any assembly cap, where forced overflow takes over.
+An effective ceiling at or below the trigger warns as inert. An effective
+ceiling above an absolute or lowered trigger warns as unanchored. Global and
+per-model ratio triggers below the effective ceiling are quiet while they
+retain their window-derived value. Both warnings show the effective ceiling and
+trigger in tokens and name the cap when it limits deferral. The first deferral
+in an episode logs at INFO and subsequent deferrals log at DEBUG. With the
+ceiling enabled, `/lcm status` shows the configured share and its token value
+alongside `turn_start_deferred_checks`, the number of gate checks deferred
+since the last session bind or reset (a side-channel session's bind resets it
+too). A foreground pass at or above the ceiling, or on forced overflow, clears the
+tool-turn phase, so if it leaves the prompt above the trigger, the host's next
+check in the same turn can start another pass, as with the setting off. The
+host's progress latch and attempt cap bound it; that pass logs no deferral line
+and does not move the counter.
 
 A reasonable first pass for a true 1M effective window is:
 
@@ -1351,7 +1384,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.29.2` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. The releases page marks the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

@@ -1,0 +1,1 @@
+- Fix: Ingest no longer stores the summary head as a new user message when Hermes stamps a same-length compaction rewrite.
