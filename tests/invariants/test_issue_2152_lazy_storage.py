@@ -1725,28 +1725,87 @@ def test_deferred_unload_progresses_past_a_terminal_tail(preflight, monkeypatch)
     engine, _ = preflight.register()
     engine.on_session_start("old", platform="cli")
     store = engine._store
-    terminal = {"kind": "cold", "store": store, "view": [], "session_id": "terminal"}
+    deprioritized = {"kind": "cold", "store": store, "view": [], "session_id": "deprioritized"}
     ready = {"kind": "cold", "store": store, "view": [], "session_id": "ready"}
-    engine._pending_session_tails[:] = [terminal, ready]
+    engine._pending_session_tails[:] = [deprioritized, ready]
     now = [0.0]
     visited = []
+    fail_first = True
 
     def retry(tail, **kwargs):
         visited.append(tail["session_id"])
-        if tail is terminal:
+        if tail is deprioritized:
             now[0] += 6.0
-            return False
+            return not fail_first
         return True
 
     with monkeypatch.context() as patch:
         patch.setattr(engine_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
         patch.setattr(engine, "_retry_cold_tail", retry)
-        terminal_tails = set()
-        assert engine._retry_pending_session_tails(deadline=5.0, terminal_tails=terminal_tails)
-        assert not engine._retry_pending_session_tails(deadline=11.0, terminal_tails=terminal_tails)
-    assert visited == ["terminal", "ready"]
-    assert engine._pending_session_tails == [terminal]
-    engine._pending_session_tails.clear()
+        deprioritized_tails = set()
+        assert engine._retry_pending_session_tails(deadline=5.0, deprioritized_tails=deprioritized_tails)
+        assert not engine._retry_pending_session_tails(deadline=11.0, deprioritized_tails=deprioritized_tails)
+        assert visited == ["deprioritized", "ready", "deprioritized"]
+        assert engine._pending_session_tails == [deprioritized]
+        assert engine._shutdown_unlocked(deadline=16.0, deprioritized_tails=deprioritized_tails) is False
+        assert engine._pending_session_tails == [deprioritized]
+        fail_first = False
+        assert engine._shutdown_unlocked(deadline=22.0, deprioritized_tails=deprioritized_tails) is None
+    assert engine._pending_session_tails == []
+
+
+def test_unload_retains_and_flushes_pending_tail_after_transient_readonly_error(preflight, monkeypatch):
+    from hermes_lcm import maintenance_scheduler
+
+    engine, ctx = preflight.register(supports_unload=True)
+    engine.on_session_start("ro-session", platform="cli")
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "tail"},
+    ]
+    engine.ingest(history[:1])
+    db_path = engine._store.db_path
+    connection = engine._store.connection
+    with closing(sqlite3.connect(db_path, isolation_level=None)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            engine.on_session_end("ro-session", history)
+        finally:
+            writer.rollback()
+    assert len(engine._pending_session_tails) == 1
+
+    readonly_active = threading.Event()
+    readonly_active.set()
+    deferred_saw_readonly = threading.Event()
+    append_batch = engine._append_ingest_batch
+
+    def maybe_readonly(batch):
+        if readonly_active.is_set():
+            if threading.current_thread().name == "lcm-deferred-unload":
+                deferred_saw_readonly.set()
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return append_batch(batch)
+
+    monkeypatch.setenv("LCM_SHUTDOWN_COMPACTION_WAIT_S", "0.05")
+    monkeypatch.setattr(maintenance_scheduler, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 50)
+    monkeypatch.setattr(engine, "_append_ingest_batch", maybe_readonly)
+    try:
+        ctx.unload_callbacks[0]()
+        assert deferred_saw_readonly.wait(5), "deferred unload did not retry pending tail after readonly error"
+        assert not engine._stable_use_closed
+        assert len(engine._pending_session_tails) == 1
+    finally:
+        readonly_active.clear()
+    deadline = time.monotonic() + 5
+    while not engine._stable_use_closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert engine._stable_use_closed
+    assert engine._pending_session_tails == []
+    assert engine not in maintenance_scheduler._PENDING_TAIL_ENGINES
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    assert _durable_messages(db_path, "ro-session") == [("user", "first"), ("assistant", "tail")]
+    db_path.unlink()
 
 
 def test_concurrent_first_use_binds_once(preflight):

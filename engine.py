@@ -14685,14 +14685,19 @@ class LCMEngine(
         self._detached_stores_to_close.discard(store)
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
-                                     sibling: bool = False, terminal_tails: set[int] | None = None,
+                                     sibling: bool = False, deprioritized_tails: set[int] | None = None,
                                      shutdown: bool = False) -> bool:
         """Drain under the lifecycle lock and report whether busy work needs another attempt."""
         if not self._pending_session_tails:
             return False
         if deadline is None:
             deadline = time.monotonic() + _SESSION_END_BUSY_TIMEOUT_MS / 1000
-        tails = [tail for tail in self._pending_session_tails if terminal_tails is None or id(tail) not in terminal_tails]
+        if deprioritized_tails is not None:
+            tails = [tail for tail in self._pending_session_tails if id(tail) not in deprioritized_tails] + [
+                tail for tail in self._pending_session_tails if id(tail) in deprioritized_tails
+            ]
+        else:
+            tails = list(self._pending_session_tails)
         retry_busy = False
         for index, tail in enumerate(tails):
             store = tail["store"]
@@ -14705,8 +14710,10 @@ class LCMEngine(
                         if self._retry_cold_tail(tail, sibling=sibling, deadline=deadline):
                             committed = True
                             self._pending_session_tails.remove(tail)
-                        elif terminal_tails is not None:
-                            terminal_tails.add(id(tail))
+                            if deprioritized_tails is not None:
+                                deprioritized_tails.discard(id(tail))
+                        elif deprioritized_tails is not None:
+                            deprioritized_tails.add(id(tail))
                         if time.monotonic() >= deadline:
                             retry_busy = index + 1 < len(tails)
                             break
@@ -14740,6 +14747,8 @@ class LCMEngine(
                     self._ingest_telemetry(self._log_ingest_route, tail["session_id"], "session_end" if exiting else "warm_tail",
                                            covered, rule, ids)
                     self._pending_session_tails.remove(tail)
+                    if deprioritized_tails is not None:
+                        deprioritized_tails.discard(id(tail))
                     # Read the bound store without a lazy open (#2152): after a failed
                     # rebind, opening the new home here would raise out of shutdown's cleanup.
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
@@ -14747,6 +14756,8 @@ class LCMEngine(
             except (Exception, KeyboardInterrupt) as exc:
                 if committed and tail in self._pending_session_tails:
                     self._pending_session_tails.remove(tail)
+                    if deprioritized_tails is not None:
+                        deprioritized_tails.discard(id(tail))
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
                 if isinstance(exc, KeyboardInterrupt) or _is_ingest_busy_error(exc):
@@ -14756,8 +14767,8 @@ class LCMEngine(
                     break
                 self._ledger_count("ledger.tail.retry_failed")
                 logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)
-                if not committed and terminal_tails is not None:
-                    terminal_tails.add(id(tail))
+                if not committed and deprioritized_tails is not None:
+                    deprioritized_tails.add(id(tail))
             finally:
                 if (store is not self.__dict__.get("_store")
                         and not any(t["store"] is store for t in self._pending_session_tails)):
@@ -14918,7 +14929,7 @@ class LCMEngine(
         self._unload_group = EngineUnloadGroup(self)
         return self._unload_group.shutdown
 
-    def shutdown(self, *, deadline: float | None = None, terminal_tails: set[int] | None = None):
+    def shutdown(self, *, deadline: float | None = None, deprioritized_tails: set[int] | None = None):
         # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
         if not self._plugin_is_unloading():
             drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
@@ -14963,7 +14974,7 @@ class LCMEngine(
                 if deadline is not None:
                     tail_deadline = min(tail_deadline, deadline)
                 if self._shutdown_unlocked(
-                    deadline=tail_deadline, unload_deadline=deadline, terminal_tails=terminal_tails,
+                    deadline=tail_deadline, unload_deadline=deadline, deprioritized_tails=deprioritized_tails,
                 ) is False:
                     return
                 self._stable_use_closed = True
@@ -14971,7 +14982,7 @@ class LCMEngine(
                 self._storage_lock.release()
 
     def _shutdown_unlocked(self, *, deadline: float, unload_deadline: float | None = None,
-                           terminal_tails: set[int] | None = None):
+                           deprioritized_tails: set[int] | None = None):
         snapshot = getattr(self, "_compress_refusal", None)
         if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
             try:
@@ -14989,26 +15000,21 @@ class LCMEngine(
                         store._write_lock.release()
             except Exception:
                 logger.warning("LCM shutdown: deferred compaction refusal restore failed", exc_info=True)
-        retry_busy = self._retry_pending_session_tails(
-            deadline=deadline, exiting=unload_deadline is None and terminal_tails is None,
-            terminal_tails=terminal_tails, shutdown=True,
+        self._retry_pending_session_tails(
+            deadline=deadline, exiting=unload_deadline is None and deprioritized_tails is None,
+            deprioritized_tails=deprioritized_tails, shutdown=True,
         )
         detached_stores = self._detached_stores_to_close.copy()
         if self._pending_session_tails:
-            if unload_deadline is not None:
-                # A tail can still own an old profile's store. Finish its retry
-                # before closing the engine rather than orphaning that store.
-                logger.warning("LCM unload: session-end rows still pending; deferring storage cleanup")
+            if unload_deadline is not None or deprioritized_tails is not None:
+                # A tail can still own an old profile's store, or hit a transient
+                # failure such as SQLITE_READONLY. Keep retrying through deferred
+                # unload until it flushes or explicit engine.shutdown() runs at exit.
+                if unload_deadline is not None:
+                    logger.warning("LCM unload: session-end rows still pending; deferring storage cleanup")
                 return False
-            if terminal_tails is not None:
-                if retry_busy:
-                    return False
-                self._warn_unflushed_session_tails(
-                    "unresolved session-end tail", deadline=deadline,
-                    outcome_reason="pending_tail_dropped_at_shutdown",
-                )
-                detached_stores.update(tail["store"] for tail in self._pending_session_tails
-                                       if tail["store"] is not self.__dict__.get("_store"))
+            detached_stores.update(tail["store"] for tail in self._pending_session_tails
+                                   if tail["store"] is not self.__dict__.get("_store"))
         self._discard_prepared_leaves()
         self._retire_embedding_maintenance(wait=True, deadline=unload_deadline)
         cleanup = [
