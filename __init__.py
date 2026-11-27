@@ -1125,20 +1125,26 @@ def register(ctx):
                                 cold = use_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
                                 if cold.used and cold.value:
                                     return
-                        child_fallback = (
-                            result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
-                                              ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
+                    child_fallback = (
+                        (not unload_capable and result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT)
+                        or (
+                            unload_capable
+                            and result.status in (
+                                ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                ActiveEngineUseStatus.ENGINE_NOT_RESIDENT,
+                            )
                             and (engine._storage_ready or engine._db_path.is_file())
                         )
-                        if child_fallback:
-                            # No engine of the child's own: store its rows without binding one.
-                            stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
-                            if stored.used and stored.value:
-                                logger.debug(
-                                    "LCM post_llm_call delegated child %s: rows stored without binding an engine",
-                                    session_id,
-                                )
-                                return
+                    )
+                    if child_fallback:
+                        # No engine of the child's own: store its rows without binding one.
+                        stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
+                        if stored.used and stored.value:
+                            logger.debug(
+                                "LCM post_llm_call delegated child %s: rows stored without binding an engine",
+                                session_id,
+                            )
+                            return
 
                 if not result.used:
                     if _forward_reloaded_post_llm_call(kwargs):

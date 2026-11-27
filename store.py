@@ -825,12 +825,26 @@ class _IngestAttempt:
     thread: int = field(default_factory=threading.get_ident)
 
 
+_EXISTING_OPEN_OPTIONS = threading.local()
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
     _ingest_prelock = True
 
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+        pending = getattr(_EXISTING_OPEN_OPTIONS, "pending", None)
+        if pending is not None and isinstance(self, pending[0]):
+            _EXISTING_OPEN_OPTIONS.pending = None
+            self._init_fields(
+                db_path,
+                ingest_protection_config=ingest_protection_config,
+                hermes_home=hermes_home,
+                create_parent=False,
+            )
+            self._open_existing_db(write_timeout_ms=pending[1])
+            return
         self._init_fields(
             db_path,
             ingest_protection_config=ingest_protection_config,
@@ -849,17 +863,23 @@ class MessageStore:
         write_timeout_ms: int = 5000,
     ) -> "MessageStore":
         """Open an established store without creating files or running schema bootstrap."""
-        self = cls.__new__(cls)
-        self._init_fields(
-            db_path,
-            ingest_protection_config=ingest_protection_config,
-            hermes_home=hermes_home,
-            create_parent=False,
-        )
+        previous = getattr(_EXISTING_OPEN_OPTIONS, "pending", None)
+        _EXISTING_OPEN_OPTIONS.pending = (cls, write_timeout_ms)
+        try:
+            return cls(
+                db_path,
+                ingest_protection_config=ingest_protection_config,
+                hermes_home=hermes_home,
+            )
+        finally:
+            _EXISTING_OPEN_OPTIONS.pending = previous
+
+    def _open_existing_db(self, *, write_timeout_ms: int = 5000) -> None:
         self._conn = sqlite3.connect(
             self.db_path.resolve().as_uri() + "?mode=rw",
             uri=True,
             timeout=write_timeout_ms / 1000,
+            check_same_thread=False,
             isolation_level="IMMEDIATE",
         )
         try:
@@ -868,7 +888,6 @@ class MessageStore:
         except BaseException:
             self.close()
             raise
-        return self
 
     def _init_fields(
         self,
