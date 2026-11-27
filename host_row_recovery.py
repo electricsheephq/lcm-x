@@ -212,11 +212,11 @@ def _recover_candidate(engine_cls, config, home, db_path, state_path, conv, boun
     try:
         # Recovery can finish after an unload timeout. Its detached reader
         # only works on the established database and never bootstraps a file.
-        store = det._store = MessageStore(
+        store = det._store = MessageStore._open_existing(
             db_path, ingest_protection_config=config, hermes_home=home,
-            existing_write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+            write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
         )
-        det._dag = SummaryDAG(db_path, existing_only=True)
+        det._dag = SummaryDAG._open_existing(db_path)
         det._lifecycle = LifecycleStateStore(db_path, existing_only=True)
         det._storage_ready = True
         if Path(store.db_path).resolve() != Path(db_path):

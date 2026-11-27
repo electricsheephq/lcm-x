@@ -1,12 +1,11 @@
 # Store contract
 
-Contract version: 3
-Digest: sha256:aa72222429f7e6f96147b098e04455d1d18aa3387f57dc346083e783972e83fa
+Contract version: 2
+Digest: sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0
 
 Version 2 adds the partial `idx_msg_session_tool_call` index for tool-row lookups by call ID (#2975).
 Version 2 code can use a store before the index exists, and the first writable open that can take the write lock creates it. The SQLite schema stamp stays at 5.
-Version 3 adds the optional `existing_only` argument on `SummaryDAG.__init__` and `existing_write_timeout_ms` on `MessageStore.__init__` for retained unload callbacks; defaults retain normal schema creation with no schema migration.
-Current readers accept version 1 and version 2 stores and replicas. Older cloud readers refuse a newer contract version with `replica_newer_contract`.
+Version 2 readers accept version 1 stores and replicas. A version 1 cloud reader refuses a version 2 replica with `replica_newer_contract`.
 
 ## What a consumer may read
 
@@ -35,21 +34,21 @@ Column entries below give name, declared type, nullability, default SQL and prim
 
 ## How a consumer may write
 
-Write core rows only through the contracted `MessageStore` methods below. `MessageStore` opens the store; `SummaryDAG(db_path)` is contracted for schema creation only. The optional `existing_only` and `existing_write_timeout_ms` constructor arguments open existing storage without bootstrap; the latter also bounds the write timeout. Defaults retain normal schema creation. Close opened stores after use. `connection` is a read-oriented property and may be `None` after close; only consumer-owned rows have the SQL-write exception below.
+Write core rows only through the contracted `MessageStore` methods below. `MessageStore` opens the store; `SummaryDAG(db_path)` is contracted for schema creation only. Close opened stores after use. `connection` is a read-oriented property and may be `None` after close; only consumer-owned rows have the SQL-write exception below.
 `append_batch` returns stable store ids; `ingest_atomic` and `atomic` own transaction boundaries. Bind host uids and relations through their methods; `record_session_lineage` keeps the first parent link. Metadata helpers read and update JSON values. `register_session_purge` registers a named callback for consumer-owned session data in the caller transaction; it grants no automatic-maintenance deletion authority.
 `db_bootstrap.SCHEMA_VERSION` is 5 (the on-disk schema stamp, distinct from this contract version). `mark_migration_step_complete` records a named additive step. The reader API is `StoreReader` (construction, preparation, envelope formatting and tool calls) and `handle(reader, request)`, which handles a JSON-RPC request and returns a response or `None` for a notification.
 
 <!-- Generated signatures; annotations omitted by inspect.Signature.replace. -->
 | Callable | Signature |
 | --- | --- |
-| `dag.SummaryDAG` | `(db_path, *, existing_only=False)` |
+| `dag.SummaryDAG` | `(db_path)` |
 | `db_bootstrap.mark_migration_step_complete` | `(conn, step_name)` |
 | `mcp_reader.StoreReader` | `(store_path, hermes_home, *, config, environ=None)` |
 | `mcp_reader.StoreReader.call` | `(self, name, arguments)` |
 | `mcp_reader.StoreReader.envelope` | `(self, raw, context)` |
 | `mcp_reader.StoreReader.prepare` | `(self, *, tokenizer_wait_s=30.0)` |
 | `mcp_reader.handle` | `(reader, request)` |
-| `store.MessageStore` | `(db_path, *, ingest_protection_config=None, hermes_home='', existing_write_timeout_ms=None)` |
+| `store.MessageStore` | `(db_path, *, ingest_protection_config=None, hermes_home='')` |
 | `store.MessageStore.add_host_uid_bindings` | `(self, lineage_key, rows)` |
 | `store.MessageStore.add_message_relations` | `(self, groups)` |
 | `store.MessageStore.append_batch` | `(self, session_id, messages, token_estimates=None, source='', conversation_id='')` |
@@ -74,7 +73,7 @@ Fields: `host` (host string), `event` (event name), `session_id` and optional `a
 
 ## Reached today, not contracted
 
-These existing private dependencies are not promoted in version 2. Locations refer to the main tree at introduction.
+These existing private dependencies are not promoted in version 1. Locations refer to the main tree at introduction.
 | Private name | Consumer and location |
 | --- | --- |
 | `MessageStore._ingest_protection_config` | Capture writer, `claude_code_store.py:796` |
@@ -99,4 +98,3 @@ Run `tests/compat/test_store_contract.py`. For a surface change, raise the contr
 | --- | --- | --- | --- |
 | 1 | sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9 | 2026-11-16 | Record the shared store, capture ledger and reader surface. |
 | 2 | sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0 | 2026-11-19 | Index tool-row lookups by call ID (#2975). |
-| 3 | sha256:aa72222429f7e6f96147b098e04455d1d18aa3387f57dc346083e783972e83fa | 2026-11-25 | Record optional existing-only DAG and bounded existing-store writer constructors for retained callbacks; no schema migration. |

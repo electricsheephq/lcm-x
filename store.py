@@ -830,12 +830,58 @@ class MessageStore:
 
     _ingest_prelock = True
 
-    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = "",
-                 existing_write_timeout_ms: int | None = None):
+    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+        self._init_fields(
+            db_path,
+            ingest_protection_config=ingest_protection_config,
+            hermes_home=hermes_home,
+            create_parent=True,
+        )
+        self._init_db()
+
+    @classmethod
+    def _open_existing(
+        cls,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        write_timeout_ms: int = 5000,
+    ) -> "MessageStore":
+        """Open an established store without creating files or running schema bootstrap."""
+        self = cls.__new__(cls)
+        self._init_fields(
+            db_path,
+            ingest_protection_config=ingest_protection_config,
+            hermes_home=hermes_home,
+            create_parent=False,
+        )
+        self._conn = sqlite3.connect(
+            self.db_path.resolve().as_uri() + "?mode=rw",
+            uri=True,
+            timeout=write_timeout_ms / 1000,
+            isolation_level="IMMEDIATE",
+        )
+        try:
+            refuse_schema_version_too_new(self._conn)
+            self._conn.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _init_fields(
+        self,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        create_parent: bool,
+    ) -> None:
         self.ingest_prelock_counts = Counter()
         self._ingest_prelock_state = None
         self.db_path = Path(db_path)
-        if existing_write_timeout_ms is None:
+        if create_parent:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
@@ -862,21 +908,6 @@ class MessageStore:
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
         self._manual_chunk_backlog_pending = False
-        if existing_write_timeout_ms is None:
-            self._init_db()
-        else:
-            # A retired engine may finish a proven tail. Never recreate a
-            # removed file or start schema/bootstrap work from that callback.
-            self._conn = sqlite3.connect(
-                self.db_path.resolve().as_uri() + "?mode=rw", uri=True,
-                timeout=existing_write_timeout_ms / 1000, isolation_level="IMMEDIATE",
-            )
-            try:
-                refuse_schema_version_too_new(self._conn)
-                self._conn.execute("PRAGMA synchronous=FULL")
-            except BaseException:
-                self.close()
-                raise
 
     def existing_summary_node(self, node_id: int):
         """Read summary proof without opening a separate DAG connection."""

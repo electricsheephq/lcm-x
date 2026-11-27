@@ -303,13 +303,12 @@ def test_detached_close_preserves_live_prepared_leaves(case, monkeypatch, fail_o
     monkeypatch.setattr(leaf_prep, "discard", lambda path, owner=None: discarded.append(str(path)))
     failed_paths = []
 
-    def fail_dag(path, *, existing_only):
-        assert existing_only
+    def fail_dag(path):
         failed_paths.append(str(path))
         raise RuntimeError("injected detached storage open failure")
 
     if fail_open:
-        monkeypatch.setattr(host_row_recovery, "SummaryDAG", fail_dag)
+        monkeypatch.setattr(host_row_recovery.SummaryDAG, "_open_existing", staticmethod(fail_dag))
     warnings = case.run()
     if fail_open:
         assert failed_paths == [str(case.live._store.db_path)]

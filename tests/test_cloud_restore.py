@@ -69,7 +69,7 @@ def test_v2_restores_v1_replica(fixture, tmp_path, monkeypatch):
         old.setattr(cp, 'CONTRACT_VERSION', 1)
         old.setattr(cp, 'CONTRACT_DIGEST', 'sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9')
         manifest = pub(fixture)
-    assert manifest['stamp']['contract']['version'] == 1 and cp.CONTRACT_VERSION == 3
+    assert manifest['stamp']['contract']['version'] == 1 and cp.CONTRACT_VERSION == 2
     target = tmp_path / 'restored-v1'
     result = restore(fixture, target, transcripts=[f's1={fixture[2]}'])
     assert result['code'] == 'done' and result['check3'] == 'done'
@@ -77,7 +77,7 @@ def test_v2_restores_v1_replica(fixture, tmp_path, monkeypatch):
 
 
 def test_v1_refuses_v2_replica(fixture, tmp_path, monkeypatch):
-    assert pub(fixture)['stamp']['contract']['version'] == 3
+    assert pub(fixture)['stamp']['contract']['version'] == 2
     monkeypatch.setattr(cp, 'CONTRACT_VERSION', 1)
     fixture[1].calls.clear()
     refusal('replica_newer_contract', lambda: cr.restore(fixture[1], PREFIX, COPY, 1, tmp_path / 'refused-v2'))

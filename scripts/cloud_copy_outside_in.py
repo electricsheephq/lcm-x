@@ -26,11 +26,10 @@ import struct
 import sys
 import zlib
 
-CONTRACT_VERSION = 3  # docs/store-contract.md
-CONTRACT_DIGEST = "sha256:aa72222429f7e6f96147b098e04455d1d18aa3387f57dc346083e783972e83fa"
+CONTRACT_VERSION = 2  # docs/store-contract.md
+CONTRACT_DIGEST = "sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0"
 CONTRACT_DIGESTS = {
     1: "sha256:76644a990e50b9613697704dcb05b349a952d44ea22187bd768b0eab9a9badc9",
-    2: "sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0",
     CONTRACT_VERSION: CONTRACT_DIGEST,
 }
 LAYOUT, OWNER_KEY, STAMP_KEY = 1, "capture:owner", "import:origin"  # claude_code_store.OWNER_KEY

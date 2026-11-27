@@ -1622,7 +1622,7 @@ this object (`sort_keys=True`, separators `(",", ":")`, `ensure_ascii=False`). T
 | `origin_harness` | string | `host` in the `capture:owner` row |
 | `generation` | int | this generation |
 | `parent` | null or object | `{"generation": int, "manifest_sha256": sha256 of that manifest's stored bytes}` |
-| `contract` | object | `{"version": 3, "digest": "sha256:aa72222429f7e6f96147b098e04455d1d18aa3387f57dc346083e783972e83fa"}` (docs/store-contract.md:3-4) |
+| `contract` | object | `{"version": 2, "digest": "sha256:3818b2f6eebec8b3d6e00707ebc2b46e70c970f039671e79c0bdfa94dc0abac0"}` (docs/store-contract.md:3-4) |
 | `schema_version` | int | the store's own `metadata` value for key `schema_version`, as an integer; 0 when the row is absent |
 | `projection_versions` | list of strings | distinct `capture_events.projection_version`, sorted; `[]` when the table is absent |
 | `unit` | object | `{"version": string or null, "core_commit": string or null, "core_version": string or null}` |

@@ -183,11 +183,22 @@ class SummaryDAG:
 
     DELETE_SESSION_SCOPE_TABLE = _DELETE_SESSION_SCOPE_TABLE
 
-    def __init__(self, db_path: str | Path, *, existing_only: bool = False):
+    def __init__(self, db_path: str | Path):
+        self._init_fields(db_path)
+        self._init_db()
+
+    @classmethod
+    def _open_existing(cls, db_path: str | Path) -> "SummaryDAG":
+        """Open an established DAG store without creating files or running schema bootstrap."""
+        self = cls.__new__(cls)
+        self._init_fields(db_path)
+        self._init_db(existing_only=True)
+        return self
+
+    def _init_fields(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
         self._db_lock = threading.RLock()
-        self._init_db(existing_only=existing_only)
 
     @property
     def connection(self) -> Optional[sqlite3.Connection]:

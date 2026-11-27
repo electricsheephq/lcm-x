@@ -3396,7 +3396,7 @@ class LCMEngine(
             spend_guard = self._rollup_spend_guard
 
             def maintain() -> None:
-                private_dag = SummaryDAG(database_path, existing_only=True)
+                private_dag = SummaryDAG._open_existing(database_path)
                 try:
                     run_rollup_maintenance(
                         private_dag,
@@ -5607,10 +5607,10 @@ class LCMEngine(
                 self._session_end_flush_active = False
 
     def _open_retired_store(self, store, *, busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS):
-        return closing(MessageStore(
+        return closing(MessageStore._open_existing(
             store.db_identity, hermes_home=self._hermes_home,
             ingest_protection_config=self._config,
-            existing_write_timeout_ms=busy_timeout_ms,
+            write_timeout_ms=busy_timeout_ms,
         ))
 
     def _append_retired_tail(self, store, old_store, session_id, conversation_id, messages, platform,
@@ -5821,7 +5821,7 @@ class LCMEngine(
         writer = self._clone_for_agent()
         writer._discard_prepared_leaves = lambda: None
         try:
-            writer._dag = SummaryDAG(store.db_path, existing_only=True)
+            writer._dag = SummaryDAG._open_existing(store.db_path)
             writer._lifecycle = LifecycleStateStore(store.db_path, existing_only=True)
             writer._store = store
             writer._storage_ready = True

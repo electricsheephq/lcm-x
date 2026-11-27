@@ -67,9 +67,9 @@ def _store_candidate(engine_cls, config, home, db_path, row, messages, window):
     det = engine_cls(config=copy.deepcopy(config), hermes_home=home)
     det._discard_prepared_leaves = lambda: None
     try:
-        store = det._store = MessageStore(
+        store = det._store = MessageStore._open_existing(
             db_path, ingest_protection_config=config, hermes_home=home,
-            existing_write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+            write_timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
         )
         det._storage_ready = True
         if Path(store.db_path).resolve() != Path(db_path):
