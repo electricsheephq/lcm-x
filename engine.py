@@ -6013,10 +6013,12 @@ class LCMEngine(
         try:
             with closing(sqlite3.connect(self._state_db_path().resolve().as_uri() + "?mode=ro",
                                          uri=True, timeout=0.05)) as conn:
+                session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+                source_clause = "AND COALESCE(s.source, '') != 'subagent'" if "source" in session_cols else ""
                 if uid is not None and any(row[1] == "message_uid" for row in conn.execute("PRAGMA table_info(messages)")):
                     saved = conn.execute(
-                        """SELECT m.content FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
-                        WHERE s.id = ? AND s.parent_session_id IS NULL AND s.ended_at IS NULL
+                        f"""SELECT m.content FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                        WHERE s.id = ? {source_clause} AND s.ended_at IS NULL
                           AND m.role = 'assistant' AND m.message_uid = ?""",
                         (session_id, uid),
                     ).fetchone()
@@ -6026,8 +6028,8 @@ class LCMEngine(
                 if stamp is None or not isinstance(reply.get("content"), str):
                     return False
                 return conn.execute(
-                    """SELECT 1 FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
-                    WHERE s.id = ? AND s.parent_session_id IS NULL AND s.ended_at IS NULL
+                    f"""SELECT 1 FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                    WHERE s.id = ? {source_clause} AND s.ended_at IS NULL
                       AND m.role = 'assistant' AND m.timestamp = ? AND m.content = ?""",
                     (session_id, stamp, reply["content"]),
                 ).fetchone() is not None
@@ -6036,7 +6038,9 @@ class LCMEngine(
 
     def _start_fresh_reload_lane(self, session_id, conversation_id, platform):
         if (self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)
-                or self._plugin_is_unloading()):
+                or self._plugin_is_unloading()
+                or ((self._storage_ready or self._db_path.is_file())
+                    and self._stored_delegate_child_link(session_id))):
             return False
         lane = conversation_id or session_id
         if not self._lifecycle.claim_new_hook_binding(session_id, lane):
