@@ -9282,7 +9282,7 @@ class LCMEngine(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts, uid_fetched=uid_fetched,
-                ingest_drop_decisions=ingest_drop_decisions,
+                ingest_drop_decisions=ingest_drop_decisions, original_messages=messages,
             )
             today = self._ingest_cursor
             ledger_run = self._ledger_cold_cursor(

@@ -2100,7 +2100,8 @@ class CompactionMixin:
         session, conversation, other_conversation, store_ids = self._session_owner_backoff
         if (session, conversation) == (self._session_id, self._conversation_id):
             try:
-                if not self._current_binding_is_delegate():
+                if (not self._current_binding_is_delegate()
+                        and (conversation == session or conversation in self._rotation_predecessor_session_ids(session))):
                     mapped = store_ids.intersection(self._get_store_id_map_for_messages(working_messages).values())
                     if mapped and self._store.connection.execute(
                         "SELECT 1 FROM json_each(?) AS source CROSS JOIN messages AS m "

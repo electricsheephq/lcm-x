@@ -1,6 +1,7 @@
 """Natural re-ownership and mixed-window replay (#1250, I1/I2/I5/I14)."""
 
 import json
+import sqlite3
 
 import pytest
 
@@ -65,6 +66,67 @@ def _mixed(open_engine, *, sequential=False):
     owners = [GATEWAY] * len(full) if expected_ids else [SESSION] * len(EARLY) + [GATEWAY] * len(LATER)
     assert [row["conversation_id"] for row in _rows(gateway)] == owners
     return writer, gateway, gateway_view
+
+
+@pytest.mark.parametrize("shape", ["same-uids", "all-new-uids", "middle-new-uid", "uid-bound-to-other-row"])
+def test_reowned_replay_checks_host_uid_bindings(open_engine, tmp_path, monkeypatch, shape):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    with sqlite3.connect(tmp_path / "state.db") as db:
+        db.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+        db.execute("INSERT INTO sessions VALUES (?, NULL, NULL)", (SESSION,))
+
+    writer, gateway = open_engine(), open_engine()
+    original = [dict(row, message_uid=f"early-{i}") for i, row in enumerate(EARLY)]
+    if shape == "uid-bound-to-other-row":
+        original[2].pop("message_uid")
+    _start(writer)
+    writer.ingest(original)
+    lineage, _ = writer._host_uid_lineage_key()
+    assert lineage is not None
+    stored = _rows(writer)
+    bound = writer._store.host_uid_uids_of_stores(lineage, [row["store_id"] for row in stored])
+    assert bound == {row["store_id"]: {host["message_uid"]} for row, host in zip(stored, original)
+                     if "message_uid" in host}
+    _bind_gateway(gateway)
+    gateway.ingest(original + LATER)
+    gateway.compress(original + LATER)
+    assert gateway.last_compression_status == "compacted"
+    before = _rows(gateway)
+    assert len(before) == 9 and all(row["conversation_id"] == GATEWAY for row in before)
+    assert set(gateway._store.read_metadata_json(REOWN_KEY)) == {row["store_id"] for row in before[:4]}
+
+    resumed = open_engine()
+    _start(resumed)
+    incoming = [dict(row) for row in original]
+    new_uids = {}
+    if shape == "all-new-uids":
+        new_uids = {i: f"new-{i}" for i in range(len(incoming))}
+    elif shape == "middle-new-uid":
+        new_uids = {2: "new-2"}
+        # The receipt's content view need not carry the original UID.
+        cold_reader = resumed._cold_reader_replay_messages
+        monkeypatch.setattr(resumed, "_cold_reader_replay_messages", lambda *args: [
+            {key: value for key, value in row.items() if key != "message_uid"} for row in cold_reader(*args)
+        ])
+    elif shape == "uid-bound-to-other-row":
+        incoming[2]["message_uid"] = incoming[0]["message_uid"]
+    for index, uid in new_uids.items():
+        incoming[index]["message_uid"] = uid
+
+    resumed.ingest(incoming)
+    after = _rows(resumed)
+    added = after[len(before):]
+    print(f"rows={len(before)}->{len(after)} added={[row['content'] for row in added]}")
+    assert after[:len(before)] == before
+    if shape == "same-uids":
+        assert not added
+        assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
+    else:
+        # One contradiction invalidates the whole receipt. Ordinary ingest
+        # persists the ambiguous batch, including any otherwise replayed rows.
+        assert _digests(added) == _digests(incoming)
+        new_bindings = resumed._store.host_uid_bindings_for(lineage, new_uids.values())
+        assert new_bindings == {uid: [(added[i]["store_id"], "canonical")] for i, uid in new_uids.items()}
 
 
 @pytest.mark.parametrize("restarts,plain", [(1, False), (2, False), (1, True)],

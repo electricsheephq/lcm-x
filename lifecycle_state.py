@@ -1078,6 +1078,7 @@ class LifecycleStateStore:
             )
         reowned_ids = []
         reowned_from = set()
+        predecessors = None
         if conversation_id != session_id and any(
             str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows
         ):
@@ -1086,7 +1087,8 @@ class LifecycleStateStore:
                 (conversation_id,),
             ).fetchone()
             if binding is not None and binding[0] == session_id:
-                chain = [session_id, *rotation_predecessor_session_ids(conn, session_id)]
+                predecessors = rotation_predecessor_session_ids(conn, session_id)
+                chain = [session_id, *predecessors]
                 position = {source: index for index, source in enumerate(chain)}
                 provisional_ids = [
                     int(row[0]) for row in snapshot_rows
@@ -1145,7 +1147,11 @@ class LifecycleStateStore:
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]
         if offending:
-            if conversation_id == session_id and all(row[1] == session_id for row in offending):
+            if all(row[1] == session_id for row in offending) and (
+                conversation_id == session_id or conversation_id in (
+                    predecessors if predecessors is not None else rotation_predecessor_session_ids(conn, session_id)
+                )
+            ):
                 owners = {row[2] for row in offending}
                 if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
                     other_conversation_id, = owners

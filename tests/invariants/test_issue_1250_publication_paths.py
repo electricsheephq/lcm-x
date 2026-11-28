@@ -156,6 +156,41 @@ def test_rotation_publishes_without_copying_carried_rows(pair, store_child_turn)
     assert old.last_finalized_frontier_store_id == 3
 
 
+def test_rotated_session_window_backs_off_after_gateway_reownership(pair):
+    build, calls = pair
+    writer = build(S)
+    early = turns("early")
+    writer.ingest(early)
+    parent_view = writer.compress(early)
+    assert writer.last_compression_status == "compacted"
+    writer.on_session_end(S, early)
+    bind(writer, C, boundary_reason="compression", old_session_id=S)
+    assert writer._conversation_id == S
+    child = turns("child")
+    writer_view = parent_view + child
+    writer.ingest(writer_view)
+    child_ids = {row["store_id"] for row in rows(writer, (C,)) if row["conversation_id"] == S}
+    assert len(child_ids) == len(child)
+
+    gateway = build(C, G)
+    gateway_view = writer_view + turns("gateway")
+    gateway.ingest(gateway_view)
+    gateway.compress(gateway_view, force=True)
+    assert gateway.last_compression_status == "compacted"
+    before = rows(gateway, (S, C))
+    assert child_ids <= {row["store_id"] for row in before
+                         if row["session_id"] == C and row["conversation_id"] == G}
+
+    count = len(calls)
+    fallback = writer.compress(child, force=True)
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(calls) == count + 1
+    assert writer.compress(fallback, force=True) == fallback
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(calls) == count + 1
+    assert rows(writer, (S, C)) == before
+
+
 def test_failed_provisional_rebind_proof_preserves_identity_anchors(pair, monkeypatch):
     build, _ = pair
     engine = build(C, G)

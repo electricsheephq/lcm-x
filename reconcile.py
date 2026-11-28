@@ -22,6 +22,7 @@ import copy
 import hashlib
 import json
 import re
+import sqlite3
 import sys
 import threading
 from collections import Counter
@@ -443,6 +444,7 @@ class _StoreCursorRun:
     session_count: int
     allow_session_end_replay_proof: bool
     ingest_drop_decisions: Callable[[], list[bool]] | None = None
+    original_messages: List[Dict[str, Any]] | None = None
     tail_limit: int = field(init=False)
     stored_tail: List[tuple[str, str, str, str, str]] = field(init=False)
 
@@ -3430,7 +3432,7 @@ class ReconcileMixin:
             # retirement; any other outcome (a skipped batch, a scaffold-only prefix) is today's decision below.
             cursor = self._reconcile_ingest_cursor_from_store(
                 messages, allow_session_end_replay_proof=allow_session_end_replay_proof,
-                ingest_drop_decisions=run.ingest_drop_decisions,
+                ingest_drop_decisions=run.ingest_drop_decisions, original_messages=run.original_messages,
             )
             recon = self._last_ingest_reconciliation
             if cursor > 0 and recon.get("action") == "advanced cursor" and str(recon.get("reason") or "").startswith("replayed "):
@@ -3452,6 +3454,7 @@ class ReconcileMixin:
     def _cursor_from_reowned_session_rows(
         self, messages, stored_rows, session_count: int, *,
         ingest_drop_decisions: Callable[[], list[bool]] | None = None,
+        original_messages: List[Dict[str, Any]] | None = None,
     ) -> int:
         """Recognize a returning session-id window's complete ordered raw history."""
         session_id = self._session_id
@@ -3484,6 +3487,18 @@ class ReconcileMixin:
         if len(rows) > len(messages) or not any(row["store_id"] in reowned for row in rows):
             return 0
         drops = ingest_drop_decisions() if ingest_drop_decisions is not None else None
+        host_messages = messages if original_messages is None else original_messages
+        host_uids, uid_bindings, stored_uids = [], {}, {}
+        if uid_recognition_enabled(self):
+            host_uids = [self._host_occurrence_metadata(message)["message_uid"] for message in host_messages]
+            wanted = {uid for uid in host_uids if uid is not None}
+            if wanted and (lineage := self._host_uid_lineage_key()[0]) is not None:
+                try:
+                    uid_bindings = self._store.host_uid_bindings_for(lineage, wanted)
+                    stored_uids = self._store.host_uid_uids_of_stores(lineage, [row["store_id"] for row in rows])
+                except sqlite3.Error:
+                    logger.debug("LCM could not check UIDs for re-owned session rows", exc_info=True)
+                    return 0
         matched = 0
         for cursor, message in enumerate(messages, start=1):
             drop = drops[cursor - 1] if drops is not None else self._matches_ignore_message_patterns(message)
@@ -3499,6 +3514,15 @@ class ReconcileMixin:
                     or stamp is not None and row["observed_at"] is not None and stamp != row["observed_at"]
                     or ident != stored_ident):
                 return 0
+            if host_uids and (uid := host_uids[cursor - 1]) is not None:
+                store_id = row["store_id"]
+                row_uids = stored_uids.get(store_id, ())
+                # A canonical or version UID for this row is valid. Reuse the
+                # occurrence check to veto a different durable UID.
+                previous_uid = uid if uid in row_uids else next(iter(row_uids), None)
+                if (any(bound_id != store_id for bound_id, _ in uid_bindings.get(uid, ()))
+                        or self._host_occurrence_changed(host_messages[cursor - 1], {"message_uid": previous_uid})):
+                    return 0
             if len(rows) == 1 and (stamp is None or row["observed_at"] is None):
                 # An equal-content delta is ambiguous without the same
                 # occurrence evidence required by ordinary singleton replay.
@@ -3520,6 +3544,7 @@ class ReconcileMixin:
         session_counts: Optional[list] = None,
         uid_fetched=None,
         ingest_drop_decisions: Callable[[], list[bool]] | None = None,
+        original_messages: List[Dict[str, Any]] | None = None,
     ) -> int:
         """Infer the in-memory cursor for an existing session after process restart.
 
@@ -3542,7 +3567,7 @@ class ReconcileMixin:
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
-            ingest_drop_decisions=ingest_drop_decisions,
+            ingest_drop_decisions=ingest_drop_decisions, original_messages=original_messages,
         )
         if session_count <= 0:
             provisional_cursor = self._cursor_from_provisional_rebind(messages, [])
@@ -3631,6 +3656,7 @@ class ReconcileMixin:
         if max(cursor or 0, uid_cursor) < len(messages):
             reowned_cursor = self._cursor_from_reowned_session_rows(
                 messages, stored_rows, session_count, ingest_drop_decisions=ingest_drop_decisions,
+                original_messages=original_messages,
             )
             if reowned_cursor > max(cursor or 0, uid_cursor):
                 effective_incoming = (
