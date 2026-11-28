@@ -390,7 +390,7 @@ without changing its behavior until removal.
 | `LCM_EMBEDDING_QUERY_PREFIX` | `str` | `""` | — | — |
 | `LCM_EMBEDDING_DOCUMENT_PREFIX` | `str` | `""` | — | — |
 | `LCM_EMBED_CONTENT_POLICY` | `str` | `"conversational"` | — | — |
-| `LCM_OLLAMA_BASE_URL` | `str` | `"http://localhost:11434"` | — | — |
+| `LCM_OLLAMA_BASE_URL` | `str` | `"http://127.0.0.1:11434"` | — | — |
 | `LCM_EMBEDDING_BASE_URL` | `str` | `""` | — | — |
 | `LCM_EMBEDDING_API_KEY_ENV` | `str` | `"LCM_EMBEDDING_API_KEY"` | — | — |
 | `LCM_EMBEDDING_QUERY_TIMEOUT_S` | `float` | `3.0` | — | — |
@@ -414,6 +414,8 @@ without changing its behavior until removal.
 | `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` | `int` | `8` | — | — |
 | `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` | `float` | `600.0` | — | — |
 <!-- END GENERATED CONFIG REFERENCE -->
+
+If Ollama listens only on IPv6, override the default `http://127.0.0.1:11434` with `LCM_OLLAMA_BASE_URL=http://[::1]:11434` or use `http://localhost:11434` as its value.
 
 ## Hand-written reference: explicit configuration readers
 

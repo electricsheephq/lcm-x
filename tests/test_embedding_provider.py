@@ -601,7 +601,7 @@ def test_embedding_config_defaults_and_environment(monkeypatch):
     defaults = LCMConfig()
     assert defaults.embedding_provider == "fastembed"
     assert defaults.embedding_model == ""
-    assert defaults.ollama_base_url == "http://localhost:11434"
+    assert defaults.ollama_base_url == "http://127.0.0.1:11434"
     assert defaults.embedding_query_timeout_s == 3.0
     assert defaults.embedding_backfill_timeout_s == 120.0
     assert defaults.embedding_max_batch_items == 1000

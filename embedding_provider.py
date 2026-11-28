@@ -365,8 +365,8 @@ def _automatic_chunks_allowed(config: Any) -> bool:
         return True  # FastEmbed runs in this process
     # Read the base URL exactly as resolve_provider/OllamaProvider do.
     base_url = str(
-        getattr(config, "ollama_base_url", "http://localhost:11434")
-    ).strip().rstrip("/") or "http://localhost:11434"
+        getattr(config, "ollama_base_url", "http://127.0.0.1:11434")
+    ).strip().rstrip("/") or "http://127.0.0.1:11434"
     return _is_loopback_url(base_url)
 
 
@@ -1397,7 +1397,7 @@ class OllamaProvider(_ResilientProvider):
         model: str,
         *,
         config: LCMConfig | None = None,
-        base_url: str = "http://localhost:11434",
+        base_url: str = "http://127.0.0.1:11434",
         transport: HttpTransport | None = None,
         timeout: float = 3.0,
         sleeper: Callable[[float], None] = time.sleep,
@@ -1408,7 +1408,7 @@ class OllamaProvider(_ResilientProvider):
         self._model_id = str(model).strip()
         if not self._model_id:
             raise ValueError("Ollama embedding model must not be empty")
-        self.base_url = str(base_url).strip().rstrip("/") or "http://localhost:11434"
+        self.base_url = str(base_url).strip().rstrip("/") or "http://127.0.0.1:11434"
         self._transport = transport or _default_http_transport
         self.timeout = float(timeout)
         self._sleep = sleeper
@@ -2057,7 +2057,7 @@ def resolve_provider(
     if embedding_provider_id(provider) == "ollama":
         return OllamaProvider(
             model, config=config,
-            base_url=getattr(config, "ollama_base_url", "http://localhost:11434"),
+            base_url=getattr(config, "ollama_base_url", "http://127.0.0.1:11434"),
             timeout=timeout,
             spend_guard=spend_guard,
         )
