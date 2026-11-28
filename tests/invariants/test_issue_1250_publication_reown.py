@@ -218,7 +218,7 @@ def summary_calls(open_engine, monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("followup", ["other-rebind", "start", "reset", "overflow", "cleanup", "hold"])
+@pytest.mark.parametrize("followup", ["owner-changed", "start", "reset", "overflow", "cleanup", "hold"])
 def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, followup):
     writer, gateway = open_engine(), open_engine()
     writer.on_session_start(SESSION, platform="gui", context_length=200_000)
@@ -256,9 +256,12 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
         assert len(summary_calls) == call_count
         assert _rows(writer) == before
         return
-    if followup == "other-rebind":
-        gateway.on_session_start("another-session", platform="desktop", conversation_id=GATEWAY,
-                                 context_length=200_000)
+    if followup == "owner-changed":
+        with writer._store.atomic(immediate=True):
+            writer._store.connection.execute(
+                "UPDATE messages SET conversation_id = ? WHERE session_id = ?", ("new-owner", SESSION),
+            )
+        before = _rows(writer)
     elif followup == "start":
         writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
     elif followup == "reset":
@@ -274,8 +277,8 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
     writer.compress(list(fallback), force=True)
     assert len(summary_calls) > call_count
     assert _rows(writer) == before
-    if followup == "other-rebind":
-        assert writer.get_status()["last_compression_failure_reason"] == "publication_invariant_conflict"
+    if followup == "owner-changed":
+        assert writer._session_owner_backoff[2] == "new-owner"
 
 
 @pytest.mark.parametrize("finalize_before_conflict", [False, True], ids=["keep-armed", "arm-after-end"])
@@ -342,10 +345,11 @@ def test_second_window_publishes_after_overflow_drops_conflicting_rows(
     assert writer._dag.get_session_node_count(SESSION) > nodes
     assert len(summary_calls) > call_count
     assert writer._session_owner_backoff is None
+    assert (SESSION, GATEWAY) not in writer._session_owner_warning_keys
     assert _rows(writer) == before
 
 
-@pytest.mark.parametrize("kind", ["unrelated-owner", "gateway-publisher", "delegate-publisher"])
+@pytest.mark.parametrize("kind", ["two-owners", "gateway-publisher", "delegate-publisher"])
 def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, monkeypatch, kind):
     from hermes_lcm.lifecycle_state import LifecycleStateStore
 
@@ -353,13 +357,17 @@ def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, mo
     publisher = "other-gateway" if kind == "gateway-publisher" else SESSION
     platform = _DELEGATE_SOURCE if kind == "delegate-publisher" else "gui"
     engine.on_session_start(SESSION, platform=platform, conversation_id=publisher, context_length=200_000)
-    if kind != "unrelated-owner":
-        _bind_gateway(open_engine())
+    _bind_gateway(open_engine())
     engine.ingest(list(EARLY))
     with engine._store.atomic(immediate=True):
         engine._store.connection.execute(
             "UPDATE messages SET conversation_id = ? WHERE session_id = ?", (GATEWAY, SESSION),
         )
+        if kind == "two-owners":
+            engine._store.connection.execute(
+                "UPDATE messages SET conversation_id = ? WHERE session_id = ? AND store_id = 2",
+                ("another-owner", SESSION),
+            )
     before = _rows(engine)
     conflicts = []
     stage = LifecycleStateStore.stage_compaction_publication
@@ -378,10 +386,9 @@ def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, mo
         assert engine.last_compression_status == "error"
         assert _rows(engine) == before
     assert len(summary_calls) == len(conflicts) == 2
-    if kind == "delegate-publisher":
-        assert all(exc.other_conversation_id == GATEWAY and exc.row_count > 0 for exc in conflicts)
-    else:
-        assert all(type(exc) is LifecyclePublicationConflictError for exc in conflicts)
+    assert all(type(exc) is LifecyclePublicationConflictError for exc in conflicts)
+    assert engine.get_status()["last_compression_failure_reason"] == "publication_invariant_conflict"
+    assert engine._session_owner_backoff is None
     assert all(str(exc) == "Compaction publication source ownership changed" for exc in conflicts)
 
 

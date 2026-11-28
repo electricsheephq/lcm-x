@@ -3461,9 +3461,11 @@ class ReconcileMixin:
         if not isinstance(ids, list) or not all(type(store_id) is int and store_id > 0 for store_id in ids):
             return 0
         reowned = set(ids)
+        if not reowned or len(messages) < len(reowned):
+            return 0
         if len(stored_rows) < session_count:
             stored_rows = self._store.get_session_messages(session_id, limit=session_count)
-        if not reowned or not reowned <= {row["store_id"] for row in stored_rows}:
+        if not reowned <= {row["store_id"] for row in stored_rows}:
             return 0
         # The original window contains these exact transferred occurrences and
         # its own rows. A gateway-owned row outside the receipt is no evidence
@@ -3473,9 +3475,13 @@ class ReconcileMixin:
             if (row["store_id"] in reowned or row["conversation_id"] in ("", session_id))
             and not self._matches_ignore_message_patterns(row, stored_row=True)
         ]
-        if len(rows) > len(messages):
+        if len(rows) > len(messages) or not any(row["store_id"] in reowned for row in rows):
             return 0
-        for message, row in zip(messages, rows):
+        matched = 0
+        for cursor, message in enumerate(messages, start=1):
+            if self._matches_ignore_message_patterns(message):
+                continue
+            row = rows[matched]
             ident = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
             stamp = _normalize_observed_at(message.get("timestamp"))
             if (_has_lossy_redacted_identity(ident)
@@ -3484,7 +3490,10 @@ class ReconcileMixin:
                         row, stored_row=True, strip_carrier=False, allow_pruned_tool_alias=False,
                     )):
                 return 0
-        return len(rows) if any(row["store_id"] in reowned for row in rows) else 0
+            matched += 1
+            if matched == len(rows):
+                return cursor
+        return 0
 
     def _reconcile_ingest_cursor_from_store(
         self,

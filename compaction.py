@@ -1906,6 +1906,7 @@ class CompactionMixin:
                     carried_ranges,
                     copy_exclusion_proofs=self._store_complete_copy_exclusion_proofs,
                     reowned_store_ids=reowned_store_ids,
+                    publisher_is_delegate=self._current_binding_is_delegate,
                     **({"copy_matches": self._store_complete_uid_copy_publication_match}
                        if uid_recognition_enabled(self) else {}),
                 )
@@ -1917,6 +1918,7 @@ class CompactionMixin:
             model=model,
         )
         self._session_owner_backoff = None
+        self._session_owner_warning_keys.clear()
         if reowned_store_ids:
             logger.info(
                 "LCM publication re-owned provisional rows: conversation=%s session=%s count=%d store_ids=%d-%d",
@@ -2098,14 +2100,14 @@ class CompactionMixin:
         session, conversation, other_conversation, store_ids = self._session_owner_backoff
         if (session, conversation) == (self._session_id, self._conversation_id):
             try:
-                other_binding = self._lifecycle.get_by_conversation(other_conversation)
-                if (
-                    other_binding is not None
-                    and session in (other_binding.current_session_id, other_binding.last_finalized_session_id)
-                    and not self._current_binding_is_delegate()
-                    and not store_ids.isdisjoint(self._get_store_id_map_for_messages(working_messages).values())
-                ):
-                    return LifecycleOtherWindowConflictError(other_conversation, store_ids)
+                if not self._current_binding_is_delegate():
+                    mapped = store_ids.intersection(self._get_store_id_map_for_messages(working_messages).values())
+                    if mapped and self._store.connection.execute(
+                        "SELECT 1 FROM json_each(?) AS source CROSS JOIN messages AS m "
+                        "WHERE m.store_id = source.value AND m.session_id = ? AND m.conversation_id = ? LIMIT 1",
+                        (json.dumps(sorted(mapped)), session, other_conversation),
+                    ).fetchone():
+                        return LifecycleOtherWindowConflictError(other_conversation, store_ids)
             except sqlite3.Error:
                 logger.debug("LCM could not recheck the competing conversation's publication conflict", exc_info=True)
         self._session_owner_backoff = None
@@ -2152,8 +2154,8 @@ class CompactionMixin:
         elif isinstance(exc, LifecycleOtherWindowConflictError):
             failure_reason = exc.reason
             noop_reason = (
-                "Another window bound this session to another conversation. "
-                "This window cannot summarize the rows that conversation now owns. "
+                "Rows of this session are owned by another conversation. "
+                "This window cannot summarize those rows. "
                 "Only one window should compact a session (issue 1250)."
             )
             other = exc.other_conversation_id

@@ -49,7 +49,7 @@ class LifecyclePublicationConflictError(RuntimeError):
 
 
 class LifecycleOtherWindowConflictError(LifecyclePublicationConflictError):
-    """The session's own publication met rows now owned by another binding."""
+    """The session's own publication met rows owned by another conversation."""
 
     reason = "session_owned_by_other_window"
 
@@ -1006,6 +1006,7 @@ class LifecycleStateStore:
         copy_exclusion_proofs: dict[int, int] | None = None,
         copy_matches=None,
         reowned_store_ids: list[int] | None = None,
+        publisher_is_delegate=None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1130,12 +1131,12 @@ class LifecycleStateStore:
                         conn.execute(
                             """
                             INSERT INTO metadata (key, value) VALUES (?, ?)
-                            ON CONFLICT(key) DO UPDATE SET value = (
+                            ON CONFLICT(key) DO UPDATE SET value = CASE WHEN json_valid(metadata.value) THEN (
                                 SELECT json_group_array(value) FROM (
                                     SELECT value FROM json_each(metadata.value)
                                     UNION SELECT value FROM json_each(excluded.value)
                                 )
-                            )
+                            ) ELSE excluded.value END
                             """,
                             (reowned_session_rows_key(source_session), json.dumps(store_ids)),
                         )
@@ -1144,17 +1145,11 @@ class LifecycleStateStore:
         if offending:
             if conversation_id == session_id and all(row[1] == session_id for row in offending):
                 owners = {row[2] for row in offending}
-                if len(owners) == 1:
+                if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
                     other_conversation_id, = owners
-                    binding = conn.execute(
-                        "SELECT current_session_id, last_finalized_session_id "
-                        "FROM lcm_lifecycle_state WHERE conversation_id = ?",
-                        (other_conversation_id,),
-                    ).fetchone()
-                    if binding is not None and session_id in binding:
-                        raise LifecycleOtherWindowConflictError(
-                            other_conversation_id, frozenset(int(row[0]) for row in offending),
-                        )
+                    raise LifecycleOtherWindowConflictError(
+                        other_conversation_id, frozenset(int(row[0]) for row in offending),
+                    )
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )

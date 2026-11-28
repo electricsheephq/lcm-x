@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from hermes_lcm import engine as engine_module
+from hermes_lcm import engine as engine_module, message_patterns
+from tests.engine_helpers import _FakeTimeoutRegexEngine
 from tests.invariants.test_issue_1250_publication_reown import (
     EARLY, GATEWAY, LATER, SESSION, _bind_gateway, _digests, _hook_for, _rows,
     open_engine as _open_engine,
@@ -59,7 +60,8 @@ def _mixed(open_engine, *, sequential=False):
     gateway_view = _step(gateway, "gateway compress", full, lambda: gateway.compress(full), may_reown=True)
     expected_ids = ([row["store_id"] for row in before if row["conversation_id"] == SESSION]
                     if gateway.last_compression_status == "compacted" else None)
-    assert gateway._store.read_metadata_json(REOWN_KEY) == expected_ids
+    receipt = gateway._store.read_metadata_json(REOWN_KEY)
+    assert (sorted(receipt) if receipt is not None else None) == expected_ids
     owners = [GATEWAY] * len(full) if expected_ids else [SESSION] * len(EARLY) + [GATEWAY] * len(LATER)
     assert [row["conversation_id"] for row in _rows(gateway)] == owners
     return writer, gateway, gateway_view
@@ -149,7 +151,8 @@ def test_single_window_same_binding_restart(open_engine):
 
 
 @pytest.mark.parametrize("rotate_before_conflict", [False, True])
-def test_competing_gateway_rotates_after_reownership(open_engine, monkeypatch, rotate_before_conflict):
+@pytest.mark.parametrize("finalize_next", [False, True], ids=["one-transition", "two-transitions"])
+def test_competing_gateway_rotates_after_reownership(open_engine, monkeypatch, rotate_before_conflict, finalize_next):
     writer, gateway, gateway_view = _mixed(open_engine)
     calls = []
 
@@ -164,6 +167,10 @@ def test_competing_gateway_rotates_after_reownership(open_engine, monkeypatch, r
         gateway.on_session_start("S2-1250", platform="desktop", conversation_id=GATEWAY)
         binding = gateway._lifecycle.get_by_conversation(GATEWAY)
         assert (binding.current_session_id, binding.last_finalized_session_id) == ("S2-1250", SESSION)
+        if finalize_next:
+            gateway.on_session_end("S2-1250", [])
+            binding = gateway._lifecycle.get_by_conversation(GATEWAY)
+            assert (binding.current_session_id, binding.last_finalized_session_id) == (None, "S2-1250")
 
     if rotate_before_conflict:
         rotate()
@@ -175,3 +182,66 @@ def test_competing_gateway_rotates_after_reownership(open_engine, monkeypatch, r
     assert _step(writer, "rotated gateway back-off", view, lambda: writer.compress(view, force=True)) == view
     assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
     assert len(calls) == 1
+
+
+def test_replay_receipt_skips_ignored_host_message(open_engine, monkeypatch):
+    if message_patterns._regex_engine is None:
+        monkeypatch.setattr(message_patterns, "_regex_engine", _FakeTimeoutRegexEngine)
+    config = {"ignore_message_patterns": ["^HEARTBEAT"]}
+    writer, gateway = open_engine(**config), open_engine(**config)
+    heartbeat = {"role": "user", "content": "HEARTBEAT ok"}
+    raw = EARLY[:2] + [heartbeat] + EARLY[2:]
+    _start(writer)
+    _step(writer, "initial ingest with heartbeat", raw, lambda: writer.ingest(raw), EARLY)
+    _bind_gateway(gateway)
+    full = raw + LATER
+    _step(gateway, "gateway ingest", full, lambda: gateway.ingest(full), LATER)
+    _step(gateway, "gateway re-owns the rows", full, lambda: gateway.compress(full), may_reown=True)
+    assert gateway.last_compression_status == "compacted"
+    assert set(gateway._store.read_metadata_json(REOWN_KEY)) == {
+        row["store_id"] for row in _rows(writer)[:len(EARLY)]
+    }
+    writer.shutdown()
+
+    resumed = open_engine(**config)
+    _start(resumed)
+    new = [
+        {"role": "user", "content": "A new request after the heartbeat."},
+        {"role": "assistant", "content": "A new reply after the heartbeat."},
+    ]
+    _step(resumed, "raw replay with heartbeat", raw + new, lambda: resumed.ingest(raw + new), new)
+    assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
+    assert resumed._last_ingest_reconciliation["cursor"] == len(raw)
+
+
+def test_replay_receipt_stops_at_unmatched_host_message(open_engine):
+    writer, gateway, _ = _mixed(open_engine)
+    raw = EARLY[:2] + [{"role": "user", "content": "An unmatched request."}] + EARLY[2:]
+    stored = _rows(gateway)
+    assert writer._cursor_from_reowned_session_rows(raw, stored, len(stored)) == 0
+
+
+def test_short_view_skips_full_receipt_scan(open_engine, monkeypatch):
+    writer, gateway, _ = _mixed(open_engine)
+    stored = _rows(gateway)
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("a view shorter than the receipt should not load the session")
+
+    monkeypatch.setattr(writer._store, "get_session_messages", unexpected_read)
+    assert writer._cursor_from_reowned_session_rows(EARLY[:2], stored[-1:], len(stored)) == 0
+
+
+def test_malformed_replay_receipt_does_not_prevent_reownership(open_engine):
+    writer, gateway = open_engine(), open_engine()
+    _start(writer)
+    writer.ingest(list(EARLY))
+    before = _rows(writer)
+    writer._store.write_metadata_json([REOWN_KEY], "malformed")
+    _bind_gateway(gateway)
+    full = EARLY + LATER
+    _step(gateway, "gateway ingest", full, lambda: gateway.ingest(full), LATER)
+    _step(gateway, "gateway publishes with malformed receipt", full, lambda: gateway.compress(full), may_reown=True)
+    assert gateway.last_compression_status == "compacted"
+    assert sorted(gateway._store.read_metadata_json(REOWN_KEY)) == [row["store_id"] for row in before]
+    assert all(row["conversation_id"] == GATEWAY for row in _rows(gateway))
