@@ -470,6 +470,10 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
   provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
   an unstamped replay of the returning window's compacted view can still add a copy on each restart.
+- **v0.30.5 known issue (#1250).** When two windows share one session with unstamped rows, the tested replay
+  cases store 1 to 3 extra rows per cold restart with no loss. Keep one window per session until v0.31.0.
+  Check `two_window_replay_copies` in `/lcm doctor` or `lcm_doctor` for possible copies. A genuine new
+  message that repeats earlier text without a stamp or host UID can also be counted.
 - **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
 - **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).

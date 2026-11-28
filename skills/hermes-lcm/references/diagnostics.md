@@ -75,6 +75,10 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 - `/lcm status` can report `last_compression_failure_reason: session_owned_by_other_window`. The
   `last_compression_noop_reason` and the `/lcm doctor` compaction observation explain that another conversation
   owns the rows this window tried to summarize. Keep only one window compacting a session until v0.31.0 (#1250).
+- `two_window_replay_copies` counts possible copies in sessions shared by multiple windows. The `lcm_doctor`
+  result includes total rows and affected sessions, with up to 20 session IDs and 50 store IDs per session.
+  Genuine repeated messages without a stamp or host UID can also be counted. See the v0.30.5 known issue
+  in [Session lifecycle](session-lifecycle.md).
 - LOCAL catch-up: `/lcm status` exposes `embedding_incremental_last_pass`; doctor readiness includes the database's maintenance outcome. `model_preparing`, `model_unavailable`, `lease_held`, `circuit_open` and `row_backoff` describe deferred work; `no_progress`, `model_prepare_exhausted`, refusal/error or `queue_capacity_exhausted` need inspection. Summary coverage alone does not certify chunk coverage. Full-text recall remains available while semantic coverage is incomplete.
 - Unbound status after restart: send a normal message, then check again.
 - `LCM shutdown drain timed out ... child=<12 hex> has up to N handed-over row(s) not yet stored ... (#2483)`: a delegated

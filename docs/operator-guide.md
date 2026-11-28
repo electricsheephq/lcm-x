@@ -1363,6 +1363,8 @@ The `embedding_provider_health` check warns when the configured provider cannot 
 `lcm_status` reports `hidden_only_streak`, which counts passes that publish summaries but free no host row. It clears on a session reset, a conversation change, a pass that consumes a host row, or when pressure falls under the trigger. While the streak is positive, `hidden_only_last_pass` gives the latest `frontier_store_id`, `leaves`, and `hidden_rows`.
 The `lcm_doctor` check `compaction_progress` warns at three hidden-only passes and shows the streak and latest pass. Compaction is summarising stored rows the host no longer shows, so this work cannot shrink host context until it reaches rows the host still holds.
 
+The `two_window_replay_copies` check reports possible cold-restart copies when windows shared a session with unstamped rows. The JSON detail includes row and session counts and samples of session and store IDs. A genuine new message with the same replay identity and no stamp or host UID can count as well. See the [v0.30.5 known issue](exactly-once-ingest.md#38-lineage-a8).
+
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning
 and failure classes surfaced in the command output, using the same operator

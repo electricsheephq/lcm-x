@@ -11,6 +11,70 @@ from .config import companion_enable_command
 from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_warning
 from .diagnostics import fresh_sqlite_check, sqlite_wal_reset_check
 from .lifecycle_state import LifecycleOtherWindowConflictError
+from .store import _MESSAGE_SELECT_COLUMNS
+
+
+def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
+    """Report possible unstamped replay copies without changing the store."""
+    check = "two_window_replay_copies"
+    row_count = session_count = 0
+    sessions = []
+    try:
+        store = engine._store
+        conn = store.connection
+        scoped = conn.execute(
+            "SELECT session_id FROM messages WHERE conversation_id <> '' "
+            "GROUP BY session_id HAVING COUNT(DISTINCT conversation_id) > 1 ORDER BY session_id"
+        ).fetchall()
+        if scoped:
+            tables = {name for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('host_uid_bindings', 'message_relations')"
+            )}
+            # The optional tables may never have been created. Read their evidence
+            # directly because the ingest helpers can take a write lock or create schema.
+            unstamped = "observed_at IS NULL"
+            if "message_relations" in tables:
+                unstamped += (
+                    " AND NOT EXISTS (SELECT 1 FROM message_relations AS r WHERE r.store_id = messages.store_id "
+                    "AND r.kind = 'alt_stamp' AND r.observed_at IS NOT NULL)"
+                )
+            if "host_uid_bindings" in tables:
+                unstamped += (
+                    " AND NOT EXISTS (SELECT 1 FROM host_uid_bindings AS b WHERE b.store_id = messages.store_id "
+                    "AND b.kind IN ('canonical', 'version'))"
+                )
+            for (session_id,) in scoped:
+                seen = set()
+                count = 0
+                store_ids = []
+                for record in conn.execute(
+                    f"SELECT {_MESSAGE_SELECT_COLUMNS}, ({unstamped}) FROM messages "
+                    "WHERE session_id = ? ORDER BY store_id", (session_id,),
+                ):
+                    row = store._row_to_dict(record)
+                    identity = engine._message_replay_identity(row, stored_row=True, store=store, session_id=session_id)
+                    if record[-1] and identity in seen:
+                        count += 1
+                        if len(sessions) < 20 and len(store_ids) < 50:
+                            store_ids.append(row["store_id"])
+                    seen.add(identity)
+                if count:
+                    row_count += count
+                    session_count += 1
+                    if len(sessions) < 20:
+                        sessions.append({"session_id": session_id, "store_ids": store_ids})
+    except Exception as exc:
+        return {"check": check, "status": "fail", "detail": {"error": str(exc)}}
+
+    detail: dict[str, Any] = {"row_count": row_count, "session_count": session_count, "sessions": sessions}
+    if row_count:
+        detail["message"] = (
+            "These are possible copies stored again on a cold restart while two windows shared a session "
+            "with unstamped rows. A genuine new message that repeats earlier text without a stamp can also "
+            "be counted. See the v0.30.5 known-issue note in docs/exactly-once-ingest.md."
+        )
+    return {"check": check, "status": "warn" if row_count else "pass", "detail": detail}
 
 
 @dataclass(frozen=True)
@@ -50,6 +114,7 @@ class DoctorFacts:
     source_stats: dict[str, Any]
     lifecycle_stats: dict[str, Any]
     lifecycle_fragmented: bool
+    two_window_replay_copies: dict[str, Any]
     protection: dict[str, Any]
     survival_fit: dict[str, Any]
     fit_count: int | None
@@ -315,6 +380,8 @@ def collect_doctor(engine: Any) -> DoctorFacts:
     if lifecycle_stats.get("error") or command._has_lifecycle_fragmentation(lifecycle_stats):
         lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
         triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
+    replay_copies = two_window_replay_copies_check(engine)
+    triage_checks.append(replay_copies)
     try:  # #582: the survival fit kept a session alive by dropping stored turns from live context
         survival_fit = engine._store.read_metadata_json(command.SURVIVAL_FIT_COUNTER_KEY)
     except Exception:
@@ -397,6 +464,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         source_stats=source_stats,
         lifecycle_stats=lifecycle_stats,
         lifecycle_fragmented=lifecycle_fragmented,
+        two_window_replay_copies=replay_copies,
         protection=protection,
         survival_fit=survival_fit,
         fit_count=fit_count,
@@ -610,6 +678,17 @@ def render_doctor(facts: DoctorFacts) -> str:
             recommended_actions.append(
                 "treat this as read-only evidence; do not infer every mismatch is harmful"
             )
+
+    replay_copies = facts.two_window_replay_copies
+    replay_detail = replay_copies["detail"]
+    if replay_copies["status"] == "warn":
+        observations.append(
+            f"two_window_replay_copies: {replay_detail['row_count']} row(s) across "
+            f"{replay_detail['session_count']} session(s). {replay_detail['message']}"
+        )
+    elif replay_copies["status"] == "fail":
+        issues.append("two_window_replay_copies")
+        observations.append(f"two_window_replay_copies_error: {replay_detail['error']}")
 
     if facts.clean_scan.get("protected_count"):
         observations.append(

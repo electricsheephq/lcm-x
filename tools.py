@@ -5725,6 +5725,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     """Run diagnostics on the LCM database and configuration."""
+    from .command_doctor import two_window_replay_copies_check
     from .tokens import token_counter_status
 
     engine = _require_engine(kwargs)
@@ -6111,6 +6112,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "status": "fail",
             "detail": str(e),
         })
+    checks.append(two_window_replay_copies_check(engine))
 
     # 7. Context pressure
     if engine.context_length > 0:
