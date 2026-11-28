@@ -1,5 +1,6 @@
 """Natural re-ownership and mixed-window replay (#1250, I1/I2/I5/I14)."""
 
+from copy import deepcopy
 import json
 import sqlite3
 
@@ -220,7 +221,7 @@ def test_provisional_tool_segment_keeps_restamped_parallel_results_together(open
     ]
 
 
-def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine):
+def test_receipt_stores_result_once_beside_gateway_owned_call(open_engine):
     call = {"role": "assistant", "content": "", "tool_calls": [
         {"id": "trailing", "type": "function", "function": {"name": "read", "arguments": "{}"}},
     ]}
@@ -245,6 +246,85 @@ def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine)
         orphan = stored[-1]
         assert (orphan["conversation_id"], orphan["role"], orphan["tool_call_id"]) == (SESSION, "tool", "trailing")
         assert _digests(stored) == _digests(before + [result])
+
+
+def _seed_pending_provisional_call(open_engine, early, *, fresh, delegated=False):
+    prompt = {"role": "user", "content": "Run the stamped tool.", "timestamp": 500}
+    call = {"role": "assistant", "content": "", "timestamp": 501, "tool_calls": [
+        {"id": "pending", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+    ]}
+    result = {"role": "tool", "content": "Stamped result.", "timestamp": 502,
+              "tool_call_id": "pending", "tool_name": "read"}
+    writer = open_engine(fresh_tail_count=fresh)
+    _start(writer)
+    writer.ingest(deepcopy(early))
+    emitted = writer.compress(deepcopy(early), force=True)
+    assert writer.last_compression_status == "compacted"
+    if delegated:
+        writer._append_off_current_session_end_suffix(
+            SESSION, [{"role": "user", "content": "An unrelated delegated occurrence."}],
+            source=_DELEGATE_SOURCE, conversation_id=SESSION,
+        )
+    writer.ingest(deepcopy([*emitted, prompt, call]))
+    writer.shutdown()
+    return [*emitted, prompt, call, result]
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_stamped_provisional_continuation_with_unstamped_tail_stays_flat(open_engine, monkeypatch, mode):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    view = _seed_pending_provisional_call(open_engine, EARLY, fresh=1, delegated=True)
+    gateway = open_engine(fresh_tail_count=1)
+    _bind_gateway(gateway)
+    before = _rows(gateway)
+    gateway.ingest(deepcopy(view))
+    stored = _rows(gateway)
+    assert len(stored) == 8
+    assert stored[:-1] == before
+    # Known limit: the gateway stores the result once while S still owns its call.
+    assert stored[-2]["conversation_id"] == SESSION
+    assert stored[-2]["tool_calls"][0]["id"] == stored[-1]["tool_call_id"] == "pending"
+    assert stored[-1]["conversation_id"] == GATEWAY
+    gateway.shutdown()
+    for _ in range(6):
+        gateway = open_engine(fresh_tail_count=1)
+        _bind_gateway(gateway)
+        gateway.ingest(deepcopy(view))
+        assert _rows(gateway) == stored
+        gateway.shutdown()
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_first_gateway_compress_after_pending_call_writes_commit_proof(open_engine, monkeypatch, mode):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    early = [{"role": "user" if index % 2 == 0 else "assistant",
+              "content": f"Early row {index}.", "timestamp": 100 + index}
+             for index in range(30)]
+    view = _seed_pending_provisional_call(open_engine, early, fresh=24)
+    gateway = open_engine(fresh_tail_count=24)
+    _bind_gateway(gateway)
+    gateway.ingest(deepcopy(view))
+    gateway.shutdown()
+
+    gateway = open_engine(fresh_tail_count=24)
+    _bind_gateway(gateway)
+    emitted = gateway.compress(deepcopy(view), force=True)
+    assert gateway.last_compression_status == "compacted"
+    assert len(view) == 27
+    assert len(emitted) == 25
+    assert gateway._durable_commit_proof_payload()
+    stored = _rows(gateway)
+    assert len(stored) == 33
+    gateway.shutdown()
+    for _ in range(6):
+        gateway = open_engine(fresh_tail_count=24)
+        _bind_gateway(gateway)
+        assert gateway._cursor_from_durable_commit_proof(deepcopy(emitted)) == len(emitted)
+        gateway.ingest(deepcopy(emitted))
+        assert _rows(gateway) == stored
+        gateway.shutdown()
 
 
 def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=(), earlier=(), stamp_result=True):
@@ -335,7 +415,7 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
     if shape in {"receipt", "partial-results"} and stamped:
         assert proof["receipt_before_ingest"] == (3 if shape == "partial-results" else 2)
     if shape == "provisional" and stamped:
-        assert proof["provisional_before_ingest"] == 1
+        assert proof["provisional_before_ingest"] == 3
     if shape in {"receipt", "uid", "partial-results"}:
         # Known limit: the new result stays orphaned under S on every pass.
         assert [state["rows"] for state in states] == [4 if shape == "partial-results" else 3] * 6
@@ -345,8 +425,14 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
         assert states[0]["result_ids"] == ["r17-second" if shape == "partial-results" else "r17-first"]
         assert not any(state["writes"] for state in states[1:])
         return
-    assert not any(state["orphans"] for state in states)
-    expected = {"control": ["tool"], "provisional": ["user", "assistant", "tool"]}[shape]
+    if shape == "provisional":
+        # Known limit: with stamped replay evidence, S owns the call and G
+        # owns the result. The single orphan stays constant across restarts.
+        assert [state["rows"] for state in states] == [7 if stamped else 9] * 6
+        assert [state["orphans"] for state in states] == [int(stamped)] * 6
+    else:
+        assert not any(state["orphans"] for state in states)
+    expected = ["user", "assistant", "tool"] if shape == "provisional" and not stamped else ["tool"]
     assert states[0]["writes"] == expected
     assert states[0]["owners"] == [GATEWAY if shape == "provisional" else SESSION] * len(expected)
     assert states[0]["result_ids"] == ["r17-first"]

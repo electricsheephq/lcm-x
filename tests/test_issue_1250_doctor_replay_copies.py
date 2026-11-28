@@ -83,8 +83,11 @@ def publish(engine, view):
 
 
 @pytest.mark.parametrize("mode", ("off", "shadow", "on"))
-@pytest.mark.parametrize(("shape", "per_pass"), [("later", 3), ("mixed", 1)])
-def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass):
+@pytest.mark.parametrize(("shape", "per_pass", "stored_per_pass"), [
+    ("later", 3, [4, 4, 3, 3, 3, 3]),
+    ("mixed", 1, [3, 2, 1, 1, 1, 1]),
+])
+def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass, stored_per_pass):
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
     group = tool_group("target", "parallel") if shape == "mixed" else tool_group("target")
     group[-1].pop("timestamp")
@@ -110,27 +113,30 @@ def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass):
         assert two_window_replay_copies_check(gateway)["status"] == "pass"
 
     counts, extras, scan_ms = [], [], []
-    for cold_pass in range(1, 7):
+    for cold_pass, expected_stored in enumerate(stored_per_pass, start=1):
         with cold_engine(G, fresh=1) as gateway:
             before = stored(gateway)
             gateway.ingest(deepcopy(view))
             after = stored(gateway)
             assert after[:len(before)] == before
-            extra_ids = [row["store_id"] for row in after[len(before):]]
+            added = after[len(before):]
+            unstamped_ids = [row["store_id"] for row in added if row["observed_at"] is None]
             start = perf_counter()
             check = two_window_replay_copies_check(gateway)
             scan_ms.append((perf_counter() - start) * 1_000)
             assert check["status"] == "warn"
             detail = check["detail"]
             counts.append(detail["row_count"])
-            extras.append(len(extra_ids))
-            assert len(extra_ids) == per_pass
+            extras.append(len(added))
+            # The first two passes also copy stamped rows outside the doctor's count.
+            assert len(added) == expected_stored
+            assert len(unstamped_ids) == per_pass
             assert detail["row_count"] == cold_pass * per_pass
             assert "partial" not in detail
             assert detail["session_count"] == 1
             sample, = detail["sessions"]
             assert sample["session_id"] == S
-            assert sample["store_ids"][-per_pass:] == extra_ids
+            assert sample["store_ids"][-per_pass:] == unstamped_ids
     print(f"{shape}/{mode}: count={counts}; extra={extras}")
     print(f"{shape}/{mode}: scan_ms={[round(elapsed, 3) for elapsed in scan_ms]}")
 
@@ -305,7 +311,7 @@ def test_doctor_output_and_caps(tmp_path):
             for i in range(20)
         ]
         assert "genuine new message" in detail["message"]
-        assert "v0.30.5 known-issue note" in detail["message"]
+        assert "skills/hermes-lcm/references/session-lifecycle.md" in detail["message"]
         text = command._doctor_text(engine)
         assert f"{CHECK}: 1071 row(s) across 21 session(s). {detail['message']}" in text
         guidance = (

@@ -463,16 +463,20 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   can require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
   A new result may still join an unanswered call already owned by the receiving conversation.
   After a re-own, a new result can be stored in the returning conversation while its call stays with the gateway.
-  In the tested shapes, one such orphan stayed constant across six cold restarts. Provider-facing assembly drops
-  the result when its call is absent, and consecutive assemblies with the same rows emit the same prefix.
+  In the tested shapes, one such orphan stayed constant across six cold restarts. The live turn's host view still
+  carries the gateway's call, so the model sees the result. When the call is absent, provider-facing assembly drops
+  the orphan, and consecutive assemblies with the same rows emit the same prefix.
   The full result remained in the session store and was retrievable by recall after two more restarts.
-  Compaction from the returning window refused the mixed view because it still included gateway-owned rows.
-  Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
-  provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
+  The returning window's compaction refuses the mixed view as a designed back-off for gateway-owned rows.
+  It refuses the same way when there is no orphan.
+  On a stamped provisional handoff, the result stays with the gateway and the call stays with the session-ID window,
+  each stored once with one constant orphan.
+  Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. After rollback to v0.30.4,
   an unstamped replay of the returning window's compacted view can still add a copy on each restart.
-- **v0.30.5 known issue (#1250).** When two windows share one session with unstamped rows, the tested replay
-  cases store 1 to 3 extra rows per cold restart with no loss. Keep one window per session until v0.31.0.
-  Check `two_window_replay_copies` in `/lcm doctor` or `lcm_doctor` for possible copies. A genuine new
+- **v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
+  again, one copy per unstamped retained or later row. The short-tail probes measured 1 to 6 extra rows
+  per cold restart with no loss. Keep one window per session until v0.31.0.
+  The `two_window_replay_copies` check in `/lcm doctor` or `lcm_doctor` counts possible unstamped copies. A genuine new
   message that repeats earlier text without a stamp or host UID can also be counted.
   The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.
 - **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.

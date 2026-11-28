@@ -87,7 +87,7 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
         detail["message"] = (
             "These are possible copies stored again on a cold restart while two windows shared a session "
             "with unstamped rows. A genuine new message that repeats earlier text without a stamp can also "
-            "be counted. See the v0.30.5 known-issue note in docs/exactly-once-ingest.md."
+            "be counted. See skills/hermes-lcm/references/session-lifecycle.md."
         )
     if rows_scanned < rows_in_scope:
         detail.update(partial=True, rows_scanned=rows_scanned, rows_in_scope=rows_in_scope)

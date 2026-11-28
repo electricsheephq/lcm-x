@@ -86,17 +86,20 @@ Equal timestamps prove only the receipt's ordered prefix. In every UID mode, a r
 require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
 A new result may still join an unanswered call already owned by the receiving conversation.
 After a re-own, the returning conversation can store a new result without its gateway-owned call.
-The tested cases kept one such orphan across six cold restarts. Provider-facing assembly drops the orphan
-when its call is absent and emits a stable prefix on repeated assembly. The full result stayed in the store
-and recall recovered it after two more restarts. Compaction of the returning window's mixed view was refused
-because it included gateway-owned rows.
-Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
-provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
+The tested cases kept one such orphan across six cold restarts. The live turn's host view still carries
+the gateway's call, so the model sees the result. When the call is absent, provider-facing assembly drops the
+orphan and emits a stable prefix on repeated assembly. The full result stayed in the store and recall recovered
+it after two more restarts. The returning window's compaction refuses the mixed view as a designed back-off
+for gateway-owned rows. It refuses the same way when there is no orphan.
+On a stamped provisional handoff, the result stays with the gateway and the call stays with the session-ID window,
+each stored once with one constant orphan.
+Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. After rollback to v0.30.4,
 an unstamped replay of the returning window's compacted view can still add a copy on each restart.
 
-**v0.30.5 known issue (#1250).** When two windows share one session with unstamped rows, the tested replay
-cases store 1 to 3 extra rows per cold restart with no loss. Keep one window per session until v0.31.0.
-The `two_window_replay_copies` doctor check shows possible copies. A genuine new message that repeats
+**v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
+again, one copy per unstamped retained or later row. The short-tail probes measured 1 to 6 extra rows per
+cold restart with no loss. Keep one window per session until v0.31.0.
+The `two_window_replay_copies` doctor check counts possible unstamped copies. A genuine new message that repeats
 earlier text without a stamp or host UID can also be counted.
 The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.
 
