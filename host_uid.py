@@ -263,11 +263,12 @@ class HostUidShadowMixin:
             self._host_uid_count(Counter(errors=1), exc)
         return known
 
-    def _host_uid_tail_cut(self, messages, row):
+    def _host_uid_tail_cut(self, messages, row, reowned=()):
         if not self._uid_recognition_enabled() or not row or not any(_valid_uid(m.get("message_uid")) for m in messages):
             return None
         if ((lineage := self._host_uid_lineage_key()[0]) is None or row.get("session_id") != self._session_id
-                or str(row.get("conversation_id") or "").strip() not in {"", str(self._conversation_id or "")}):
+                or (str(row.get("conversation_id") or "").strip() not in {"", str(self._conversation_id or "")}
+                    and row["store_id"] not in reowned)):
             return None
         try:
             sid = row["store_id"]
@@ -333,7 +334,8 @@ class HostUidShadowMixin:
                           bound_uids=None, held=None, avoid=(), reowned=()):
         """Resolve durable occurrences and optionally report placeholder versions superseded by their source.
 
-        Only the ownership-receipt replay passes ``reowned`` IDs. Those rows must still belong to this session's lineage.
+        The receipt replay and the session-id window's UID prefix and post-cursor resolves pass validated
+        ``reowned`` IDs. Those rows must still belong to this session's lineage.
         """
         if not self._uid_recognition_enabled():
             return {}

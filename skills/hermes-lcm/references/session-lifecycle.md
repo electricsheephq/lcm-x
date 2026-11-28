@@ -80,8 +80,10 @@ When another conversation owns rows in this session, the session-id window can s
 `session_owned_by_other_window` in status and an observation in doctor. This also applies when the window still
 uses a recorded compression predecessor as its conversation ID. Until v0.31.0, compact a session from one
 window using the conversation ID that owns its rows. Use that same conversation when resuming the session (#1250).
-On return to the session-id window, the ownership receipt recognizes a moved row only with equal timestamps or a
-byte-matched UID binding in mode `on`. Unproven rows go to ordinary ingest, which stores rows it does not recognize.
+The returning session-id window treats validated receipt rows as its own for host UID recognition when enabled in mode `on`.
+Equal timestamps prove only the receipt's ordered prefix. In `off` and `shadow` (the default), ordinary ingest
+stores rows it cannot recognize after the receipt's first break under the session ID. The paired replay grid
+checks whether the excess over v0.30.4 stays bounded across cold restarts.
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 

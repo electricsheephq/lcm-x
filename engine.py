@@ -8974,6 +8974,39 @@ class LCMEngine(
         ):
             raise error
 
+    def _receipt_prior_ingest_row(self, index, message, claimed_id):
+        """Re-use an own-row occurrence recorded for a UID already spent by a stamp.
+
+        Gateway turns can sit between the two occurrences in the ledger, so its
+        contiguous cursor cannot prove the second one. Require the exact prior
+        host prefix and an explicit, live occurrence binding for this index.
+        """
+        attempt = getattr(self, "_ingest_ledger_attempt", None)
+        if attempt is None or message.get("timestamp") is not None or index >= len(attempt["entries"]):
+            return None
+        conn, session = self._store.connection, self._session_id
+        try:
+            lineage = ingest_ledger.persisted_lineage(conn, session, attempt["lineage"])
+            view = ingest_ledger.newest_view(conn, lineage, "ingest")
+            end = 16 * (index + 1)
+            if view is None or view["prefix_chain"][:end] != attempt["chain"][:end]:
+                return None
+            entry = ingest_ledger.decode_entries(view["entries"])[index]
+            if (entry.ref is None or entry.is_descriptor or entry.uidset_digest is None
+                    or entry[:3] != attempt["entries"][index][:3]):
+                return None
+            stored = conn.execute(
+                "SELECT m.store_id FROM occurrence_bindings b JOIN messages m ON b.store_id = m.store_id "
+                "WHERE b.lineage = ? AND b.occ_id = ? AND b.disposition = 'stored' AND b.identity_digest = ? "
+                "AND m.store_id > ? AND m.session_id = ? AND m.conversation_id = ?",
+                (lineage, entry.ref, entry.identity_digest, claimed_id, session, session),
+            ).fetchone()
+            if stored:
+                return self._store.get(stored[0])
+        except (sqlite3.Error, ValueError, IndexError) as exc:
+            self._raise_ingest_busy(exc)
+        return None
+
     def _ledger_cold_cursor(self, messages, ignored, today, session_count, after_commit):
         """Admit the read-only candidate only after the complete legacy choice."""
         attempt, store = getattr(self, "_ingest_ledger_attempt", None), self._store
@@ -9264,6 +9297,8 @@ class LCMEngine(
         uid_recognition = uid_recognition_enabled(self)
         uid_fetched = {} if uid_recognition else None
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
+        self._reowned_receipt_ids = None
+        self._reowned_receipt_pairs = {}
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
 
@@ -9413,8 +9448,12 @@ class LCMEngine(
                 if uid_recognition and anchor_plan["cursor"] < n:
                     matched = anchor_plan.setdefault("matched", {})
                     other_claims = {int(row["store_id"]) for rows in matched.values() for row in rows}
+                    receipt_claims = {sid for idx, sid in self._reowned_receipt_pairs.items()
+                                      if idx < anchor_plan["cursor"]}
+                    other_claims |= receipt_claims
                     for idx, row in self._host_uid_resolve(
-                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims).items():
+                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims,
+                            reowned=self._reowned_receipt_store_ids()).items():
                         if (idx >= anchor_plan["cursor"] and idx not in matched and idx not in anchor_plan["remainders"]
                                 and (row is None or row["store_id"] not in other_claims)):
                             if row is not None:

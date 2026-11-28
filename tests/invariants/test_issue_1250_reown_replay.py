@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from hermes_lcm import engine as engine_module, message_patterns
+from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 from tests.engine_helpers import _FakeTimeoutRegexEngine
 from tests.invariants.test_issue_1250_publication_reown import (
     EARLY, GATEWAY, LATER, SESSION, _bind_gateway, _digests, _hook_for, _rows,
@@ -15,6 +16,159 @@ from tests.invariants.test_issue_1250_publication_reown import (
 open_engine = _open_engine
 pytestmark = pytest.mark.issue(1250)
 REOWN_KEY = f"reowned_session_rows:{SESSION}"
+
+
+@pytest.fixture
+def uid_lineage(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    with sqlite3.connect(tmp_path / "state.db") as db:
+        db.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+        db.execute("INSERT INTO sessions VALUES (?, NULL, NULL)", (SESSION,))
+
+
+def _reown_then_append(open_engine, early):
+    writer = open_engine(fresh_tail_count=0)
+    _start(writer)
+    writer.ingest(early)
+    writer.shutdown()
+    gateway = open_engine(fresh_tail_count=0)
+    _bind_gateway(gateway)
+    gateway.compress(early, force=True)
+    assert gateway.last_compression_status == "compacted"
+    assert gateway._store.read_metadata_json(REOWN_KEY) == [row["store_id"] for row in _rows(gateway)]
+    gateway.ingest(early + LATER[:2])
+    assert len(_rows(gateway)) == len(early) + 2
+    gateway.shutdown()
+
+
+def _cold_replay(open_engine, raw, passes, *, fresh=0):
+    for _ in range(passes):
+        engine = open_engine(fresh_tail_count=fresh)
+        _start(engine)
+        engine.ingest(raw)
+        yield _rows(engine)
+        engine.shutdown()
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("stamp_first", [True, False], ids=["stamp-first", "uid-first"])
+def test_receipt_row_cannot_prove_two_occurrences(open_engine, stamp_first):
+    original = dict(EARLY[0], timestamp=100, message_uid="early-0")
+    _reown_then_append(open_engine, [original])
+    with_stamp = dict(EARLY[0], timestamp=100)
+    with_uid = dict(EARLY[0], message_uid="early-0")
+    raw = [with_stamp, with_uid] if stamp_first else [with_uid, with_stamp]
+    assert [sum(row["content"] == original["content"] for row in stored)
+            for stored in _cold_replay(open_engine, raw, 5)] == [2] * 5
+
+
+@pytest.mark.usefixtures("uid_lineage")
+def test_receipt_claim_does_not_hide_pruned_tool_source(open_engine):
+    call_id = "r12-call"
+    early = [dict(EARLY[0], timestamp=100), {
+        "role": "assistant", "content": "", "timestamp": 101, "message_uid": "early-1",
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+    }, {"role": "tool", "content": "An original result. " * 20, "tool_call_id": call_id, "message_uid": "early-2"}]
+    _reown_then_append(open_engine, early)
+    raw = early[:2] + [dict(early[2], content=_HERMES_PRUNED_TOOL_PLACEHOLDER)]
+    # Keeping the claimed source visible lets the resolver recognize the tool
+    # group, while the post-filter still prevents spending the assistant twice.
+    assert [len(stored) for stored in _cold_replay(open_engine, raw, 6)] == [5] * 6
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mixed, expected", [(True, [8, 9, 10, 11, 12]), (False, [6, 8, 10, 12, 14])],
+                         ids=["mixed-replay", "same-uids-replay-plus-pair"])
+def test_receipt_uid_replay_matches_ga_sequence(open_engine, mixed, expected):
+    early = [dict(row, message_uid=f"early-{i}") for i, row in enumerate(EARLY if mixed else EARLY[:2])]
+    _reown_then_append(open_engine, early)
+    if mixed:
+        raw = early[:2] + [dict(EARLY[2], message_uid="changed"), EARLY[3]]
+    else:
+        raw = early + early
+    assert [len(stored) for stored in _cold_replay(open_engine, raw, 5)] == expected
+
+
+@pytest.mark.usefixtures("uid_lineage")
+def test_receipt_uid_replay_with_stall_rows_matches_ga_sequence(open_engine):
+    early = [dict(row, message_uid=f"early-{i}") for i, row in enumerate(EARLY)]
+    writer, _, _ = _mixed(open_engine, early=early)
+    held = [dict(role="assistant", content="Reply stored during the stall.", message_uid="held-0"),
+            dict(role="user", content="Request stored during the stall.", message_uid="held-1")]
+    writer.ingest(writer.compress(early) + held)
+    writer.shutdown()
+    raw = early + held + [dict(role="assistant", content="New reply after restart."),
+                          dict(role="user", content="New request after restart.")]
+    counts = []
+    for _ in range(5):
+        engine = open_engine()
+        _start(engine)
+        engine.compress(raw, force=True)
+        counts.append(len(_rows(engine)))
+        engine.shutdown()
+    assert counts == [13, 15, 17, 19, 21]
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("receipt", [None, "missing", "foreign", "rotation", "duplicate"])
+def test_unusable_receipt_does_not_widen_uid_resolution(open_engine, monkeypatch, receipt):
+    early = [dict(EARLY[0], timestamp=100, message_uid="early-0")]
+    if receipt is not None:
+        _reown_then_append(open_engine, early)
+    cold = open_engine(fresh_tail_count=0)
+    session = "S2-1250" if receipt == "rotation" else SESSION
+    cold.on_session_start(session, platform="gui", conversation_id=SESSION, context_length=200_000)
+    if receipt == "rotation":
+        rotated = cold._store.append(session, early[0], conversation_id=GATEWAY)
+        cold._store.write_metadata_json([f"reowned_session_rows:{session}"], json.dumps([rotated]))
+    if receipt in {"missing", "foreign", "duplicate"}:
+        first_id = _rows(cold)[0]["store_id"]
+        invalid_id = max(row["store_id"] for row in _rows(cold)) + 1
+        if receipt == "foreign":
+            invalid_id = cold._store.append("foreign-session", early[0], conversation_id=SESSION)
+        elif receipt == "duplicate":
+            invalid_id = first_id
+        cold._store.write_metadata_json([REOWN_KEY], json.dumps([first_id, invalid_id]))
+    seen = []
+    resolve = cold._host_uid_resolve
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("reowned", ()))
+        return resolve(*args, **kwargs)
+
+    monkeypatch.setattr(cold, "_host_uid_resolve", spy)
+    cold.ingest(early)
+    assert seen and not any(seen)
+    assert cold._reowned_receipt_store_ids() == frozenset()
+    if receipt is None:
+        assert cold._last_ingest_reconciliation == {"action": "none", "reason": "not run"}
+    elif receipt != "rotation":
+        # The ordinary ledger can still prove this stamped row in round 11.
+        assert cold._last_ingest_reconciliation["reason"] == "ledger durable cursor (ingest vector)"
+        assert cold._last_ingest_reconciliation["cursor"] == 1
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_receipt_gate_uses_two_sql_variables_for_1200_rows(open_engine, monkeypatch, mode):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    engine = open_engine(fresh_tail_count=0)
+    _start(engine)
+    early = [dict(role="user", content=f"Synthetic row {i}", timestamp=100 + i) for i in range(1200)]
+    with engine._store.atomic(immediate=True):
+        ids = [engine._store.append(SESSION, message, conversation_id=GATEWAY) for message in early]
+        engine._store.write_metadata_json([REOWN_KEY], json.dumps(ids))
+    engine.shutdown()
+    cold = open_engine(fresh_tail_count=0)
+    _start(cold)
+    conn = cold._store.connection
+    conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+    statements = []
+    conn.set_trace_callback(statements.append)
+    cold.ingest(early)
+    assert cold._reowned_receipt_store_ids() == frozenset(ids)
+    assert [row["store_id"] for row in _rows(cold)] == ids
+    assert sum("FROM json_each(" in sql and "JOIN messages m ON m.store_id" in sql for sql in statements) == 1
 
 
 @pytest.fixture
@@ -148,14 +302,27 @@ def test_reowned_replay_checks_host_uid_bindings(open_engine, tmp_path, monkeypa
     assert after[:len(before)] == before
     if shape in {"same-uids", "version-on-other-row"}:
         assert not added
-        assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
+        assert resumed._last_ingest_reconciliation["reason"] == "replayed UID-bound prefix"
     else:
         # v0.30.4 adds all four all-new rows, or one contradicted row in each
         # partial case. The receipt here only proves the prefix before the veto.
         cursor = 0 if shape == "all-new-uids" else 2
-        assert _digests(added) == _digests(incoming[cursor:])
+        assert _digests(added) == _digests(incoming if cursor == 0 else incoming[2:3])
         new_bindings = resumed._store.host_uid_bindings_for(lineage, new_uids.values())
         assert new_bindings == {uid: [(added[i - cursor]["store_id"], "canonical")] for i, uid in new_uids.items()}
+        if cursor:
+            resumed.shutdown()
+            for _ in range(4):
+                cold = open_engine()
+                _start(cold)
+                if shape == "middle-new-uid":
+                    reader = cold._cold_reader_replay_messages
+                    monkeypatch.setattr(cold, "_cold_reader_replay_messages", lambda *args: [
+                        {key: value for key, value in row.items() if key != "message_uid"} for row in reader(*args)
+                    ])
+                cold.ingest(incoming)
+                assert _rows(cold) == after
+                cold.shutdown()
 
 
 @pytest.mark.parametrize("restarts,plain", [(1, False), (2, False), (1, True)],
@@ -387,7 +554,9 @@ def test_replay_receipt_stops_at_unmatched_host_message(open_engine, has_stamps)
     raw = early[:2] + [{"role": "user", "content": "An unmatched request."}] + early[2:]
     stored = _rows(gateway)
     # v0.30.4 has no receipt matcher.
-    assert writer._cursor_from_reowned_session_rows(raw, stored, len(stored)) == (2 if has_stamps else 0)
+    cursor, pairs = writer._cursor_from_reowned_session_rows(raw, stored, len(stored))
+    assert cursor == (2 if has_stamps else 0)
+    assert pairs == {i: row["store_id"] for i, row in enumerate(stored[:cursor])}
 
 
 def test_short_view_skips_full_receipt_scan(open_engine, monkeypatch):
@@ -398,7 +567,7 @@ def test_short_view_skips_full_receipt_scan(open_engine, monkeypatch):
         pytest.fail("a view shorter than the receipt should not load the session")
 
     monkeypatch.setattr(writer._store, "get_session_messages", unexpected_read)
-    assert writer._cursor_from_reowned_session_rows(EARLY[:2], stored[-1:], len(stored)) == 0
+    assert writer._cursor_from_reowned_session_rows(EARLY[:2], stored[-1:], len(stored)) == (0, {})
 
 
 @pytest.mark.parametrize("prior, retained", [

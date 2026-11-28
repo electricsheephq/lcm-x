@@ -3451,45 +3451,67 @@ class ReconcileMixin:
         )
         return 0
 
+    def _reowned_receipt_store_ids(self) -> frozenset[int]:
+        """Validate the session-id window's receipt once per ingest attempt."""
+        session_id = self._session_id
+        if not session_id or self._conversation_id != session_id:
+            return frozenset()
+        if (cached := getattr(self, "_reowned_receipt_ids", None)) is not None:
+            return cached
+        self._reowned_receipt_ids = frozenset()
+        try:
+            ids = self._store.read_metadata_json(reowned_session_rows_key(session_id))
+            if not isinstance(ids, list) or not ids or any(type(sid) is not int or sid <= 0 for sid in ids):
+                return self._reowned_receipt_ids
+            distinct = frozenset(ids)
+            if len(distinct) != len(ids):
+                return self._reowned_receipt_ids
+            count, = self._store.connection.execute(
+                "SELECT COUNT(*) FROM json_each(?) j JOIN messages m ON m.store_id = j.value WHERE m.session_id = ?",
+                (json.dumps(ids), session_id),
+            ).fetchone()
+        except ValueError:
+            return self._reowned_receipt_ids
+        except sqlite3.Error as exc:
+            self._raise_ingest_busy(exc)
+            return self._reowned_receipt_ids
+        if count == len(ids):
+            self._reowned_receipt_ids = distinct
+        return self._reowned_receipt_ids
+
     def _cursor_from_reowned_session_rows(
         self, messages, stored_rows, session_count: int, *,
         ingest_drop_decisions: Callable[[], list[bool]] | None = None,
         original_messages: List[Dict[str, Any]] | None = None,
-    ) -> int:
+    ) -> tuple[int, dict[int, int]]:
         """Recognize the occurrence-proven prefix of a returning session-id window's raw history."""
         session_id = self._session_id
         if self._conversation_id != session_id or (
             len(stored_rows) == session_count
             and not any(row["conversation_id"] not in ("", session_id) for row in stored_rows)
         ):
-            return 0
-        try:
-            ids = self._store.read_metadata_json(reowned_session_rows_key(session_id))
-        except ValueError:
-            return 0
-        if not isinstance(ids, list) or not all(type(store_id) is int and store_id > 0 for store_id in ids):
-            return 0
-        reowned = set(ids)
+            return 0, {}
+        reowned = self._reowned_receipt_store_ids()
         if not reowned or len(messages) < len(reowned):
-            return 0
+            return 0, {}
         if len(stored_rows) < session_count:
             stored_rows = self._store.get_session_messages(session_id, limit=session_count)
         if not reowned <= {row["store_id"] for row in stored_rows}:
-            return 0
-        # The original window contains these exact transferred occurrences and
-        # its own rows. A gateway-owned row outside the receipt is no evidence
-        # for this replay path, even if its bytes happen to match.
+            return 0, {}
         rows = [
             row for row in stored_rows
             if (row["store_id"] in reowned or row["conversation_id"] in ("", session_id))
             and not self._matches_ignore_message_patterns(row, stored_row=True)
         ]
-        if len(rows) > len(messages) or not any(row["store_id"] in reowned for row in rows):
-            return 0
+        positions = {row["store_id"]: index for index, row in enumerate(rows)}
+        last_receipt_pos = max((positions[sid] for sid in reowned if sid in positions), default=-1)
+        if last_receipt_pos < 0:
+            return 0, {}
         drops = (ingest_drop_decisions() if ingest_drop_decisions is not None else
                  [self._matches_ignore_message_patterns(message) for message in messages])
         host_messages = messages if original_messages is None else original_messages
         host_uids, uid_bindings, stored_uids, resolved_uids = [], {}, {}, {}
+        recognition = uid_recognition_enabled(self)
         if host_message_uid_mode() != "off":
             host_uids = [self._host_occurrence_metadata(message)["message_uid"] for message in host_messages]
             wanted = {uid for uid in host_uids if uid is not None}
@@ -3499,38 +3521,60 @@ class ReconcileMixin:
                     stored_uids = self._store.host_uid_uids_of_stores(lineage, [row["store_id"] for row in rows])
                 except sqlite3.Error:
                     logger.debug("LCM could not check UIDs for re-owned session rows", exc_info=True)
-                    return 0
-                if uid_recognition_enabled(self):
+                    return 0, {}
+                if recognition:
                     resolved_uids = self._host_uid_resolve(
                         [message for message, drop in zip(host_messages, drops) if not drop],
                         identities=[message for message, drop in zip(messages, drops) if not drop],
                         reowned=reowned,
                     )
-        matched_cursor = 0
+        next_pos, paired_rows, stamp_claimed = 0, {}, set()
         visible = (index for index, drop in enumerate(drops) if not drop)
-        for pair, (index, row) in enumerate(zip(visible, rows)):
+        for pair, index in enumerate(visible):
             message = messages[index]
             ident = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
+            if _has_lossy_redacted_identity(ident):
+                break
             stamp = _normalize_observed_at(message.get("timestamp"))
-            stored_ident = self._message_replay_identity(
-                row, stored_row=True, strip_carrier=False, allow_pruned_tool_alias=False,
-            )
-            if (_has_lossy_redacted_identity(ident)
-                    or stamp is not None and row["observed_at"] is not None and stamp != row["observed_at"]
-                    or ident != stored_ident):
-                break
-            store_id = row["store_id"]
-            if host_uids and (uid := host_uids[index]) is not None:
-                row_uids = stored_uids.get(store_id, ())
-                if (any(bound_id != store_id for bound_id, _ in uid_bindings.get(uid, ()))
-                        or row_uids and uid not in row_uids):
-                    break
+            uid = host_uids[index] if host_uids else None
+            stamped = rows[next_pos] if stamp is not None and next_pos <= last_receipt_pos else None
             uid_row = resolved_uids.get(pair)
-            if not (stamp is not None and stamp == row["observed_at"]
-                    or uid_row is not None and uid_row["store_id"] == store_id):
+            prior = None
+            if uid_row is not None and uid_row["store_id"] in stamp_claimed:
+                prior = self._receipt_prior_ingest_row(index, host_messages[index], uid_row["store_id"])
+            for row in (stamped, uid_row, prior):
+                if row is None:
+                    continue
+                sid, observed = row["store_id"], row["observed_at"]
+                position = positions.get(sid, -1)
+                if position < next_pos or (stamp is not None and observed is not None and stamp != observed):
+                    continue
+                if row is not prior and uid is not None:
+                    row_uids = stored_uids.get(sid, ())
+                    if (any(bound_id != sid for bound_id, _ in uid_bindings.get(uid, ()))
+                            or row_uids and uid not in row_uids):
+                        continue
+                if row is not uid_row and row is not prior and stamp != observed:
+                    continue
+                if ident != self._message_replay_identity(
+                        row, stored_row=True, strip_carrier=False, allow_pruned_tool_alias=False):
+                    continue
+                paired_rows[index] = [row]
+                next_pos = position + 1
+                if uid is None and stamp is not None and sid in reowned:
+                    stamp_claimed.add(sid)
                 break
-            matched_cursor = index + 1
-        return matched_cursor
+            else:
+                break
+        if paired_rows and not recognition:
+            # Stamp-only replay must not consume the opening assistant of an
+            # unproven tool segment and leave only its results to be stored.
+            hits = set(paired_rows)
+            self._identity_anchor_tool_segments(messages, 0, hits, paired_rows)
+            stop = min(paired_rows.keys() - hits, default=len(messages))
+            paired_rows = {index: rows for index, rows in paired_rows.items() if index < stop}
+        pairs = {index: matched[0]["store_id"] for index, matched in paired_rows.items()}
+        return max(pairs, default=-1) + 1, pairs
 
     def _reconcile_ingest_cursor_from_store(
         self,
@@ -3546,6 +3590,7 @@ class ReconcileMixin:
 
         ``session_counts`` (#1286), when given, receives the session's stored row count at this bind.
         """
+        self._reowned_receipt_pairs = {}
         if not self._session_id or not messages:
             return 0
 
@@ -3555,8 +3600,11 @@ class ReconcileMixin:
         recognition = uid_recognition_enabled(self)
         uid_cursor = 0
         if recognition:
+            receipt_ids = self._reowned_receipt_store_ids()
             bound_uids = set()
-            uid_matches = self._host_uid_resolve(messages, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids)
+            uid_matches = self._host_uid_resolve(
+                messages, prefix_only=True, fetched=uid_fetched, bound_uids=bound_uids, reowned=receipt_ids,
+            )
             uid_cursor = next((i for i in range(len(messages)) if i not in uid_matches), len(messages))
             if uid_cursor == len(messages):
                 return self._record_uid_cursor(messages, uid_cursor, session_count, 0)
@@ -3602,7 +3650,8 @@ class ReconcileMixin:
             logger.info("LCM UID cut budget disabled: unbound_host_rows=%d", unbound)
             budgeted = False
         # Later cuts can mistake new rows for older equal content (#1511). Earlier ones keep their own proof.
-        content_cut = self._host_uid_tail_cut(messages, stored_tail_rows[-1]) if budgeted and stored_tail_rows else None
+        content_cut = (self._host_uid_tail_cut(messages, stored_tail_rows[-1], reowned=receipt_ids)
+                       if budgeted and stored_tail_rows else None)
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -3650,11 +3699,12 @@ class ReconcileMixin:
             )
             return replay_cursor
         if max(cursor or 0, uid_cursor) < len(messages):
-            reowned_cursor = self._cursor_from_reowned_session_rows(
+            reowned_cursor, pairs = self._cursor_from_reowned_session_rows(
                 messages, stored_rows, session_count, ingest_drop_decisions=ingest_drop_decisions,
                 original_messages=original_messages,
             )
             if reowned_cursor > max(cursor or 0, uid_cursor):
+                self._reowned_receipt_pairs = pairs
                 effective_incoming = (
                     len(messages) - sum(ingest_drop_decisions()) if ingest_drop_decisions is not None
                     else sum(not self._matches_ignore_message_patterns(message) for message in messages)
