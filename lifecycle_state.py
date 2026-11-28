@@ -49,10 +49,11 @@ class LifecycleOtherWindowConflictError(LifecyclePublicationConflictError):
 
     reason = "session_owned_by_other_window"
 
-    def __init__(self, other_conversation_id: str, row_count: int) -> None:
+    def __init__(self, other_conversation_id: str, store_ids: frozenset[int]) -> None:
         super().__init__("Compaction publication source ownership changed")
         self.other_conversation_id = other_conversation_id
-        self.row_count = row_count
+        self.store_ids = store_ids
+        self.row_count = len(store_ids)
 
 
 def _compaction_coverage_conflict_message(
@@ -1123,11 +1124,14 @@ class LifecycleStateStore:
                 if len(owners) == 1:
                     other_conversation_id, = owners
                     binding = conn.execute(
-                        "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                        "SELECT current_session_id, last_finalized_session_id "
+                        "FROM lcm_lifecycle_state WHERE conversation_id = ?",
                         (other_conversation_id,),
                     ).fetchone()
-                    if binding is not None and binding[0] == session_id:
-                        raise LifecycleOtherWindowConflictError(other_conversation_id, len(offending))
+                    if binding is not None and (binding[0] == session_id or tuple(binding) == (None, session_id)):
+                        raise LifecycleOtherWindowConflictError(
+                            other_conversation_id, frozenset(int(row[0]) for row in offending),
+                        )
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )

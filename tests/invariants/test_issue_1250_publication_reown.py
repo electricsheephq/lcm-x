@@ -218,8 +218,8 @@ def summary_calls(open_engine, monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("clear", ["other-rebind", "start", "reset", "overflow"])
-def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, clear):
+@pytest.mark.parametrize("followup", ["other-rebind", "start", "reset", "overflow", "cleanup", "hold"])
+def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, followup):
     writer, gateway = open_engine(), open_engine()
     writer.on_session_start(SESSION, platform="gui", context_length=200_000)
     writer.ingest(list(EARLY))
@@ -242,19 +242,31 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
     assert len(summary_calls) - call_count == 1
     warnings = [record for record in caplog.records if "session_owned_by_other_window" in record.getMessage()]
     assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert "failure=publication_invariant_conflict" in warnings[0].getMessage()
     assert _rows(writer) == before
 
-    if clear == "other-rebind":
+    if followup in {"cleanup", "hold"}:
+        if followup == "cleanup":
+            writer._compaction_request.below_threshold_cleanup_only = True
+        else:
+            writer._start_no_progress_hold("no_progress", persist=True)
+        call_count = len(summary_calls)
+        assert writer.compress(list(fallback), current_tokens=100) == fallback
+        assert writer.last_compression_status == "sanitized"
+        assert len(summary_calls) == call_count
+        assert _rows(writer) == before
+        return
+    if followup == "other-rebind":
         gateway.on_session_start("another-session", platform="desktop", conversation_id=GATEWAY,
                                  context_length=200_000)
-    elif clear == "start":
+    elif followup == "start":
         writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
-    elif clear == "reset":
+    elif followup == "reset":
         writer.on_session_reset()
     else:
         monkeypatch.setattr(writer, "_should_force_overflow_recovery", lambda **_: True)
         monkeypatch.setattr(writer, "_overflow_recovery_assembly_cap", lambda **_: 100_000)
-    if clear in {"start", "reset"}:
+    if followup in {"start", "reset"}:
         assert writer._session_owner_backoff is None
         assert _rows(writer) == before
         return
@@ -262,8 +274,75 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
     writer.compress(list(fallback), force=True)
     assert len(summary_calls) > call_count
     assert _rows(writer) == before
-    if clear == "other-rebind":
+    if followup == "other-rebind":
         assert writer.get_status()["last_compression_failure_reason"] == "publication_invariant_conflict"
+
+
+@pytest.mark.parametrize("finalize_before_conflict", [False, True], ids=["keep-armed", "arm-after-end"])
+def test_second_window_stall_backs_off_after_gateway_ends(open_engine, summary_calls, finalize_before_conflict):
+    writer, gateway = open_engine(), open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    gateway_view = _publish(gateway, EARLY + LATER)
+    before = _rows(writer)
+    call_count = len(summary_calls)
+    if finalize_before_conflict:
+        gateway.on_session_end(SESSION, gateway_view)
+    fallback = writer.compress(list(EARLY))
+    assert len(summary_calls) == call_count + 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    if not finalize_before_conflict:
+        gateway.on_session_end(SESSION, gateway_view)
+    binding = writer._lifecycle.get_by_conversation(GATEWAY)
+    assert binding.current_session_id is None and binding.last_finalized_session_id == SESSION
+    threshold = writer.threshold_tokens
+    assert writer.compress(list(fallback), current_tokens=threshold) == fallback
+    assert len(summary_calls) == call_count + 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    sweep = writer._last_threshold_full_sweep
+    assert (sweep["status"], sweep["stop_reason"], sweep["tokens_before"], sweep["total_passes"]) == (
+        "error", "session_owned_by_other_window", threshold, 0,
+    )
+    assert _rows(writer) == before
+
+
+@pytest.mark.parametrize("next_pass_overflow", [False, True], ids=["threshold", "overflow"])
+def test_second_window_publishes_after_overflow_drops_conflicting_rows(
+    open_engine, summary_calls, monkeypatch, next_pass_overflow,
+):
+    writer, gateway = open_engine(large_output_active_replay_stubbing_enabled=False), open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    _publish(gateway, EARLY + LATER)
+    host = writer.compress(list(EARLY))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    for i in range(3):
+        host = _add_turn(writer, host, i)
+    before = _rows(writer)
+    gateway_ids = {row["store_id"] for row in before if row["conversation_id"] == GATEWAY}
+    with monkeypatch.context() as overflow:
+        overflow.setattr(writer._config, "max_assembly_tokens", 44)
+        host = writer.compress(list(host))
+    assert writer.last_compression_status == "error"
+    assert not gateway_ids.intersection(writer._get_store_id_map_for_messages(host).values())
+    assert writer._lifecycle.get_by_conversation(GATEWAY).current_session_id == SESSION
+    assert writer._session_owner_backoff is not None
+    nodes = writer._dag.get_session_node_count(SESSION)
+    call_count = len(summary_calls)
+    if next_pass_overflow:
+        monkeypatch.setattr(writer._config, "max_assembly_tokens", 44)
+    tokens = 44 if next_pass_overflow else writer.threshold_tokens
+    assert writer._should_force_overflow_recovery(observed_tokens=tokens, messages=host) == next_pass_overflow
+    writer.compress(list(host), current_tokens=tokens)
+    assert writer.last_compression_status == "compacted"
+    assert writer._dag.get_session_node_count(SESSION) > nodes
+    assert len(summary_calls) > call_count
+    assert writer._session_owner_backoff is None
+    assert _rows(writer) == before
 
 
 @pytest.mark.parametrize("kind", ["unrelated-owner", "gateway-publisher", "delegate-publisher"])
