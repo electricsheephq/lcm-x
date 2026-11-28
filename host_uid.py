@@ -263,11 +263,12 @@ class HostUidShadowMixin:
             self._host_uid_count(Counter(errors=1), exc)
         return known
 
-    def _host_uid_tail_cut(self, messages, row):
+    def _host_uid_tail_cut(self, messages, row, reowned=()):
         if not self._uid_recognition_enabled() or not row or not any(_valid_uid(m.get("message_uid")) for m in messages):
             return None
         if ((lineage := self._host_uid_lineage_key()[0]) is None or row.get("session_id") != self._session_id
-                or str(row.get("conversation_id") or "").strip() not in {"", str(self._conversation_id or "")}):
+                or (str(row.get("conversation_id") or "").strip() not in {"", str(self._conversation_id or "")}
+                    and row["store_id"] not in reowned)):
             return None
         try:
             sid = row["store_id"]
@@ -330,8 +331,13 @@ class HostUidShadowMixin:
             return source
 
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
-                          bound_uids=None, held=None, avoid=()):
-        """Resolve durable occurrences and optionally report placeholder versions superseded by their source."""
+                          bound_uids=None, held=None, avoid=(), reowned=(), defer_tool_segments=False):
+        """Resolve durable occurrences and optionally report placeholder versions superseded by their source.
+
+        The receipt replay and the session-id window's UID prefix and post-cursor resolves pass validated
+        ``reowned`` IDs. Those rows must still belong to this session's lineage.
+        Receipt replay defers the tool segment check until it combines UID and stamp matches.
+        """
         if not self._uid_recognition_enabled():
             return {}
         uids = [m.get("message_uid") for m in messages]
@@ -350,7 +356,7 @@ class HostUidShadowMixin:
             carry = self._load_compression_carry_ranges() if fetched else ()
             conversation = {"", str(self._conversation_id or "")}
             owned = {sid: row for sid, row in fetched.items() if row and self._identity_anchor_owned(row, carry)
-                     and str(row.get("conversation_id") or "").strip() in conversation}
+                     and (str(row.get("conversation_id") or "").strip() in conversation or sid in reowned)}
             for idx, (uid, message) in enumerate(zip(uids, messages)):
                 if _valid_uid(uid) and not message.get("_absorbed_message_uids"):
                     identity = (identities if identities is not None else messages)[idx]
@@ -379,7 +385,8 @@ class HostUidShadowMixin:
                         continue
                 if prefix_only:
                     break
-            if resolved and (identities is not None or prefix_only and len(resolved) < len(messages)):
+            if resolved and not defer_tool_segments and (
+                    identities is not None or prefix_only and len(resolved) < len(messages)):
                 visible = [i for i, m in enumerate(messages) if not self._matches_ignore_message_patterns(m)]
                 hits = {j for j, i in enumerate(visible) if i in resolved}
                 self._identity_anchor_tool_segments([messages[i] for i in visible], 0, hits,

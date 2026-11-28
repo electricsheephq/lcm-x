@@ -17,6 +17,7 @@ from tests.behaviour.ingest_trace_harness import (
     engine_attributes, engine_module, first_difference, observe,
     install_clock, reopen, search_observation, snapshot,
 )
+from tests.behaviour.reconcile_trace_harness import ATTEMPT_ATTRIBUTES
 from tests.harness import engine_context, pin_char_counter
 
 
@@ -51,7 +52,8 @@ def test_ingest_golden(case: Any, tmp_path: Path) -> None:
 def test_observer_completeness(tmp_path: Path) -> None:
     discovered, methods = engine_attributes(Path(engine_module.__file__).parent)
     assert "_ingest_messages" in methods
-    assert discovered <= OBSERVED_ATTRIBUTES, f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES)}"
+    unobserved = discovered - OBSERVED_ATTRIBUTES - ATTEMPT_ATTRIBUTES
+    assert not unobserved, f"Unobserved engine state: {sorted(unobserved)}"
     assert "_ingest_cursor" in discovered
     assert REFUSED_INPUT in discovered
     assert "_identity_anchor_commit" in methods

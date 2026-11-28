@@ -76,6 +76,34 @@ to its parent session.
 
 ## Compaction commits
 
+Any non-delegate window can see `session_owned_by_other_window` in status and an observation in doctor when all
+conflicting rows belong to the session and one other conversation with a lifecycle record owns them. For a window
+bound to a recorded rotation predecessor, the check also includes rows from that predecessor chain. Until #2938 is fixed,
+compact a session from one window using the conversation ID that owns its rows. Use that same conversation when
+resuming the session (#1250).
+The returning session-id window treats validated receipt rows as its own for host UID recognition when enabled in mode `on`.
+Equal timestamps prove only the receipt's ordered prefix. In every UID mode, a receipt or provisional proof can
+require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
+A new result may still join an unanswered call already owned by the receiving conversation.
+After a re-own, the returning conversation can store a new result without its gateway-owned call.
+The tested cases kept one such orphan across six cold restarts. The live turn's host view still carries
+the gateway's call, so the model sees the result. When the call is absent, provider-facing assembly drops the
+orphan and emits a stable prefix on repeated assembly. The full result stayed in the store and recall recovered
+it after two more restarts. The returning window's compaction refuses the mixed view as a designed back-off
+for gateway-owned rows. It refuses the same way when there is no orphan.
+On a stamped provisional handoff, the result stays with the gateway and the call stays with the session-ID window,
+each stored once with one constant orphan.
+Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. After rollback to v0.30.4,
+an unstamped replay of the returning window's compacted view can still add a copy on each restart.
+
+**v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
+again, one copy per unstamped retained or later row. The first two restarts can also store up to two
+copies of tool rows with their original stamps. The short-tail probes measured 1 to 6 extra rows per
+cold restart with no loss. Keep one window per session until #3128 is fixed.
+The `two_window_replay_copies` doctor check counts unstamped repeats and exact stamped copies. A genuine new message that repeats
+earlier text without a stamp or host UID can also be counted.
+The check scans at most 20,000 in-scope rows, the most recently written sessions first, and reports a partial count past that limit.
+
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 
 At process exit, scheduler work and orphaned local encoder workers share one deadline.

@@ -1,0 +1,826 @@
+"""#1250: a leaf can atomically take ownership of its session's provisional rows (I1, I2, I5, I14)."""
+
+import ast
+from collections import Counter
+from contextlib import ExitStack, nullcontext
+from copy import deepcopy
+from hashlib import sha256
+import json
+import logging
+from pathlib import Path
+
+import pytest
+
+from hermes_lcm import engine as engine_module, plugin_identity
+from hermes_lcm.aux_session import _DELEGATE_SOURCE
+from hermes_lcm.command_doctor import _doctor_text
+from hermes_lcm.command_status import _status_text
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryNode
+from hermes_lcm.engine import LCMEngine
+from hermes_lcm.engine_registry import (
+    ActiveEngineUseStatus, use_active_lcm_engine, use_cold_lcm_engine, use_lcm_engine,
+)
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError, reowned_session_rows_key
+from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tools import lcm_grep
+from tests.test_issue_671_stub_first_exit import payload_of, tool_content, tool_pair
+
+SESSION = "S-1250"
+GATEWAY = "agent:main:local:dm:S-1250"
+SETTINGS = dict(fresh_tail_count=1, leaf_chunk_tokens=1, incremental_max_depth=0,
+                temporal_rollups_enabled=False, embeddings_enabled=False)
+EARLY = [
+    {"role": "user", "content": "Early GUI turn: project cobalt uses SQLite."},
+    {"role": "assistant", "content": "Cobalt keeps authoritative history in SQLite."},
+    {"role": "user", "content": "Early GUI turn: the deployment checkpoint is approved."},
+    {"role": "assistant", "content": "Checkpoint approval recorded for cobalt."},
+]
+LATER = [
+    {"role": "user", "content": "Desktop turn: add a nightly backup job."},
+    {"role": "assistant", "content": "Nightly backup job added to the cobalt plan."},
+    {"role": "user", "content": "Desktop turn: rotate the logs weekly."},
+    {"role": "assistant", "content": "Weekly log rotation added."},
+    {"role": "user", "content": "Desktop turn: keep the newest turn in context."},
+]
+
+pytestmark = pytest.mark.issue(1250)
+
+
+@pytest.fixture
+def open_engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **_: ("Cobalt summary.", 1))
+    with ExitStack() as stack:
+        def open_one(**overrides):
+            engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"), **(SETTINGS | overrides)))
+            stack.callback(engine.shutdown)
+            return engine
+
+        yield open_one
+
+
+def _hook_for(engine):
+    # The real hook body, with the production registry and ingest, from the investigation repro.
+    source = Path(engine_module.__file__).with_name("__init__.py")
+    tree = ast.parse(source.read_text())
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name in {"_engine_bound_session_id", "_on_post_llm_call"}
+    ]
+    namespace = dict(
+        engine=engine, active=True, _identity=plugin_identity, nullcontext=nullcontext,
+        logger=logging.getLogger(__name__), ActiveEngineUseStatus=ActiveEngineUseStatus,
+        use_active_lcm_engine=use_active_lcm_engine, use_cold_lcm_engine=use_cold_lcm_engine,
+        use_lcm_engine=use_lcm_engine,
+    )
+    exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["_on_post_llm_call"]
+
+
+def _bind_gateway(engine):
+    engine.on_session_start(SESSION, platform="desktop", conversation_id=GATEWAY, context_length=200_000)
+
+
+def _rows(engine):
+    return engine._store.get_session_messages(SESSION)
+
+
+def _digests(rows):
+    return Counter((row["role"], sha256(row["content"].encode()).hexdigest()) for row in rows)
+
+
+def _frontier(engine):
+    return engine._lifecycle.get_by_conversation(GATEWAY).current_frontier_store_id
+
+
+def _coverage(engine):
+    return {store_id for node in engine._dag.get_session_nodes(SESSION) for store_id in node.source_ids}
+
+
+def _owners(engine):
+    return {row["store_id"]: row["conversation_id"] for row in _rows(engine)}
+
+
+def _seed_mixed(engine):
+    engine.on_session_start(SESSION, platform="gui", context_length=200_000)
+    engine.ingest(list(EARLY))
+    _bind_gateway(engine)
+    engine.ingest(EARLY + LATER)
+    assert list(_owners(engine).values()) == [SESSION] * len(EARLY) + [GATEWAY] * len(LATER)
+    return EARLY + LATER
+
+
+def _seed_compacted(engine):
+    engine.on_session_start(SESSION, platform="gui", context_length=200_000)
+    engine.ingest(list(EARLY))
+    host = list(engine.compress(list(EARLY)))
+    assert engine.last_compression_status == "compacted"
+    return host
+
+
+def _publish(engine, host):
+    before = _rows(engine)
+    frontier = _frontier(engine)
+    nodes = engine._dag.get_session_node_count(SESSION)
+    output = list(engine.compress(list(host)))
+    assert engine.last_compression_status == "compacted"
+    assert _frontier(engine) > frontier
+    assert engine._dag.get_session_node_count(SESSION) > nodes
+    after = _rows(engine)
+    assert _digests(after) == _digests(before)
+    assert after == [
+        dict(old, conversation_id=new["conversation_id"])
+        for old, new in zip(before, after, strict=True)
+    ]
+    return output
+
+
+def _add_turn(engine, host, index):
+    turn = [
+        {"role": "assistant", "content": f"Desktop reply {index}."},
+        {"role": "user", "content": f"Desktop follow-up {index}."},
+    ]
+    expected = _digests(_rows(engine)) + _digests(turn)
+    engine.ingest(host + turn)
+    assert _digests(_rows(engine)) == expected
+    return host + turn
+
+
+@pytest.mark.parametrize("cold_hook", [False, True], ids=["identityless-bind", "cold-post-turn-hook"])
+def test_mixed_session_publishes_first_and_later_passes(open_engine, cold_hook, caplog):
+    engine = open_engine()
+    if cold_hook:
+        hook = _hook_for(engine)
+        hook(session_id=SESSION, platform="gui", conversation_history=list(EARLY))
+        assert list(_owners(engine).values()) == [SESSION] * len(EARLY)
+        _bind_gateway(engine)
+        hook(session_id=SESSION, platform="desktop", conversation_id=GATEWAY, conversation_history=EARLY + LATER)
+        host = EARLY + LATER
+    else:
+        host = _seed_mixed(engine)
+    before = _rows(engine)
+    with caplog.at_level(logging.INFO, logger="hermes_lcm.compaction"):
+        for index in range(3):
+            if index:
+                host = _add_turn(engine, host, index)
+            host = _publish(engine, host)
+    assert all(owner == GATEWAY for owner in _owners(engine).values())
+    first, last = before[0]["store_id"], before[len(EARLY) - 1]["store_id"]
+    assert [record.getMessage() for record in caplog.records if "re-owned provisional rows" in record.getMessage()] == [
+        f"LCM publication re-owned provisional rows: conversation={GATEWAY} session={SESSION} "
+        f"count={len(EARLY)} store_ids={first}-{last}"
+    ]
+
+
+@pytest.mark.parametrize("unmatched", [False, True], ids=["absent", "unmatched"])
+def test_finding5_does_not_move_rows_the_leaf_skips(open_engine, unmatched):
+    engine = open_engine()
+    _seed_mixed(engine)
+    before = _rows(engine)
+    early_ids = {key for key, owner in _owners(engine).items() if owner == SESSION}
+    host = [dict(row, content="[gui] " + row["content"]) for row in EARLY] + LATER if unmatched else LATER
+    _publish(engine, host)
+    assert _frontier(engine) > max(early_ids)
+    engine.compress(EARLY + LATER)
+    assert engine.last_compression_status in {"compacted", "noop", "idle"}
+    assert not (early_ids & _coverage(engine))
+    assert _rows(engine) == before
+
+
+def test_hidden_provisional_row_between_consumed_rows_stays_recallable(open_engine):
+    engine = open_engine()
+    _bind_gateway(engine)
+    hidden = {"role": "user", "content": "Cobalthiddenmarker remains searchable."}
+    engine.ingest(EARLY[:1])
+    left = _rows(engine)[0]["store_id"]
+    hidden_id = engine._store.append(SESSION, hidden, conversation_id=SESSION)
+    engine.ingest(EARLY[:3])
+    before = _rows(engine)
+    right = before[2]["store_id"]
+    _publish(engine, EARLY[:3])
+    assert {left, right} <= _coverage(engine)
+    assert hidden_id < _frontier(engine) and hidden_id not in _coverage(engine)
+    assert _rows(engine) == before
+    assert _digests(_rows(engine))[next(iter(_digests([hidden])))] == 1
+    query = {"query": "cobalthiddenmarker"}
+    default = json.loads(lcm_grep(query, engine=engine))
+    assert [hit["store_id"] for hit in default["results"]] == [hidden_id]
+    scoped = json.loads(lcm_grep({**query, "conversation_id": GATEWAY}, engine=engine))
+    assert scoped["results"] == []
+
+
+@pytest.fixture
+def summary_calls(open_engine, monkeypatch):
+    calls = []
+
+    def summarize(**kwargs):
+        calls.append(None)
+        return "Cobalt summary.", 1
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    return calls
+
+
+@pytest.mark.parametrize("followup", ["owner-changed", "owner-state-removed", "start", "reset", "overflow", "cleanup", "hold"])
+def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, followup):
+    writer, gateway = open_engine(), open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    _publish(gateway, EARLY + LATER)
+    old_host = list(EARLY)
+    before = _rows(writer)
+    call_count = len(summary_calls)
+    with caplog.at_level(logging.WARNING, logger="hermes_lcm.compaction"):
+        fallback = writer.compress(old_host)
+        assert writer.last_compression_status == "error"
+        reason = writer.last_compression_noop_reason
+        assert "Only one window should compact a session (issue 1250)." in reason
+        assert "last_compression_failure_reason: session_owned_by_other_window" in _status_text(writer)
+        assert reason in _status_text(writer)
+        assert reason in _doctor_text(writer)
+        assert writer.compress(list(fallback)) == fallback
+        assert writer.compress(list(fallback)) == fallback
+    assert len(summary_calls) - call_count == 1
+    warnings = [record for record in caplog.records if "session_owned_by_other_window" in record.getMessage()]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert "failure=publication_invariant_conflict" in warnings[0].getMessage()
+    assert _rows(writer) == before
+
+    if followup in {"cleanup", "hold"}:
+        if followup == "cleanup":
+            writer._compaction_request.below_threshold_cleanup_only = True
+        else:
+            writer._start_no_progress_hold("no_progress", persist=True)
+        call_count = len(summary_calls)
+        assert writer.compress(list(fallback), current_tokens=100) == fallback
+        assert writer.last_compression_status == "sanitized"
+        assert len(summary_calls) == call_count
+        assert _rows(writer) == before
+        return
+    if followup == "owner-changed":
+        with writer._store.atomic(immediate=True):
+            writer._store.connection.execute(
+                "UPDATE messages SET conversation_id = ? WHERE session_id = ?", ("new-owner", SESSION),
+            )
+        before = _rows(writer)
+    elif followup == "owner-state-removed":
+        with writer._store.atomic(immediate=True):
+            writer._store.connection.execute(
+                "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?", (GATEWAY,),
+            )
+    elif followup == "start":
+        writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+    elif followup == "reset":
+        writer.on_session_reset()
+    else:
+        monkeypatch.setattr(writer, "_should_force_overflow_recovery", lambda **_: True)
+        monkeypatch.setattr(writer, "_overflow_recovery_assembly_cap", lambda **_: 100_000)
+    if followup in {"start", "reset"}:
+        assert writer._session_owner_backoff is None
+        assert _rows(writer) == before
+        return
+    call_count = len(summary_calls)
+    writer.compress(list(fallback), force=True)
+    assert len(summary_calls) > call_count
+    assert _rows(writer) == before
+    if followup in {"owner-changed", "owner-state-removed"}:
+        assert writer._session_owner_backoff is None
+        assert writer.last_compression_noop_reason == "summary publication could not prove contiguous source coverage"
+
+
+@pytest.mark.parametrize("finalize_before_conflict", [False, True], ids=["keep-armed", "arm-after-end"])
+def test_second_window_stall_backs_off_after_gateway_ends(open_engine, summary_calls, finalize_before_conflict):
+    writer = open_engine(large_output_active_replay_stubbing_enabled=False)
+    gateway = open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    gateway_view = _publish(gateway, EARLY + LATER)
+    before = _rows(writer)
+    call_count = len(summary_calls)
+    if finalize_before_conflict:
+        gateway.on_session_end(SESSION, gateway_view)
+    fallback = writer.compress(list(EARLY))
+    assert len(summary_calls) == call_count + 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    if not finalize_before_conflict:
+        gateway.on_session_end(SESSION, gateway_view)
+    binding = writer._lifecycle.get_by_conversation(GATEWAY)
+    assert binding.current_session_id is None and binding.last_finalized_session_id == SESSION
+    threshold = writer.threshold_tokens
+    assert writer.compress(list(fallback), current_tokens=threshold) == fallback
+    assert len(summary_calls) == call_count + 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    sweep = writer._last_threshold_full_sweep
+    assert (sweep["status"], sweep["stop_reason"], sweep["tokens_before"], sweep["total_passes"]) == (
+        "error", "session_owned_by_other_window", threshold, 0,
+    )
+    assert _rows(writer) == before
+
+
+def test_second_window_backoff_allows_stub_exit_and_pre_leaf_condensation(open_engine, monkeypatch):
+    writer = open_engine(
+        large_output_externalization_threshold_chars=1_000_000,
+        leaf_chunk_tokens=250,
+        summary_prefix_target_tokens=100,
+    )
+    gateway = open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    first = _publish(gateway, EARLY + LATER)
+    later = _add_turn(gateway, first, 0)
+    _publish(gateway, later)
+
+    leaf_calls = []
+    summarize_leaf = writer._summarize_leaf_chunk_with_rescue
+
+    def count_leaf(*args, **kwargs):
+        leaf_calls.append(None)
+        return summarize_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "_summarize_leaf_chunk_with_rescue", count_leaf)
+    writer.threshold_tokens = 3_500
+    host = list(EARLY) + [{"role": "user", "content": "Read the tool fixture."}]
+    host += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(leaf_calls) == 1
+
+    host += [{"role": "user", "content": "The tool output is now outside the fresh tail."}]
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer._last_threshold_full_sweep["stop_reason"] == "stub_first_exit"
+    assert tool_content(host, "threshold-tool").startswith("[Externalized tool output:")
+    assert writer._session_owner_backoff is not None
+
+    # Give the already published summaries their own sweep budget.
+    writer._config.summary_prefix_target_tokens = 1
+    host += [{"role": "user", "content": payload_of(3_600, "new threshold turn")}]
+    expected = _digests(_rows(writer)) + _digests(host[-1:])
+    writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer._last_threshold_full_sweep["pre_leaf_condensation_passes"] == 1
+    assert writer._last_threshold_full_sweep["condensation_passes"] == 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(leaf_calls) == 1
+    assert _digests(_rows(writer)) == expected
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+@pytest.mark.parametrize("window", ["gateway", "session-id"])
+def test_threshold_backoff_over_six_host_turns(open_engine, monkeypatch, mode, window):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    writer, gateway = open_engine(), open_engine()
+    writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+    if window == "session-id":
+        _bind_gateway(gateway)
+        writer._config.summary_prefix_target_tokens = gateway._config.summary_prefix_target_tokens = 100
+        gateway.ingest(deepcopy(EARLY))
+    writer.ingest(deepcopy(EARLY))
+    if window == "gateway":
+        _bind_gateway(gateway)
+    host = deepcopy(EARLY + LATER)
+    gateway.ingest(host)
+    gateway_view = gateway.compress(host)
+    if window == "session-id":
+        gateway.compress(gateway_view + [
+            {"role": "assistant", "content": "Gateway later reply."},
+            {"role": "user", "content": "Gateway later request."},
+        ])
+        active, view = writer, deepcopy(EARLY)
+        expected_condensations, sizes = 1, [7, 8, 9, 10, 11, 12]
+    else:
+        writer._config.large_output_active_replay_stubbing_enabled = False
+        writer_view = writer.compress(deepcopy(EARLY))
+        for index in range(3):
+            writer_view += [
+                {"role": "assistant", "content": f"Desktop reply {index}."},
+                {"role": "user", "content": f"Desktop follow-up {index}."},
+            ]
+            writer.ingest(writer_view)
+        with monkeypatch.context() as overflow:
+            overflow.setattr(writer._config, "max_assembly_tokens", 44)
+            writer_view = writer.compress(deepcopy(writer_view))
+        writer._config.summary_prefix_target_tokens = 100
+        writer.compress(deepcopy(writer_view), current_tokens=writer.threshold_tokens)
+        late = [row for row in _rows(writer) if row["content"].startswith(("Desktop reply ", "Desktop follow-up "))]
+        assert _coverage(writer) & {row["store_id"] for row in late}
+        assert {row["conversation_id"] for row in late} == {SESSION}
+        view = gateway_view + [{"role": row["role"], "content": row["content"]} for row in late] + [
+            {"role": "assistant", "content": "Gateway reply after the late leaf."},
+            {"role": "user", "content": "Gateway follow-up after the late leaf."},
+        ]
+        writer.shutdown()
+        gateway.shutdown()
+        active = open_engine()
+        _bind_gateway(active)
+        expected_condensations, sizes = 3, [13 if mode == "on" else 12, 13, 14, 15, 16, 17]
+
+    active._config.large_output_externalization_threshold_chars = 1_000_000
+    active._config.summary_prefix_target_tokens = 100
+    active._config.leaf_chunk_tokens = 250
+    active.threshold_tokens = 3_500
+    active.ingest(deepcopy(view))
+    leaf_calls = []
+    summarize_leaf = active._summarize_leaf_chunk_with_rescue
+
+    def count_leaf(*args, **kwargs):
+        leaf_calls.append(None)
+        return summarize_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(active, "_summarize_leaf_chunk_with_rescue", count_leaf)
+    for index in range(6):
+        turn = [{"role": "user", "content": f"New threshold turn {index}."}]
+        if index == 0:
+            turn += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+        elif index >= 2:
+            turn[0]["content"] += payload_of(3_600, f"turn{index}")
+        if index == 2:
+            active._config.summary_prefix_target_tokens = 1
+        view += turn
+        tokens = count_messages_tokens(view)
+        prior = {row["store_id"]: row for row in _rows(active)}
+        node_ids = {node.node_id for node in active._dag.get_session_nodes(SESSION)}
+        leaf_calls.clear()
+        view = active.compress(deepcopy(view), current_tokens=tokens)
+        current = {row["store_id"]: row for row in _rows(active)}
+        sweep = active._last_threshold_full_sweep
+        condensed = sum(node.source_type == "nodes" and node.node_id not in node_ids
+                        for node in active._dag.get_session_nodes(SESSION))
+        assert not active._compress_forced_overflow
+        assert sweep["tokens_before"] == tokens
+        assert len(leaf_calls) == (index == 0)
+        assert (sweep["stop_reason"] == "stub_first_exit") == (index == 1)
+        assert condensed == (expected_condensations if index == 2 else 0)
+        assert len(view) == sizes[index]
+        assert all(row == dict(current[sid], conversation_id=row["conversation_id"]) for sid, row in prior.items())
+        stored = _digests(current.values())
+        assert all(stored[identity] == count for identity, count in _digests(turn).items())
+
+
+@pytest.mark.parametrize("next_pass_overflow,claim_late", [
+    pytest.param(False, False, id="threshold"),
+    pytest.param(True, False, id="overflow"),
+    pytest.param(False, True, id="gateway-claims-late"),
+])
+def test_second_window_publishes_after_overflow_drops_conflicting_rows(
+    open_engine, summary_calls, monkeypatch, next_pass_overflow, claim_late,
+):
+    writer, gateway = open_engine(large_output_active_replay_stubbing_enabled=False), open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    gateway_view = _publish(gateway, EARLY + LATER)
+    host = writer.compress(list(EARLY))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    for i in range(3):
+        host = _add_turn(writer, host, i)
+    before = _rows(writer)
+    gateway_ids = {row["store_id"] for row in before if row["conversation_id"] == GATEWAY}
+    with monkeypatch.context() as overflow:
+        overflow.setattr(writer._config, "max_assembly_tokens", 44)
+        host = writer.compress(list(host))
+    assert writer.last_compression_status == "error"
+    assert not gateway_ids.intersection(writer._get_store_id_map_for_messages(host).values())
+    assert writer._lifecycle.get_by_conversation(GATEWAY).current_session_id == SESSION
+    assert writer._session_owner_backoff is not None
+    nodes = writer._dag.get_session_node_count(SESSION)
+    call_count = len(summary_calls)
+    if next_pass_overflow:
+        monkeypatch.setattr(writer._config, "max_assembly_tokens", 44)
+    tokens = 44 if next_pass_overflow else writer.threshold_tokens
+    assert writer._should_force_overflow_recovery(observed_tokens=tokens, messages=host) == next_pass_overflow
+    writer.compress(list(host), current_tokens=tokens)
+    assert writer.last_compression_status == "compacted"
+    assert writer._dag.get_session_node_count(SESSION) > nodes
+    assert len(summary_calls) > call_count
+    assert writer._session_owner_backoff is None
+    assert (SESSION, GATEWAY) not in writer._session_owner_warning_keys
+    assert _rows(writer) == before
+
+    if claim_late:
+        late = [row for row in before if row["conversation_id"] == SESSION]
+        late_ids = {row["store_id"] for row in late}
+        assert _coverage(writer) & late_ids
+        resumed = open_engine()
+        _bind_gateway(resumed)
+        host = gateway_view + [{"role": row["role"], "content": row["content"]} for row in late]
+        host += [
+            {"role": "assistant", "content": "Desktop reply after the late leaf."},
+            {"role": "user", "content": "Desktop follow-up after the late leaf."},
+        ]
+        resumed.ingest(host)
+        stored = _rows(resumed)
+        covered = _coverage(resumed)
+        call_count = len(summary_calls)
+        for _ in range(6):
+            host = resumed.compress(list(host), force=True)
+            assert resumed.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+            assert resumed._session_owner_backoff[2] == SESSION
+            assert resumed._session_owner_backoff[3] & late_ids
+            assert len(summary_calls) == call_count + 1
+            assert _rows(resumed) == stored
+            assert _coverage(resumed) == covered
+
+
+@pytest.mark.parametrize("kind", ["two-owners", "gateway-no-owner-state", "delegate-publisher"])
+def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, monkeypatch, kind):
+    from hermes_lcm.lifecycle_state import LifecycleStateStore
+
+    engine = open_engine()
+    publisher = "other-gateway" if kind == "gateway-no-owner-state" else SESSION
+    platform = _DELEGATE_SOURCE if kind == "delegate-publisher" else "gui"
+    engine.on_session_start(SESSION, platform=platform, conversation_id=publisher, context_length=200_000)
+    if kind != "gateway-no-owner-state":
+        _bind_gateway(open_engine())
+    engine.ingest(list(EARLY))
+    with engine._store.atomic(immediate=True):
+        engine._store.connection.execute(
+            "UPDATE messages SET conversation_id = ? WHERE session_id = ?", (GATEWAY, SESSION),
+        )
+        if kind == "two-owners":
+            engine._store.connection.execute(
+                "UPDATE messages SET conversation_id = ? WHERE session_id = ? AND store_id = 2",
+                ("another-owner", SESSION),
+            )
+    before = _rows(engine)
+    conflicts = []
+    stage = LifecycleStateStore.stage_compaction_publication
+
+    def record(store, *args, **kwargs):
+        try:
+            return stage(store, *args, **kwargs)
+        except LifecyclePublicationConflictError as exc:
+            conflicts.append(exc)
+            raise
+
+    monkeypatch.setattr(LifecycleStateStore, "stage_compaction_publication", record)
+    host = list(EARLY)
+    for _ in range(2):
+        host = engine.compress(list(host))
+        assert engine.last_compression_status == "error"
+        assert _rows(engine) == before
+    assert len(summary_calls) == len(conflicts) == 2
+    assert all(type(exc) is LifecyclePublicationConflictError for exc in conflicts)
+    assert engine.get_status()["last_compression_failure_reason"] == "publication_invariant_conflict"
+    assert engine._session_owner_backoff is None
+    assert all(str(exc) == "Compaction publication source ownership changed" for exc in conflicts)
+
+
+def test_gateway_only_control(open_engine):
+    engine = open_engine()
+    _bind_gateway(engine)
+    engine.ingest(EARLY + LATER)
+    _publish(engine, EARLY + LATER)
+    assert set(_owners(engine).values()) == {GATEWAY}
+
+
+def test_identityless_rebind_keeps_gateway_after_retirement(open_engine):
+    engine = open_engine()
+    host = _seed_mixed(engine)
+    assert engine._lifecycle.get_by_conversation(SESSION).current_session_id == SESSION
+    assert engine._lifecycle.get_by_conversation(GATEWAY).current_session_id == SESSION
+    engine.on_session_start(SESSION, platform="tui", context_length=200_000)
+    assert engine._conversation_id == GATEWAY
+    _publish(engine, host)
+    fresh = open_engine()
+    fresh.on_session_start(SESSION, platform="tui", context_length=200_000)
+    assert fresh._conversation_id == GATEWAY
+    old = fresh._lifecycle.get_by_conversation(SESSION)
+    assert old.current_session_id is None
+    assert old.last_finalized_session_id == SESSION
+
+
+@pytest.mark.parametrize("appended", [False, True], ids=["own-replay", "same-text-new"])
+def test_returning_window_replays_own_emission_once(open_engine, appended):
+    writer = open_engine()
+    host = _seed_compacted(writer)
+    emitted_tail_id = _rows(writer)[-1]["store_id"]
+    gateway = open_engine()
+    _bind_gateway(gateway)
+    gateway.ingest(host + LATER)
+    _publish(gateway, host + LATER)
+    assert _owners(gateway)[emitted_tail_id] == GATEWAY
+    expected = _digests(_rows(gateway))
+    if appended:
+        expected += _digests(host[-1:])
+        host = host + [dict(host[-1])]
+    for _ in range(6):
+        resumed = open_engine()
+        resumed.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+        resumed.ingest(deepcopy(host))
+        assert _digests(_rows(resumed)) == expected
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["host-turn-loop", "fresh-engine-per-pass"])
+def test_previously_compacted_session_preserves_nodes_and_never_copies_tail(open_engine, cold):
+    engine = open_engine()
+    host = _seed_compacted(engine)
+    history = engine._dag.get_session_nodes(SESSION)
+    prior_covered = _coverage(engine)
+    prior_frontier = engine._lifecycle.get_by_conversation(SESSION).current_frontier_store_id
+    provisional_tail = set(_owners(engine)) - prior_covered
+    assert prior_frontier > 0 and provisional_tail
+
+    if cold:
+        engine = open_engine()
+    _bind_gateway(engine)
+    # A later cold pass can prove these post-emission occurrences by stamp.
+    host += [dict(row, timestamp=200 + index) for index, row in enumerate(LATER)]
+    engine.ingest(list(host))
+    assert engine._last_ingest_reconciliation["cursor"] == 2
+    assert _digests(_rows(engine)) == _digests(EARLY + LATER)
+
+    for index in range(3):
+        if cold:
+            engine = open_engine()
+            _bind_gateway(engine)
+        if index:
+            host = _add_turn(engine, host, index)
+        host = _publish(engine, host)
+    assert engine._dag.get_session_nodes(SESSION)[:len(history)] == history
+    owners = _owners(engine)
+    assert {key for key, owner in owners.items() if owner == SESSION} == prior_covered
+    assert all(owners[store_id] == GATEWAY for store_id in provisional_tail)
+    old = engine._lifecycle.get_by_conversation(SESSION)
+    assert old.current_session_id is None and old.current_frontier_store_id == 0
+    assert old.last_finalized_session_id == SESSION and old.last_finalized_frontier_store_id == prior_frontier
+
+
+@pytest.mark.parametrize("claim_late", [False, True], ids=["original-host-view", "late-row-in-view"])
+def test_still_bound_writer_publishes_late_rows_when_claimed(open_engine, claim_late):
+    writer = open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    gateway = open_engine()
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+
+    late = {"role": "assistant", "content": "GUI reply after the gateway bind."}
+    writer.ingest(EARLY + [late])
+    late_id = _rows(gateway)[-1]["store_id"]
+    assert _owners(gateway)[late_id] == SESSION
+    assert _digests(_rows(gateway)) == _digests(EARLY + LATER + [late])
+    host = EARLY + LATER
+    if claim_late:
+        # Resume the gateway with the full transcript, including the late reply now held by the host.
+        gateway = open_engine()
+        _bind_gateway(gateway)
+        host = _add_turn(gateway, host + [late], 1)
+    _publish(gateway, host)
+    assert (late_id in _coverage(gateway)) is claim_late
+    assert _owners(gateway)[late_id] == (GATEWAY if claim_late else SESSION)
+    assert writer._conversation_id == SESSION
+
+
+def _stage_leaf(engine, covered):
+    return engine._dag.add_node(
+        SummaryNode(session_id=SESSION, summary="Cobalt summary.", source_ids=covered),
+        before_commit=lambda conn, node_id: engine._lifecycle.stage_compaction_publication(
+            conn, GATEWAY, SESSION, node_id, _frontier(engine), covered,
+        ),
+    )
+
+
+def test_other_conversation_in_mixed_snapshot_still_refuses(open_engine):
+    engine = open_engine()
+    _seed_mixed(engine)
+    foreign = engine._store.append(
+        SESSION, {"role": "user", "content": "Another conversation's row."}, conversation_id="foreign",
+    )
+    before = _rows(engine)
+    with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
+        _stage_leaf(engine, sorted(_owners(engine)))
+    assert _rows(engine) == before
+    assert _owners(engine)[foreign] == "foreign"
+    assert _frontier(engine) == 0 and not _coverage(engine)
+
+
+def test_previously_claimed_provisional_row_still_refuses(open_engine):
+    engine = open_engine()
+    _seed_compacted(engine)
+    covered = sorted(_coverage(engine))
+    _bind_gateway(engine)
+    before = _rows(engine)
+    with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
+        _stage_leaf(engine, covered)
+    assert _rows(engine) == before
+    assert _coverage(engine) == set(covered)
+    assert _frontier(engine) == 0
+
+
+def test_provisional_proof_does_not_skip_same_text_with_a_new_stamp(open_engine):
+    engine = open_engine()
+    early = [dict(row, timestamp=100 + index) for index, row in enumerate(EARLY)]
+    engine.on_session_start(SESSION, platform="gui", context_length=200_000)
+    engine.ingest(list(early))
+    output = list(engine.compress(list(early)))
+    assert output[-1]["timestamp"] == 103
+    _bind_gateway(engine)
+    repeated = dict(output[-1], timestamp=200)
+    engine.ingest(output[:-1] + [repeated] + LATER)
+    assert _digests(_rows(engine)) == _digests(EARLY + [repeated] + LATER)
+    assert [(row["conversation_id"], row["observed_at"]) for row in _rows(engine)
+            if row["content"] == repeated["content"]] == [(SESSION, 103), (GATEWAY, 200)]
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["warm", "cold"])
+def test_rebind_does_not_copy_tail_when_summary_carries_a_user_turn(open_engine, cold):
+    early = EARLY + [{"role": "user", "content": "One more request before the bind."}]
+    engine = open_engine(fresh_tail_count=3)
+    engine.on_session_start(SESSION, platform="gui", context_length=200_000)
+    engine.ingest(list(early))
+    output = list(engine.compress(list(early)))
+    assert engine.last_compression_status == "compacted"
+    assert engine._generated_context_carrier_remainder(output[0]) == early[2]["content"]
+    if cold:
+        engine = open_engine(fresh_tail_count=3)
+    _bind_gateway(engine)
+    engine.ingest(output + LATER)
+    assert engine._last_ingest_reconciliation["cursor"] == len(output)
+    assert _digests(_rows(engine)) == _digests(early + LATER)
+    _publish(engine, output + LATER)
+
+
+def test_delegate_source_excluded_from_transfer_and_bind_replay(open_engine):
+    engine = open_engine()
+    host = _seed_compacted(engine)
+    delegate_turn = {"role": "user", "content": "Delegated child turn."}
+    [delegate_id] = engine._append_off_current_session_end_suffix(
+        SESSION, [delegate_turn], source=_DELEGATE_SOURCE, conversation_id=SESSION,
+    )
+    _bind_gateway(engine)
+    engine.ingest(list(host) + LATER)
+    assert engine._last_ingest_reconciliation["cursor"] == 2
+    assert _digests(_rows(engine)) == _digests(EARLY + LATER + [delegate_turn])
+    with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
+        _stage_leaf(engine, [delegate_id])
+    _publish(engine, host + LATER)
+    assert _owners(engine)[delegate_id] == SESSION
+    assert delegate_id not in _coverage(engine)
+
+
+def test_delegate_rows_count_as_stored_but_cannot_transfer(open_engine):
+    engine = open_engine()
+    turns = EARLY[:2]
+    delegate_ids = engine._append_off_current_session_end_suffix(
+        SESSION, turns, source=_DELEGATE_SOURCE, conversation_id=SESSION,
+    )
+    _bind_gateway(engine)
+    engine.ingest(list(turns))
+    assert all(_owners(engine)[store_id] == SESSION for store_id in delegate_ids)
+    assert [row["conversation_id"] for row in _rows(engine)] == [SESSION, SESSION]
+    with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
+        _stage_leaf(engine, delegate_ids)
+    assert list(_owners(engine).values()) == [SESSION, SESSION]
+
+
+@pytest.mark.parametrize("compacted", [False, True], ids=["raw", "with-own-emission"])
+def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monkeypatch, caplog, compacted):
+    engine = open_engine()
+    if compacted:
+        emitted = _seed_compacted(engine)
+        moved_id = _rows(engine)[-1]["store_id"]
+        _bind_gateway(engine)
+        host = emitted + LATER
+        engine.ingest(host)
+    else:
+        host = _seed_mixed(engine)
+        moved_id = _rows(engine)[0]["store_id"]
+    before = _rows(engine)
+    coverage = _coverage(engine)
+    old = engine._lifecycle.get_by_conversation(SESSION)
+    real = engine._lifecycle.stage_compaction_publication
+    key = reowned_session_rows_key(SESSION)
+    emission_keys = [f"reowned_{prefix}:{SESSION}" for prefix in ("compaction_commit_proof", "host_occurrence_snapshot")]
+
+    def fail_after_staging(conn, *args, **kwargs):
+        real(conn, *args, **kwargs)
+        assert conn.execute(
+            "SELECT conversation_id FROM messages WHERE store_id = ?", (moved_id,),
+        ).fetchone()[0] == GATEWAY
+        assert conn.execute(
+            "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?", (SESSION,),
+        ).fetchone()[0] is None
+        assert conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone() is not None
+        if compacted:
+            for emission_key in emission_keys:
+                assert conn.execute("SELECT value FROM metadata WHERE key = ?", (emission_key,)).fetchone() is not None
+        raise LifecyclePublicationConflictError("Injected after ownership and frontier staging")
+
+    with monkeypatch.context() as patch, caplog.at_level(logging.INFO):
+        patch.setattr(engine._lifecycle, "stage_compaction_publication", fail_after_staging)
+        engine.compress(list(host))
+    assert engine.last_compression_status == "error"
+    assert "Injected after ownership and frontier staging" in caplog.text
+    assert "re-owned provisional rows" not in caplog.text
+    assert _rows(engine) == before
+    assert engine._store.read_metadata_json(key) is None
+    assert all(engine._store.read_metadata_json(emission_key) is None for emission_key in emission_keys)
+    assert engine._lifecycle.get_by_conversation(SESSION) == old
+    assert _frontier(engine) == 0 and _coverage(engine) == coverage

@@ -452,7 +452,34 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   2. At P1, pair kept P and L bindings by equal non-NULL stamp and identity_digest, consuming L matches once in P ordinal order. Keep both stored rows and write `possible_replay_of` from P's copy to L's. Unstamped digest twins get no relation and are counted.
   3. Give each distinct non-NULL P ordinal a fresh ordinal after L's max, in P's order; occ_ids, refs and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key bindings, observations, emissions and vectors; keep the newest two vectors per kind. view_seq is store-global, so P's newest becomes L's cursor when it is newer.
   4. At P1 this is a no-op: legacy `host_uid_bindings` retains its own key. Canonical uid/revision merging moves to P2.
-  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Ownership repair (#1250) remains deferred.
+  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Lineage merge leaves message ownership unchanged.
+- **Publication ownership (#1250).** A gateway leaf can take ownership of a session's own eligible provisional rows in the same
+  transaction as the leaf and frontier. Any non-delegate window can get `session_owned_by_other_window` when all conflicting
+  rows belong to the session and one other conversation with a lifecycle record owns them. For a window bound to a recorded
+  rotation predecessor, the check also includes rows from that predecessor chain. A `reowned_session_rows:<session>`
+  receipt records the exact transferred store IDs for the original session-id binding. A returning session-id window treats
+  validated receipt rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
+  and conflicting UID bindings can veto a pair in `shadow` and `on`. In every UID mode, a receipt or provisional proof
+  can require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
+  A new result may still join an unanswered call already owned by the receiving conversation.
+  After a re-own, a new result can be stored in the returning conversation while its call stays with the gateway.
+  In the tested shapes, one such orphan stayed constant across six cold restarts. The live turn's host view still
+  carries the gateway's call, so the model sees the result. When the call is absent, provider-facing assembly drops
+  the orphan, and consecutive assemblies with the same rows emit the same prefix.
+  The full result remained in the session store and was retrievable by recall after two more restarts.
+  The returning window's compaction refuses the mixed view as a designed back-off for gateway-owned rows.
+  It refuses the same way when there is no orphan.
+  On a stamped provisional handoff, the result stays with the gateway and the call stays with the session-ID window,
+  each stored once with one constant orphan.
+  Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. After rollback to v0.30.4,
+  an unstamped replay of the returning window's compacted view can still add a copy on each restart.
+- **v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
+  again, one copy per unstamped retained or later row. The first two restarts can also store up to two
+  copies of tool rows with their original stamps. The short-tail probes measured 1 to 6 extra rows
+  per cold restart with no loss. Keep one window per session until #3128 is fixed.
+  The `two_window_replay_copies` check in `/lcm doctor` or `lcm_doctor` counts unstamped repeats and exact stamped copies. A genuine new
+  message that repeats earlier text without a stamp or host UID can also be counted.
+  The check scans at most 20,000 in-scope rows, the most recently written sessions first, and reports a partial count past that limit.
 - **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
 - **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).

@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import sqlite3
 import sys
 import time
 from threading import get_ident
@@ -46,7 +47,11 @@ from .fresh_tail import tool_group_safe_end
 from .host_uid import _uid_recognition_pass
 from .ingest_protection import redact_sensitive_value
 from . import ingest_ledger, leaf_prep
-from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
+from .lifecycle_state import (
+    LifecycleBindingChangedError,
+    LifecycleOtherWindowConflictError,
+    LifecyclePublicationConflictError,
+)
 from .message_analysis import _is_codex_interim, _tool_call_id
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
@@ -1900,6 +1905,7 @@ class CompactionMixin:
         ``stage_compaction_publication``). ``before_publication(conn)`` (#787 promotion) re-validates first, in
         that transaction; it raises to reject."""
         before_commit = None
+        reowned_store_ids: list[int] = []
         if self._session_id and self._conversation_id:
             publication_session_id = self._session_id
             publication_conversation_id = self._conversation_id
@@ -1917,6 +1923,8 @@ class CompactionMixin:
                     filter_exclusion_proofs,
                     carried_ranges,
                     copy_exclusion_proofs=self._store_complete_copy_exclusion_proofs,
+                    reowned_store_ids=reowned_store_ids,
+                    publisher_is_delegate=self._current_binding_is_delegate,
                     **({"copy_matches": self._store_complete_uid_copy_publication_match}
                        if uid_recognition_enabled(self) else {}),
                 )
@@ -1927,6 +1935,14 @@ class CompactionMixin:
             escalation_level=level or None,  # #441; 0 = placeholder, no model call
             model=model,
         )
+        self._session_owner_backoff = None
+        self._session_owner_warning_keys.clear()
+        if reowned_store_ids:
+            logger.info(
+                "LCM publication re-owned provisional rows: conversation=%s session=%s count=%d store_ids=%d-%d",
+                publication_conversation_id, publication_session_id, len(reowned_store_ids),
+                reowned_store_ids[0], reowned_store_ids[-1],
+            )
 
     def _leaf_consumption(self, selected_raw_chunk, compacted_chunk, sources, anchored_input, anchor_claims,
                           dependent_reply_message_ids):
@@ -2099,6 +2115,33 @@ class CompactionMixin:
                 raise leaf_prep.PromotionRejected("coverage_digest_mismatch")
         return revalidate
 
+    def _other_window_publication_backoff(
+        self, working_messages: List[Dict[str, Any]],
+    ) -> LifecycleOtherWindowConflictError | None:
+        """Skip only while the current view still maps to rows from the ownership refusal."""
+        if self._session_owner_backoff is None:
+            return None
+        session, conversation, other_conversation, store_ids = self._session_owner_backoff
+        if (session, conversation) == (self._session_id, self._conversation_id):
+            try:
+                provisional_sessions = [session, *self._rotation_predecessor_session_ids(session)]
+                conflict_sessions = provisional_sessions if conversation in provisional_sessions else [session]
+                if not self._current_binding_is_delegate():
+                    mapped = store_ids.intersection(self._get_store_id_map_for_messages(working_messages).values())
+                    if mapped and self._store.connection.execute(
+                        "SELECT 1 FROM json_each(?) AS source CROSS JOIN messages AS m "
+                        "WHERE m.store_id = source.value AND m.session_id IN (SELECT value FROM json_each(?)) "
+                        "AND m.conversation_id = ? "
+                        "AND EXISTS (SELECT 1 FROM lcm_lifecycle_state WHERE conversation_id = m.conversation_id) "
+                        "LIMIT 1",
+                        (json.dumps(sorted(mapped)), json.dumps(conflict_sessions), other_conversation),
+                    ).fetchone():
+                        return LifecycleOtherWindowConflictError(other_conversation, store_ids)
+            except sqlite3.Error:
+                logger.debug("LCM could not recheck the competing conversation's publication conflict", exc_info=True)
+        self._session_owner_backoff = None
+        return None
+
     def _fail_open_after_publication_failure(
         self,
         active_context: List[Dict[str, Any]],
@@ -2130,12 +2173,36 @@ class CompactionMixin:
                 ),
             )
         self._last_compression_status = "error"
+        warn = True
         binding_changed = isinstance(exc, LifecycleBindingChangedError)
         if binding_changed:
             failure_reason, noop_reason = (
                 "lifecycle_binding_changed",
                 "summary publication lost its lifecycle binding"
             )
+        elif isinstance(exc, LifecycleOtherWindowConflictError):
+            failure_reason = exc.reason
+            noop_reason = (
+                "Rows of this session are owned by another conversation. "
+                "This window cannot summarize those rows. "
+                "Only one window should compact a session (issue 1250)."
+            )
+            other = exc.other_conversation_id
+            backoff = (self._session_id, self._conversation_id, other, exc.store_ids)
+            if backoff != self._session_owner_backoff:
+                try:
+                    if not self._current_binding_is_delegate():
+                        self._session_owner_backoff = backoff
+                except sqlite3.Error:
+                    logger.debug("LCM could not check delegate identity for publication back-off", exc_info=True)
+            warning_key = (self._session_id, other)
+            if warning_key not in self._session_owner_warning_keys:
+                self._session_owner_warning_keys.add(warning_key)
+                logger.warning("LCM summary publication refused (failure=publication_invariant_conflict "
+                               "reason=%s, session=%s, "
+                               "other_conversation=%s, rows=%d). %s",
+                               failure_reason, self._session_id, other, exc.row_count, noop_reason)
+            warn = False
         elif isinstance(exc, LifecyclePublicationConflictError):
             failure_reason, noop_reason = (
                 "publication_invariant_conflict",
@@ -2167,14 +2234,15 @@ class CompactionMixin:
                 "duration_ms": round(self._last_compaction_duration_ms, 3),
                 "stop_reason": failure_reason,
             }
-        logger.warning(
-            "LCM summary publication could not finish; preserving replay-safe "
-            "context (reason=%s, code=%s, name=%s, detail=%s)",
-            failure_reason,
-            getattr(exc, "sqlite_errorcode", None),
-            getattr(exc, "sqlite_errorname", None),
-            str(exc)[:500],  # #519: the raise site's ids (never message content)
-        )
+        if warn:
+            logger.warning(
+                "LCM summary publication could not finish; preserving replay-safe "
+                "context (reason=%s, code=%s, name=%s, detail=%s)",
+                failure_reason,
+                getattr(exc, "sqlite_errorcode", None),
+                getattr(exc, "sqlite_errorname", None),
+                str(exc)[:500],  # #519: the raise site's ids (never message content)
+            )
         return fallback
 
     def _assemble_committed_compaction_context(
@@ -2399,8 +2467,11 @@ class CompactionMixin:
             stub_first_sweep.update(
                 status="partial", stop_reason="stub_first_exit", tokens_after=count_messages_tokens(exited),
                 duration_ms=round((time.perf_counter() - state._compress_started) * 1000.0, 3),
-                summary_prefix_tokens_after=self._summary_frontier_tokens(),
             )
+            try:  # the exit is committed: a failed status read must not turn it into a fail-open
+                stub_first_sweep["summary_prefix_tokens_after"] = self._summary_frontier_tokens()
+            except Exception:
+                logger.debug("LCM stub-first exit: summary prefix read failed", exc_info=True)
             self._last_threshold_full_sweep = stub_first_sweep
         return exited
 
@@ -2744,7 +2815,6 @@ class CompactionMixin:
             if state.force_overflow
             else None
         )
-
         return "next", None
 
     def _ingest_compression_view(self, state: _CompressionState,
@@ -4488,6 +4558,11 @@ class CompactionMixin:
             return result
         working_messages = state.working_messages
         ingest_cleanup_changed_active_context = state.ingest_cleanup_changed_active_context
+        # Recheck on the ingested view even if the stub-first exit takes the pass.
+        other_window_conflict = (
+            self._other_window_publication_backoff(working_messages)
+            if recovery_assembly_cap is None else None
+        )
         action, result = self._prepare_compression_sweep(state, messages, force, recovery_attempt)
         if action == "return":
             return result
@@ -4541,6 +4616,28 @@ class CompactionMixin:
         action, result = self._condense_before_leaves(state, focus_topic)
         if action == "return":
             return result
+        # Back off the conflicting leaf after the independent stub and condensation work.
+        if other_window_conflict is not None:
+            # A depth target staged the validated free cuts instead of exiting; apply them before backing off.
+            if state.stub_first_fallback:
+                try:
+                    exited = self._use_stub_first_fallback(state)
+                except Exception as fallback_exc:
+                    logger.warning("LCM stub-first fallback failed before the other-window back-off (%s)",
+                                   type(fallback_exc).__name__)
+                    self._store.rollback_pending_write()
+                else:
+                    if exited is not None:
+                        return exited
+            return self._fail_open_after_publication_failure(
+                working_messages,
+                other_window_conflict,
+                compress_started=_compress_started,
+                threshold_full_sweep_active=threshold_full_sweep_active,
+                recovery_assembly_cap=recovery_assembly_cap,
+                leaf_passes=0,
+                condensation_passes=state.pre_leaf_condensation_passes,
+            )
         estimated_active_tokens = state.estimated_active_tokens
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason

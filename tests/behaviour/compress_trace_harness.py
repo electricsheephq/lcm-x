@@ -516,6 +516,8 @@ OBSERVED_ATTRIBUTES = (
     "_select_oldest_leaf_chunk",
     "_serialize_messages_with_clip",
     "_session_id",
+    "_session_owner_backoff",
+    "_session_owner_warning_keys",
     "_should_force_overflow_recovery",
     "_should_run_deferred_maintenance",
     "_start_sweep_budget_hold",
@@ -872,6 +874,8 @@ def state(engine: Any, canonical: Canonical) -> dict[str, Any]:
         if name == "_store_complete_substitutes" and not config.host_uid_recognition_enabled():
             continue  # Only UID-recognition passes can populate this scratch map.
         value = observed_attribute(engine, name)
+        if name in {"_session_owner_backoff", "_session_owner_warning_keys"} and not value:
+            continue  # No competing-window state before an ownership refusal.
         if name == REFUSED_INPUT and value is None:
             continue
         if name == "_store":
