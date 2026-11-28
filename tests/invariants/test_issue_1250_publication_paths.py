@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from hashlib import sha256
 import json
 import sqlite3
+import sys
 
 import pytest
 
@@ -349,3 +350,76 @@ def test_backoff_takes_staged_stub_first_exit_under_depth_target(open_engine, mo
     assert writer._session_owner_backoff is not None
     assert len(leaf_calls) == first_pass_leaf_calls
     assert _digests(_rows(writer)) == expected
+
+
+def _backed_off_depth_target_writer(open_one):
+    writer = open_one(
+        large_output_externalization_threshold_chars=1_000_000,
+        leaf_chunk_tokens=250,
+        summary_prefix_target_tokens=100,
+        depth_target_ratio=0.0002,
+    )
+    gateway = open_one()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    first = _publish(gateway, EARLY + LATER)
+    _publish(gateway, _add_turn(gateway, first, 0))
+    writer.threshold_tokens = 3_500
+    # The system message carries the LCM note, so the stubbed list has a non-empty replay digest.
+    host = [{"role": "system", "content": "You are a careful agent."}] + list(EARLY)
+    host += [{"role": "user", "content": "Read the tool fixture."}]
+    host += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    host += [{"role": "user", "content": "The tool output is now outside the fresh tail."}]
+    finalized = []
+    finalize = writer._finalize_stub_first_exit
+
+    def record_finalize(*args, **kwargs):
+        finalized.append(finalize(*args, **kwargs))
+        return finalized[-1]
+
+    writer._finalize_stub_first_exit = record_finalize
+    return writer, host, finalized
+
+
+@pytest.mark.parametrize("error", [RuntimeError("frontier read failed"),
+                                   sqlite3.OperationalError("database is locked")],
+                         ids=["runtime", "locked"])
+def test_backoff_stub_first_fallback_keeps_replay_proof_consistent(open_engine, monkeypatch, error):  # noqa: F811
+    # The fallback commits its exit (replay digest, marker) before reading the summary frontier for status.
+    writer, host, finalized = _backed_off_depth_target_writer(open_engine)
+    frontier = writer._summary_frontier_tokens
+
+    def failing_frontier():
+        if sys._getframe(1).f_code.co_name == "_use_stub_first_fallback":
+            raise error
+        return frontier()
+
+    monkeypatch.setattr(writer, "_summary_frontier_tokens", failing_frontier)
+    before = set(writer._load_compacted_active_replay_snapshot_digests())
+    expected = _digests(_rows(writer)) + _digests(host[-1:])
+    out = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert finalized and finalized[-1] is not None
+    stubbed = finalized[-1]
+    assert writer._compacted_active_replay_snapshot_digest(stubbed)
+    new = set(writer._load_compacted_active_replay_snapshot_digests()) - before
+    took_exit = (out == stubbed and writer._compacted_active_replay_snapshot_digest(out) in new
+                 and writer._last_stub_first_exit is not None and writer.last_compression_status != "error")
+    failed_open = not new and writer._last_stub_first_exit is None and out == host
+    assert took_exit or failed_open, (writer.last_compression_status, len(new), writer._last_stub_first_exit)
+    assert writer._session_owner_backoff is not None
+    assert _digests(_rows(writer)) == expected
+
+
+def test_backoff_stub_first_fallback_writes_the_returned_replay_proof(open_engine):  # noqa: F811
+    writer, host, finalized = _backed_off_depth_target_writer(open_engine)
+    before = set(writer._load_compacted_active_replay_snapshot_digests())
+    out = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert finalized and finalized[-1] is not None and out == finalized[-1]
+    digest = writer._compacted_active_replay_snapshot_digest(out)
+    assert digest and digest in set(writer._load_compacted_active_replay_snapshot_digests()) - before
+    assert writer._last_threshold_full_sweep["stop_reason"] == "stub_first_exit"
+    assert writer._last_threshold_full_sweep["summary_prefix_tokens_after"] == writer._summary_frontier_tokens()

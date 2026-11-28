@@ -2467,8 +2467,11 @@ class CompactionMixin:
             stub_first_sweep.update(
                 status="partial", stop_reason="stub_first_exit", tokens_after=count_messages_tokens(exited),
                 duration_ms=round((time.perf_counter() - state._compress_started) * 1000.0, 3),
-                summary_prefix_tokens_after=self._summary_frontier_tokens(),
             )
+            try:  # the exit is committed: a failed status read must not turn it into a fail-open
+                stub_first_sweep["summary_prefix_tokens_after"] = self._summary_frontier_tokens()
+            except Exception:
+                logger.debug("LCM stub-first exit: summary prefix read failed", exc_info=True)
             self._last_threshold_full_sweep = stub_first_sweep
         return exited
 
