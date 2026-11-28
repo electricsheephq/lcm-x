@@ -14,6 +14,12 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
+from hermes_lcm.tokens import count_messages_tokens
+from tests.invariants.test_issue_1250_publication_reown import (
+    EARLY, LATER, SESSION, _add_turn, _bind_gateway, _digests, _publish, _rows,
+    open_engine,  # noqa: F401
+)
+from tests.test_issue_671_stub_first_exit import payload_of, tool_content, tool_pair
 
 S = "S"
 C = "S2"
@@ -297,3 +303,49 @@ def test_rotation_keeps_foreign_owner(pair, prior):
     with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
         stage(engine, [row_id], carried_ranges=carry)
     assert rows(engine, (S, C)) == before
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.0002])
+def test_backoff_takes_staged_stub_first_exit_under_depth_target(open_engine, monkeypatch, ratio):  # noqa: F811
+    # A depth target the stub trial misses stages the free cuts; the back-off must not drop them.
+    writer = open_engine(
+        large_output_externalization_threshold_chars=1_000_000,
+        leaf_chunk_tokens=250,
+        summary_prefix_target_tokens=100,
+        depth_target_ratio=ratio,
+    )
+    gateway = open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    first = _publish(gateway, EARLY + LATER)
+    _publish(gateway, _add_turn(gateway, first, 0))
+
+    leaf_calls = []
+    summarize_leaf = writer._summarize_leaf_chunk_with_rescue
+
+    def count_leaf(*args, **kwargs):
+        leaf_calls.append(None)
+        return summarize_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "_summarize_leaf_chunk_with_rescue", count_leaf)
+    writer.threshold_tokens = 3_500
+    host = list(EARLY) + [{"role": "user", "content": "Read the tool fixture."}]
+    host += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert writer._session_owner_backoff is not None
+    first_pass_leaf_calls = len(leaf_calls)
+
+    host += [{"role": "user", "content": "The tool output is now outside the fresh tail."}]
+    tokens = count_messages_tokens(host)
+    expected = _digests(_rows(writer)) + _digests(host[-1:])
+    out = writer.compress(host, current_tokens=tokens)
+    assert writer.last_compression_status != "error"
+    assert writer._last_threshold_full_sweep["stop_reason"] == "stub_first_exit"
+    assert count_messages_tokens(out) < tokens
+    assert tool_content(out, "threshold-tool").startswith("[Externalized tool output:")
+    assert writer._session_owner_backoff is not None
+    assert len(leaf_calls) == first_pass_leaf_calls
+    assert _digests(_rows(writer)) == expected

@@ -4615,6 +4615,17 @@ class CompactionMixin:
             return result
         # Back off the conflicting leaf after the independent stub and condensation work.
         if other_window_conflict is not None:
+            # A depth target staged the validated free cuts instead of exiting; apply them before backing off.
+            if state.stub_first_fallback:
+                try:
+                    exited = self._use_stub_first_fallback(state)
+                except Exception as fallback_exc:
+                    logger.warning("LCM stub-first fallback failed before the other-window back-off (%s)",
+                                   type(fallback_exc).__name__)
+                    self._store.rollback_pending_write()
+                else:
+                    if exited is not None:
+                        return exited
             return self._fail_open_after_publication_failure(
                 working_messages,
                 other_window_conflict,
