@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -19,10 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .aux_session import _DELEGATE_SOURCE
 from .db_bootstrap import (
     configure_connection,
     owned_conversation_clause,
     refuse_schema_version_too_new,
+    rotation_predecessor_session_ids,
     run_versioned_migrations,
 )
 from .sqlite_session import ConnectionPolicy, open_connection
@@ -31,6 +34,16 @@ from .head_copy import known_head_copy_ids
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
 _BIND_CAS_ATTEMPTS = 8
+COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
+HOST_OCCURRENCE_SNAPSHOT_PREFIX = "host_occurrence_snapshot"
+
+
+def reowned_session_rows_key(session_id: str) -> str:
+    return f"reowned_session_rows:{session_id}"
+
+
+def reowned_emission_prefix(prefix: str) -> str:
+    return f"reowned_{prefix}"
 
 
 class LifecycleBindingChangedError(RuntimeError):
@@ -39,6 +52,18 @@ class LifecycleBindingChangedError(RuntimeError):
 
 class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
+
+
+class LifecycleOtherWindowConflictError(LifecyclePublicationConflictError):
+    """The session's own publication met rows owned by another conversation."""
+
+    reason = "session_owned_by_other_window"
+
+    def __init__(self, other_conversation_id: str, store_ids: frozenset[int]) -> None:
+        super().__init__("Compaction publication source ownership changed")
+        self.other_conversation_id = other_conversation_id
+        self.store_ids = store_ids
+        self.row_count = len(store_ids)
 
 
 def _compaction_coverage_conflict_message(
@@ -986,6 +1011,8 @@ class LifecycleStateStore:
         carried_ranges: list[tuple[str, int, int]] | None = None,
         copy_exclusion_proofs: dict[int, int] | None = None,
         copy_matches=None,
+        reowned_store_ids: list[int] | None = None,
+        publisher_is_delegate=None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1039,17 +1066,15 @@ class LifecycleStateStore:
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs) + list(copy_proofs.values()))
         )
-        snapshot_rows = conn.execute(
-            """
+        snapshot_sql = """
             SELECT m.store_id, m.session_id, m.conversation_id, m.content, m.role,
                    m.tool_call_id, m.tool_calls, m.tool_name
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
             WHERE m.store_id = source.value
             ORDER BY m.store_id
-            """,
-            (str(snapshot_ids),),
-        ).fetchall()
+        """
+        snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         if (
             [int(row[0]) for row in snapshot_rows] != snapshot_ids
             or not all(row_is_owned(row) for row in snapshot_rows)
@@ -1057,7 +1082,107 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+        reowned_ids = []
+        reowned_from = set()
+        predecessors = None
+        if conversation_id != session_id and any(
+            str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows
+        ):
+            binding = conn.execute(
+                "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if binding is not None and binding[0] == session_id:
+                predecessors = rotation_predecessor_session_ids(conn, session_id)
+                chain = [session_id, *predecessors]
+                position = {source: index for index, source in enumerate(chain)}
+                provisional_ids = [
+                    int(row[0]) for row in snapshot_rows
+                    if row[1] in position and row[2] in position
+                    and position[row[1]] <= position[row[2]]
+                ] if conversation_id not in position else []
+            else:
+                provisional_ids = []
+            if provisional_ids:
+                selected = conn.execute(
+                    """
+                    SELECT store_id, conversation_id, session_id FROM messages
+                    WHERE COALESCE(source, '') != ?
+                      AND store_id IN (SELECT value FROM json_each(?))
+                      AND store_id NOT IN (
+                          SELECT source.value
+                          FROM summary_nodes AS node, json_each(node.source_ids) AS source
+                          WHERE node.source_type = 'messages' AND node.node_id != ?
+                            AND source.value IN (SELECT value FROM json_each(?))
+                      )
+                    ORDER BY store_id
+                    """,
+                    (_DELEGATE_SOURCE, str(provisional_ids), publication_node_id, str(provisional_ids)),
+                ).fetchall()
+                reowned_ids = [int(row[0]) for row in selected]
+                if reowned_ids:
+                    updated = conn.execute(
+                        "UPDATE messages SET conversation_id = ? "
+                        "WHERE store_id IN (SELECT value FROM json_each(?))",
+                        (conversation_id, str(reowned_ids)),
+                    ).rowcount
+                    if updated != len(reowned_ids):
+                        raise LifecyclePublicationConflictError("Compaction publication re-owned row count changed")
+                    reowned_from = {row[1] for row in selected}
+                    # Keep the exact occurrences for a later bind to the original session-id
+                    # conversation. The receipt rolls back with the ownership and frontier.
+                    own_session_rows: dict[str, list[int]] = {}
+                    for store_id, old_owner, source_session in selected:
+                        if old_owner == source_session:
+                            own_session_rows.setdefault(source_session, []).append(store_id)
+                    for source_session, store_ids in own_session_rows.items():
+                        conn.execute(
+                            """
+                            INSERT INTO metadata (key, value) VALUES (?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = CASE WHEN
+                                json_type(CASE WHEN json_valid(metadata.value) THEN metadata.value END) = 'array'
+                            THEN (
+                                SELECT json_group_array(value) FROM (
+                                    SELECT value FROM json_each(metadata.value) WHERE type = 'integer'
+                                    UNION SELECT value FROM json_each(excluded.value)
+                                )
+                            ) ELSE excluded.value END
+                            """,
+                            (reowned_session_rows_key(source_session), json.dumps(store_ids)),
+                        )
+                        # The gateway can replace the session-keyed proof after this
+                        # commit. Keep the old window's proof and its digest twin together.
+                        proof_key = f"{COMPACTION_COMMIT_PROOF_METADATA_PREFIX}:{source_session}"
+                        snapshot_key = f"{HOST_OCCURRENCE_SNAPSHOT_PREFIX}:{source_session}"
+                        conn.execute(
+                            """
+                            INSERT INTO metadata (key, value)
+                            SELECT 'reowned_' || saved.key, saved.value
+                            FROM metadata AS saved, metadata AS proof
+                            WHERE saved.key IN (?, ?) AND proof.key = ? AND json_extract(
+                                CASE WHEN json_valid(proof.value) THEN proof.value END, '$.conversation_id'
+                            ) = ?
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (proof_key, snapshot_key, proof_key, source_session),
+                        )
+                    snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
+        offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]
+        if offending:
+            if predecessors is None:
+                predecessors = rotation_predecessor_session_ids(conn, session_id)
+            provisional_sessions = {session_id, *predecessors}
+            conflict_sessions = provisional_sessions if conversation_id in provisional_sessions else {session_id}
+            if all(row[1] in conflict_sessions for row in offending):
+                owners = {row[2] for row in offending}
+                if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
+                    other_conversation_id, = owners
+                    if conn.execute(
+                        "SELECT 1 FROM lcm_lifecycle_state WHERE conversation_id = ?", (other_conversation_id,),
+                    ).fetchone():
+                        raise LifecycleOtherWindowConflictError(
+                            other_conversation_id, frozenset(int(row[0]) for row in offending),
+                        )
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
@@ -1164,4 +1289,24 @@ class LifecycleStateStore:
             session_id,
             covered_end,
         )
+        if reowned_ids:
+            # Preserve the provisional frontier for its old nodes without leaving S current
+            # twice. A stale engine can still write new provisional rows for a later leaf.
+            now = time.time()
+            conn.execute(
+                """
+                UPDATE lcm_lifecycle_state
+                SET current_session_id = NULL, current_frontier_store_id = 0,
+                    last_finalized_session_id = :sid, last_finalized_at = :now, updated_at = :now,
+                    last_finalized_frontier_store_id = CASE
+                        WHEN last_finalized_session_id = :sid
+                         AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
+                        THEN MAX(current_frontier_store_id, last_finalized_frontier_store_id)
+                        ELSE current_frontier_store_id END
+                WHERE conversation_id IN (SELECT value FROM json_each(:owners)) AND current_session_id = :sid
+                """,
+                {"sid": session_id, "now": now, "owners": json.dumps(sorted(reowned_from))},
+            )
+        if reowned_store_ids is not None:
+            reowned_store_ids[:] = reowned_ids
         return covered_end

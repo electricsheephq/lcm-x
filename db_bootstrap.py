@@ -31,6 +31,38 @@ SQLITE_WAL_RESET_ACTION = (
 )
 
 
+def rotation_predecessor_metadata_key(session_id: str) -> str:
+    return f"rotation_predecessor_session:{session_id}"
+
+
+def rotation_predecessor_session_ids(
+    conn: sqlite3.Connection, session_id: str, max_hops: int = 32,
+) -> list[str]:
+    """Read the recorded compression-boundary chain, nearest predecessor first."""
+    def read_metadata(key):
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = ?", (key,),
+        ).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+
+    return walk_rotation_predecessors(read_metadata, session_id, max_hops)
+
+
+def walk_rotation_predecessors(read_metadata, session_id: str, max_hops: int) -> list[str]:
+    predecessors = []
+    current = session_id
+    for _ in range(max_hops):
+        try:
+            predecessor = read_metadata(rotation_predecessor_metadata_key(current))
+        except Exception:
+            break
+        if not isinstance(predecessor, str) or not predecessor or predecessor == session_id or predecessor in predecessors:
+            break
+        predecessors.append(predecessor)
+        current = predecessor
+    return predecessors
+
+
 def sqlite_wal_reset_affected(version_info=None) -> bool:
     """Whether the linked SQLite version lacks the WAL-reset fix/backports."""
     v = sqlite3.sqlite_version_info if version_info is None else version_info
