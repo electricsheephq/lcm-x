@@ -3901,8 +3901,9 @@ class ReconcileMixin:
                     if stored_tail_rows[rewind]["store_id"] not in explained and not bound.get(stored_tail_rows[rewind]["store_id"]):
                         cursor = rewind
                         rewound = True
-            # The session-wide tail can end inside a tool group that the
-            # gateway now owns. Keep its new results with the whole group.
+            # The session-wide tail can end inside a tool group the gateway
+            # now owns. Rewind a trailing call, or a partial group whose
+            # held occurrences have positional evidence.
             last = stored_rows[-1]
             tool_start = cursor
             if (
@@ -3921,7 +3922,21 @@ class ReconcileMixin:
                         and all(self._message_replay_identity(message)
                                 == self._message_replay_identity(row, stored_row=True)
                                 for message, row in zip(prefix, tail, strict=True))):
-                    tool_start = start
+                    if len(prefix) == 1:
+                        tool_start = start
+                    else:
+                        needs_uid = [i for i, (message, row) in enumerate(zip(prefix, tail, strict=True))
+                                     if (stamp := _normalize_observed_at(message.get("timestamp"))) is None
+                                     or stamp != row["observed_at"]]
+                        uid_rows = {}
+                        if needs_uid and recognition:
+                            host_messages = messages if original_messages is None else original_messages
+                            uid_rows = self._host_uid_resolve(
+                                host_messages[start:cursor], identities=prefix, reowned=self._reowned_receipt_store_ids(),
+                                defer_tool_segments=True,
+                            )
+                        if all(uid_rows.get(i) and uid_rows[i]["store_id"] == tail[i]["store_id"] for i in needs_uid):
+                            tool_start = start
             split_reowned_call = tool_start < cursor
             cursor = tool_start
             reason = (

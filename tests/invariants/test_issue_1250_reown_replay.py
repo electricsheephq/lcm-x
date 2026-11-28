@@ -244,7 +244,7 @@ def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine)
         ]
 
 
-def _measure_tool_resume(open_engine, shape, mode, stamped):
+def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=()):
     call_ids = ("r17-first", "r17-second") if shape == "partial-results" else ("r17-first",)
     call = {"role": "assistant", "content": "", "tool_calls": [
         {"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}
@@ -283,12 +283,13 @@ def _measure_tool_resume(open_engine, shape, mode, stamped):
 
     view = emitted + incoming
     proof, states = {}, []
-    for pass_index in range(6):
+    # With a follow-up, measure the initial return and then six cold replays.
+    for pass_index in range(7 if follow_up else 6):
         returning = open_engine(fresh_tail_count=0)
         (_bind_gateway if shape == "provisional" else _start)(returning)
         before = _rows(returning)
         if pass_index == 0:
-            expected = _digests(before) + _digests(incoming[-1:])
+            expected = _digests(before) + _digests(incoming[-1:]) + _digests(follow_up)
             receipt = getattr(returning, "_cursor_from_reowned_session_rows", None)
             if shape in {"receipt", "partial-results"} and stamped and receipt:
                 proof["receipt_before_ingest"] = receipt(view, before, len(before))[0]
@@ -296,6 +297,9 @@ def _measure_tool_resume(open_engine, shape, mode, stamped):
                 assert not returning._reowned_receipt_store_ids()
                 proof["provisional_before_ingest"] = returning._cursor_from_provisional_rebind(view, before)
         returning.ingest(view)
+        if pass_index == 0 and follow_up:
+            view = [*view, *follow_up]
+            returning.ingest(view)
         after = _rows(returning)
         assert after[:len(before)] == before
         assert not expected - _digests(after)
@@ -328,6 +332,15 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
         assert proof["receipt_before_ingest"] == 1
     if shape == "provisional" and stamped:
         assert proof["provisional_before_ingest"] == 1
+    if shape == "partial-results" and not stamped:
+        # Known limit: the unstamped second result stays orphaned on every pass.
+        assert [state["rows"] for state in states] == [4] * 6
+        assert [state["orphans"] for state in states] == [1] * 6
+        assert states[0]["writes"] == ["tool"]
+        assert states[0]["owners"] == [SESSION]
+        assert states[0]["result_ids"] == ["r17-second"]
+        assert not any(state["writes"] for state in states[1:])
+        return
     assert not any(state["orphans"] for state in states)
     expected = {
         "control": ["tool"],
@@ -337,6 +350,24 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
     assert states[0]["writes"] == expected
     assert states[0]["owners"] == [GATEWAY if shape == "provisional" else SESSION] * len(expected)
     assert states[0]["result_ids"] == (["r17-first", "r17-second"] if shape == "partial-results" else ["r17-first"])
+    assert not any(state["writes"] for state in states[1:])
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_unstamped_partial_results_followed_by_turn_do_not_grow(open_engine, monkeypatch, mode):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    follow_up = [
+        {"role": "user", "content": "Continue after the second result."},
+        {"role": "assistant", "content": "The check is complete."},
+    ]
+    _, states = _measure_tool_resume(open_engine, "partial-results", mode, False, follow_up=follow_up)
+    assert [state["rows"] for state in states] == [6] * 7
+    # Known limit: without stamps or UIDs, the second result can stay orphaned.
+    assert [state["orphans"] for state in states] == [1] * 7
+    assert states[0]["writes"] == ["tool", "user", "assistant"]
+    assert states[0]["owners"] == [SESSION] * 3
+    assert states[0]["result_ids"] == ["r17-second"]
     assert not any(state["writes"] for state in states[1:])
 
 
