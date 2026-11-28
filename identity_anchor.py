@@ -1661,8 +1661,9 @@ class IdentityAnchorMixin:
 
     def _identity_anchor_tool_segments(self, messages, cursor: int, hits: set, matched, proven=()) -> None:
         """An assistant tool-call segment is replayed whole or not at all, except a stored segment whose
-        only new rows are trailing results resuming in place on its session's newest row. ``proven``
-        rows (the audited prefix's positional replays) stay replayed."""
+        only new rows are trailing results resuming in place on its session's newest row.
+        A receipt row can resume only in its own conversation or with no recorded owner.
+        ``proven`` rows (the audited prefix's positional replays) stay replayed."""
         index, n = max(cursor, 0), len(messages)
         while index < n:
             if str(messages[index].get("role") or "") == "assistant" and messages[index].get("tool_calls"):
@@ -1675,7 +1676,10 @@ class IdentityAnchorMixin:
                     last = max((row for k in held for row in matched.get(k, ())), key=lambda r: int(r["store_id"]),
                                default=None)
                     tail = self._store.get_session_tail(str(last["session_id"]), limit=1) if last else None
-                    resumes = bool(tail) and int(tail[-1]["store_id"]) == int(last["store_id"])
+                    resumes = bool(tail) and int(tail[-1]["store_id"]) == int(last["store_id"]) and (
+                        tail[-1].get("conversation_id") in (None, "", self._conversation_id)
+                        or int(last["store_id"]) not in self._reowned_receipt_store_ids()
+                    )
                 if len(held) != end - index and not resumes:
                     hits.difference_update(k for k in range(index, end) if k not in proven)
                 index = end

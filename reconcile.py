@@ -3650,18 +3650,23 @@ class ReconcileMixin:
             call -= 1
         if not call or rows[call]["role"] != "assistant" or not rows[call].get("tool_calls"):
             return 0
-        original, copy = rows[call - 1], rows[call]
-        if (original["conversation_id"] == self._conversation_id
-                or any(row["conversation_id"] != self._conversation_id for row in rows[call:])
-                or original["store_id"] not in self._reowned_receipt_store_ids()
-                or original["observed_at"] != copy["observed_at"]
-                or self._message_replay_identity(original, stored_row=True)
-                != self._message_replay_identity(copy, stored_row=True)):
+        original_call = call - 1
+        while original_call > 0 and rows[original_call]["role"] == "tool":
+            original_call -= 1
+        original, local = rows[original_call:call], rows[call:]
+        if (len(original) >= len(local)
+                or any(row["conversation_id"] != self._conversation_id for row in local)
+                or any(row["conversation_id"] in ("", self._conversation_id) for row in original)
+                or not {row["store_id"] for row in original} <= self._reowned_receipt_store_ids()
+                or any(old["observed_at"] != copy["observed_at"]
+                       or self._message_replay_identity(old, stored_row=True)
+                       != self._message_replay_identity(copy, stored_row=True)
+                       for old, copy in zip(original, local))):
             return 0
-        call_ids = {item.get("id") for item in copy["tool_calls"] if isinstance(item, dict)}
+        call_ids = {item.get("id") for item in local[0]["tool_calls"] if isinstance(item, dict)}
         if None in call_ids or not call_ids or {row["tool_call_id"] for row in rows[call + 1:]} != call_ids:
             return 0
-        history = rows[:call - 1] + rows[call:]
+        history = rows[:original_call] + local
         if len(messages) < len(history):
             return 0
         for message, row in zip(messages, history):
@@ -3818,8 +3823,10 @@ class ReconcileMixin:
                 stored_tail_count=len(stored_tail), effective_incoming=reowned_emission_cursor,
             )
             return reowned_emission_cursor
-        if not (cursor or uid_cursor):
-            cursor = self._cursor_from_reowned_tool_copy(messages, stored_rows, session_count) or cursor
+        if max(cursor or 0, uid_cursor) < len(messages):
+            tool_copy_cursor = self._cursor_from_reowned_tool_copy(messages, stored_rows, session_count)
+            if tool_copy_cursor > max(cursor or 0, uid_cursor):
+                cursor = tool_copy_cursor
         if max(cursor or 0, uid_cursor) < len(messages):
             reowned_cursor, pairs = self._cursor_from_reowned_session_rows(
                 messages, stored_rows, session_count, ingest_drop_decisions=ingest_drop_decisions,
@@ -3894,21 +3901,29 @@ class ReconcileMixin:
                     if stored_tail_rows[rewind]["store_id"] not in explained and not bound.get(stored_tail_rows[rewind]["store_id"]):
                         cursor = rewind
                         rewound = True
-            # The session-wide tail can end at a call that the gateway now
-            # owns. Keep its new results with a local copy of their call.
+            # The session-wide tail can end inside a tool group that the
+            # gateway now owns. Keep its new results with the whole group.
             last = stored_rows[-1]
-            split_reowned_call = (
-                cursor < len(messages) and last["conversation_id"] != self._conversation_id
-                and messages[cursor].get("role") == "tool" and messages[cursor - 1].get("role") == "assistant"
-                and last["role"] == "assistant" and last.get("tool_calls")
+            tool_start = cursor
+            if (
+                cursor < len(messages) and last["conversation_id"] not in ("", self._conversation_id)
+                and messages[cursor].get("role") == "tool" and last["role"] in ("assistant", "tool")
                 and last["store_id"] in self._reowned_receipt_store_ids()
-                and self._message_replay_identity(messages[cursor - 1])
-                == self._message_replay_identity(last, stored_row=True)
-                and any(call.get("id") and call["id"] == messages[cursor].get("tool_call_id")
-                        for call in last["tool_calls"] if isinstance(call, dict))
-            )
-            if split_reowned_call:
-                cursor -= 1
+            ):
+                start = cursor - 1
+                while start > 0 and messages[start].get("role") == "tool":
+                    start -= 1
+                prefix = messages[start:cursor]
+                tail = stored_rows[-len(prefix):]
+                if (len(prefix) == len(tail) and prefix[0].get("role") == "assistant"
+                        and any(call.get("id") and call["id"] == messages[cursor].get("tool_call_id")
+                                for call in tail[0].get("tool_calls") or () if isinstance(call, dict))
+                        and all(self._message_replay_identity(message)
+                                == self._message_replay_identity(row, stored_row=True)
+                                for message, row in zip(prefix, tail, strict=True))):
+                    tool_start = start
+            split_reowned_call = tool_start < cursor
+            cursor = tool_start
             reason = (
                 "replayed durable tail before a re-owned tool call" if split_reowned_call else
                 "replayed durable tail before a later user occurrence" if rewound else

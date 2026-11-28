@@ -244,6 +244,102 @@ def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine)
         ]
 
 
+def _measure_tool_resume(open_engine, shape, mode, stamped):
+    call_ids = ("r17-first", "r17-second") if shape == "partial-results" else ("r17-first",)
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}
+        for call_id in call_ids
+    ]}
+    incoming = [{"role": "user", "content": "Run the round-17 tool check."}, call, *[
+        {"role": "tool", "content": f"Result for {call_id}.", "tool_call_id": call_id, "tool_name": "read"}
+        for call_id in call_ids
+    ]]
+    if stamped:
+        for index, row in enumerate(incoming):
+            row["timestamp"] = 100 + index
+    if shape == "uid" and mode == "on":
+        for index, row in enumerate(incoming):
+            row["message_uid"] = f"resume-{index}"
+
+    initial, emitted = incoming[:-1], []
+    writer = open_engine(fresh_tail_count=0)
+    _start(writer)
+    if shape == "provisional":
+        writer.ingest(EARLY)
+        emitted = writer.compress(EARLY, force=True)
+        assert writer.last_compression_status == "compacted"
+    writer.ingest(emitted + initial)
+    writer.shutdown()
+
+    if shape not in {"control", "provisional"}:
+        gateway = open_engine(fresh_tail_count=0)
+        _bind_gateway(gateway)
+        gateway.compress(initial, force=True)
+        if hasattr(gateway, "_reowned_receipt_store_ids"):
+            transferred = _rows(gateway)
+            assert [row["conversation_id"] for row in transferred] == [GATEWAY] * len(initial)
+            assert gateway._store.read_metadata_json(REOWN_KEY) == [row["store_id"] for row in transferred]
+        gateway.shutdown()
+
+    view = emitted + incoming
+    proof, states = {}, []
+    for pass_index in range(6):
+        returning = open_engine(fresh_tail_count=0)
+        (_bind_gateway if shape == "provisional" else _start)(returning)
+        before = _rows(returning)
+        if pass_index == 0:
+            expected = _digests(before) + _digests(incoming[-1:])
+            receipt = getattr(returning, "_cursor_from_reowned_session_rows", None)
+            if shape in {"receipt", "partial-results"} and stamped and receipt:
+                proof["receipt_before_ingest"] = receipt(view, before, len(before))[0]
+        returning.ingest(view)
+        after = _rows(returning)
+        assert after[:len(before)] == before
+        assert not expected - _digests(after)
+        seen, orphans = set(), 0
+        for row in after:
+            if row["role"] == "assistant":
+                seen.update((row["conversation_id"], call["id"]) for call in row["tool_calls"] or ())
+            elif row["role"] == "tool":
+                orphans += (row["conversation_id"], row["tool_call_id"]) not in seen
+        states.append({
+            "rows": len(after), "orphans": orphans,
+            "writes": [row["role"] for row in after[len(before):]],
+            "owners": [row["conversation_id"] for row in after[len(before):]],
+            "result_ids": [row["tool_call_id"] for row in after[len(before):] if row["role"] == "tool"],
+            "cursor": returning._last_ingest_reconciliation["cursor"],
+            "reason": returning._last_ingest_reconciliation["reason"],
+        })
+        returning.shutdown()
+    return proof, states
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+@pytest.mark.parametrize("stamped", [False, True], ids=["unstamped", "stamped"])
+@pytest.mark.parametrize("shape", ["receipt", "uid", "partial-results", "provisional", "control"])
+def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stamped):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    proof, states = _measure_tool_resume(open_engine, shape, mode, stamped)
+    if shape in {"receipt", "partial-results"} and stamped:
+        assert proof["receipt_before_ingest"] == 1
+    if shape == "provisional" and stamped:
+        assert states[0]["reason"] == "replayed proven provisional session tail"
+        assert states[0]["writes"] == ["tool"]
+        assert states[0]["orphans"] == 1
+        pytest.xfail("The provisional source has no receipt and keeps the existing exemption.")
+    expected = {
+        "control": ["tool"],
+        "partial-results": ["assistant", "tool", "tool"],
+        "provisional": ["user", "assistant", "tool"],
+    }.get(shape, ["assistant", "tool"])
+    assert states[0]["writes"] == expected
+    assert states[0]["owners"] == [GATEWAY if shape == "provisional" else SESSION] * len(expected)
+    assert states[0]["result_ids"] == (["r17-first", "r17-second"] if shape == "partial-results" else ["r17-first"])
+    assert not any(state["writes"] for state in states[1:])
+    assert not any(state["orphans"] for state in states)
+
+
 @pytest.mark.usefixtures("uid_lineage")
 @pytest.mark.parametrize("mixed, expected", [(True, [8, 9, 10, 11, 12]), (False, [6, 8, 10, 12, 14])],
                          ids=["mixed-replay", "same-uids-replay-plus-pair"])
