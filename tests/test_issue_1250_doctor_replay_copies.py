@@ -340,7 +340,7 @@ def test_doctor_output_and_caps(tmp_path):
         assert f"{CHECK}: 1071 row(s) across 21 session(s). {detail['message']}" in text
         guidance = (
             "These rows are possible copies from two windows sharing one session. Nothing is lost. "
-            "Keep one window per session until v0.31.0. The listed IDs are for a later repair."
+            "Keep one window per session until LCM-X issue #3128 is fixed. The listed IDs are for a later repair."
         )
         assert f"- {CHECK}: inspect warning-only — {guidance}" in text
         assert f"- {CHECK}: inspect — inspect the reported detail" not in text

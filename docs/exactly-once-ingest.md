@@ -476,7 +476,7 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
 - **v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
   again, one copy per unstamped retained or later row. The first two restarts can also store up to two
   copies of tool rows with their original stamps. The short-tail probes measured 1 to 6 extra rows
-  per cold restart with no loss. Keep one window per session until v0.31.0.
+  per cold restart with no loss. Keep one window per session until #3128 is fixed.
   The `two_window_replay_copies` check in `/lcm doctor` or `lcm_doctor` counts unstamped repeats and exact stamped copies. A genuine new
   message that repeats earlier text without a stamp or host UID can also be counted.
   The check scans at most 20,000 in-scope rows, the most recently written sessions first, and reports a partial count past that limit.

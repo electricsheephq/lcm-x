@@ -228,7 +228,7 @@ Each summary route (the summary model and each fallback model) has its own circu
 
 For this ownership refusal, `/lcm status` shows `last_compression_failure_reason: session_owned_by_other_window`
 and the reason text. `/lcm doctor` shows that text as a `compaction:` observation. The warning carries
-`failure=publication_invariant_conflict`. Keep only one window compacting a session until v0.31.0 (#1250).
+`failure=publication_invariant_conflict`. Keep only one window compacting a session until #2938 is fixed (#1250).
 
 A 400 or 404 saying the route cannot serve its model (unknown model, model not found, does not exist, not supported) is a configuration error (#682): it opens the route on the first failure and logs one WARNING per episode naming the provider and model the host used and whether LCM-X sent a model; a successful summary ends the episode. The fix is in the profile's `config.yaml`, not an LCM key: set `auxiliary.compression.provider` and `auxiliary.compression.model` together, or a consistent `model.provider` / `model.default` pair. `lcm_status.summary_route` shows `state` (`open`/`closed`), `seconds_left`, `last_error_class`, `provider` and `model`.
 

@@ -292,7 +292,7 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     elif name == "two_window_replay_copies" and status == "warn":
         command = (
             "These rows are possible copies from two windows sharing one session. Nothing is lost. "
-            "Keep one window per session until v0.31.0. The listed IDs are for a later repair."
+            "Keep one window per session until LCM-X issue #3128 is fixed. The listed IDs are for a later repair."
         )
         warning_only = True
         rationale = "the replay-copy check reports possible duplicates while preserving stored rows"
