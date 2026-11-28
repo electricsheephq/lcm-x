@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -14,18 +15,24 @@ from .lifecycle_state import LifecycleOtherWindowConflictError
 from .store import _MESSAGE_SELECT_COLUMNS
 
 
+TWO_WINDOW_REPLAY_SCAN_LIMIT = 20_000
+
+
 def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
     """Report possible unstamped replay copies without changing the store."""
     check = "two_window_replay_copies"
-    row_count = session_count = 0
+    row_count = session_count = rows_scanned = 0
     sessions = []
     try:
         store = engine._store
         conn = store.connection
+        # SQLite's default TRIM removes spaces only. Legacy IDs may also contain tabs or newlines.
         scoped = conn.execute(
-            "SELECT session_id FROM messages WHERE conversation_id <> '' "
-            "GROUP BY session_id HAVING COUNT(DISTINCT conversation_id) > 1 ORDER BY session_id"
+            "SELECT session_id, COUNT(*) FROM messages GROUP BY session_id "
+            "HAVING COUNT(DISTINCT NULLIF(TRIM(conversation_id, char(9, 10, 11, 12, 13, 32)), '')) > 1 "
+            "ORDER BY session_id"
         ).fetchall()
+        rows_in_scope = sum(count for _, count in scoped)
         if scoped:
             tables = {name for (name,) in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -44,21 +51,29 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
                     " AND NOT EXISTS (SELECT 1 FROM host_uid_bindings AS b WHERE b.store_id = messages.store_id "
                     "AND b.kind IN ('canonical', 'version'))"
                 )
-            for (session_id,) in scoped:
-                seen = set()
+            for session_id, _ in scoped:
+                remaining = TWO_WINDOW_REPLAY_SCAN_LIMIT - rows_scanned
+                if remaining <= 0:
+                    break
+                seen: set[bytes] = set()
                 count = 0
                 store_ids = []
+                # Select the newest IDs first, then stream their rows in replay order.
                 for record in conn.execute(
                     f"SELECT {_MESSAGE_SELECT_COLUMNS}, ({unstamped}) FROM messages "
-                    "WHERE session_id = ? ORDER BY store_id", (session_id,),
+                    "WHERE store_id IN (SELECT store_id FROM messages "
+                    "WHERE session_id = ? ORDER BY store_id DESC LIMIT ?) ORDER BY store_id",
+                    (session_id, remaining),
                 ):
+                    rows_scanned += 1
                     row = store._row_to_dict(record)
                     identity = engine._message_replay_identity(row, stored_row=True, store=store, session_id=session_id)
-                    if record[-1] and identity in seen:
+                    digest = sha256(repr(identity).encode("utf-8")).digest()
+                    if record[-1] and digest in seen:
                         count += 1
                         if len(sessions) < 20 and len(store_ids) < 50:
                             store_ids.append(row["store_id"])
-                    seen.add(identity)
+                    seen.add(digest)
                 if count:
                     row_count += count
                     session_count += 1
@@ -74,6 +89,10 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
             "with unstamped rows. A genuine new message that repeats earlier text without a stamp can also "
             "be counted. See the v0.30.5 known-issue note in docs/exactly-once-ingest.md."
         )
+    if rows_scanned < rows_in_scope:
+        detail.update(partial=True, rows_scanned=rows_scanned, rows_in_scope=rows_in_scope)
+        lower_bound = "The count covers the newest rows only and is a lower bound."
+        detail["message"] = f"{detail['message']} {lower_bound}" if row_count else lower_bound
     return {"check": check, "status": "warn" if row_count else "pass", "detail": detail}
 
 
@@ -681,7 +700,7 @@ def render_doctor(facts: DoctorFacts) -> str:
 
     replay_copies = facts.two_window_replay_copies
     replay_detail = replay_copies["detail"]
-    if replay_copies["status"] == "warn":
+    if replay_copies["status"] == "warn" or replay_detail.get("partial"):
         observations.append(
             f"two_window_replay_copies: {replay_detail['row_count']} row(s) across "
             f"{replay_detail['session_count']} session(s). {replay_detail['message']}"

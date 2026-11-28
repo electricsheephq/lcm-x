@@ -1,13 +1,14 @@
-"""Doctor coverage for the round-19 cold-replay cells and their controls."""
+"""Doctor coverage for the cold-replay cells, controls, and scan budget."""
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
 import json
 import sqlite3
+from time import perf_counter
 
 import pytest
 
-from hermes_lcm import command, engine as engine_module, message_patterns, tools
+from hermes_lcm import command, command_doctor, engine as engine_module, message_patterns, tools
 from hermes_lcm.command_doctor import two_window_replay_copies_check
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -108,7 +109,7 @@ def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass):
             gateway.ingest(deepcopy(view))
         assert two_window_replay_copies_check(gateway)["status"] == "pass"
 
-    counts, extras = [], []
+    counts, extras, scan_ms = [], [], []
     for cold_pass in range(1, 7):
         with cold_engine(G, fresh=1) as gateway:
             before = stored(gateway)
@@ -116,18 +117,22 @@ def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass):
             after = stored(gateway)
             assert after[:len(before)] == before
             extra_ids = [row["store_id"] for row in after[len(before):]]
+            start = perf_counter()
             check = two_window_replay_copies_check(gateway)
+            scan_ms.append((perf_counter() - start) * 1_000)
             assert check["status"] == "warn"
             detail = check["detail"]
             counts.append(detail["row_count"])
             extras.append(len(extra_ids))
             assert len(extra_ids) == per_pass
             assert detail["row_count"] == cold_pass * per_pass
+            assert "partial" not in detail
             assert detail["session_count"] == 1
             sample, = detail["sessions"]
             assert sample["session_id"] == S
             assert sample["store_ids"][-per_pass:] == extra_ids
     print(f"{shape}/{mode}: count={counts}; extra={extras}")
+    print(f"{shape}/{mode}: scan_ms={[round(elapsed, 3) for elapsed in scan_ms]}")
 
 
 def test_single_window_after_publication(cold_engine):
@@ -210,9 +215,10 @@ def test_two_window_pass(tmp_path, evidence):
         assert two_window_replay_copies_check(engine) == empty_check()
 
 
-def test_no_scope_does_not_read_content(tmp_path):
+@pytest.mark.parametrize("legacy_id", (S, f"  {S}  ", "   ", " \t\n "))
+def test_no_scope_does_not_read_content(tmp_path, legacy_id):
     with engine_context(tmp_path, embeddings_enabled=False) as engine:
-        insert_rows(engine, [(S, S, "Repeated", None), (S, S, "Repeated", None)])
+        insert_rows(engine, [(S, S, "Repeated", None), (S, legacy_id, "Repeated", None)])
         conn = engine._store.connection
         statements = []
         conn.set_trace_callback(statements.append)
@@ -222,6 +228,59 @@ def test_no_scope_does_not_read_content(tmp_path):
             conn.set_trace_callback(None)
         assert len(statements) == 1
         assert "content" not in statements[0]
+
+
+def budget_rows(total_rows):
+    yield S, S, "Older pair", 100
+    yield S, S, "Older pair", None
+    for row in range(total_rows - 4):
+        yield S, S, f"Distinct {row}", None
+    yield S, G, "Newest pair", 100
+    yield S, G, "Newest pair", None
+
+
+@pytest.mark.parametrize("total_rows", (20_004, pytest.param(200_000, marks=pytest.mark.latency)))
+def test_newest_rows_budget(tmp_path, total_rows):
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        insert_rows(engine, budget_rows(total_rows))
+        start = perf_counter()
+        check = two_window_replay_copies_check(engine)
+        elapsed = perf_counter() - start
+        print(f"{total_rows} in-scope rows: check_s={elapsed:.6f}")
+
+        assert check["status"] == "warn"
+        detail = check["detail"]
+        assert detail["partial"] is True
+        assert detail["rows_scanned"] == 20_000
+        assert detail["rows_in_scope"] == total_rows
+        assert detail["row_count"] == 1
+        assert detail["sessions"] == [{"session_id": S, "store_ids": [total_rows]}]
+        assert "newest rows only and is a lower bound" in detail["message"]
+        if total_rows == 200_000:
+            assert elapsed < 2
+
+
+@pytest.mark.parametrize("budget", (2, 3, 4))
+def test_budget_shared_across_sessions(tmp_path, monkeypatch, budget):
+    monkeypatch.setattr(command_doctor, "TWO_WINDOW_REPLAY_SCAN_LIMIT", budget)
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        insert_rows(engine, [
+            ("first", S, "First", None), ("first", G, "Second", None),
+            ("second", S, "Repeat", None), ("second", G, "Repeat", None),
+        ])
+        check = two_window_replay_copies_check(engine)
+        detail = check["detail"]
+        if budget < 4:
+            assert check["status"] == "pass"
+            assert detail["row_count"] == 0
+            assert detail["partial"] is True
+            assert detail["rows_scanned"] == budget
+            assert detail["rows_in_scope"] == 4
+            assert "newest rows only and is a lower bound" in command._doctor_text(engine)
+        else:
+            assert check["status"] == "warn"
+            assert detail["row_count"] == 1
+            assert "partial" not in detail
 
 
 def test_doctor_output_and_caps(tmp_path):
@@ -247,7 +306,14 @@ def test_doctor_output_and_caps(tmp_path):
         ]
         assert "genuine new message" in detail["message"]
         assert "v0.30.5 known-issue note" in detail["message"]
-        assert f"{CHECK}: 1071 row(s) across 21 session(s). {detail['message']}" in command._doctor_text(engine)
+        text = command._doctor_text(engine)
+        assert f"{CHECK}: 1071 row(s) across 21 session(s). {detail['message']}" in text
+        guidance = (
+            "These rows are possible copies from two windows sharing one session. Nothing is lost. "
+            "Keep one window per session until v0.31.0. The listed IDs are for a later repair."
+        )
+        assert f"- {CHECK}: inspect warning-only — {guidance}" in text
+        assert f"- {CHECK}: inspect — inspect the reported detail" not in text
         conn = engine._store.connection
         conn.execute("PRAGMA query_only=ON")
         try:

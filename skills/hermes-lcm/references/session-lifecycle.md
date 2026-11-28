@@ -98,6 +98,7 @@ an unstamped replay of the returning window's compacted view can still add a cop
 cases store 1 to 3 extra rows per cold restart with no loss. Keep one window per session until v0.31.0.
 The `two_window_replay_copies` doctor check shows possible copies. A genuine new message that repeats
 earlier text without a stamp or host UID can also be counted.
+The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 

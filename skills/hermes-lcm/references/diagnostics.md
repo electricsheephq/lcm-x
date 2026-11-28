@@ -79,6 +79,7 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
   result includes total rows and affected sessions, with up to 20 session IDs and 50 store IDs per session.
   Genuine repeated messages without a stamp or host UID can also be counted. See the v0.30.5 known issue
   in [Session lifecycle](session-lifecycle.md).
+  The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.
 - LOCAL catch-up: `/lcm status` exposes `embedding_incremental_last_pass`; doctor readiness includes the database's maintenance outcome. `model_preparing`, `model_unavailable`, `lease_held`, `circuit_open` and `row_backoff` describe deferred work; `no_progress`, `model_prepare_exhausted`, refusal/error or `queue_capacity_exhausted` need inspection. Summary coverage alone does not certify chunk coverage. Full-text recall remains available while semantic coverage is incomplete.
 - Unbound status after restart: send a normal message, then check again.
 - `LCM shutdown drain timed out ... child=<12 hex> has up to N handed-over row(s) not yet stored ... (#2483)`: a delegated
