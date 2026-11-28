@@ -173,7 +173,11 @@ from .host_uid_emit import (
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
-from .db_bootstrap import refresh_legacy_conversation_ids
+from .db_bootstrap import (
+    refresh_legacy_conversation_ids,
+    rotation_predecessor_metadata_key,
+    walk_rotation_predecessors,
+)
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
@@ -6168,7 +6172,7 @@ class LCMEngine(
 
     @staticmethod
     def _rotation_predecessor_metadata_key(session_id: str) -> str:
-        return f"rotation_predecessor_session:{session_id}"
+        return rotation_predecessor_metadata_key(session_id)
 
     def _record_rotation_predecessor(self, session_id: str, predecessor_session_id: str) -> None:
         """#680: remember the compression-boundary lineage so an externalized ref
@@ -6192,18 +6196,7 @@ class LCMEngine(
 
     def _rotation_predecessor_session_ids(self, session_id: str, max_hops: int = 32) -> list[str]:
         """The recorded compression-boundary predecessors of ``session_id``, nearest first."""
-        found: list[str] = []
-        current = session_id
-        for _ in range(max_hops):
-            try:
-                predecessor = self._store.read_metadata_json(self._rotation_predecessor_metadata_key(current))
-            except Exception:
-                break
-            if not isinstance(predecessor, str) or not predecessor or predecessor == session_id or predecessor in found:
-                break
-            found.append(predecessor)
-            current = predecessor
-        return found
+        return walk_rotation_predecessors(self._store.read_metadata_json, session_id, max_hops)
 
     def carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         """Move retained summaries from the old session into the new one.
@@ -6758,6 +6751,10 @@ class LCMEngine(
                 # commit proof or a carried native recovery proof.
                 or self._durable_commit_proof_payload() is not None
                 or bool(self._load_native_recovery_replay_snapshot_digests())
+                # A gateway rebind can still prove an empty child's inherited tail.
+                or (self._conversation_id != self._session_id and bool(
+                    self._load_compression_carry_ranges(with_anchor=False)
+                ))
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)

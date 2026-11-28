@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -24,6 +25,7 @@ from .db_bootstrap import (
     configure_connection,
     owned_conversation_clause,
     refuse_schema_version_too_new,
+    rotation_predecessor_session_ids,
     run_versioned_migrations,
 )
 from .sqlite_session import ConnectionPolicy, open_connection
@@ -1058,16 +1060,29 @@ class LifecycleStateStore:
                 "Compaction publication source ownership changed"
             )
         reowned_ids = []
-        if conversation_id != session_id:
-            provisional_ids = [
-                int(row[0]) for row in snapshot_rows if row[1] == row[2] == session_id
-            ]
+        reowned_from = set()
+        if conversation_id != session_id and any(
+            str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows
+        ):
+            binding = conn.execute(
+                "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if binding is not None and binding[0] == session_id:
+                chain = [session_id, *rotation_predecessor_session_ids(conn, session_id)]
+                position = {source: index for index, source in enumerate(chain)}
+                provisional_ids = [
+                    int(row[0]) for row in snapshot_rows
+                    if row[1] in position and row[2] in position
+                    and position[row[1]] <= position[row[2]]
+                ] if conversation_id not in position else []
+            else:
+                provisional_ids = []
             if provisional_ids:
-                reowned_ids = sorted(int(row[0]) for row in conn.execute(
+                selected = conn.execute(
                     """
-                    UPDATE messages SET conversation_id = ?
-                    WHERE session_id = ? AND conversation_id = ?
-                      AND COALESCE(source, '') != ?
+                    SELECT store_id, conversation_id FROM messages
+                    WHERE COALESCE(source, '') != ?
                       AND store_id IN (SELECT value FROM json_each(?))
                       AND store_id NOT IN (
                           SELECT source.value
@@ -1075,12 +1090,20 @@ class LifecycleStateStore:
                           WHERE node.source_type = 'messages' AND node.node_id != ?
                             AND source.value IN (SELECT value FROM json_each(?))
                       )
-                    RETURNING store_id
+                    ORDER BY store_id
                     """,
-                    (conversation_id, session_id, session_id, _DELEGATE_SOURCE,
-                     str(provisional_ids), publication_node_id, str(provisional_ids)),
-                ).fetchall())
+                    (_DELEGATE_SOURCE, str(provisional_ids), publication_node_id, str(provisional_ids)),
+                ).fetchall()
+                reowned_ids = [int(row[0]) for row in selected]
                 if reowned_ids:
+                    updated = conn.execute(
+                        "UPDATE messages SET conversation_id = ? "
+                        "WHERE store_id IN (SELECT value FROM json_each(?))",
+                        (conversation_id, str(reowned_ids)),
+                    ).rowcount
+                    if updated != len(reowned_ids):
+                        raise LifecyclePublicationConflictError("Compaction publication re-owned row count changed")
+                    reowned_from = {row[1] for row in selected}
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
@@ -1203,9 +1226,9 @@ class LifecycleStateStore:
                          AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
                         THEN MAX(current_frontier_store_id, last_finalized_frontier_store_id)
                         ELSE current_frontier_store_id END
-                WHERE conversation_id = :sid AND current_session_id = :sid
+                WHERE conversation_id IN (SELECT value FROM json_each(:owners)) AND current_session_id = :sid
                 """,
-                {"sid": session_id, "now": now},
+                {"sid": session_id, "now": now, "owners": json.dumps(sorted(reowned_from))},
             )
         if reowned_store_ids is not None:
             reowned_store_ids[:] = reowned_ids

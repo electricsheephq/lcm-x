@@ -103,10 +103,6 @@ def _hermes_salvage_protected_positions(messages) -> set[int]:
                [-_HERMES_SALVAGE_KEEP_RECENT_TOOLS:])
 
 
-def _is_provisional_delegate_row(row, session_id) -> bool:
-    return row.get("session_id") == row.get("conversation_id") == session_id and row.get("source") == _DELEGATE_SOURCE
-
-
 def _is_stored_nonstring_content(text: str) -> bool:
     """#1385: canonical non-string storage cannot prove a salvage-clearable string.
 
@@ -2893,6 +2889,16 @@ class ReconcileMixin:
         try:
             payload = self._durable_commit_proof_payload(session_id) or {}
             anchored = self._identity_anchor_carry_ranges() if with_anchor and session_id in (None, self._session_id) else []
+            if (not payload and session_id in (None, self._session_id)
+                    and self._session_id and self._conversation_id != self._session_id):
+                predecessors = self._rotation_predecessor_session_ids(self._session_id)
+                if predecessors and self._conversation_id not in predecessors:
+                    proof = self._provisional_rebind_proof(predecessors)
+                    if proof:
+                        payload = {"carry_ranges": [
+                            (source, start, end) for source, start, end in proof.get("carry_ranges") or ()
+                            if source in predecessors
+                        ]}
             return self._coalesce_compression_carry_ranges(
                 list(payload.get("carry_ranges") or []) + anchored
             )
@@ -2924,7 +2930,7 @@ class ReconcileMixin:
         return coalesced
 
     def _cursor_from_durable_commit_proof(
-        self, messages, allow_replaced_tail: Optional[list] = None, *, payload=None,
+        self, messages, allow_replaced_tail: Optional[list] = None, *, payload=None, provisional_owners=(),
     ) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
 
@@ -3058,7 +3064,9 @@ class ReconcileMixin:
                     break
                 self._load_host_rewrite_overrides(page)
                 for row in page:
-                    if self._conversation_id != self._session_id and _is_provisional_delegate_row(row, self._session_id):
+                    # Only the provisional-tail extension excludes delegate writes. The
+                    # regular proof walk continues to account for all stored rows.
+                    if row["conversation_id"] in provisional_owners and row["source"] == _DELEGATE_SOURCE:
                         continue
                     if index >= n:
                         return None
@@ -3124,10 +3132,7 @@ class ReconcileMixin:
             return None
         rows = self._store.get_session_messages(self._session_id, limit=session_count)
         self._load_host_rewrite_overrides(rows)
-        if len(rows) != session_count or (
-            self._conversation_id != self._session_id
-            and any(_is_provisional_delegate_row(row, self._session_id) for row in rows)
-        ):
+        if len(rows) != session_count:
             return None
         rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
         recent_tools = _hermes_salvage_protected_positions(messages)
@@ -3467,6 +3472,14 @@ class ReconcileMixin:
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
         if session_count <= 0:
+            provisional_cursor = self._cursor_from_provisional_rebind(messages, [])
+            if provisional_cursor is not None and provisional_cursor > uid_cursor:
+                self._record_ingest_reconciliation(
+                    action="advanced cursor", reason="replayed proven provisional session tail",
+                    cursor=provisional_cursor, incoming=len(messages), session_count=0,
+                    stored_tail_count=0, effective_incoming=provisional_cursor,
+                )
+                return provisional_cursor
             cursor = self._reconcile_empty_store_session(run)
             return self._record_uid_cursor(messages, uid_cursor, session_count, 0) if uid_cursor > cursor else cursor
 
@@ -3475,11 +3488,6 @@ class ReconcileMixin:
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
         if not stored_rows:
             return self._record_uid_cursor(messages, uid_cursor, session_count, 0) if uid_cursor else 0
-        cross_binding = self._conversation_id and self._conversation_id != self._session_id
-        if cross_binding:
-            stored_rows = [
-                row for row in stored_rows if not _is_provisional_delegate_row(row, self._session_id)
-            ]
         stored_tail_rows = [
             row
             for row in stored_rows
@@ -3530,7 +3538,7 @@ class ReconcileMixin:
                 effective_incoming=proof_cursor,
             )
             return proof_cursor
-        if cross_binding and any(row["conversation_id"] == self._session_id for row in stored_tail_rows):
+        if self._conversation_id != self._session_id:
             provisional_cursor = self._cursor_from_provisional_rebind(messages, stored_tail_rows)
             if provisional_cursor is not None and provisional_cursor > max(cursor or 0, uid_cursor):
                 self._record_ingest_reconciliation(
@@ -3632,26 +3640,46 @@ class ReconcileMixin:
 
         return self._reconcile_unmatched_store_history(run)
 
-    def _cursor_from_provisional_rebind(self, messages, stored_rows) -> Optional[int]:
-        """Use S's emitted head to prove a stored tail when the same session now binds G."""
+    def _provisional_rebind_proof(self, provisional_owners):
         session_id = self._session_id
-        previous = self._lifecycle.get_by_conversation(session_id)
-        if previous is None or not (
-            previous.current_session_id == session_id
-            or previous.current_session_id is None and previous.last_finalized_session_id == session_id
-        ):
+        current_binding = self._emission_binding()
+        for owner in provisional_owners:
+            previous = self._lifecycle.get_by_conversation(owner)
+            if previous is None or not (
+                previous.current_session_id == session_id
+                or previous.current_session_id is None and previous.last_finalized_session_id == session_id
+            ):
+                continue
+            proof = self._durable_commit_proof_payload(binding={
+                **current_binding, "conversation_id": owner, "reset_epoch": previous.last_reset_at,
+            })
+            if proof and proof["version"] == 4 and not proof.get("native") and (
+                current_binding["reset_epoch"] is None
+                or float(proof.get("created_at") or 0) > current_binding["reset_epoch"]
+            ):
+                return proof
+        return None
+
+    def _cursor_from_provisional_rebind(self, messages, stored_rows) -> Optional[int]:
+        """Use the old provisional binding's emitted head and ordered rows to prove replay."""
+        session_id = self._session_id
+        if not self._conversation_id or self._conversation_id == session_id:
             return None
         try:
-            current_binding = self._emission_binding()
-            proof = self._durable_commit_proof_payload(binding={
-                **current_binding, "conversation_id": session_id, "reset_epoch": previous.last_reset_at,
-            })
-            if not proof or proof["version"] != 4 or proof.get("native") or (
-                current_binding["reset_epoch"] is not None
-                and float(proof.get("created_at") or 0) <= current_binding["reset_epoch"]
-            ):
+            predecessors = self._rotation_predecessor_session_ids(session_id)
+            owners = {session_id, *predecessors}
+            if self._conversation_id in owners:
                 return None
-            cursor = self._cursor_from_durable_commit_proof(messages, payload=proof)
+            stored_rows = [
+                row for row in stored_rows
+                if not (row["conversation_id"] in owners and row["source"] == _DELEGATE_SOURCE)
+            ]
+            if not predecessors and not any(row["conversation_id"] == session_id for row in stored_rows):
+                return None
+            proof = self._provisional_rebind_proof([session_id, *predecessors])
+            if not proof:
+                return None
+            cursor = self._cursor_from_durable_commit_proof(messages, payload=proof, provisional_owners=owners)
             if not cursor:
                 return None
             # The normal matcher falls back to a scaffold-only prefix without S's descriptors.
@@ -3659,20 +3687,35 @@ class ReconcileMixin:
             # Every projected raw occurrence must still match its row in the ordered tail.
             projection, identities = self._occurrence_replay_identities(messages, proof)
             matched = [(index, identity) for index, identity in enumerate(identities[:cursor]) if identity is not None]
-            if not matched or len(matched) > len(stored_rows) or not any(
+            if not matched or not any(
                 entry.generated_span is not None and (
                     identity is None or entry.kind == "carrier" and (entry.retained_source or {}).get("store_id")
                 )
                 for entry, identity in zip(projection.entries[:cursor], identities[:cursor])
             ):
                 return None
+            if proof["conversation_id"] in predecessors:
+                carried = {}
+                for source, start, end in self._coalesce_compression_carry_ranges(proof.get("carry_ranges") or ()):
+                    if source not in predecessors:
+                        continue
+                    page = self._store.get_range(source, start + 1, end, limit=len(matched) + 1)
+                    if len(page) > len(matched):
+                        return None
+                    carried.update(
+                        (row["store_id"], row) for row in page
+                        if row["conversation_id"] in owners and row["source"] != _DELEGATE_SOURCE
+                    )
+                stored_rows = sorted([*stored_rows, *carried.values()], key=lambda row: row["store_id"])
+            if len(matched) > len(stored_rows):
+                return None
             suffix = stored_rows[-len(matched):]
-            if not any(row["conversation_id"] == session_id for row in suffix):
+            if not any(row["conversation_id"] in owners for row in suffix):
                 return None
             metadata = self._remapped_output_metadata(messages, proof, cursor)
             for (index, identity), row in zip(matched, suffix):
                 retained_id = (projection.entries[index].retained_source or {}).get("store_id")
-                if row["conversation_id"] not in {"", session_id, self._conversation_id} or (
+                if row["conversation_id"] not in {"", self._conversation_id, *owners} or (
                     (retained_id is not None and retained_id != row["store_id"])
                     or _has_lossy_redacted_identity(identity)
                     or identity != self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)

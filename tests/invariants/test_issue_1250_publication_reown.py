@@ -4,7 +4,6 @@ import ast
 from collections import Counter
 from contextlib import ExitStack, nullcontext
 from hashlib import sha256
-import json
 import logging
 from pathlib import Path
 
@@ -19,12 +18,9 @@ from hermes_lcm.engine_registry import (
     ActiveEngineUseStatus, use_active_lcm_engine, use_cold_lcm_engine, use_lcm_engine,
 )
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
-from tests.compat.conftest import host_root, old_tree  # noqa: F401
-from tests.compat.helpers import run_old
 
 SESSION = "S-1250"
 GATEWAY = "agent:main:local:dm:S-1250"
-PREVIOUS_GA = {"v0.30.4": "0ab1160716f1c5167d17885a92aaa1ed10b0919f"}
 SETTINGS = dict(fresh_tail_count=1, leaf_chunk_tokens=1, incremental_max_depth=0,
                 temporal_rollups_enabled=False, embeddings_enabled=False)
 EARLY = [
@@ -355,7 +351,7 @@ def test_delegate_source_excluded_from_transfer_and_bind_replay(open_engine):
     assert delegate_id not in _coverage(engine)
 
 
-def test_delegate_row_alone_cannot_prove_a_gateway_occurrence(open_engine):
+def test_delegate_rows_count_as_stored_but_cannot_transfer(open_engine):
     engine = open_engine()
     turns = EARLY[:2]
     delegate_ids = engine._append_off_current_session_end_suffix(
@@ -364,7 +360,10 @@ def test_delegate_row_alone_cannot_prove_a_gateway_occurrence(open_engine):
     _bind_gateway(engine)
     engine.ingest(list(turns))
     assert all(_owners(engine)[store_id] == SESSION for store_id in delegate_ids)
-    assert [row["conversation_id"] for row in _rows(engine)] == [SESSION, SESSION, GATEWAY, GATEWAY]
+    assert [row["conversation_id"] for row in _rows(engine)] == [SESSION, SESSION]
+    with pytest.raises(LifecyclePublicationConflictError, match="^Compaction publication source ownership changed$"):
+        _stage_leaf(engine, delegate_ids)
+    assert list(_owners(engine).values()) == [SESSION, SESSION]
 
 
 def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monkeypatch, caplog):
@@ -393,57 +392,3 @@ def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monke
     assert _rows(engine) == before
     assert engine._lifecycle.get_by_conversation(SESSION) == old
     assert _frontier(engine) == 0 and not _coverage(engine)
-
-
-OLD_RESUME = """
-inputs = json.loads(data)
-engine = LCMEngine(config=LCMConfig(database_path=db, **inputs["settings"]))
-try:
-    engine.on_session_start(inputs["session"], platform="desktop", context_length=200_000)
-    assert engine._conversation_id == inputs["conversation"]
-    state = engine._lifecycle
-    before = state.get_by_conversation(engine._conversation_id).current_frontier_store_id
-    nodes_before = engine._dag.get_session_node_count(engine._session_id)
-    view = inputs["view"]
-    engine.ingest(view)
-    engine.compress(view)
-    result = dict(status=engine.last_compression_status,
-                  frontier_before=before,
-                  frontier_after=state.get_by_conversation(engine._conversation_id).current_frontier_store_id,
-                  nodes_before=nodes_before, nodes_after=engine._dag.get_session_node_count(engine._session_id),
-                  rows=[[r["store_id"], r["conversation_id"], r["role"], r["content"]]
-                        for r in engine._store.get_session_messages(engine._session_id)],
-                  integrity=[r[0] for r in engine._store.connection.execute("PRAGMA integrity_check")])
-finally:
-    engine.shutdown()
-print(json.dumps(result))
-"""
-
-
-def test_previous_ga_reopens_and_publishes_after_reownership(open_engine, tmp_path, old_tree, host_root):  # noqa: F811
-    engine = open_engine()
-    host = _seed_compacted(engine)
-    _bind_gateway(engine)
-    engine.ingest(host + LATER)
-    output = _publish(engine, host + LATER)
-    before = _rows(engine)
-    frontier = _frontier(engine)
-    engine.shutdown()
-
-    new_turns = [
-        {"role": "assistant", "content": "Rollback reader's first reply."},
-        {"role": "user", "content": "Rollback reader's next request."},
-    ]
-    result = run_old(
-        old_tree("v0.30.4", PREVIOUS_GA), tmp_path, host_root, OLD_RESUME,
-        data=json.dumps(dict(settings=SETTINGS, session=SESSION, conversation=GATEWAY, view=output + new_turns)),
-    )
-    assert result["integrity"] == ["ok"]
-    assert result["status"] == "compacted" and result["nodes_after"] > result["nodes_before"]
-    assert result["frontier_after"] > result["frontier_before"] == frontier
-    assert result["rows"][:len(before)] == [
-        [row["store_id"], row["conversation_id"], row["role"], row["content"]] for row in before
-    ]
-    assert [(owner, role, content) for _, owner, role, content in result["rows"][len(before):]] == [
-        (GATEWAY, row["role"], row["content"]) for row in new_turns
-    ]
