@@ -283,7 +283,7 @@ def test_newest_rows_budget(tmp_path, total_rows):
         assert detail["row_count"] == 1
         assert (detail["unstamped"], detail["stamped_exact"]) == (1, 0)
         assert detail["sessions"] == [{"session_id": S, "store_ids": [total_rows]}]
-        assert "newest rows only and is a lower bound" in detail["message"]
+        assert "most recently written sessions and is a lower bound" in detail["message"]
         if total_rows == 200_000:
             assert elapsed < 2
 
@@ -298,16 +298,17 @@ def test_budget_shared_across_sessions(tmp_path, monkeypatch, budget):
         ])
         check = two_window_replay_copies_check(engine)
         detail = check["detail"]
+        # The most recently written session is scanned first, so an older session
+        # that fills the budget cannot hide the newer session's copy.
+        assert check["status"] == "warn"
+        assert detail["row_count"] == 1
+        assert detail["sessions"] == [{"session_id": "second", "store_ids": [4]}]
         if budget < 4:
-            assert check["status"] == "pass"
-            assert detail["row_count"] == 0
             assert detail["partial"] is True
             assert detail["rows_scanned"] == budget
             assert detail["rows_in_scope"] == 4
-            assert "newest rows only and is a lower bound" in command._doctor_text(engine)
+            assert "most recently written sessions and is a lower bound" in command._doctor_text(engine)
         else:
-            assert check["status"] == "warn"
-            assert detail["row_count"] == 1
             assert "partial" not in detail
 
 
@@ -331,7 +332,7 @@ def test_doctor_output_and_caps(tmp_path):
         assert (detail["unstamped"], detail["stamped_exact"]) == (21 * 51, 0)
         assert detail["sessions"] == [
             {"session_id": f"s-{i:02d}", "store_ids": list(range(i * 52 + 2, i * 52 + 52))}
-            for i in range(20)
+            for i in range(20, 0, -1)  # the most recently written sessions first
         ]
         assert "genuine new message" in detail["message"]
         assert "skills/hermes-lcm/references/session-lifecycle.md" in detail["message"]

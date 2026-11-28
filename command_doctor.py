@@ -30,7 +30,7 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
         scoped = conn.execute(
             "SELECT session_id, COUNT(*) FROM messages GROUP BY session_id "
             "HAVING COUNT(DISTINCT NULLIF(TRIM(conversation_id, char(9, 10, 11, 12, 13, 32)), '')) > 1 "
-            "ORDER BY session_id"
+            "ORDER BY MAX(store_id) DESC"
         ).fetchall()
         rows_in_scope = sum(count for _, count in scoped)
         if scoped:
@@ -102,7 +102,7 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
         )
     if rows_scanned < rows_in_scope:
         detail.update(partial=True, rows_scanned=rows_scanned, rows_in_scope=rows_in_scope)
-        lower_bound = "The count covers the newest rows only and is a lower bound."
+        lower_bound = "The count covers only the newest rows of the most recently written sessions and is a lower bound."
         detail["message"] = f"{detail['message']} {lower_bound}" if row_count else lower_bound
     return {"check": check, "status": "warn" if row_count else "pass", "detail": detail}
 
