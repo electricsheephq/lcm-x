@@ -458,8 +458,8 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   transferred store IDs for the original session-id binding. A returning session-id window treats validated receipt
   rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
   and conflicting UID bindings can veto a pair in `shadow` and `on`. In `off` and `shadow` (the default), ordinary
-  ingest stores rows it cannot recognize after the receipt's first break under the session ID. The paired replay grid
-  checks whether the excess over v0.30.4 stays bounded across cold restarts.
+  ingest stores rows it cannot recognize after the receipt's first break under the session ID. Measured against v0.30.4
+  across six cold restarts, that excess stays constant.
 - **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
 - **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).
