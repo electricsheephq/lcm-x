@@ -34,10 +34,16 @@ from .head_copy import known_head_copy_ids
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
 _BIND_CAS_ATTEMPTS = 8
+COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
+HOST_OCCURRENCE_SNAPSHOT_PREFIX = "host_occurrence_snapshot"
 
 
 def reowned_session_rows_key(session_id: str) -> str:
     return f"reowned_session_rows:{session_id}"
+
+
+def reowned_emission_prefix(prefix: str) -> str:
+    return f"reowned_{prefix}"
 
 
 class LifecycleBindingChangedError(RuntimeError):
@@ -1143,6 +1149,22 @@ class LifecycleStateStore:
                             ) ELSE excluded.value END
                             """,
                             (reowned_session_rows_key(source_session), json.dumps(store_ids)),
+                        )
+                        # The gateway can replace the session-keyed proof after this
+                        # commit. Keep the old window's proof and its digest twin together.
+                        proof_key = f"{COMPACTION_COMMIT_PROOF_METADATA_PREFIX}:{source_session}"
+                        snapshot_key = f"{HOST_OCCURRENCE_SNAPSHOT_PREFIX}:{source_session}"
+                        conn.execute(
+                            """
+                            INSERT INTO metadata (key, value)
+                            SELECT 'reowned_' || saved.key, saved.value
+                            FROM metadata AS saved, metadata AS proof
+                            WHERE saved.key IN (?, ?) AND proof.key = ? AND json_extract(
+                                CASE WHEN json_valid(proof.value) THEN proof.value END, '$.conversation_id'
+                            ) = ?
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (proof_key, snapshot_key, proof_key, source_session),
                         )
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]

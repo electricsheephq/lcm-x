@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from hermes_lcm import engine as engine_module, message_patterns
+from hermes_lcm.aux_session import _DELEGATE_SOURCE
 from hermes_lcm.reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER
 from tests.engine_helpers import _FakeTimeoutRegexEngine
 from tests.invariants.test_issue_1250_publication_reown import (
@@ -71,17 +72,20 @@ def test_provisional_rebind_suffix_requires_occurrence_evidence(open_engine, mon
     writer.shutdown()
     if shape == "new-uids":
         late = [dict(row, message_uid=f"new-{index}") for index, row in enumerate(late)]
-    copies = shape != "stamps" and (shape != "same-uids" or mode != "on")
-    for pass_number in range(1, 7):
+    if shape == "stamps" or (shape == "same-uids" and mode == "on"):
+        repeats_by_pass = [0] * 6
+    elif shape == "new-uids" and mode == "on":
+        repeats_by_pass = [1] * 6
+    else:
+        # v0.30.4 also re-stores this unproven suffix on every cold bind.
+        repeats_by_pass = range(1, 7)
+    for repeats in repeats_by_pass:
         gateway = open_engine(**settings)
         _bind_gateway(gateway)
         before = _rows(gateway)
         gateway.ingest(emitted + late)
         stored = _rows(gateway)
         assert stored[:len(before)] == before
-        repeats = pass_number if copies else 0
-        if shape == "new-uids" and mode == "on":
-            repeats = 1
         assert _digests(stored) == _digests(EARLY + late + late * repeats)
         gateway.shutdown()
 
@@ -179,8 +183,65 @@ def test_receipt_checks_tool_segment_after_combining_proofs(open_engine, proof):
         ]
         assert added[0]["tool_calls"][0]["id"] == added[1]["tool_call_id"] == call_id
         assert added[1]["content"] == raw[2]["content"]
+        resumed.shutdown()
+        for stored in _cold_replay(open_engine, raw, 5):
+            assert stored == after
     else:
         assert added == []
+
+
+def test_provisional_tool_segment_keeps_restamped_parallel_results_together(open_engine):
+    call = {"role": "assistant", "content": "", "timestamp": 101, "tool_calls": [
+        {"id": name, "type": "function", "function": {"name": "read", "arguments": "{}"}}
+        for name in ("first", "second")
+    ]}
+    results = [{"role": "tool", "content": f"Result {name}.", "tool_call_id": name,
+                "tool_name": "read", "timestamp": stamp}
+               for name, stamp in (("first", 102), ("second", 103))]
+    writer = open_engine()
+    _start(writer)
+    writer.ingest(EARLY)
+    emitted = writer.compress(EARLY, force=True)
+    # The delegate interrupts the session-wide raw tail, but belongs outside
+    # the foreground emission and continuation.
+    writer._append_off_current_session_end_suffix(
+        SESSION, [{"role": "user", "content": "Delegated occurrence."}],
+        source=_DELEGATE_SOURCE, conversation_id=SESSION,
+    )
+    writer.ingest(emitted + [call, *results])
+    writer.shutdown()
+    gateway = open_engine()
+    _bind_gateway(gateway)
+    before = _rows(gateway)
+    gateway.ingest(emitted + [call, results[0], dict(results[1], timestamp=200)])
+    added = _rows(gateway)[len(before):]
+    assert [(row["conversation_id"], row["role"], row["observed_at"]) for row in added] == [
+        (GATEWAY, "assistant", 101), (GATEWAY, "tool", 102), (GATEWAY, "tool", 200),
+    ]
+
+
+def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine):
+    call = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "trailing", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+    ]}
+    result = {"role": "tool", "content": "New result.", "tool_call_id": "trailing", "tool_name": "read"}
+    view = EARLY[:1] + [call]
+    writer = open_engine(fresh_tail_count=0)
+    _start(writer)
+    writer.ingest(view)
+    writer.shutdown()
+    gateway = open_engine(fresh_tail_count=0)
+    _bind_gateway(gateway)
+    gateway.compress(view, force=True)
+    before = _rows(gateway)
+    assert gateway._store.read_metadata_json(REOWN_KEY) == [row["store_id"] for row in before]
+    gateway.shutdown()
+
+    for stored in _cold_replay(open_engine, view + [result], 6):
+        assert stored[:len(before)] == before
+        assert [(row["conversation_id"], row["role"]) for row in stored[len(before):]] == [
+            (SESSION, "assistant"), (SESSION, "tool"),
+        ]
 
 
 @pytest.mark.usefixtures("uid_lineage")

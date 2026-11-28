@@ -181,7 +181,7 @@ from .db_bootstrap import (
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import HOST_OCCURRENCE_SNAPSHOT_PREFIX, LifecycleStateStore, reowned_emission_prefix
 from .message_content import (
     canonical_text,
     canonical_value,
@@ -7487,7 +7487,7 @@ class LCMEngine(
                 store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
             self._write_compaction_metadata(
-                self._replay_snapshot_metadata_key("host_occurrence_snapshot"),
+                self._replay_snapshot_metadata_key(HOST_OCCURRENCE_SNAPSHOT_PREFIX),
                 json.dumps(snapshot, sort_keys=True),
             )
 
@@ -7525,19 +7525,19 @@ class LCMEngine(
                 return False
         return True
 
-    def _durable_commit_proof_payload(self, session_id=None, *, binding=None):
+    def _durable_commit_proof_payload(self, session_id=None, *, binding=None, reowned=False):
         local = self._compress_commit_proof
         if local and local.get("durable") is False and local.get("session_id") == (session_id or self._session_id):
             return None
-        payload = (super()._durable_commit_proof_payload(session_id) if binding is None
-                   else super()._durable_commit_proof_payload(session_id, binding=binding))
+        payload = super()._durable_commit_proof_payload(session_id, binding=binding, reowned=reowned)
         if payload is None:
             return None
         try:
-            raw = self._store.read_metadata_json(self._replay_snapshot_metadata_key(
-                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id))
-            snapshot = self._store.read_metadata_json(self._replay_snapshot_metadata_key(
-                "host_occurrence_snapshot", session_id))
+            proof_prefix, snapshot_prefix = _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, HOST_OCCURRENCE_SNAPSHOT_PREFIX
+            if reowned:
+                proof_prefix, snapshot_prefix = reowned_emission_prefix(proof_prefix), reowned_emission_prefix(snapshot_prefix)
+            raw = self._store.read_metadata_json(self._replay_snapshot_metadata_key(proof_prefix, session_id))
+            snapshot = self._store.read_metadata_json(self._replay_snapshot_metadata_key(snapshot_prefix, session_id))
             digest = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
             # A concurrent writer may replace the proof between the two reads:
             # attach the snapshot only to the proof that was validated above.
@@ -9299,6 +9299,7 @@ class LCMEngine(
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
         self._reowned_receipt_ids = None
         self._reowned_receipt_pairs = {}
+        provisional_tool_rewind: set[int] = set()
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
 
@@ -9318,6 +9319,7 @@ class LCMEngine(
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts, uid_fetched=uid_fetched,
                 ingest_drop_decisions=ingest_drop_decisions, original_messages=messages,
+                provisional_tool_rewind=provisional_tool_rewind,
             )
             today = self._ingest_cursor
             ledger_run = self._ledger_cold_cursor(
@@ -9348,6 +9350,9 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+            # The provisional proof found a partial group. Its entire segment
+            # goes through storage, even if legacy tool equality would replay it.
+            new_prefix_occurrences.update(provisional_tool_rewind)
         # Remapping can expose rows the ledger proved: they are no longer a
         # consumed prefix, so every residual consumer must be able to match them.
         ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}

@@ -3,6 +3,7 @@
 import ast
 from collections import Counter
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 from hashlib import sha256
 import json
 import logging
@@ -368,6 +369,98 @@ def test_second_window_backoff_allows_stub_exit_and_pre_leaf_condensation(open_e
     assert _digests(_rows(writer)) == expected
 
 
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+@pytest.mark.parametrize("window", ["gateway", "session-id"])
+def test_threshold_backoff_over_six_host_turns(open_engine, monkeypatch, mode, window):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    writer, gateway = open_engine(), open_engine()
+    writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+    if window == "session-id":
+        _bind_gateway(gateway)
+        writer._config.summary_prefix_target_tokens = gateway._config.summary_prefix_target_tokens = 100
+        gateway.ingest(deepcopy(EARLY))
+    writer.ingest(deepcopy(EARLY))
+    if window == "gateway":
+        _bind_gateway(gateway)
+    host = deepcopy(EARLY + LATER)
+    gateway.ingest(host)
+    gateway_view = gateway.compress(host)
+    if window == "session-id":
+        gateway.compress(gateway_view + [
+            {"role": "assistant", "content": "Gateway later reply."},
+            {"role": "user", "content": "Gateway later request."},
+        ])
+        active, view = writer, deepcopy(EARLY)
+        expected_condensations, sizes = 1, [7, 8, 9, 10, 11, 12]
+    else:
+        writer._config.large_output_active_replay_stubbing_enabled = False
+        writer_view = writer.compress(deepcopy(EARLY))
+        for index in range(3):
+            writer_view += [
+                {"role": "assistant", "content": f"Desktop reply {index}."},
+                {"role": "user", "content": f"Desktop follow-up {index}."},
+            ]
+            writer.ingest(writer_view)
+        with monkeypatch.context() as overflow:
+            overflow.setattr(writer._config, "max_assembly_tokens", 44)
+            writer_view = writer.compress(deepcopy(writer_view))
+        writer._config.summary_prefix_target_tokens = 100
+        writer.compress(deepcopy(writer_view), current_tokens=writer.threshold_tokens)
+        late = [row for row in _rows(writer) if row["content"].startswith(("Desktop reply ", "Desktop follow-up "))]
+        assert _coverage(writer) & {row["store_id"] for row in late}
+        assert {row["conversation_id"] for row in late} == {SESSION}
+        view = gateway_view + [{"role": row["role"], "content": row["content"]} for row in late] + [
+            {"role": "assistant", "content": "Gateway reply after the late leaf."},
+            {"role": "user", "content": "Gateway follow-up after the late leaf."},
+        ]
+        writer.shutdown()
+        gateway.shutdown()
+        active = open_engine()
+        _bind_gateway(active)
+        expected_condensations, sizes = 3, [13 if mode == "on" else 12, 13, 14, 15, 16, 17]
+
+    active._config.large_output_externalization_threshold_chars = 1_000_000
+    active._config.summary_prefix_target_tokens = 100
+    active._config.leaf_chunk_tokens = 250
+    active.threshold_tokens = 3_500
+    active.ingest(deepcopy(view))
+    leaf_calls = []
+    summarize_leaf = active._summarize_leaf_chunk_with_rescue
+
+    def count_leaf(*args, **kwargs):
+        leaf_calls.append(None)
+        return summarize_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(active, "_summarize_leaf_chunk_with_rescue", count_leaf)
+    for index in range(6):
+        turn = [{"role": "user", "content": f"New threshold turn {index}."}]
+        if index == 0:
+            turn += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+        elif index >= 2:
+            turn[0]["content"] += payload_of(3_600, f"turn{index}")
+        if index == 2:
+            active._config.summary_prefix_target_tokens = 1
+        view += turn
+        tokens = count_messages_tokens(view)
+        prior = {row["store_id"]: row for row in _rows(active)}
+        node_ids = {node.node_id for node in active._dag.get_session_nodes(SESSION)}
+        leaf_calls.clear()
+        view = active.compress(deepcopy(view), current_tokens=tokens)
+        current = {row["store_id"]: row for row in _rows(active)}
+        sweep = active._last_threshold_full_sweep
+        condensed = sum(node.source_type == "nodes" and node.node_id not in node_ids
+                        for node in active._dag.get_session_nodes(SESSION))
+        assert not active._compress_forced_overflow
+        assert sweep["tokens_before"] == tokens
+        assert len(leaf_calls) == (index == 0)
+        assert (sweep["stop_reason"] == "stub_first_exit") == (index == 1)
+        assert condensed == (expected_condensations if index == 2 else 0)
+        assert len(view) == sizes[index]
+        assert all(row == dict(current[sid], conversation_id=row["conversation_id"]) for sid, row in prior.items())
+        stored = _digests(current.values())
+        assert all(stored[identity] == count for identity, count in _digests(turn).items())
+
+
 @pytest.mark.parametrize("next_pass_overflow,claim_late", [
     pytest.param(False, False, id="threshold"),
     pytest.param(True, False, id="overflow"),
@@ -500,6 +593,28 @@ def test_identityless_rebind_keeps_gateway_after_retirement(open_engine):
     old = fresh._lifecycle.get_by_conversation(SESSION)
     assert old.current_session_id is None
     assert old.last_finalized_session_id == SESSION
+
+
+@pytest.mark.parametrize("appended", [False, True], ids=["own-replay", "same-text-new"])
+def test_returning_window_replays_own_emission_once(open_engine, appended):
+    writer = open_engine()
+    host = _seed_compacted(writer)
+    emitted_tail_id = _rows(writer)[-1]["store_id"]
+    gateway = open_engine()
+    _bind_gateway(gateway)
+    gateway.ingest(host + LATER)
+    _publish(gateway, host + LATER)
+    assert _owners(gateway)[emitted_tail_id] == GATEWAY
+    expected = _digests(_rows(gateway))
+    if appended:
+        expected += _digests(host[-1:])
+        host = host + [dict(host[-1])]
+    for _ in range(6):
+        resumed = open_engine()
+        resumed.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+        resumed.ingest(deepcopy(host))
+        assert _digests(_rows(resumed)) == expected
+        resumed.shutdown()
 
 
 @pytest.mark.parametrize("cold", [False, True], ids=["host-turn-loop", "fresh-engine-per-pass"])
@@ -665,23 +780,37 @@ def test_delegate_rows_count_as_stored_but_cannot_transfer(open_engine):
     assert list(_owners(engine).values()) == [SESSION, SESSION]
 
 
-def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monkeypatch, caplog):
+@pytest.mark.parametrize("compacted", [False, True], ids=["raw", "with-own-emission"])
+def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monkeypatch, caplog, compacted):
     engine = open_engine()
-    host = _seed_mixed(engine)
+    if compacted:
+        emitted = _seed_compacted(engine)
+        moved_id = _rows(engine)[-1]["store_id"]
+        _bind_gateway(engine)
+        host = emitted + LATER
+        engine.ingest(host)
+    else:
+        host = _seed_mixed(engine)
+        moved_id = _rows(engine)[0]["store_id"]
     before = _rows(engine)
+    coverage = _coverage(engine)
     old = engine._lifecycle.get_by_conversation(SESSION)
     real = engine._lifecycle.stage_compaction_publication
     key = reowned_session_rows_key(SESSION)
+    emission_keys = [f"reowned_{prefix}:{SESSION}" for prefix in ("compaction_commit_proof", "host_occurrence_snapshot")]
 
     def fail_after_staging(conn, *args, **kwargs):
         real(conn, *args, **kwargs)
         assert conn.execute(
-            "SELECT conversation_id FROM messages WHERE store_id = ?", (before[0]["store_id"],),
+            "SELECT conversation_id FROM messages WHERE store_id = ?", (moved_id,),
         ).fetchone()[0] == GATEWAY
         assert conn.execute(
             "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?", (SESSION,),
         ).fetchone()[0] is None
         assert conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone() is not None
+        if compacted:
+            for emission_key in emission_keys:
+                assert conn.execute("SELECT value FROM metadata WHERE key = ?", (emission_key,)).fetchone() is not None
         raise LifecyclePublicationConflictError("Injected after ownership and frontier staging")
 
     with monkeypatch.context() as patch, caplog.at_level(logging.INFO):
@@ -692,5 +821,6 @@ def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monke
     assert "re-owned provisional rows" not in caplog.text
     assert _rows(engine) == before
     assert engine._store.read_metadata_json(key) is None
+    assert all(engine._store.read_metadata_json(emission_key) is None for emission_key in emission_keys)
     assert engine._lifecycle.get_by_conversation(SESSION) == old
-    assert _frontier(engine) == 0 and not _coverage(engine)
+    assert _frontier(engine) == 0 and _coverage(engine) == coverage

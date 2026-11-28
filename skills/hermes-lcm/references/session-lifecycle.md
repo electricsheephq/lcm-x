@@ -77,13 +77,17 @@ to its parent session.
 ## Compaction commits
 
 Any non-delegate window can see `session_owned_by_other_window` in status and an observation in doctor when all
-conflicting rows belong to the session and one other conversation with a lifecycle record owns them. Until v0.31.0,
+conflicting rows belong to the session and one other conversation with a lifecycle record owns them. For a window
+bound to a recorded rotation predecessor, the check also includes rows from that predecessor chain. Until v0.31.0,
 compact a session from one window using the conversation ID that owns its rows. Use that same conversation when
 resuming the session (#1250).
 The returning session-id window treats validated receipt rows as its own for host UID recognition when enabled in mode `on`.
-Equal timestamps prove only the receipt's ordered prefix. In `off` and `shadow` (the default), ordinary ingest
-stores rows it cannot recognize after the receipt's first break under the session ID. Measured against v0.30.4
-across six cold restarts, that excess stays constant.
+Equal timestamps prove only the receipt's ordered prefix. In every UID mode, ingest re-stores the whole tool group,
+including its opening call, when the receipt or provisional proof leaves part of the group unproven.
+A new result may still join an unanswered call already owned by the receiving conversation.
+Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
+provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
+an unstamped replay of the returning window's compacted view can still add a copy on each restart.
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 

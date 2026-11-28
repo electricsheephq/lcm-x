@@ -455,12 +455,16 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Lineage merge leaves message ownership unchanged.
 - **Publication ownership (#1250).** A gateway leaf can take ownership of a session's own eligible provisional rows in the same
   transaction as the leaf and frontier. Any non-delegate window can get `session_owned_by_other_window` when all conflicting
-  rows belong to the session and one other conversation with a lifecycle record owns them. A `reowned_session_rows:<session>`
+  rows belong to the session and one other conversation with a lifecycle record owns them. For a window bound to a recorded
+  rotation predecessor, the check also includes rows from that predecessor chain. A `reowned_session_rows:<session>`
   receipt records the exact transferred store IDs for the original session-id binding. A returning session-id window treats
   validated receipt rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
-  and conflicting UID bindings can veto a pair in `shadow` and `on`. In `off` and `shadow` (the default), ordinary
-  ingest stores rows it cannot recognize after the receipt's first break under the session ID. Measured against v0.30.4
-  across six cold restarts, that excess stays constant.
+  and conflicting UID bindings can veto a pair in `shadow` and `on`. In every UID mode, ingest re-stores the whole tool group,
+  including its opening call, when the receipt or provisional proof leaves part of the group unproven.
+  A new result may still join an unanswered call already owned by the receiving conversation.
+  Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
+  provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
+  an unstamped replay of the returning window's compacted view can still add a copy on each restart.
 - **Failure and restart.** Ordinary merge failures roll back only the adoption savepoint and count `ledger.lineage_merge_failed`; without a persisted key the batch stays under P. Busy errors, cancellation and owner integrity loss propagate. The per-store/salt/session memo is set only after COMMIT. Late adoption appends P's ordinals and counts `ledger.lineage_merge.late`; it never discards stored history.
 - **Fork child.** It starts a new lineage. The parent link by occ_id moves to P2; while the parent lineage is provisional, that link will stay provisional. A missing named non-fork parent stays provisional and never becomes a root (L4-8).
 - The host's view model is not declared (M7).
