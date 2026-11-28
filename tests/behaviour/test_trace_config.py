@@ -43,6 +43,7 @@ def test_changed_existing_default_moves_fingerprint(canonical, monkeypatch):
 def test_scenario_override_is_visible(canonical):
     assert canonical.value(LCMConfig(fresh_tail_count=2)) == {
         "__trace_config__": 1, "fresh_tail_count": 2,
+        "ollama_base_url": "http://127.0.0.1:11434",
     }
 
 

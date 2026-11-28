@@ -1,812 +1,812 @@
 {
   "ingest": {
     "admission-aliases": {
-      "outcome_sha": "c43d66e19fb324916f6f7c7fe2a13cece1263b8b6d73dc825d49d042aa5be8b0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "50483c532ab6f2750119221eb0a8de51fe1b8c544a47abc0aacfed48a03a597e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "admission-empty": {
-      "outcome_sha": "8559d1c6787c9192ca2db4bf00310443414c618aa5cc30d242bf0584f71abc1d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "dfc523d709e38635c6aee14316668ba437547c5860a2bb3cdc87c6deb0adebf5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "admission-full": {
-      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then admission-full: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "31edd3849b07249324ce6d5bbeef16bb4fe5451f91c914461b4c4a4167cdb5eb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then admission-full: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "admission-ignored": {
-      "outcome_sha": "c1c04bff836ec09b1ce3c9c06c7999c20a0545ee1330807fde763f89d4574c83",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "443d403ed84e173722d38dd6eb4f3884abb6cb28d92ba4e3a3fedfbdecb2b4c5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "admission-no-session": {
-      "outcome_sha": "9fd886fca24005588fd249fd0131c52725e49254e88ad8c395c6e7815f06439b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6da8fa0098edbf89f338c18940821183fc2dff93cfee46e2054858f6ee05d8e1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "admission-stateless": {
-      "outcome_sha": "04fc2675cbcc6144d2ffb48936396fa102bc0bc5fca69da2cc5e9393a0af7ad8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "0d7e50e8053737f2b5d79bc94d6374e3d0b0b78f8d712832f68f5c853ffc5e50",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-disabled": {
-      "outcome_sha": "f9db413587e27eeb1cf519983cc3406f3a439f029af65d8068da12af79419581",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "aac0114fd528e0c96e5d9cf9068a7a56e60028911a2508fb23af00f23a67dd52",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-remainder": {
-      "outcome_sha": "d77b7d7fc5dcf40bc0a2c495cd069eee0cbab3f7500a9054b19364cfe2b96efc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9f9db23944d2bed204d85e432cb4cc417291a036aa6e4ff42e27d085f113fce8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-stamp-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "88581c2a502e19687108f93d8bb38bf904551cbec57afc04d6941eaa2b23a594",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-stamp-replay": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f3c5cb213bb152aba0f5b4764c8fccf037bd36f6bea472133b1546fb599e128b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-version": {
-      "outcome_sha": "711fa0ca5737097a262f7c871a7295b3fd0bb261162fdb6f327912855d5c283c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a242732e3cab09758975c6d8e1e19bb5f062420df4623c9126026ee52e968bb6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "anchor-version-ignore": {
-      "outcome_sha": "cd08bbfd20dd860f95b81eef49ad0893269d69e8663892928ba1649a3293f987",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1fc873ab0ae7965798ee4268d8f32999ceabc30dcc7fac6caccd6117ccac925d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "boundary-exhausted-other-digest": {
-      "outcome_sha": "62a26b9a61c2c93420bc38a6e9522fa49b03e6481288e162df7f7c02bf92937c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7a24c496b8a52845295b7d08bf0143e9a0c102aa7db76d3df890ac11453b3354",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "boundary-stored-counts-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e63c2c478cd4c479987ca069e3c5ad88bdc4be23fab3280c9ea508ef3480cdb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "boundary-two-digests": {
-      "outcome_sha": "0f09cc6c85e0399a2c9b72ee92e7c1a7f86633eeb28daa6389a30156e2dff5f4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9d5bcbd2f942f4b7a53e5f244850f4ae174fd222b9674ef0b58375f079ca4ba7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-absent": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f3c5cb213bb152aba0f5b4764c8fccf037bd36f6bea472133b1546fb599e128b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-divergent-cache": {
-      "outcome_sha": "189daf034a7162cd1af214d94466823d1a385d9f03e9485d9a0dbb2b50f6b926",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "fa5e2b9c9c6482514ae1833791d3253f6a11b711b604ca58142d3ffd275d8117",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-empty-delta": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f3c5cb213bb152aba0f5b4764c8fccf037bd36f6bea472133b1546fb599e128b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-new-stamp": {
-      "outcome_sha": "08dcd26a03130270a6a3dd74d05c9abf964788f5222469cb08edebef91bc8c47",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ba4cb72dc285c0f00c59b2b7fca989d1a68ad9ae64741ccb7e9b22730d5dfcc4",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "88581c2a502e19687108f93d8bb38bf904551cbec57afc04d6941eaa2b23a594",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-rewrite": {
-      "outcome_sha": "00bf8a5efdfc48ed1ebfd8763790c0ee6bf2e62758c9d29c5dce9e5c2b786aef",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a7e3e0699fcb92ea2e7f2d879f248250035c8c40da03989ba95078277a16f00a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "cache-short-cache": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f3c5cb213bb152aba0f5b4764c8fccf037bd36f6bea472133b1546fb599e128b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-end-allow-end": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e7ee42a1ad9539a07835476aee4129cd4599f22c4e6b132fd6dd6395eeb855a5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-end-delta": {
-      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6ecbed298fedd36100a819542a2df2b6cc592947708588976d0c1c4a7512b592",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-end-full": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e7ee42a1ad9539a07835476aee4129cd4599f22c4e6b132fd6dd6395eeb855a5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-end-new-uid": {
-      "outcome_sha": "ae5660bb9747f76b156878d9e81369526ac3e25fd24338772de18de50e9ceb9b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "651557ca90efa92133c23c794d5c56347117e1e8a101d029ca77d40506e37a60",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-metadata-conflict": {
-      "outcome_sha": "386c88feb8145c74ce645f977116569c784e5a4d7b77c425d2256b58d5044d76",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "856443245a4bf41d232cec900f5c2178a1e410550561854139e15f1803538713",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v2-allow-end": {
-      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "173b19f6d8a00cd789071c6f32765933a93fba20a7d4b95993b811be80dabd03",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v2-delta": {
-      "outcome_sha": "c31b1c7a37fccd80d9e076d72e75037d6b736ad6bc7e9161f7356a9642f61910",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "50ea93315a48d3f48d56e34d0fc5881000e1d51023b94980d5c44f883fffed8f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v2-full": {
-      "outcome_sha": "7812ba51b6aa7e0ed4a99221d14d45f20e9939da25bdfcab579b507176896ea8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "173b19f6d8a00cd789071c6f32765933a93fba20a7d4b95993b811be80dabd03",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v2-new-uid": {
-      "outcome_sha": "b3ba3d6773c804fd439fb3351abb3d90defe98b14ec279f1cb71690e9091c621",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "edbb6f3d50834b75d3e8edb22cd838ffa5ec9fe5a7425fadf063bb135c9c7d49",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v3-allow-end": {
-      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b3405ffb3c77a824e6f407b638f510d60cb82aafdaa5684a80d6653c63479c33",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v3-delta": {
-      "outcome_sha": "817ca3f962343f65a5670309001b43be32242120d5e96162da4626f9e8d17fcc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b389ffa866c88ed93098c870dfb32f4545c298bbf8fd9ac600c64b4e3b5f1b4c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v3-full": {
-      "outcome_sha": "244964efedb0d3cd2d1a985470c3d3a478316aef0127b626edab4ba07a65ce65",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b3405ffb3c77a824e6f407b638f510d60cb82aafdaa5684a80d6653c63479c33",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v3-new-uid": {
-      "outcome_sha": "090743d4f4bfef56ca46db1663f11dbe5dba25a74527ca6cb858b44e291a97d8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9a765de6622e055034cc1e9211ab27887db59c4b20a44064632a84ee6864ea43",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v4-allow-end": {
-      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c55b7e063ec5952cfbde0c00f56c6e3c5736e87eba7740b606c74326245eeb04",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v4-delta": {
-      "outcome_sha": "80a57497233dcfa8dae38ae2c0738a04b4b42f5c502a3503afc818a63edc3644",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d5a3a81f62db222c2f784cb225ecd6e0920c2aaf3a664228a8d1b22d04f7febe",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v4-full": {
-      "outcome_sha": "7ab69666a8d5babcafef9e73bdb351cb399018d6b318d221b8842329390b5190",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c55b7e063ec5952cfbde0c00f56c6e3c5736e87eba7740b606c74326245eeb04",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "durable-v4-new-uid": {
-      "outcome_sha": "6042f9d2fed0abc4a8f4b7b899f5588b989db0058cdf848a289d53fbc1e0eb88",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "fe64e697bc05746143997642c5865654bc8fc81c351d190d6acf009246dfbbd8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "empty-all-ordinals": {
-      "outcome_sha": "97b91dab6057e08522e948833fbe46b1978f16b46e04d35837e8318006e3648e",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-all-ordinals: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "1a937c9c537e5d676216a42b00d5282674ed33f202f01d99924c882ae4dd711f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-all-ordinals: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "empty-child-placeholder-prefix": {
-      "outcome_sha": "bc37813e310daa7d74d82168bc283b29236c6b1db57ac566977f164fca32a1df",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-child-placeholder-prefix: adds possible_replay_of 3->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "79378d6e015fcc83f1e8416395672b4e0be8657138cac566dfd2a548c48dc86e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then empty-child-placeholder-prefix: adds possible_replay_of 3->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-changed": {
-      "outcome_sha": "8520b7eaf3d8f64d1d7e4c06bf670b1bebf0750a3ea20c3ebffa58836376c142",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b78fdf66c28f211d96d88b378bd291971c2e2c24b023a2afc7cbcd485b23b3ef",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-delta": {
-      "outcome_sha": "87774324fcc0f6171667ec3579b0400419e3198e6724801a40f7125389f1ae6a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b9db05f58ade0bf8af819a5c95b5adfed33b612fcd592584bbb168bb691a584d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-full": {
-      "outcome_sha": "ec820852096da24d3d79a70045662c82370d673c56962851c8449ed145152fa1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b675b028c3fc8ac53406b3fe64d56a62c4653c63e744390a016306333428d2cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-new": {
-      "outcome_sha": "549a6c05efef0106abecbbf19fdb1d1666de66532ae230eaddd79b1c438fb037",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then ignored-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "48ebb93c00d49fbc7e1d1ad436f1d2f4a7f3e30a2e745857d14b25c140474a55",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then ignored-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-prefix": {
-      "outcome_sha": "bb5dc23e6f79dea459fd1664769f3884d26d2a202e2a1015e055785c8e90d001",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e7919e82439b7c19c73f5f71f5ae64e19b082d46feff77a1d48146062568440b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-rewrite": {
-      "outcome_sha": "e66677a239a5ebc4179fba048424350bf30f1af0287dae7c515fa81705f64685",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "656424234582b19ce63453910af6a5b44fb03d3b65ac7960917d54dbc27a73f1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-suffix": {
-      "outcome_sha": "4dc93d7ced361e5de601634c65db1c528dd8b5747566a1bfbaf5662d7a9260fb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9565b1fb40588914fec0ace3305c666a78de8b922cb765a78a2753e741066a34",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "ignored-warm": {
-      "outcome_sha": "2c0da4c00965bd16f1214072716809a5c5012533bc29ace7c5c2f4648825bbe7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f7ad1d40fda42d3980a313ab982eea247c5652befe44d631d55b97b463383966",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-changed": {
-      "outcome_sha": "86a40d98594f1726ad7d79732c816c106fa7678270f5ac37e55d534eb4650316",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "224550945b0a3100842a70996be0fc0a50178a22a5bed64c3a15ce0fd51ad86c",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-delta": {
-      "outcome_sha": "7a1e67ef45af81a2e80f3846ad714861460bf2c8afc58f1bbbecf6b73ea70af4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-delta: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "610ae4f9370105f6f2fd5d4ebba3232037faffd1e84017b2a10cd09b2b2333e8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-delta: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-full": {
-      "outcome_sha": "809cd723cbe9486dc9e16528e8b3f6a07d137d92747cf2082b8a85259ca82179",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-full: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "3a51b7c82fe06ecfe49353d6705b9c4cfa2d5218dcef714a609eae93bfc73314",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-full: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-new": {
-      "outcome_sha": "52492a8d84bc2e95e4c808c6dbf23a92a5a199efc3ff7198175b9642f9e1ce5b",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "fb044ab2737441c28e79aac5ed4fd763644001ccf79e5c697b52b562a8aa4a43",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-prefix": {
-      "outcome_sha": "baa6b23ffc635d72cd8bca10d61ce90aa0c3b1f9cafad9bfc7d6822ac38ab47f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5b5b0e25736b3f88dd780ced3b4a6c1d8fd3f3a461545abdcad73bf37b1561f2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-rewrite": {
-      "outcome_sha": "1f61c2485e89516fdbc37946ebafa074a3aa8d2f97ca985a0ab5e29b4c0b8e41",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "c18406865bf088ab488a9068dae7e6df1e290577592b8a32a7aae099b32292a9",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-suffix": {
-      "outcome_sha": "58b041ddcc3ad0ff3dbafa089b1b775d2ee658cf6b442ddcfc3f3f1a37951389",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-suffix: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "923cc9640c8f76e8b75756bc94b18efe7a1d20bf7c80d4186f0288a02c15dd0e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then marker-suffix: adds possible_replay_of 5->4 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "marker-warm": {
-      "outcome_sha": "ad49857cbbdbb469465bc8dd8d327a029b1c4b1ff7b316d38c6b0965384509e6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "96e26d05c94f90ca4db85e0e487cfba0941efc2a4d92bec187e168604f30b2e6",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-assistant-1": {
-      "outcome_sha": "dc1935da3468b17c7f73d6333ec01c697f9065625e5bf1e46c36b94aa875bec1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "638ba45468a88a154b96ca5131f510b823329a35bf267126323475c815ce2259",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-assistant-2": {
-      "outcome_sha": "10a302c54a3bfbab608b765761b33c1ea9d5a2bf7d81630b3614a63c9b68a9e5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "dd95c88d7a6d40223b2c7bdf1fd68618cead6a7afb6f32fd682b16bd8d986e52",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-tool-1": {
-      "outcome_sha": "319e3a03b6849b3293dfb919b77108fc80cda158ff8904d9a7c844ccb0706741",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ffca3c996a0cba2ff49961a152a6928e13650536880b91e90451ef3064bd0cf5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-tool-2": {
-      "outcome_sha": "54ab1d9b9f4904047ed255be7dd57110a7decd241ab57972b57be02b9af180cf",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "322d1403c777faa5ea7e9c111d62b27bff35ba69cdeec2a68da74abd333a7744",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-user-1": {
-      "outcome_sha": "b4347c406bb1a988fa014997a79bc1adb1828bdf82d5d5c6e49da4f666ecf263",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f7f3075059fadd4d1ee2ac6028d7d802a44f1773eba12e96dc909a55221d739c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "opaque-raw-stub-user-2": {
-      "outcome_sha": "e2a4434ce752b66e2407b4f72e1095ba09aa875c6fd7455ac85ba5750bd5943a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ceb695de29507e3ebc221b5074f19ad813f441eb11d091ef3c79b8e89be2c479",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-generated": {
-      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "762a823d563ba2a665dc1fc586e31100bdc0ebba8f912d78dfef2de735641059",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e63c2c478cd4c479987ca069e3c5ad88bdc4be23fab3280c9ea508ef3480cdb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-1-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7c8429a7e3c45ad7e10da7579a4fbf07c18fc13741ff44ebbf05affc1c87d451",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-generated": {
-      "outcome_sha": "81b0b8ebafab9a54b6470fb040713281ad70b1d8e5e437d795a544a3e02d293c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "762a823d563ba2a665dc1fc586e31100bdc0ebba8f912d78dfef2de735641059",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-generated: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a43749038da1517616060538f2b1fcaec39cd95d894108424b8b245ab6449646",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-0-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-0-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7c8429a7e3c45ad7e10da7579a4fbf07c18fc13741ff44ebbf05affc1c87d451",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bacfed5e54c31083755a976d22cb028910387a1602a40d8f19824a8770c123f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e63c2c478cd4c479987ca069e3c5ad88bdc4be23fab3280c9ea508ef3480cdb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-1-summary": {
-      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d35285b192f2eddfc4b6a485100c20c0a330dab5955c2f708bb9a2c4104dbc6f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bacfed5e54c31083755a976d22cb028910387a1602a40d8f19824a8770c123f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a43749038da1517616060538f2b1fcaec39cd95d894108424b8b245ab6449646",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-1-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-1-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7c8429a7e3c45ad7e10da7579a4fbf07c18fc13741ff44ebbf05affc1c87d451",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bacfed5e54c31083755a976d22cb028910387a1602a40d8f19824a8770c123f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-mixed": {
-      "outcome_sha": "d13ff7499b7fb729e2150a15553d3f1e2f1d8f184ac4aa3916b7edb408d9aad6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e63c2c478cd4c479987ca069e3c5ad88bdc4be23fab3280c9ea508ef3480cdb1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-1-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-1-summary": {
-      "outcome_sha": "ba58f43d40a473da5b15cd163debf6fc025aa3de0b26d80bf161c180c469c70a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d35285b192f2eddfc4b6a485100c20c0a330dab5955c2f708bb9a2c4104dbc6f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-all": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-all: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-generated": {
-      "outcome_sha": "485416bec023ddbcadc21a0356755c54170d34c4a64cfbb7c580e67a84d0c9c1",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bacfed5e54c31083755a976d22cb028910387a1602a40d8f19824a8770c123f8",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-mixed": {
-      "outcome_sha": "772996163e9c688f0f71b4fad65f01ad9ff9e42120678569ed4d360b124acf84",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a43749038da1517616060538f2b1fcaec39cd95d894108424b8b245ab6449646",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-single": {
-      "outcome_sha": "84f43245dc1a39e7f53a7be9919fed7d73a0e92e3460fcbfbc235ac3ce34e859",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "e1c344d8db1bb2a4064e14518277f93f4f92b5cdb2f9cd8cdbbc74315afdc4f3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-single: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-stored-counts": {
-      "outcome_sha": "afb62a6adc905e041af3c2fa530e99d454973b6fcaff39cc47b49b4276e9df98",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "0de4d1d3ba3cd8fc9678dcb24b0995e362930c64f723ff464660138be44b86a1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then placeholder-2-2-stored-counts: adds possible_replay_of 3->1, 4->2 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "placeholder-2-2-summary": {
-      "outcome_sha": "02d590655aca5d009f9793ed83e4817cdef3f6f8687d2ad9eea61a6e6e6e90f6",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7c8429a7e3c45ad7e10da7579a4fbf07c18fc13741ff44ebbf05affc1c87d451",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-consulted": {
-      "outcome_sha": "8e46667fc820aacc4a51c27c3a847f98372ae5c29f903ab2798a30be70615765",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "83fbd0f9d2f49b77082eab8ac9ba81af91a75415decc705793e4c0019e923e50",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-divergent": {
-      "outcome_sha": "49914b8334a5e9d0064a56eded094bc0e72ffaff1b0169b9be3357aa8432298f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bfd0664e8ff2eeeb254fed01b19ad7b39a26311940ebfd490ca8f3cdae6552ab",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-foreign-conversation": {
-      "outcome_sha": "83082056f6429beabc420d50ac1633e975c23080fb7f88244be04f97090f69b7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e6eb40a19da204742833290f5301f16d593de42a047fb78cb2b5ffe085aa00c1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-foreign-session": {
-      "outcome_sha": "77b474ed29b63ec3243149fab411d8135a6b4da2caa4932da124a530555840fc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "639604c8706bc78b6cb1e792c02682e2a0aadb0fcb8efca4c7028114e4814b89",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-merge": {
-      "outcome_sha": "5afe86033a0c6c55f3b013d6ee012b8075f9d707cb5c4ea051519b890c5d26a5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-consumed-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "21b3c8a583e84a15104b8b61a95ecc1b186d0e13cfaf1ed8ed61ce692940c08d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-consumed-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5ea9bd5c5c3260b7367604e1fa85bedd4f70dc0117ae893880e22fa0b3061a20",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "1d2e28c25bd4b43899af5b3117a7ab071c6cfc6ec61fdfa696e7e2abdc27b792",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "88581c2a502e19687108f93d8bb38bf904551cbec57afc04d6941eaa2b23a594",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-repair": {
-      "outcome_sha": "f46f796daf16a901daa72535feabfce5ed539ff6748d6d5e4773d117615ae8c5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7b2b3ad1a3dff30b02d35d59eb6f7fdf448e3784702965da1099379fa2976644",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-short": {
-      "outcome_sha": "0302e2d84ef1908e3acc267b7ffe21e6f6b1907e9424590dded2dd02aa8bd19a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d4d48725e9881cadfe3a90f0e90c2d99f1a4dc0bff9a47f471f6fc84dcc9a93f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-consumed-zero": {
-      "outcome_sha": "8687a9b62bc6d4db21f07048102f6441f845f7386277c02da753511f82cbbcf9",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be9fec60aa351a368df589bf00c8f9cc59de64ca9b058c4fec9155c8bd1ca566",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-consulted": {
-      "outcome_sha": "2d4df9926f7884d0974eea87c0934f656515f9e6016fa6803249cdb877174d11",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3a9211a89072203153eab39857de056e76632ba743a8a7505fa387ad3e40f55f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-divergent": {
-      "outcome_sha": "968cc16fb4dcdf83b6d9aa45f060f5ab8eccf847c4f835ace24ee0223426d785",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "291e095bd329ccc8dd467226715fd04ca8af2865834824ba8976c18a7c85faae",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-foreign-conversation": {
-      "outcome_sha": "dd441365c8d9086a0abb238fea4222954078ab91136961f62eeb7a7f68e28eb3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "329a7e6d4b60c053c211bd34ed10e481153891d8fc11c9d6617741dbdf387c6f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-foreign-session": {
-      "outcome_sha": "e4e947ccbcd823f0c779fbd1c8c7117785ab8773b02a8c574dad971522588704",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "1e391a6cfc1fb377f5ccab4ce2d707c001ee7ae0cb76ebb47c6bac2289efcf83",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-lossy": {
-      "outcome_sha": "c08fe605cbf31f94545c73d947d2ecdcad6117eeac40685cca2523bd134a6622",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c9543fbd2589e711ba29a614a83f148f524506b05897727374381bfa5b296614",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-merge": {
-      "outcome_sha": "4daef13124c29dda1c6530f2581a0e158dc63e95467946b9ade98e45a0e8a686",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-native-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "40175f50d86ba712bd0cbb6a0ed1d3c5c47b37a49ba7fd502b521252104616ee",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-native-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5ea9bd5c5c3260b7367604e1fa85bedd4f70dc0117ae893880e22fa0b3061a20",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "1d2e28c25bd4b43899af5b3117a7ab071c6cfc6ec61fdfa696e7e2abdc27b792",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "88581c2a502e19687108f93d8bb38bf904551cbec57afc04d6941eaa2b23a594",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-remap": {
-      "outcome_sha": "c5a7e78a3835c388cf7c6420afc2163d97794693da10b4fbad5de9d5d325bfd3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "bd306704ee4ad4bb6174c484126870766b1277f0cc9291cff9612878e57b8718",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-remap-new-stamp": {
-      "outcome_sha": "f673378c2a26abd2970c6d220b408e28c0b3f215b0fc19273fcd10efc558ebeb",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "dba0ed2589cda6efc392be8b064456ec5dc19e24bba6208590525e4082eb8e3f",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-repair": {
-      "outcome_sha": "e8402a3833bc0674effbe8f88aef6fa66798a0aef081eca6cf681a620137e3bb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ddbbd0d10ccd0eee295efa17d0df84186386eded96571c0a45275e873615f61d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-short": {
-      "outcome_sha": "36628838e8d8068637689639c67900c5bfb7d1ccdc67539e397a6e91f2d8315f",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "cdfe383c61091866b6acbaa03c82c3785a331d3cdb1c479e691676fe54e555ac",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-native-zero": {
-      "outcome_sha": "25bb80cfffa596d31211ac40cfa632b0b2687651eaeea53083e4dd07a88a7019",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "148f7423518e346d59ce399e55ecb4857596fa3f93a1408a5a776b0cf2758f0e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-consulted": {
-      "outcome_sha": "f1a5b2d99b8db10526b1358dc2ad5ae599867fe623a9aa4db534eb9c2d769891",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5bf384a37786baf8ffb2312aabc8e486a575f26ab756e153e7005669240fc2f1",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-divergent": {
-      "outcome_sha": "caa96355e725f000148dccecc994454f876ca9253d704864adfe0085e292983a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6ec4a010b3eb9381cce957e7711693ce14937e05497033318d40f1f0de7c585f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-foreign-conversation": {
-      "outcome_sha": "5ec8b0501f213ce6fd76ef762411bce20e4ff9c5a95dac40f53ae2b12c5bdd13",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d01f5a46c9c552016f5ac426757eaadd6db397f5ab4793785ab945c2cb525590",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-foreign-session": {
-      "outcome_sha": "9b2ec95d41320a38582907daa9b9c9ad390638841872edd3cfbeece7b60e8874",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "0098468a4c67728c0fa38f9ace9ce4ebb7153478a16988b58f10dd2df3659929",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-full": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-input": {
-      "outcome_sha": "c5ec22b5116297fb7f6ad2b557826a67c30f7c5797ba9fcc27c10da703858e53",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ecdb73177b5a5e83335069e9aa181c72766ceeac5d048980ded2ed766182a171",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-merge": {
-      "outcome_sha": "47fbe0771af67253cc19d60ee13b3d5cdc8af6e9697ec55b8a0e36fd92273f07",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-output-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "6c0233b4ebf8bb93fca596d84d3d78b4a2924007290d91108dc6e5985e0ae892",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then proof-output-merge: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-missing-metadata": {
-      "outcome_sha": "b0cfc7cd1928d2e1e2b66f0d890b3c8453e887f48d5be0a16d44eb77e36b5d95",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5ea9bd5c5c3260b7367604e1fa85bedd4f70dc0117ae893880e22fa0b3061a20",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-new-stamp": {
-      "outcome_sha": "e5fc5788c1c7ef6e625cf9975c1cc8dfdf6e3252bb2396fe8499fd9961798873",
-      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged"
+      "outcome_sha": "1d2e28c25bd4b43899af5b3117a7ab071c6cfc6ec61fdfa696e7e2abdc27b792",
+      "reason": "#2378: re-stamped carried row linked possible_replay_of; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-new-uid": {
-      "outcome_sha": "11f9c6bf8237786258ee731230d6106f5b2ccf57098d1a2ffe38c7ddf6f84c68",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "88581c2a502e19687108f93d8bb38bf904551cbec57afc04d6941eaa2b23a594",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-repair": {
-      "outcome_sha": "9a78ab992378d711265b740e910954bd4998a31555cb5d44bd7eda32243e8046",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b4566b46b5c32f39634527b18b86cf75a014b0b25500c738d13e9191940f6583",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-short": {
-      "outcome_sha": "2d8bbc10dd014d2f9375169f655c57d01c5ce168c2a1034ccec636778e63eaa5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "537199fb592267c9dca6631e4af121b5867116379be956cea7a0bed2f920d1cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "proof-output-zero": {
-      "outcome_sha": "d3073f8408dacb76e144da81703ad375d6a440ce9d02ecafa22d98b860836971",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "625cca32f83f1be5f54f1432d921d760a1b0a468724e8b82993fc17c3d508aa7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "protect-after-filter-copy": {
-      "outcome_sha": "c8ce01f5d6cdcfd3f531d7342d51f702a1630f237e36f97f90180ad38d9e3192",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "86fa980d6779beb4eb58128a48e76bef91092a0c0e7786dfb480d82f6da1cf66",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "protect-large-assistant": {
-      "outcome_sha": "b13645e0987309b318d49f96c14ecdc690b5dc9023f02f2334744f05bb61f2ba",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-assistant: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "a8a3d52c58d394e50b094e6ee767437406fc92cda75e0543ea9d78c5b59c8bdf",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-assistant: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "protect-large-user": {
-      "outcome_sha": "d33936512eb0389d8dc314ad4dcec90bb1fc81b0123be34f0ff35f42ddf7f991",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-user: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "54b1ec7ba140fbb6d088f76eed145db8127c15164a4d76a0bcbe388c41e18481",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then protect-large-user: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "protect-path-error": {
-      "outcome_sha": "352525a3c28c381d6bc1cc05530ab8d0bdd396052420d596996f36e41acb9efc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a2f2dbd0ad26a71b09e4f2d39885f86e8fbadceb6d5b0ec5da600401c1afba97",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "reconcile-tool-after-new": {
-      "outcome_sha": "5330aa8abf9b152f9750b969b665ab6edf71ca4eca2072e53f9746345babc11c",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "b069a244f6fe4501a192e7b2c005529d928ceca91cfd406e49878bbe6646d303",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "repeated-equal-occurrences": {
-      "outcome_sha": "b66e74141d6ec68a5551fa6c9caa3a042a3858135b20489351e432f9974ca58c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "4da7459e8664feea4737e255618545102b2b3dfdabb6352587bd46311927c29b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "repeated-tool-id": {
-      "outcome_sha": "d5a83b4ea7fe4fa2144f2e82e2588d78e00adf1f3c61f37f7daa000cdeab714b",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
+      "outcome_sha": "f587d73e7c841c9448d8dc090c20b137d44f63375d9993a78d0b39dcc40319d6",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "replay-build-mapped-ignore": {
-      "outcome_sha": "e68b25e313cf9e67ada9053b55b5ca61da06366d2951fee38655d4bf3efd9f0e",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged"
+      "outcome_sha": "41aeb37b3c8bca2934b77c687fe34ded2d0de9a4b763785cffaa68bb146b075a",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "replay-build-quarantine-prefix": {
-      "outcome_sha": "da83cdcc5bde68d7c666be6a5f768ae6b333bac072c9290676d9793df5314e74",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b5669108ed78beec26005818f94d0801d06dbfe075afa865f370b019cd87869b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "row-filter-generated-append-error": {
-      "outcome_sha": "b2aa35478241aa7b60c216081cc545e1735791bc1e8d788b72480a6c4f7592b7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "1724f49a66638c8cf0c605d3d8c811b8f1144906f7569cb991ab95ce14b25350",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then row-filter-generated-append-error: adds possible_replay_of 7->5, 8->6 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "row-filter-ignore-ledger-lock": {
-      "outcome_sha": "33474d00806c48a2f415c3270372ec5a3560904d095d4970e371932a946d2aa0",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "37f60ebd46660331dbe85fda4ccec3851e14def332ede34c1fd36d542efa5edb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "row-filter-ignored-append-error": {
-      "outcome_sha": "eb4bd089208db13599496286680fe550a8a6e76e5e524b0db66686231d66cdbb",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9c9d7ee9c228d65f519b972849e85a7de0bee01a233002013c3d41ced7020c60",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "scaffold-metadata": {
-      "outcome_sha": "8f1d4a919c5533445740f48043c9e454dbf7ac96ad5c0b39579fd940d81f3c26",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3f4b9b3d5f5759b6ca30422378b09e919461652e34da89b4f3eb5250d9a43818",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sequence-compaction": {
-      "outcome_sha": "b7530134497fd5bca8404b1fc21008e2a47266467e135d183ffe9cd2b5c46272",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "ce35a87d4c61276051b759569f6f46e13b8ebb877896e3055da0564915e36516",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sequence-host-merge": {
-      "outcome_sha": "6652f566e1fc0bf3b55282d7f9df9334f8d7ddb7b9b7060aeffce24fa2e00235",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "b0d0ffe084485c617b6de1056420f7527773f5e82e35106ffce306871991eee9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sequence-rewrite": {
-      "outcome_sha": "3d5b5fe312485983be3ad6ff137d630a81bc4207d09f012fd56cb53ba90b35fd",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "b02428ecb5f5430f7a8bb3b69e6e437528d8c308b4eed67d53b9710fe1884e4d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sequence-rotation": {
-      "outcome_sha": "1294da1506dbd42abd196d77b73a9b2b8de7092c772aa74b8e05ecdafe0f70b4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change"
+      "outcome_sha": "cd0cfcf5aea350c2b8fbc2f964385b6f632d6b711a910fc59bd19025e55b6d83",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2344: compress no longer leaves its id()-keyed store-id map in engine state after the pass; state-after hash only, no row or outcome change. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-append": {
-      "outcome_sha": "320d20fb18a6a040ab1a1d25b70e0b06c0647b403bf39145d12277fa954d5938",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "c7c40f1ca337b622778ef0eff6a4e13481c13a46ff2f8d9528adf265764562b7",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-append: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-duplicate-existing-tail": {
-      "outcome_sha": "702139d7b61dfcdb50f1b9ea3277e11f1056d4d8e47126d5a32f8b1bc20e8cc2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "b44c6e0454bcff3f11d582ee8d31368be3664dd009eff2b254ec5faa9331505a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-duplicate-tail": {
-      "outcome_sha": "051df811a1ef0b0b74d1b1da080a4125e2add334c436db0526060ed78817045c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "b9f75bf9ea543121b1948b6778d7263870c2abc2082df3136a4988eb682383cb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-duplicate-tail: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-durable": {
-      "outcome_sha": "0b115b03d0f2495bbdd6c3efac4a0ee3096fcad6e0f05d70bcb3c1da48016051",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "c5008a9a158dedb155d6db16424c4f663a932d286d97186d3ca11cb76ca4e998",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-locked": {
-      "outcome_sha": "514af1553229c77a2df0e30021cc8e3440cba3c21094f34cc946d0d5791d6c1a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "20cef4a258d470e2d9b73a3e13e277f2fb09f4840d2b635329439b842ab40320",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-locked: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-locked-existing-tail": {
-      "outcome_sha": "a1f5b8966f775ff29d98f57f860c15ba9e467b00d19ae8eb7d4fd72a4378bd13",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a705673374a11e865f51c0123a6f15a66cbfff8ef7499581ca7b35e2ce57f278",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-metadata": {
-      "outcome_sha": "9f42b0bcef170e51636e96a1bb5e4c3f29fad2b9ca590fb07698975c09c8f6e8",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "9f9b839b42d0ed9f04eee6d438fd887f417d09935e0961514a57ee0834564843",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-prematch": {
-      "outcome_sha": "325dd7d33e5d2c20b13eea87d1544d3bafeadcddf3b80d6b3d2bf1b9c860ff2a",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "0388f3b4b9035a3f4b7b8f17afed77733eb08a64529dc8f0996e2744cfb8169c",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-probe": {
-      "outcome_sha": "5df325f64fc8ac914ad0efd9a7f4edd322b36a1e85509e8bc63e43de81b3d4cc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-probe: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "31edd3849b07249324ce6d5bbeef16bb4fe5451f91c914461b4c4a4167cdb5eb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-probe: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-relation": {
-      "outcome_sha": "327761efc4b799251295e613f8dafff272078e8e941d5aee9127cd69d5465bf5",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "a014d8482f4bf6a318642d01899d0dd379de146f0d2c8d2e67058ae93a251f07",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "sqlite-snapshot": {
-      "outcome_sha": "f6b21f76f1e8456533d15e459a4e5f2e7795f226e7941e08bb64158ee914e4fc",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-snapshot: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "234dc78575e222c20d77e5ec832ce0160e3c9955f926c2de616e86e8b96be460",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then sqlite-snapshot: adds possible_replay_of 2->1 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-segments-after-new": {
-      "outcome_sha": "56232c0ea6412c873730f9a12e0d3e38b49f41e476db16e50d913a90b19062be",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "985cc270a29bce3829144359a942132d52242900a9cfa3d02a299a806aeff082",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-stub-host-held": {
-      "outcome_sha": "276b41143ee452f766d32b32d40d77966bf2273918746a6f7ba0ff06042a6f45",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ee3c64bf0b6f6fd258d807b328f0eac923416c5d036a6eefef1aaffb2b670396",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-stub-pair": {
-      "outcome_sha": "7cb56d23f271b1858714dba893fd0a4155b288ff2a83604865cafd0013a497d3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "439ae084dba0768fc501a926da4b6d82b9241af4cbdc2decff4aad1858471ccf",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-stub-recovery": {
-      "outcome_sha": "d669255161446b04979f08827577c650db1ac104f9169bfdf2f5d4e0cdda090d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "dcfba91a042e820716474cb8c425a818521f20fcbc902bc35506097a5634b08f",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-stub-single": {
-      "outcome_sha": "4269640ed7d887c85fb28985a86a8ab4f566936d83f649e415ca1e878dcd4c00",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e7df7ac7ecb1e99f7e16eab20c95473acb402543a96481c6115062905f3f2354",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tool-stub-warm": {
-      "outcome_sha": "f712252c4fe8a5695e0d056f86c07603676cfc95c47e7035de6cea6b03f9eff3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "be0e334ce284a651d83aaf633abfe3c5e97841ecd4492954e88aef6cd4846035",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-changed": {
-      "outcome_sha": "99446c15729e8becc7fa5ef340eae466fd3138b5ad273440e1aa4c869e317c39",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335)"
+      "outcome_sha": "22e8041040a241de9aec9003e93c49191e6baebb3f89c1cde8655be7eeb1daea",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-changed: adds possible_replay_of 7->3 (#2305 P1h PR5 cursor-0 batch links); review fix: adds possible_replay_of 6->2 for the empty assistant tool-call copy (#2305 PR #2335). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-delta": {
-      "outcome_sha": "2ac1bc2b502d26a8ca78e94298ccc445db7c70d3f36a38144b1da71d903092d2",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
+      "outcome_sha": "3c0c0cebaf4ac893e39b26e6e98e7c15c4df0982e43c06206066d300000db441",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-full": {
-      "outcome_sha": "0df1649081eab83240d962efac42570130584714ef03a11b34c5d9a3ebe80880",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
+      "outcome_sha": "42b7a4e793475c916ed59ab51f069ab290c00232b73000c6910cbfec1e74d653",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-new": {
-      "outcome_sha": "ede3a3dc1f53f8b06b71d1d752abc40291eac6f3baebf2d0cd356436655d7592",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "2d5a7ae9ce4a4cbc993e556bebb51f85c9104dfd1da862872dc9daac71d42d4e",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-prefix": {
-      "outcome_sha": "b29824f161b017f6944b1478c493e4f4e3e9f8e83a9b0a1a26efe7ebe828e789",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "7f026645798f38e29a4f31beaa03f5a7899e526c149c2b81ce5d115cb2832c9a",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-rewrite": {
-      "outcome_sha": "9394c67e62a7062aa8615c4b4d5a92d0b13d3319dfe31b39f2ac26325d8cf7f5",
-      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once)"
+      "outcome_sha": "1549d244631990339c04c82003d1bf822aa3241aa412be45badef7fa7a956009",
+      "reason": "#2479 design C: a cold restart now links (possible_replay_of) the copies main already stores there; stored rows unchanged; then #2886: binds the durable tail; main stored it again (main's copies of already-stored rows and their possible_replay_of links are gone; every incoming row is stored once). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-suffix": {
-      "outcome_sha": "9fe6ae3874862cc83057fa0f9aa336cd05e1f0c9c1508d81049c4d3b8fc3bda2",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "40df9900858f33af0fa2ef2c12323731526c940db5ce3d12b398dc519a3dfeda",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then tools-suffix: adds possible_replay_of 5->3 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "tools-warm": {
-      "outcome_sha": "0c372417abf74cf4d5d473a7fc5cdc0d9ea1a3cd2e4589a15a739980a07ee489",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2886: the cold bind takes the durable-tail route (cursor 4, 'replayed durable tail') instead of the ledger cursor (also 4); stored rows and tables unchanged"
+      "outcome_sha": "1eb32a4ab8232cc1b8aaa53934cdf477a2d6c8c7aa5dc5c9f277c93e31581c65",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then #2886: the cold bind takes the durable-tail route (cursor 4, 'replayed durable tail') instead of the ledger cursor (also 4); stored rows and tables unchanged. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-changed": {
-      "outcome_sha": "5f4bc585c603698139c8384290d82c007fa8adc2add15a1f3d696fc97866630c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "d43a32247502ede382d3095afed9a059a057764ee550ac8402c390cd67edc51b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-delta": {
-      "outcome_sha": "e763b7e88499398a30bcf8ff0ff94a8f53c8b71e3bb65f7fbfca7be90dd54517",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "6ecbed298fedd36100a819542a2df2b6cc592947708588976d0c1c4a7512b592",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-full": {
-      "outcome_sha": "ee6a090cc46fb06e55bba1f0c4828b97657e19a5cf7e162b6f03dd9098afe0da",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "e7ee42a1ad9539a07835476aee4129cd4599f22c4e6b132fd6dd6395eeb855a5",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-new": {
-      "outcome_sha": "3f8bf5cbf791ba6e30f04e06a5721e5104683d052c3bd7a0a56e87947cdcfb6d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then turns-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "bff9ed655b6eb45a388b30cb15ad20bacb0b2c4bf304278693383b5d3cb083b9",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then turns-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-prefix": {
-      "outcome_sha": "e8cb62995f4e1ee095dae582590668fa1e57d80241e20d416f4635d7236894c7",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "947efeb26f5336a265ddcfb774130fe1292c6f66c3da1e8d819bac4a166ffabb",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-rewrite": {
-      "outcome_sha": "057b81e97bf7bdf12e345a5af440759725a4557c1f5a2d7d56d281f84ffd9f7c",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "41c7149e6c640bf22b453418a32e89959c86fb4a77d73a5708f07d69b5d6a399",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-suffix": {
-      "outcome_sha": "b4c7eeb11f2b38e21a66fbeb57e921fec991137672d1670581f060370556c273",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ae1b68a17c89cd7523765629e4496ee220c8459d954884c9f21501796d7df9f2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "turns-warm": {
-      "outcome_sha": "21e6992058975e99ff6ec24b66a93fc2bc099e17c350c4d04af3c9e264479745",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "f3c5cb213bb152aba0f5b4764c8fccf037bd36f6bea472133b1546fb599e128b",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "uid-bindings-new": {
-      "outcome_sha": "75164b925cd8a90c34ced6d3bca7c028869aa1a28af23f71145f1e24a521fa02",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "3bc21e68d1b0385d11a4acfa6e7f11f11efbc3f4694a9ea6a1521876b39fe651",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "uid-bindings-new-occurrence": {
-      "outcome_sha": "750512c61431425e257610243b5cb75e2562aad15698d593340cbe09bec1fcef",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5e0251513d8f8d91c0bf09e17aca564145bdb8a63a5f964e0a49807996fa0286",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "uid-bindings-replay": {
-      "outcome_sha": "97bc59f1a6d715247b206224d2b831a9b68faab4527475b3be626d39c513a229",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "5cb88198d208de1573536a99ff2c89124be075a130e716184e342e9b2e093978",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-changed": {
-      "outcome_sha": "ce0e1820a4a091935d09074aa68b12d77663cf2dcd6c4fc53e91da6ff255a3db",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "643d2406c229db4143ea28c7d29033af03ad34334364e0fa88c47c0b7eb81d8d",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-delta": {
-      "outcome_sha": "e50dff5b292e9810f25e44a5cdbc7ef6acb66bb5abebcdfc85fbe374877a9321",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "ec79921f1910638bd8d0b5514e1de9d21a245121d3592ab94757b4e960fef1c2",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-full": {
-      "outcome_sha": "0f5bbbf36b7a904de099a2a69d67f9bbb2c20dbe182ac78b645948f7d48fefc4",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "cab1b4d4e0b65f917cf7451b3712fa613add644ce22f958164a1bb19288f0082",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-new": {
-      "outcome_sha": "e219783ade1e4bab8172ccfd4b496a521e723068733667ec1b82b826e0f72ec3",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "d7c4f3a87e972df98ccff51fe710c46823995003a8d09789f5e00a8cb3e4d5b0",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-new: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-prefix": {
-      "outcome_sha": "def901a3960233e999c74da550924e5b8f079ac5a4888288022c09357bdd867d",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "402cda1f842bec30c54c6a0a599f55386f1ee7d5c2dd2dcb159e27f4f6345e48",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-rewrite": {
-      "outcome_sha": "07cba92a35eb73d5d1d5abd4d02563567a698cc1f06c0a254131093005214990",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-rewrite: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links)"
+      "outcome_sha": "6e1283a6723723c642f08efae03115ff7d26d9ef35ed640974e269d3ada4f553",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed; then whitespace-rewrite: adds possible_replay_of 6->5 (#2305 P1h PR5 cursor-0 batch links). #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-suffix": {
-      "outcome_sha": "159ac3c4062b1deb9e99356ecea55b7b8895542736b8ea53ff5b7724fcc0d295",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "11360ac6ee1120867326edf3ac2fd14a289a71d431ceb77e87be85208298c4e3",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     },
     "whitespace-warm": {
-      "outcome_sha": "d87c009c9995b4fba0dea72f6b6c9dc9acbd29683a49d277b3820cf60068ad63",
-      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed"
+      "outcome_sha": "577c788b29a56e0691f6fe15696fe952f1d442f3b3aad0738d9234e992e096ce",
+      "reason": "#1894: trace config fingerprints keep only values that differ from the pinned defaults; no other outcome changed. #2126 / PR #2162: add the IPv4 Ollama default observation to the pinned trace config"
     }
   },
   "compress": {
