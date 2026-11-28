@@ -149,7 +149,7 @@ from .message_analysis import (
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from . import aux_session as _aux_session
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
+from .aux_session import _DELEGATE_SOURCE, AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
@@ -990,6 +990,8 @@ class LCMEngine(
         self.emit_automatic_compaction_status = False
         # #582 survival fit: the failure reason of this compress(), the last fit, and the one-shot warning.
         self._survival_fit_reason: Optional[str] = None
+        self._session_owner_backoff: tuple[str, str, str, int] | None = None
+        self._session_owner_warning_keys: set[tuple[str, str]] = set()
         self._survival_overhead_observation = None  # #1012 F4: (bound conversation key, largest overhead)
         self._survival_pass_observed = False  # #1107: this compress() recorded the host's figure for its own list
         self._last_survival_fit: Optional[Dict[str, Any]] = None
@@ -1762,6 +1764,12 @@ class LCMEngine(
     def last_compression_noop_reason(self) -> str:
         """Human-readable reason for the latest no-op compression decision."""
         return self._bypass_compress_state().get("_last_compression_noop_reason", "")
+
+    @property
+    def _last_compression_failure_reason(self) -> str:
+        """Reason code for a failed compression pass."""
+        state = self._bypass_compress_state()
+        return (state.get("_survival_fit_reason") or "") if state.get("_last_compression_status") == "error" else ""
 
     @property
     def last_compression_was_noop(self) -> bool:
@@ -3561,6 +3569,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._session_owner_backoff = None
         self._warn_turn_start_defer_ceiling()
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
@@ -3618,6 +3627,9 @@ class LCMEngine(
             self._schedule_rollup_maintenance(session_id)
         if not self._session_ignored and not self._session_stateless:
             self._schedule_embedding_maintenance()
+
+    def _current_binding_is_delegate(self) -> bool:
+        return self._session_platform == _DELEGATE_SOURCE or self._is_known_delegate_child(self._session_id)
 
     def _invalidate_rollups_for_published_node(self, node: "SummaryNode") -> None:
         """Stale the rollups covering EVERY UTC day a just-published node spans.
@@ -4578,6 +4590,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._session_owner_backoff = None
         self._ledger_count("ledger.emission_boundary_unadopted")
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
@@ -4619,6 +4632,7 @@ class LCMEngine(
                 self._ledger_count("ledger.emission_boundary_unadopted")
                 return False
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+        self._session_owner_backoff = None
         resumable_finalized = (
             state.last_finalized_frontier_store_id
             if state.last_finalized_session_id == session_id
@@ -6435,6 +6449,7 @@ class LCMEngine(
             "threshold_tokens": self.threshold_tokens,
             "last_compression_status": self.last_compression_status,
             "last_compression_noop_reason": self.last_compression_noop_reason,
+            "last_compression_failure_reason": self._last_compression_failure_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
             "last_stub_first_exit": dict(self._last_stub_first_exit) if self._last_stub_first_exit else None,

@@ -44,6 +44,17 @@ class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
 
 
+class LifecycleOtherWindowConflictError(LifecyclePublicationConflictError):
+    """The session's own publication met rows now owned by another binding."""
+
+    reason = "session_owned_by_other_window"
+
+    def __init__(self, other_conversation_id: str, row_count: int) -> None:
+        super().__init__("Compaction publication source ownership changed")
+        self.other_conversation_id = other_conversation_id
+        self.row_count = row_count
+
+
 def _compaction_coverage_conflict_message(
     expected_frontier: int,
     authoritative_ids: list[int],
@@ -1105,7 +1116,18 @@ class LifecycleStateStore:
                         raise LifecyclePublicationConflictError("Compaction publication re-owned row count changed")
                     reowned_from = {row[1] for row in selected}
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
-        if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+        offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]
+        if offending:
+            if conversation_id == session_id and all(row[1] == session_id for row in offending):
+                owners = {row[2] for row in offending}
+                if len(owners) == 1:
+                    other_conversation_id, = owners
+                    binding = conn.execute(
+                        "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?",
+                        (other_conversation_id,),
+                    ).fetchone()
+                    if binding is not None and binding[0] == session_id:
+                        raise LifecycleOtherWindowConflictError(other_conversation_id, len(offending))
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )

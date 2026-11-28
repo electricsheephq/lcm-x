@@ -129,6 +129,8 @@ def render_status(facts: StatusFacts) -> str:
         f"total_compactions_scope: {status.get('total_compactions_scope', 'current_conversation')}",
         f"last_compression_status: {status.get('last_compression_status', 'idle')}",
         f"last_compression_noop_reason: {status.get('last_compression_noop_reason', '') or '(none)'}",
+        *([f"last_compression_failure_reason: {status['last_compression_failure_reason']}"]
+          if status.get("last_compression_failure_reason") else []),
         f"context_length: {facts.context_length if session_bound else '(uninitialized)'}",
         f"raw_context_length: {status.get('raw_context_length', 0) if session_bound else '(uninitialized)'}",
         f"effective_context_length_cap: {status.get('effective_context_length_cap') or '(none)'}",

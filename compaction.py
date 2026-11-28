@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import sqlite3
 import sys
 import time
 from threading import get_ident
@@ -45,7 +46,11 @@ from .fresh_tail import tool_group_safe_end
 from .host_uid import _uid_recognition_pass
 from .ingest_protection import redact_sensitive_value
 from . import ingest_ledger, leaf_prep
-from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
+from .lifecycle_state import (
+    LifecycleBindingChangedError,
+    LifecycleOtherWindowConflictError,
+    LifecyclePublicationConflictError,
+)
 from .message_analysis import _is_codex_interim, _tool_call_id
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
@@ -204,6 +209,7 @@ class _CompressionState:
     observed_prompt_tokens: Optional[int] = None
     force_overflow: bool = False
     recovery_assembly_cap: Optional[int] = None
+    other_window_conflict: LifecycleOtherWindowConflictError | None = None
     working_messages: List[Dict[str, Any]] = field(default_factory=list)
     ingest_cleanup_changed_active_context: bool = False
     fit_would_strand: bool = False
@@ -2083,6 +2089,22 @@ class CompactionMixin:
                 raise leaf_prep.PromotionRejected("coverage_digest_mismatch")
         return revalidate
 
+    def _other_window_publication_backoff(self) -> LifecycleOtherWindowConflictError | None:
+        """Revalidate the competing conversation by primary key before skipping a summary."""
+        if self._session_owner_backoff is None:
+            return None
+        session, conversation, other_conversation, row_count = self._session_owner_backoff
+        if (session, conversation) == (self._session_id, self._conversation_id):
+            try:
+                other_binding = self._lifecycle.get_by_conversation(other_conversation)
+                if (other_binding is not None and other_binding.current_session_id == session
+                        and not self._current_binding_is_delegate()):
+                    return LifecycleOtherWindowConflictError(other_conversation, row_count)
+            except sqlite3.Error:
+                logger.debug("LCM could not recheck the competing conversation binding", exc_info=True)
+        self._session_owner_backoff = None
+        return None
+
     def _fail_open_after_publication_failure(
         self,
         active_context: List[Dict[str, Any]],
@@ -2114,12 +2136,35 @@ class CompactionMixin:
                 ),
             )
         self._last_compression_status = "error"
+        warn = True
         binding_changed = isinstance(exc, LifecycleBindingChangedError)
         if binding_changed:
             failure_reason, noop_reason = (
                 "lifecycle_binding_changed",
                 "summary publication lost its lifecycle binding"
             )
+        elif isinstance(exc, LifecycleOtherWindowConflictError):
+            failure_reason = exc.reason
+            noop_reason = (
+                "Another window bound this session to another conversation. "
+                "This window cannot summarize the rows that conversation now owns. "
+                "Only one window should compact a session (issue 1250)."
+            )
+            other = exc.other_conversation_id
+            backoff = (self._session_id, self._conversation_id, other, exc.row_count)
+            if backoff != self._session_owner_backoff:
+                try:
+                    if not self._current_binding_is_delegate():
+                        self._session_owner_backoff = backoff
+                except sqlite3.Error:
+                    logger.debug("LCM could not check delegate identity for publication back-off", exc_info=True)
+            warning_key = (self._session_id, other)
+            if warning_key not in self._session_owner_warning_keys:
+                self._session_owner_warning_keys.add(warning_key)
+                logger.warning("LCM summary publication refused (reason=%s, session=%s, "
+                               "other_conversation=%s, rows=%d). %s",
+                               failure_reason, self._session_id, other, exc.row_count, noop_reason)
+            warn = False
         elif isinstance(exc, LifecyclePublicationConflictError):
             failure_reason, noop_reason = (
                 "publication_invariant_conflict",
@@ -2151,14 +2196,15 @@ class CompactionMixin:
                 "duration_ms": round(self._last_compaction_duration_ms, 3),
                 "stop_reason": failure_reason,
             }
-        logger.warning(
-            "LCM summary publication could not finish; preserving replay-safe "
-            "context (reason=%s, code=%s, name=%s, detail=%s)",
-            failure_reason,
-            getattr(exc, "sqlite_errorcode", None),
-            getattr(exc, "sqlite_errorname", None),
-            str(exc)[:500],  # #519: the raise site's ids (never message content)
-        )
+        if warn:
+            logger.warning(
+                "LCM summary publication could not finish; preserving replay-safe "
+                "context (reason=%s, code=%s, name=%s, detail=%s)",
+                failure_reason,
+                getattr(exc, "sqlite_errorcode", None),
+                getattr(exc, "sqlite_errorname", None),
+                str(exc)[:500],  # #519: the raise site's ids (never message content)
+            )
         return fallback
 
     def _assemble_committed_compaction_context(
@@ -2681,6 +2727,7 @@ class CompactionMixin:
             if state.force_overflow
             else None
         )
+        state.other_window_conflict = self._other_window_publication_backoff()
 
         return "next", None
 
@@ -2705,6 +2752,16 @@ class CompactionMixin:
             return "return", messages
         self._snapshot_compression_input(getattr(self._thread_context, "compress_refusal", None))
         state.working_messages = self._without_known_head_copies(state.working_messages)
+        # Keep ingest and the usual refusal fallback; a saved list could omit newly arrived turns.
+        if state.other_window_conflict is not None and state.recovery_assembly_cap is None:
+            return "return", self._fail_open_after_publication_failure(
+                state.working_messages,
+                state.other_window_conflict,
+                compress_started=state._compress_started,
+                threshold_full_sweep_active=False,
+                recovery_assembly_cap=None,
+                leaf_passes=0,
+            )
         retained_hold = (not force and not recovery_attempt and not state.force_overflow
                          and self._retained_stop_hold_active())
         if (not force and not recovery_attempt and not state.force_overflow

@@ -68,12 +68,14 @@ def rows(engine, sessions):
 def step(label, engine, calls, host, sessions=(S,), expected=None):
     count = len(calls)
     nodes = len(engine._dag.get_session_nodes(engine._session_id))
+    before = digests(rows(engine, sessions))
     view = list(engine.compress(list(host)))
     stored = rows(engine, sessions)
     counts = digests(stored)
     print(json.dumps(dict(step=label, status=engine.last_compression_status,
                           calls=len(calls) - count, new_leaves=len(engine._dag.get_session_nodes(engine._session_id)) - nodes,
                           owner_pairs=[(r["session_id"], r["conversation_id"]) for r in stored],
+                          before=[(*key, value) for key, value in sorted(before.items())],
                           digests=[(*key, value) for key, value in sorted(counts.items())],
                           duplicates=sum((counts - expected).values()) if expected is not None else None,
                           missing=sum((expected - counts).values()) if expected is not None else None)))
@@ -152,6 +154,21 @@ def test_rotation_publishes_without_copying_carried_rows(pair, store_child_turn)
     old = engine._lifecycle.get_by_conversation(S)
     assert old.current_session_id is None and old.last_finalized_session_id == C
     assert old.last_finalized_frontier_store_id == 3
+
+
+def test_failed_provisional_rebind_proof_preserves_identity_anchors(pair, monkeypatch):
+    build, _ = pair
+    engine = build(C, G)
+    anchors = [(S, 3, 7)]
+    monkeypatch.setattr(engine, "_identity_anchor_carry_ranges", lambda: anchors)
+    monkeypatch.setattr(engine, "_durable_commit_proof_payload", lambda *_: None)
+    engine._store.write_metadata_json([f"rotation_predecessor_session:{C}"], json.dumps(S))
+
+    def unavailable(_predecessors):
+        raise RuntimeError("injected provisional proof failure")
+
+    monkeypatch.setattr(engine, "_provisional_rebind_proof", unavailable, raising=False)
+    assert engine._load_compression_carry_ranges() == anchors
 
 
 def stage(engine, covered, *, carried_ranges=None):

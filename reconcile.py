@@ -2891,14 +2891,18 @@ class ReconcileMixin:
             anchored = self._identity_anchor_carry_ranges() if with_anchor and session_id in (None, self._session_id) else []
             if (not payload and session_id in (None, self._session_id)
                     and self._session_id and self._conversation_id != self._session_id):
-                predecessors = self._rotation_predecessor_session_ids(self._session_id)
-                if predecessors and self._conversation_id not in predecessors:
-                    proof = self._provisional_rebind_proof(predecessors)
-                    if proof:
-                        payload = {"carry_ranges": [
-                            (source, start, end) for source, start, end in proof.get("carry_ranges") or ()
-                            if source in predecessors
-                        ]}
+                try:
+                    predecessors = self._rotation_predecessor_session_ids(self._session_id)
+                    if predecessors and self._conversation_id not in predecessors:
+                        proof = self._provisional_rebind_proof(predecessors)
+                        if proof:
+                            provisional = [
+                                (source, start, end) for source, start, end in proof.get("carry_ranges") or ()
+                                if source in predecessors
+                            ]
+                            payload = {"carry_ranges": self._coalesce_compression_carry_ranges(provisional)}
+                except Exception:
+                    logger.debug("LCM provisional carry-range load failed", exc_info=True)
             return self._coalesce_compression_carry_ranges(
                 list(payload.get("carry_ranges") or []) + anchored
             )

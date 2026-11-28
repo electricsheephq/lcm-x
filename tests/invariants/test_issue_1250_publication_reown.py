@@ -4,6 +4,7 @@ import ast
 from collections import Counter
 from contextlib import ExitStack, nullcontext
 from hashlib import sha256
+import json
 import logging
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import pytest
 
 from hermes_lcm import engine as engine_module, plugin_identity
 from hermes_lcm.aux_session import _DELEGATE_SOURCE
+from hermes_lcm.command_doctor import _doctor_text
+from hermes_lcm.command_status import _status_text
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -18,6 +21,7 @@ from hermes_lcm.engine_registry import (
     ActiveEngineUseStatus, use_active_lcm_engine, use_cold_lcm_engine, use_lcm_engine,
 )
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
+from hermes_lcm.tools import lcm_grep
 
 SESSION = "S-1250"
 GATEWAY = "agent:main:local:dm:S-1250"
@@ -178,6 +182,128 @@ def test_finding5_does_not_move_rows_the_leaf_skips(open_engine, unmatched):
     assert engine.last_compression_status in {"compacted", "noop", "idle"}
     assert not (early_ids & _coverage(engine))
     assert _rows(engine) == before
+
+
+def test_hidden_provisional_row_between_consumed_rows_stays_recallable(open_engine):
+    engine = open_engine()
+    _bind_gateway(engine)
+    hidden = {"role": "user", "content": "Cobalthiddenmarker remains searchable."}
+    engine.ingest(EARLY[:1])
+    left = _rows(engine)[0]["store_id"]
+    hidden_id = engine._store.append(SESSION, hidden, conversation_id=SESSION)
+    engine.ingest(EARLY[:3])
+    before = _rows(engine)
+    right = before[2]["store_id"]
+    _publish(engine, EARLY[:3])
+    assert {left, right} <= _coverage(engine)
+    assert hidden_id < _frontier(engine) and hidden_id not in _coverage(engine)
+    assert _rows(engine) == before
+    assert _digests(_rows(engine))[next(iter(_digests([hidden])))] == 1
+    query = {"query": "cobalthiddenmarker"}
+    default = json.loads(lcm_grep(query, engine=engine))
+    assert [hit["store_id"] for hit in default["results"]] == [hidden_id]
+    scoped = json.loads(lcm_grep({**query, "conversation_id": GATEWAY}, engine=engine))
+    assert scoped["results"] == []
+
+
+@pytest.fixture
+def summary_calls(open_engine, monkeypatch):
+    calls = []
+
+    def summarize(**kwargs):
+        calls.append(None)
+        return "Cobalt summary.", 1
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    return calls
+
+
+@pytest.mark.parametrize("clear", ["other-rebind", "start", "reset", "overflow"])
+def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, clear):
+    writer, gateway = open_engine(), open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    _publish(gateway, EARLY + LATER)
+    old_host = list(EARLY)
+    before = _rows(writer)
+    call_count = len(summary_calls)
+    with caplog.at_level(logging.WARNING, logger="hermes_lcm.compaction"):
+        fallback = writer.compress(old_host)
+        assert writer.last_compression_status == "error"
+        reason = writer.last_compression_noop_reason
+        assert "Only one window should compact a session (issue 1250)." in reason
+        assert "last_compression_failure_reason: session_owned_by_other_window" in _status_text(writer)
+        assert reason in _status_text(writer)
+        assert reason in _doctor_text(writer)
+        assert writer.compress(list(fallback)) == fallback
+        assert writer.compress(list(fallback)) == fallback
+    assert len(summary_calls) - call_count == 1
+    warnings = [record for record in caplog.records if "session_owned_by_other_window" in record.getMessage()]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert _rows(writer) == before
+
+    if clear == "other-rebind":
+        gateway.on_session_start("another-session", platform="desktop", conversation_id=GATEWAY,
+                                 context_length=200_000)
+    elif clear == "start":
+        writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
+    elif clear == "reset":
+        writer.on_session_reset()
+    else:
+        monkeypatch.setattr(writer, "_should_force_overflow_recovery", lambda **_: True)
+        monkeypatch.setattr(writer, "_overflow_recovery_assembly_cap", lambda **_: 100_000)
+    if clear in {"start", "reset"}:
+        assert writer._session_owner_backoff is None
+        assert _rows(writer) == before
+        return
+    call_count = len(summary_calls)
+    writer.compress(list(fallback), force=True)
+    assert len(summary_calls) > call_count
+    assert _rows(writer) == before
+    if clear == "other-rebind":
+        assert writer.get_status()["last_compression_failure_reason"] == "publication_invariant_conflict"
+
+
+@pytest.mark.parametrize("kind", ["unrelated-owner", "gateway-publisher", "delegate-publisher"])
+def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, monkeypatch, kind):
+    from hermes_lcm.lifecycle_state import LifecycleStateStore
+
+    engine = open_engine()
+    publisher = "other-gateway" if kind == "gateway-publisher" else SESSION
+    platform = _DELEGATE_SOURCE if kind == "delegate-publisher" else "gui"
+    engine.on_session_start(SESSION, platform=platform, conversation_id=publisher, context_length=200_000)
+    if kind != "unrelated-owner":
+        _bind_gateway(open_engine())
+    engine.ingest(list(EARLY))
+    with engine._store.atomic(immediate=True):
+        engine._store.connection.execute(
+            "UPDATE messages SET conversation_id = ? WHERE session_id = ?", (GATEWAY, SESSION),
+        )
+    before = _rows(engine)
+    conflicts = []
+    stage = LifecycleStateStore.stage_compaction_publication
+
+    def record(store, *args, **kwargs):
+        try:
+            return stage(store, *args, **kwargs)
+        except LifecyclePublicationConflictError as exc:
+            conflicts.append(exc)
+            raise
+
+    monkeypatch.setattr(LifecycleStateStore, "stage_compaction_publication", record)
+    host = list(EARLY)
+    for _ in range(2):
+        host = engine.compress(list(host))
+        assert engine.last_compression_status == "error"
+        assert _rows(engine) == before
+    assert len(summary_calls) == len(conflicts) == 2
+    if kind == "delegate-publisher":
+        assert all(exc.other_conversation_id == GATEWAY and exc.row_count > 0 for exc in conflicts)
+    else:
+        assert all(type(exc) is LifecyclePublicationConflictError for exc in conflicts)
+    assert all(str(exc) == "Compaction publication source ownership changed" for exc in conflicts)
 
 
 def test_gateway_only_control(open_engine):

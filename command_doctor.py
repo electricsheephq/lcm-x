@@ -10,6 +10,7 @@ from typing import Any
 from .config import companion_enable_command
 from .db_bootstrap import SQLITE_WAL_RESET_ACTION, sqlite_wal_reset_warning
 from .diagnostics import fresh_sqlite_check, sqlite_wal_reset_check
+from .lifecycle_state import LifecycleOtherWindowConflictError
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class DoctorFacts:
     fit_count: int | None
     projection_floor: bool
     survival_counter_write_lost: bool
+    other_window_compaction: str
     stub_first_exit: dict[str, Any] | None
     inactive_process: str | None
     inactive_action: str
@@ -331,6 +333,9 @@ def collect_doctor(engine: Any) -> DoctorFacts:
     if fit_count != 0:
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
     stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
+    other_window_compaction = ""
+    if getattr(engine, "_last_compression_failure_reason", "") == LifecycleOtherWindowConflictError.reason:
+        other_window_compaction = engine.last_compression_noop_reason
     inactive_process = command.inactive_record_notice(getattr(engine, "_hermes_home", ""))
     inactive_action = ""
     if inactive_process:
@@ -397,6 +402,7 @@ def collect_doctor(engine: Any) -> DoctorFacts:
         fit_count=fit_count,
         projection_floor=projection_floor,
         survival_counter_write_lost=lost is not None,
+        other_window_compaction=other_window_compaction,
         stub_first_exit=stub_first_exit,
         inactive_process=inactive_process,
         inactive_action=inactive_action,
@@ -648,6 +654,8 @@ def render_doctor(facts: DoctorFacts) -> str:
     )
     if fit_observation is not None:
         observations.append(fit_observation)
+    if facts.other_window_compaction:
+        observations.append(f"compaction: {facts.other_window_compaction}")
     if facts.stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
         observations.append("stub_first_exit: the last threshold compaction stopped on its free cuts without a "
                             "model call (partial); " + " ".join(f"{k}={v}" for k, v in facts.stub_first_exit.items()))

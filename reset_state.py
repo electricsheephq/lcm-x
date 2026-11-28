@@ -66,6 +66,7 @@ class ResetStateMixin:
         self._end_turn_start_defer_episode()
         self._reset_turn_start_deferred_checks()
         self._emission_handle = None
+        self._session_owner_backoff = None
         self._reset_session_counters()
         self._reset_compaction_progress()
         # A commit proof is valid only through the compression handoff of the
