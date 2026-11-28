@@ -237,6 +237,8 @@ export LCM_EMBEDDING_DOCUMENT_PREFIX="search_document: "
 /lcm embed warmup && /lcm embed backfill --apply
 ```
 
+If Ollama listens only on IPv6, set `LCM_OLLAMA_BASE_URL=http://[::1]:11434` or use `http://localhost:11434` as its value.
+
 Prefixes are raw strings; quote them to preserve the trailing space. Empty defaults leave
 requests and vector identities unchanged. Only Ollama and OpenAI-compatible providers use them.
 [Contributor dhaern's measurements](https://github.com/electricsheephq/lcm-x/issues/1118#issuecomment-6358033279) on two public BEIR sets

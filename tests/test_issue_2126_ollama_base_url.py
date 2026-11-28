@@ -3,11 +3,10 @@
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.embedding_provider import (
     OllamaProvider,
-    resolve_provider,
+    _automatic_chunks_allowed,
     _is_loopback_url,
+    resolve_provider,
 )
-from hermes_lcm.embedding_maintenance import _automatic_chunks_allowed
-import hermes_lcm.command as command_mod
 
 
 def test_ollama_base_url_default_is_ipv4_loopback(monkeypatch):
@@ -53,4 +52,4 @@ def test_ollama_base_url_loopback_classification():
     assert _is_loopback_url("http://127.0.0.1:11434") is True
     assert _is_loopback_url("http://localhost:11434") is True
     config_default = LCMConfig(embedding_provider="ollama")
-    assert _automatic_chunks_allowed(config_default, command_mod) is True
+    assert _automatic_chunks_allowed(config_default) is True

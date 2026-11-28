@@ -415,6 +415,8 @@ without changing its behavior until removal.
 | `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` | `float` | `600.0` | — | — |
 <!-- END GENERATED CONFIG REFERENCE -->
 
+If Ollama listens only on IPv6, override the default `http://127.0.0.1:11434` with `LCM_OLLAMA_BASE_URL=http://[::1]:11434` or use `http://localhost:11434` as its value.
+
 ## Hand-written reference: explicit configuration readers
 
 These entries are deliberately outside the scalar registry and generated table.

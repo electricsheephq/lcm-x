@@ -89,7 +89,7 @@
     "model_thresholds": {},
     "native_recovery": false,
     "new_session_retain_depth": 2,
-    "ollama_base_url": "http://localhost:11434",
+    "ollama_base_url": "http://127.0.0.1:11434",
     "preanswer_evidence_enabled": false,
     "preanswer_evidence_mode": "",
     "proactive_recall_budget_tokens": 500,
