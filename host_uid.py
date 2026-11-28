@@ -330,8 +330,11 @@ class HostUidShadowMixin:
             return source
 
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
-                          bound_uids=None, held=None, avoid=()):
-        """Resolve durable occurrences and optionally report placeholder versions superseded by their source."""
+                          bound_uids=None, held=None, avoid=(), reowned=()):
+        """Resolve durable occurrences and optionally report placeholder versions superseded by their source.
+
+        Only the ownership-receipt replay passes ``reowned`` IDs. Those rows must still belong to this session's lineage.
+        """
         if not self._uid_recognition_enabled():
             return {}
         uids = [m.get("message_uid") for m in messages]
@@ -350,7 +353,7 @@ class HostUidShadowMixin:
             carry = self._load_compression_carry_ranges() if fetched else ()
             conversation = {"", str(self._conversation_id or "")}
             owned = {sid: row for sid, row in fetched.items() if row and self._identity_anchor_owned(row, carry)
-                     and str(row.get("conversation_id") or "").strip() in conversation}
+                     and (str(row.get("conversation_id") or "").strip() in conversation or sid in reowned)}
             for idx, (uid, message) in enumerate(zip(uids, messages)):
                 if _valid_uid(uid) and not message.get("_absorbed_message_uids"):
                     identity = (identities if identities is not None else messages)[idx]

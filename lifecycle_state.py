@@ -1147,11 +1147,10 @@ class LifecycleStateStore:
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]
         if offending:
-            if all(row[1] == session_id for row in offending) and (
-                conversation_id == session_id or conversation_id in (
-                    predecessors if predecessors is not None else rotation_predecessor_session_ids(conn, session_id)
-                )
-            ):
+            if predecessors is None:
+                predecessors = rotation_predecessor_session_ids(conn, session_id)
+            provisional_sessions = {session_id, *predecessors}
+            if conversation_id in provisional_sessions and all(row[1] in provisional_sessions for row in offending):
                 owners = {row[2] for row in offending}
                 if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
                     other_conversation_id, = owners

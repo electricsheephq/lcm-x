@@ -48,14 +48,14 @@ def _step(engine, name, view, action, new=(), *, copies=(), may_reown=False):
     return result
 
 
-def _mixed(open_engine, *, sequential=False):
+def _mixed(open_engine, *, sequential=False, early=EARLY):
     writer, gateway = open_engine(), open_engine()
     _start(writer)
-    _step(writer, "early ingest", EARLY, lambda: writer.ingest(list(EARLY)), EARLY)
+    _step(writer, "early ingest", early, lambda: writer.ingest(list(early)), early)
     if sequential:
         writer.shutdown()
     _bind_gateway(gateway)
-    full = EARLY + LATER
+    full = early + LATER
     _step(gateway, "gateway ingest", full, lambda: gateway.ingest(full), LATER)
     before = _rows(gateway)
     gateway_view = _step(gateway, "gateway compress", full, lambda: gateway.compress(full), may_reown=True)
@@ -63,12 +63,36 @@ def _mixed(open_engine, *, sequential=False):
                     if gateway.last_compression_status == "compacted" else None)
     receipt = gateway._store.read_metadata_json(REOWN_KEY)
     assert (sorted(receipt) if receipt is not None else None) == expected_ids
-    owners = [GATEWAY] * len(full) if expected_ids else [SESSION] * len(EARLY) + [GATEWAY] * len(LATER)
+    owners = [GATEWAY] * len(full) if expected_ids else [SESSION] * len(early) + [GATEWAY] * len(LATER)
     assert [row["conversation_id"] for row in _rows(gateway)] == owners
     return writer, gateway, gateway_view
 
 
-@pytest.mark.parametrize("shape", ["same-uids", "all-new-uids", "middle-new-uid", "uid-bound-to-other-row"])
+@pytest.mark.parametrize("mode", ["off", "on"])
+def test_new_unstamped_pair_after_gateway_turns_is_stored(open_engine, monkeypatch, mode):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    writer, gateway = open_engine(fresh_tail_count=0), open_engine(fresh_tail_count=0)
+    original = EARLY[:2]
+    _start(writer)
+    writer.ingest(list(original))
+    writer.shutdown()
+    _bind_gateway(gateway)
+    gateway.compress(list(original), force=True)
+    assert gateway.last_compression_status == "compacted"
+    gateway.ingest(original + LATER[:2])
+    assert _digests(_rows(gateway)) == _digests(original + LATER[:2])
+    gateway.shutdown()
+
+    resumed = open_engine(fresh_tail_count=0)
+    _start(resumed)
+    new_pair = [dict(message) for message in original]
+    # v0.30.4 stores both new occurrences (4 -> 6) in both modes.
+    _step(resumed, "new unstamped pair", new_pair, lambda: resumed.ingest(new_pair), new_pair)
+
+
+@pytest.mark.parametrize("shape", [
+    "same-uids", "all-new-uids", "middle-new-uid", "uid-bound-to-other-row", "version-on-other-row",
+])
 def test_reowned_replay_checks_host_uid_bindings(open_engine, tmp_path, monkeypatch, shape):
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
     with sqlite3.connect(tmp_path / "state.db") as db:
@@ -94,6 +118,10 @@ def test_reowned_replay_checks_host_uid_bindings(open_engine, tmp_path, monkeypa
     before = _rows(gateway)
     assert len(before) == 9 and all(row["conversation_id"] == GATEWAY for row in before)
     assert set(gateway._store.read_metadata_json(REOWN_KEY)) == {row["store_id"] for row in before[:4]}
+    if shape == "version-on-other-row":
+        gateway._store.add_host_uid_bindings(lineage, [
+            (before[1]["store_id"], original[0]["message_uid"], "version", "test"),
+        ])
 
     resumed = open_engine()
     _start(resumed)
@@ -118,15 +146,16 @@ def test_reowned_replay_checks_host_uid_bindings(open_engine, tmp_path, monkeypa
     added = after[len(before):]
     print(f"rows={len(before)}->{len(after)} added={[row['content'] for row in added]}")
     assert after[:len(before)] == before
-    if shape == "same-uids":
+    if shape in {"same-uids", "version-on-other-row"}:
         assert not added
         assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
     else:
-        # One contradiction invalidates the whole receipt. Ordinary ingest
-        # persists the ambiguous batch, including any otherwise replayed rows.
-        assert _digests(added) == _digests(incoming)
+        # v0.30.4 adds all four all-new rows, or one contradicted row in each
+        # partial case. The receipt here only proves the prefix before the veto.
+        cursor = 0 if shape == "all-new-uids" else 2
+        assert _digests(added) == _digests(incoming[cursor:])
         new_bindings = resumed._store.host_uid_bindings_for(lineage, new_uids.values())
-        assert new_bindings == {uid: [(added[i]["store_id"], "canonical")] for i, uid in new_uids.items()}
+        assert new_bindings == {uid: [(added[i - cursor]["store_id"], "canonical")] for i, uid in new_uids.items()}
 
 
 @pytest.mark.parametrize("restarts,plain", [(1, False), (2, False), (1, True)],
@@ -145,10 +174,13 @@ def test_raw_replay_after_natural_stall(open_engine, differential_base, restarts
         _step(stalled, f"start {i + 1}", [], lambda: stalled.on_session_start(
             SESSION, conversation_id=binding, context_length=200_000))
         assert stalled._conversation_id == binding
+        # The original GA control replays in G without copies (9 -> 9).
+        # The returning S window has no stamps or UIDs for the moved rows.
+        copies = [] if differential_base else EARLY
         if plain:
-            _step(stalled, "plain ingest", raw, lambda: stalled.ingest(raw))
+            _step(stalled, "plain ingest", raw, lambda: stalled.ingest(raw), copies=copies)
         else:
-            _step(stalled, f"raw compress {i + 1}", raw, lambda: stalled.compress(raw, force=True))
+            _step(stalled, f"raw compress {i + 1}", raw, lambda: stalled.compress(raw, force=True), copies=copies)
 
 
 def test_restarted_window_with_self_stored_and_new_rows(open_engine, differential_base):
@@ -166,9 +198,10 @@ def test_restarted_window_with_self_stored_and_new_rows(open_engine, differentia
     _step(writer, "same-binding start", [], lambda: _start(writer))
     raw = EARLY + held + new
     # On GA the G publication refuses and S adopts a compacted view. Resuming
-    # S with its raw transcript still copies the six previously stored rows.
+    # S with its raw transcript copies the six previously stored rows on GA
+    # (11 -> 19) and on the head because there is no occurrence evidence.
     view = _step(writer, "mixed raw compress", raw, lambda: writer.compress(raw, force=True), new,
-                 copies=EARLY + held if differential_base else ())
+                 copies=EARLY + held)
     _step(writer, "adopted view", view, lambda: writer.ingest(view))
 
 
@@ -252,7 +285,8 @@ def test_replay_receipt_skips_ignored_host_message(open_engine, monkeypatch):
     config = {"ignore_message_patterns": ["^HEARTBEAT"]}
     writer, gateway = open_engine(**config), open_engine(**config)
     heartbeat = {"role": "user", "content": "HEARTBEAT ok"}
-    raw = EARLY[:2] + [heartbeat] + EARLY[2:]
+    early = [dict(row, timestamp=100 + i) for i, row in enumerate(EARLY)]
+    raw = early[:2] + [heartbeat] + early[2:]
     _start(writer)
     _step(writer, "initial ingest with heartbeat", raw, lambda: writer.ingest(raw), EARLY)
     _bind_gateway(gateway)
@@ -328,7 +362,8 @@ def test_receipt_replay_skips_cached_active_placeholder(open_engine, monkeypatch
     writer, gateway = open_engine(**config), open_engine(**config)
     _start(writer)
     ignored = {"role": "user", "content": "HEARTBEAT ignored in active replay"}
-    raw = EARLY[:2] + [ignored] + EARLY[2:]
+    early = [dict(row, timestamp=100 + i) for i, row in enumerate(EARLY)]
+    raw = early[:2] + [ignored] + early[2:]
     writer.ingest(raw)
     replay = list(writer._last_active_replay_messages)
     assert replay[2]["content"].startswith("[LCM active replay placeholder: message ignored;")
@@ -345,11 +380,14 @@ def test_receipt_replay_skips_cached_active_placeholder(open_engine, monkeypatch
     assert writer._last_ingest_reconciliation["effective_incoming"] == len(EARLY) + 1
 
 
-def test_replay_receipt_stops_at_unmatched_host_message(open_engine):
-    writer, gateway, _ = _mixed(open_engine)
-    raw = EARLY[:2] + [{"role": "user", "content": "An unmatched request."}] + EARLY[2:]
+@pytest.mark.parametrize("has_stamps", [False, True])
+def test_replay_receipt_stops_at_unmatched_host_message(open_engine, has_stamps):
+    early = [dict(row, timestamp=100 + i) for i, row in enumerate(EARLY)] if has_stamps else EARLY
+    writer, gateway, _ = _mixed(open_engine, early=early)
+    raw = early[:2] + [{"role": "user", "content": "An unmatched request."}] + early[2:]
     stored = _rows(gateway)
-    assert writer._cursor_from_reowned_session_rows(raw, stored, len(stored)) == 0
+    # v0.30.4 has no receipt matcher.
+    assert writer._cursor_from_reowned_session_rows(raw, stored, len(stored)) == (2 if has_stamps else 0)
 
 
 def test_short_view_skips_full_receipt_scan(open_engine, monkeypatch):

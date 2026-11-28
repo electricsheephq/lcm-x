@@ -3456,7 +3456,7 @@ class ReconcileMixin:
         ingest_drop_decisions: Callable[[], list[bool]] | None = None,
         original_messages: List[Dict[str, Any]] | None = None,
     ) -> int:
-        """Recognize a returning session-id window's complete ordered raw history."""
+        """Recognize the occurrence-proven prefix of a returning session-id window's raw history."""
         session_id = self._session_id
         if self._conversation_id != session_id or (
             len(stored_rows) == session_count
@@ -3486,25 +3486,30 @@ class ReconcileMixin:
         ]
         if len(rows) > len(messages) or not any(row["store_id"] in reowned for row in rows):
             return 0
-        drops = ingest_drop_decisions() if ingest_drop_decisions is not None else None
+        drops = (ingest_drop_decisions() if ingest_drop_decisions is not None else
+                 [self._matches_ignore_message_patterns(message) for message in messages])
         host_messages = messages if original_messages is None else original_messages
-        host_uids, uid_bindings, stored_uids = [], {}, {}
-        if uid_recognition_enabled(self):
+        host_uids, uid_bindings, stored_uids, resolved_uids = [], {}, {}, {}
+        if host_message_uid_mode() != "off":
             host_uids = [self._host_occurrence_metadata(message)["message_uid"] for message in host_messages]
             wanted = {uid for uid in host_uids if uid is not None}
             if wanted and (lineage := self._host_uid_lineage_key()[0]) is not None:
                 try:
-                    uid_bindings = self._store.host_uid_bindings_for(lineage, wanted)
+                    uid_bindings = self._store.host_uid_bindings_for(lineage, wanted, ("canonical",))
                     stored_uids = self._store.host_uid_uids_of_stores(lineage, [row["store_id"] for row in rows])
                 except sqlite3.Error:
                     logger.debug("LCM could not check UIDs for re-owned session rows", exc_info=True)
                     return 0
-        matched = 0
-        for cursor, message in enumerate(messages, start=1):
-            drop = drops[cursor - 1] if drops is not None else self._matches_ignore_message_patterns(message)
-            if drop:
-                continue
-            row = rows[matched]
+                if uid_recognition_enabled(self):
+                    resolved_uids = self._host_uid_resolve(
+                        [message for message, drop in zip(host_messages, drops) if not drop],
+                        identities=[message for message, drop in zip(messages, drops) if not drop],
+                        reowned=reowned,
+                    )
+        matched_cursor = 0
+        visible = (index for index, drop in enumerate(drops) if not drop)
+        for pair, (index, row) in enumerate(zip(visible, rows)):
+            message = messages[index]
             ident = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
             stamp = _normalize_observed_at(message.get("timestamp"))
             stored_ident = self._message_replay_identity(
@@ -3513,28 +3518,19 @@ class ReconcileMixin:
             if (_has_lossy_redacted_identity(ident)
                     or stamp is not None and row["observed_at"] is not None and stamp != row["observed_at"]
                     or ident != stored_ident):
-                return 0
-            if host_uids and (uid := host_uids[cursor - 1]) is not None:
-                store_id = row["store_id"]
+                break
+            store_id = row["store_id"]
+            if host_uids and (uid := host_uids[index]) is not None:
                 row_uids = stored_uids.get(store_id, ())
-                # A canonical or version UID for this row is valid. Reuse the
-                # occurrence check to veto a different durable UID.
-                previous_uid = uid if uid in row_uids else next(iter(row_uids), None)
                 if (any(bound_id != store_id for bound_id, _ in uid_bindings.get(uid, ()))
-                        or self._host_occurrence_changed(host_messages[cursor - 1], {"message_uid": previous_uid})):
-                    return 0
-            if len(rows) == 1 and (stamp is None or row["observed_at"] is None):
-                # An equal-content delta is ambiguous without the same
-                # occurrence evidence required by ordinary singleton replay.
-                if self._find_reconciled_cursor_for_store_tail(
-                    [message], [stored_ident], stored_tail_rows=rows,
-                    allow_empty_prefix=False, session_count=1, raw_session_count=session_count,
-                ) != 1:
-                    return 0
-            matched += 1
-            if matched == len(rows):
-                return cursor
-        return 0
+                        or row_uids and uid not in row_uids):
+                    break
+            uid_row = resolved_uids.get(pair)
+            if not (stamp is not None and stamp == row["observed_at"]
+                    or uid_row is not None and uid_row["store_id"] == store_id):
+                break
+            matched_cursor = index + 1
+        return matched_cursor
 
     def _reconcile_ingest_cursor_from_store(
         self,

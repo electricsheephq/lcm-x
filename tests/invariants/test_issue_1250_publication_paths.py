@@ -4,6 +4,7 @@ from collections import Counter
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+import sqlite3
 
 import pytest
 
@@ -156,10 +157,15 @@ def test_rotation_publishes_without_copying_carried_rows(pair, store_child_turn)
     assert old.last_finalized_frontier_store_id == 3
 
 
-def test_rotated_session_window_backs_off_after_gateway_reownership(pair):
+@pytest.mark.parametrize("full_view", [False, True], ids=["child-only", "carried-fresh-tail"])
+def test_rotated_session_window_backs_off_after_gateway_reownership(pair, tmp_path, full_view):
     build, calls = pair
+    (tmp_path / "hermes").mkdir(exist_ok=True)
+    with sqlite3.connect(tmp_path / "hermes" / "state.db") as db:
+        db.execute("CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+        db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [(S, None, "compression"), (C, S, None)])
     writer = build(S)
-    early = turns("early")
+    early = [dict(row, timestamp=100 + i) for i, row in enumerate(turns("early"))]
     writer.ingest(early)
     parent_view = writer.compress(early)
     assert writer.last_compression_status == "compacted"
@@ -169,6 +175,9 @@ def test_rotated_session_window_backs_off_after_gateway_reownership(pair):
     child = turns("child")
     writer_view = parent_view + child
     writer.ingest(writer_view)
+    carried = rows(writer, (S,))[-1]
+    if full_view:
+        assert (S, carried["store_id"] - 1, carried["store_id"]) in writer._load_compression_carry_ranges()
     child_ids = {row["store_id"] for row in rows(writer, (C,)) if row["conversation_id"] == S}
     assert len(child_ids) == len(child)
 
@@ -180,10 +189,19 @@ def test_rotated_session_window_backs_off_after_gateway_reownership(pair):
     before = rows(gateway, (S, C))
     assert child_ids <= {row["store_id"] for row in before
                          if row["session_id"] == C and row["conversation_id"] == G}
+    if full_view:
+        # G's commit superseded C's rotation proof. Register the same proven
+        # carry through the ancestor-anchor path to exercise a mixed-session leaf.
+        writer._register_identity_anchor_carry([carried])
 
     count = len(calls)
-    fallback = writer.compress(child, force=True)
+    fallback = writer.compress(writer_view if full_view else child, force=True)
     assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    if full_view:
+        assert carried["store_id"] in writer._session_owner_backoff[3]
+        # The carried row alone must keep the back-off armed on a shorter view.
+        conflict = writer._other_window_publication_backoff(parent_view)
+        assert conflict is not None
     assert len(calls) == count + 1
     assert writer.compress(fallback, force=True) == fallback
     assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
