@@ -79,6 +79,7 @@ CONFIG_ROWS = (
     ('selective_compiler_enabled', 'LCM_SELECTIVE_COMPILER_ENABLED', 'bool', False),
     ('embedding_binary_prescreen', 'LCM_EMBEDDING_BINARY_PRESCREEN', 'bool', False),
     ('doctor_clean_apply_enabled', 'LCM_DOCTOR_CLEAN_APPLY_ENABLED', 'bool', False),
+    ('doctor_dedupe_apply_enabled', 'LCM_DOCTOR_DEDUPE_APPLY_ENABLED', 'bool', False),
     ('empty_lifecycle_gc_enabled', 'LCM_EMPTY_LIFECYCLE_GC_ENABLED', 'bool', True),
     ('temporal_rollups_enabled', 'LCM_TEMPORAL_ROLLUPS_ENABLED', 'bool', True),
     ('background_leaf_prep_enabled', 'LCM_BACKGROUND_LEAF_PREP_ENABLED', 'bool', False),
