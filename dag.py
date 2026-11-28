@@ -31,6 +31,7 @@ from .db_bootstrap import (
 
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
+from .message_content import canonical_text
 from .search_query import (
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
@@ -167,6 +168,14 @@ _NODE_COLUMNS = (
 )
 _NODE_SELECT = ", ".join(_NODE_COLUMNS)
 _NODE_SELECT_N = ", ".join(f"n.{column}" for column in _NODE_COLUMNS)
+
+
+class CondensationPublicationRejected(RuntimeError):
+    """The selected summary sources no longer support publication."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 class SummaryDAG:
@@ -306,7 +315,7 @@ class SummaryDAG:
                     (
                         node.session_id,
                         node.depth,
-                        node.summary,
+                        canonical_text(node.summary),
                         node.token_count,
                         node.source_token_count,
                         json.dumps(node.source_ids),
@@ -314,7 +323,7 @@ class SummaryDAG:
                         node.created_at or time.time(),
                         node.earliest_at,
                         node.latest_at,
-                        node.expand_hint,
+                        canonical_text(node.expand_hint) if node.expand_hint is not None else None,
                     ),
                 )
                 if cur.lastrowid is None:
@@ -337,6 +346,35 @@ class SummaryDAG:
                 operation_name="summary_dag.add_node",
             )
             return node.node_id
+
+    @staticmethod
+    def validate_condensation_sources(conn: sqlite3.Connection, node: SummaryNode, node_id: int) -> None:
+        """Recheck the source set in the transaction that inserted the new parent."""
+        source_ids = json.dumps(node.source_ids)
+        depths = conn.execute(
+            """SELECT source.depth
+               FROM json_each(?) AS selected
+               LEFT JOIN summary_nodes AS source
+                 ON source.node_id = selected.value AND source.node_id != ?
+                AND source.session_id = ?""",
+            (source_ids, node_id, node.session_id),
+        ).fetchall()
+        if any(row[0] is None for row in depths):
+            raise CondensationPublicationRejected("source_missing")
+        if any(row[0] != node.depth - 1 for row in depths):
+            raise CondensationPublicationRejected("source_wrong_depth")
+        claimed = conn.execute(
+            """SELECT 1
+               FROM summary_nodes AS parent INDEXED BY idx_nodes_session_depth,
+                    json_each(parent.source_ids) AS edge
+               WHERE parent.session_id = ? AND parent.depth = ?
+                 AND parent.node_id != ? AND parent.source_type = 'nodes'
+                 AND CAST(edge.value AS INTEGER) IN (SELECT value FROM json_each(?))
+               LIMIT 1""",
+            (node.session_id, node.depth, node_id, source_ids),
+        ).fetchone()
+        if claimed is not None:
+            raise CondensationPublicationRejected("source_already_claimed")
 
     @staticmethod
     def stage_delete_session_scope(
@@ -499,40 +537,6 @@ class SummaryDAG:
                     (session_id, limit),
                 ).fetchall()
         return [self._row_to_node(r) for r in rows]
-
-    def get_session_node_ids_below_depth(
-        self, session_id: str, min_depth: int | None
-    ) -> List[int]:
-        """All node ids for a session that a reset would delete, UNBOUNDED.
-
-        ``min_depth=None`` returns every node id (the retain=0 case); otherwise it
-        returns ids with ``depth < min_depth``. Unlike :meth:`get_session_nodes`
-        (which caps at ``limit=1000``), this returns the complete set so
-        deletion-driven rollup staleness covers every removed node, not just the
-        first 1000.
-        """
-        with self._db_lock:
-            if min_depth is None:
-                rows = self._conn.execute(
-                    "SELECT node_id FROM summary_nodes WHERE session_id = ?",
-                    (session_id,),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT node_id FROM summary_nodes WHERE session_id = ? AND depth < ?",
-                    (session_id, min_depth),
-                ).fetchall()
-        return [int(r[0]) for r in rows if r[0] is not None]
-
-    def count_at_depth(self, session_id: str, depth: int) -> int:
-        """Count nodes at a specific depth for a session."""
-        with self._db_lock:
-            row = self._conn.execute(
-                """SELECT COUNT(*) FROM summary_nodes
-                   WHERE session_id = ? AND depth = ?""",
-                (session_id, depth),
-            ).fetchone()
-        return row[0] if row else 0
 
     def get_session_node_count(self, session_id: str) -> int:
         """Count summary nodes for a session without loading node rows."""

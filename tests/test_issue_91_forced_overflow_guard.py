@@ -1,7 +1,7 @@
 """#91: forced-overflow recovery must never return an empty transcript.
 
 Construction mirrors
-tests/test_lcm_engine.py::test_overflow_recovery_fallback_removes_orphan_tool_result.
+tests/test_lcm_engine_assembly.py::TestAssemblyToolPairGuardrail::test_overflow_recovery_fallback_removes_orphan_tool_result.
 The path needs a non-default assembly cap (LCM_MAX_ASSEMBLY_TOKENS or
 LCM_RESERVE_TOKENS_FLOOR); the tests pass it as ``assembly_cap_override``.
 """

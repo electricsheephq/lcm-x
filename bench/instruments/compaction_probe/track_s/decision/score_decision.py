@@ -61,6 +61,8 @@ def runs(n: int, args):
         yield "codex-native", r, args.external_root / "codex-runs" / s / r, {176: None, 304: "."}
     o = f"d{n}-open"
     yield "LCMX-fleet-open", o, args.run_root / "LCMX-fleet-open" / s / o, {c: f"cp-{c}" for c in args.checkpoints}
+    if args.arms and "LCMX-env-file-open" in args.arms:
+        yield "LCMX-env-file-open", o, args.run_root / "LCMX-env-file-open" / s / o, {c: f"cp-{c}" for c in args.checkpoints}
     yield "lossless-claw-open", o, args.external_root / "lc-runs" / s / f"{o}-default", {c: f"cp-{c}" for c in args.checkpoints}
     yield "lossless-claw-tuned-open", o, args.external_root / "lc-runs" / s / f"{o}-tuned", {c: f"cp-{c}" for c in args.checkpoints}
 
@@ -126,7 +128,8 @@ def main():
             score_manifest.write_atomic(manifest_path, manifest)
             for population in ("scores", "loss"):
                 for directory in (args.out / population).glob("cp-*"):
-                    (directory / name).unlink(missing_ok=True)
+                    if directory.is_dir() and not directory.is_symlink():
+                        (directory / name).unlink(missing_ok=True)
             if not receipt_ok:
                 continue  # missing/failed runs are never measured as completed; their stale scores are removed above
             run_calls, run_probes = [], {}

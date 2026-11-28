@@ -11,10 +11,11 @@ import os
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
+CHILD_BARS = ("B10",)  # scorers/delegated.py: delegated children stored under their own ids with a parent link (#1931)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
+          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn", "crash_after_host_reply_before_store"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     1623: (("B1", "B2"), "acp-process stopped-turn immediate persistence"),
@@ -44,21 +45,26 @@ ISSUES = {
     # session; LCM stores the parts only
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
-    # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
-    # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    # acp-process, crash after rotation: the scorer now expects an in-flight reply the host kept, so #861 covers only
+    # the crash turn's user row left unstored; a host-kept reply in an abandoned rotation child is #2624
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
+    2624: (("B1", "B2"), "upstream-main and upstream-uid acp-process: the restart resumes the parent and abandons the rotation child, so the interrupted turn's host-kept reply is never shown to the plugin"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
     1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
     1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
     1508: (("B1", "B2"), "T34 duplicate after the recovery crash on stamp-only rotation"),
     1506: (("B1", "B2"), "previous-GA composite of T12+T13 kept next to the replayed parts after the restart"),
+    1931: (("B1", "B2", "B10"), "delegated (subagent) children stored once under their own session id with a parent link"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
+               2624: ("upstream-main", "upstream-uid"),
                1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
-ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",)}
+ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",),
+                    2624: ("acp-process",),
+                    1931: ("acp-process",)}
 
 
 # #1013 changed the product defaults; a cell sized for the earlier trigger pins the old values here.
@@ -301,7 +307,7 @@ def registry() -> list[dict]:
         cell("window-1m/in-place", [], in_place=True, window=1000000, turns=60,
              doc="1M window through engine.update_model; tight tuning and text volume scaled x15.6 from the 64k probes, "
                  "so LCM's threshold math runs at 1M (threshold 500k tokens, ~36k tokens per turn)."),
-        cell("crash-after-rotation/rotation", [519, 549, 821, 861], in_place=False, user={"trailing_ws": True},
+        cell("crash-after-rotation/rotation", [519, 549, 821, 861, 2624], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
         cell("upgrade-crash-after-rotation/rotation", [1501, 1506], in_place=False, user={"trailing_ws": True},
@@ -315,28 +321,68 @@ def registry() -> list[dict]:
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
     ]
+    cells += [cell(f"delegated-child/{m}", [1931], in_place=ip, delegate_plan=[{"turns": [5, 17, 29]}],
+                   toolsets=["todo", "context_engine", "file", "delegation"], bars=[*BARS, *CHILD_BARS],
+                   doc="#1931: turns 5, 17 and 29 call delegate_task; each child's goal is its own tagged user row "
+                       "and it answers with a scripted tagged reply. B1/B2 score every child as its own lineage "
+                       "(state.db source 'subagent' with a non-subagent parent) and the chat lineage without them; "
+                       "B10: one host child per scripted delegate, each with stored rows, a session_lineage link to "
+                       "its host parent, no child row in another lineage and no parent row copied into a child. "
+                       "acp-process only (the in-process probe's mocked client does not reach the child's own "
+                       "client); no child run is UNSUPPORTED.")
+              for m, ip in modes()]
     cells += [cell(f"p8-control/{v}", [], in_place=True, bars=["B9"],
                    faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
                    doc="P8 flush positive control; none is the negative control.")
               for v in ("archived", "other-active", "random-snapshot", "none")]
+    cells += [cell("reply-held-crash/" + name, targets, in_place=ip, user={"trailing_ws": True},
+                   faults=[fault], doc=proof + " Reservation holds the store; does not prove natural crash timing.")
+              for name, ip, targets, fault, proof in (
+                  ("rotation-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 12, "depth": 1},
+                   "First rotation child reply survives a crash and reload."),
+                  ("plain-turn", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 1},
+                   "A later reply in the first child survives a crash and reload."),
+                  ("multi-hop", False, [2624], {"kind": "crash_after_host_reply_before_store", "turn": 22, "depth": 2},
+                   "A reply two compression hops from the ACP root survives reload."),
+                  ("pre-rotation", False, [], {"kind": "crash_after_host_reply_before_store", "turn": 5, "depth": 0},
+                   "Root-session crash control before rotation."),
+                  ("in-place", True, [], {"kind": "crash_after_host_reply_before_store", "turn": 15, "depth": 0},
+                   "Default in-place compaction crash control without a rotation child."))]
+    cells += [held_tool_cell("tool-turn"), held_tool_cell("tool-loop")]
     return cells
+
+
+def held_tool_cell(name, *, in_place=False):
+    loop = name == "tool-loop"
+    return cell("reply-held-crash-control/tool-loop-in-place" if in_place else "reply-held-crash/" + name,
+                [] if in_place else [2624], in_place=in_place, user={"trailing_ws": True}, big_lines=8,
+                faults=[dict(kind="crash_after_host_reply_before_store", turn=15, depth=0 if in_place else 1,
+                             **({"at": "tool_results"} if loop else {}))],
+                tool_plan=[{"turns": [15], "calls": [
+                    {"name": "read_file", "args": {"path": "{files}/small.txt"}},
+                    {"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
+                doc=("User row, call row and both results survive a mid-tool-loop crash (no final reply) and reload."
+                     if loop else "Whole tool turn survives crash and reload; the final reply is held at the kill; "
+                                  "whether the tool rows were already stored is recorded as store_turn_tool_rows.")
+                    + " Reservation holds the store; does not prove natural crash timing.")
 
 
 def validate(c: dict) -> None:
     assert c["transport"] in TRANSPORTS, c["id"]
-    assert set(c["bars"]) <= set(BARS + DRAIN_BARS + ("C1", "F4")), c["id"]
+    assert set(c["bars"]) <= set(BARS + DRAIN_BARS + CHILD_BARS + ("C1", "F4")), c["id"]
+    assert not set(c["bars"]) & set(CHILD_BARS) or c.get("delegate_plan"), c["id"]
     assert {f["kind"] for f in c["faults"]} <= FAULTS, c["id"]
     assert c["window"] in (32000, 32768, 64000, 128000, 1000000), c["id"]
     assert all(t in ISSUES or t in (483, 494, 519) for t in c["targets"]), c["id"]
     # Native recovery was removed (O2): only a native-on-off cell (an older lcm-x ref with it ON) may set it.
     assert not c["native_recovery"] or c.get("from_ref"), c["id"]
-    for g in c["tool_plan"]:
+    for g in c["tool_plan"] + c.get("delegate_plan", []):
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 
-def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
-    """Default-window backtests and ``opt_in`` probes match explicit patterns only, never ``all``."""
-    opt_in = (*default_window_cells(), *opt_in)
+def select(patterns: str, extra=(), opt_in=(), controls=()) -> list[dict]:
+    """Default-window backtests, ``opt_in`` probes and ``controls`` match explicit patterns only, never ``all``."""
+    opt_in = (*default_window_cells(), *opt_in, *controls)
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
     for c in cells + list(opt_in):
         validate(c)

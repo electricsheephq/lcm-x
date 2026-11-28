@@ -26,6 +26,7 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .sqlite_session import ConnectionPolicy, open_connection
+from .head_copy import known_head_copy_ids
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
@@ -895,42 +896,6 @@ class LifecycleStateStore:
             conn.rollback()
             raise
 
-    def delete_safe_rows_for_sessions(
-        self,
-        session_ids: set[str] | list[str] | tuple[str, ...],
-        *,
-        protected_session_ids: set[str] | list[str] | tuple[str, ...] | None = None,
-    ) -> tuple[int, int]:
-        candidates = {str(s) for s in session_ids if s}
-        if not candidates:
-            return 0, 0
-        protected = {str(s) for s in (protected_session_ids or ()) if s}
-        deleted = 0
-        skipped = 0
-        rows = self._conn.execute("SELECT * FROM lcm_lifecycle_state").fetchall()
-        for row in rows:
-            refs = {
-                str(value)
-                for value in (row["current_session_id"], row["last_finalized_session_id"])
-                if value
-            }
-            if not refs or not (refs & candidates):
-                continue
-            if refs & protected:
-                skipped += 1
-                continue
-            if refs <= candidates:
-                self._conn.execute(
-                    "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?",
-                    (row["conversation_id"],),
-                )
-                deleted += 1
-                continue
-            skipped += 1
-        if deleted:
-            self._conn.commit()
-        return deleted, skipped
-
     def advance_frontier(
         self,
         conversation_id: str | None,
@@ -1146,6 +1111,13 @@ class LifecycleStateStore:
         rows = [rows_by_store_id[store_id] for store_id in sorted(rows_by_store_id)]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
+        copies = known_head_copy_ids(conn, store_ids=sorted(
+            (rows_by_store_id.keys() - set(excluded_ids)) | set(all_covered_ids)
+        ))
+        # A copy a leaf already covers is published as covered, as v0.30.2 does; never a publication conflict,
+        # which would return the host list unchanged and stop every later pass on the same chunk.
+        copies -= set(all_covered_ids) | set(covered_ids)
+        authoritative_ids = [store_id for store_id in authoritative_ids if store_id not in copies]
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
                 _compaction_coverage_conflict_message(

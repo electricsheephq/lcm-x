@@ -42,7 +42,9 @@ def test_same_repro_without_failures_retains_loss(tmp_path):
     candidate, baseline = repro_pair(tmp_path)
     result = compare_runs(candidate, baseline)
     assert not result["INCOMPLETE"]
-    assert not result["pass"]
+    assert result["pass"]  # Three losses remain measured, inside the floor-4 margin.
+    assert result["categories"]["knowledge-update"]["c"] == 3
+    assert result["categories"]["knowledge-update"]["b"] == 0
     assert result["categories"]["knowledge-update"]["lower_bound_points"] == pytest.approx(-8.974358974358974)
 
 
@@ -59,7 +61,9 @@ def test_failure_after_overlay_outside_categories_is_incomplete(tmp_path, source
     assert result["INCOMPLETE"]
     assert not result["pass"]
     assert result["reason"] == "baseline: failed rows: 1 (rerun the baseline)"
-    assert all(category["pass"] for category in result["categories"].values())
+    # d8-count-margin-v1: a failure no category owns makes every category INCOMPLETE; counts stay clean.
+    assert all(category["INCOMPLETE"] and category["count_pass"] and not category["pass"]
+               for category in result["categories"].values())
 
 
 @pytest.mark.parametrize("placebo", [False, True])

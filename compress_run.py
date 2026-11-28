@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CompressRun:
-    """The active map; pass-level replacements retain their existing lifetime."""
+    """The active map. compress() scopes its pass-level replacements to the pass (#2344); other replacements are temporary scopes."""
 
     store_ids_by_message_id: dict[int, int] = field(default_factory=dict)
 

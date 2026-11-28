@@ -12,21 +12,136 @@ Older product defaults are retained; the receipt reports effective thread use.
 Each role's sealed SQLite cache and hash manifest live in --output. Per-question
 embedding wall time (including cache reads and queries), hits/misses and
 corruptions live in embedding-metrics.jsonl; d1-receipt.json aggregates each arm.
+A partitioned role is sealed only after its partition_proof passes: a plan log
+equal to the parts' dispatch logs, merged entries equal to the plan's units, a
+seeded re-embed of sampled calls with no byte mismatch, and no A-prime dispatch.
 """
 import argparse
+import hashlib
+import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import random
 import runpy
 import signal
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+VERIFY_CALLS = 16
+# Product modules between the harness and FastEmbed: the provider and its thread cap
+# (embedding_provider.py), and the model resolver plus encode-thread wrapper (config.py).
+EMBEDDING_PATH_MODULES = ("embedding_provider.py", "config.py")
+EMBEDDING_RUNTIME = ("fastembed", "onnxruntime", "tokenizers")
+# Only the plan and verify children may see these; build partitions are popped beside them.
+PROOF_ENV = ("LCM_D1_VERIFY_CALLS", "LCM_D1_VERIFY_AGAINST", "LCM_D1_VERIFY_LOG")
+
+
+class PartitionProofError(Exception):
+    pass
+
+
+def verify_sample(calls, workers, k=VERIFY_CALLS, seed=0):
+    """The first and last call each part owns, then seeded random calls, up to k."""
+    calls = sorted(set(calls))
+    chosen = {owned[i] for part in range(workers) for owned in [[c for c in calls if c % workers == part]] if owned for i in (0, -1)}
+    rest = [call for call in calls if call not in chosen]
+    chosen.update(random.Random(seed).sample(rest, min(len(rest), max(0, k - len(chosen)))))
+    return sorted(chosen)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def sealed_record(directory, role, pin, receipt=None):
+    """Admit a committed cache without opening a writer or creating output."""
+    directory = Path(directory).resolve()
+    cache, manifest = directory / "embeddings.sqlite", directory / "embeddings.manifest.json"
+    if not cache.is_file() or not manifest.is_file():
+        raise ValueError("sealed cache files missing")
+    if any(Path(f"{cache}{suffix}").exists() for suffix in ("-journal", "-wal", "-shm")):
+        raise ValueError("sealed cache has an uncommitted SQLite sidecar")
+    try:
+        with closing(sqlite3.connect(cache.as_uri() + "?mode=ro", uri=True)) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"binding", "entries"} <= tables:
+                raise ValueError("sealed cache lacks binding/entries tables")
+            bindings = db.execute("SELECT identity FROM binding").fetchall()
+            if len(bindings) != 1:
+                raise ValueError("sealed cache must hold exactly one binding row")
+            if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ValueError("sealed cache failed quick_check")
+            rows = db.execute("SELECT key, checksum FROM entries ORDER BY key").fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"sealed cache is not a readable SQLite cache: {exc}") from exc
+    raw = manifest.read_bytes()
+    data = json.loads(raw)
+    identity = bindings[0][0]
+    if data["identity"] != identity:
+        raise ValueError("sealed manifest identity differs from binding")
+    options = json.loads(identity)[2]
+    if options.get("product_sha") != pin:
+        raise ValueError("sealed identity product_sha differs from pin")
+    if options.get("role") != role:
+        raise ValueError("sealed identity role differs from role")
+    entries = len(rows)
+    if len(data["entries"]) != entries:
+        raise ValueError("sealed manifest entry count differs from database")
+    manifest_sha256 = hashlib.sha256(raw).hexdigest()
+    rebuilt = json.dumps({"identity": identity, "entries": rows}, separators=(",", ":"))
+    if hashlib.sha256(rebuilt.encode()).hexdigest() != manifest_sha256:
+        raise ValueError("sealed manifest differs from database")
+    record = {"path": str(directory), "sha256": file_sha256(cache), "manifest_sha256": manifest_sha256, "entries": entries, "identity": identity}
+    if receipt is not None:
+        receipt = Path(receipt).resolve()
+        raw_receipt = receipt.read_bytes()
+        receipt_data = json.loads(raw_receipt)
+        if receipt_data.get("cache_manifests", {}).get(role) != record["manifest_sha256"]:
+            raise ValueError("sealed receipt manifest hash differs")
+        expected = receipt_data.get("embedding_path", {}).get(role, {}).get("sha256")
+        if not isinstance(expected, str) or not expected:
+            raise ValueError(f"sealed receipt fingerprint for {role} must be a non-empty string")
+        record.update(receipt_path=str(receipt), receipt_sha256=hashlib.sha256(raw_receipt).hexdigest(),
+                      expected_fingerprint=expected)
+    return record
+
+
+def model_files_sha256(env):
+    """Hash the staged bge-small snapshot files (relative path and content); None if none are staged."""
+    root = Path(env.get("LCM_LONGMEMEVAL_FASTEMBED_CACHE") or env.get("FASTEMBED_CACHE_PATH") or Path.home() / ".cache" / "fastembed")
+    files = {}
+    for model in sorted(root.glob("*bge-small-en-v1.5*")):
+        base = model / "snapshots" if (model / "snapshots").is_dir() else model
+        files.update((str(path.relative_to(root)), file_sha256(path)) for path in sorted(base.rglob("*")) if path.is_file())
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() if files else None
+
+
+def embedding_path_fingerprint(product, reports, model_files):
+    from importlib.metadata import PackageNotFoundError, version
+
+    def dist(name):
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            return None
+
+    path = {"modules": {name: file_sha256(Path(product) / name) if (Path(product) / name).is_file() else None for name in EMBEDDING_PATH_MODULES},
+            "runtime": {**{name: dist(name) for name in EMBEDDING_RUNTIME}, "model_files_sha256": model_files},
+            "effective_ort_threads": sorted({report.get("effective_intra_op_threads") for report in reports}, key=str)}
+    return {**path, "sha256": hashlib.sha256(json.dumps(path, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 def pin(tree):
@@ -120,6 +235,8 @@ def _main(argv, interrupt):
     parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--build-workers", type=int, default=1)
     parser.add_argument("--build-threads", type=int, default=None)
+    parser.add_argument("--sealed-cache", action="append", default=[], help="ROLE=sealed-cache-directory")
+    parser.add_argument("--sealed-receipt", action="append", default=[], help="ROLE=source-d1-receipt.json")
     parser.add_argument("--thread-budget", type=int, default=8)
     parser.add_argument("--worker-timeout", type=float, default=14400)
     args = parser.parse_args(argv)
@@ -130,16 +247,43 @@ def _main(argv, interrupt):
     build_threads_requested = args.build_threads if args.build_threads is not None else args.thread_budget // args.jobs
     if build_threads_requested < 1:
         parser.error("require build-threads >= 1")
-    if args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers * build_threads_requested > args.thread_budget):
+    if not args.sealed_cache and (args.build_workers < 1 or (args.build_workers > 1 and 2 * args.build_workers * build_threads_requested > args.thread_budget)):
         parser.error("require build-workers >= 1 and 2 * build-workers * build-threads <= thread-budget for parallel builds")
     if args.build_workers == 1 and build_threads_requested > args.thread_budget:
         parser.error("require build-threads <= thread-budget for serial builds")
     products = dict(item.split("=", 1) for item in args.product)
     if len(products) != 2 or any(not role.isidentifier() for role in products):
         parser.error("require two distinct identifier role names")
+    def bindings(items, kind):
+        found = {}
+        for item in items:
+            role, sep, path = item.partition("=")
+            if not sep or not path:
+                parser.error("sealed binding must be ROLE=PATH")
+            if role not in products:
+                parser.error("sealed role is not a --product role")
+            if role in found:
+                parser.error(f"one sealed {kind} per role")
+            found[role] = path
+        return found
+    loaded, receipts = bindings(args.sealed_cache, "cache"), bindings(args.sealed_receipt, "receipt")
+    if receipts.keys() - loaded.keys():
+        parser.error("sealed receipt requires a sealed cache role")
+    for role in loaded:
+        if role not in receipts:
+            parser.error(f"sealed role {role} requires --sealed-receipt")
+    building = [role for role in products if role not in loaded]
+    if args.build_workers < 1 or (args.build_workers > 1 and len(building) * args.build_workers * build_threads_requested > args.thread_budget):
+        parser.error(f"require build-workers >= 1 and {len(building)} * build-workers * build-threads <= thread-budget for parallel builds")
+    if not building and build_threads_requested > args.thread_budget:
+        parser.error("require build-threads <= thread-budget for sealed proofs")
     products = {role: str(Path(tree).resolve()) for role, tree in products.items()}
     instrument = pin(ROOT)
     pins = {role: pin(tree) for role, tree in products.items()}
+    try:
+        sealed_roles = {role: sealed_record(path, role, pins[role], receipts.get(role)) for role, path in loaded.items()}
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+        parser.error(f"sealed admission: {exc}")
     shards = sorted(args.shards_dir.glob("shard-*/manifest.json"))
     if len(shards) != 6:
         parser.error("require six prepared shard manifests")
@@ -162,10 +306,14 @@ def _main(argv, interrupt):
                HF_HUB_OFFLINE="1", PYTHONDONTWRITEBYTECODE="1")
     env.pop("LCM_D1_BUILD_PARTITION", None)  # Only parallel build workers get a partition.
     env.pop("LCM_D1_DISPATCH_LOG", None)
+    env.pop("LCM_D1_LOOKUP_LOG", None)  # Only the A-prime pre-embed records its lookups.
+    for name in PROOF_ENV:
+        env.pop(name, None)
+    build_env = {"LCM_D1_ORT_THREADS": str(build_threads_requested), "OMP_NUM_THREADS": str(build_threads_requested), "PYTHONHASHSEED": "0"}
     common = ["--dataset-label", "m", "--provider", "fastembed", "--model", "BAAI/bge-small-en-v1.5"]
     started = time.monotonic()
 
-    def invoke(role, name, command, mode, part=None):
+    def invoke(role, name, command, mode, part=None, own_cache=None):
         if interrupt[0]:
             return {"exit_code": 128 + interrupt[0], "timed_out": False}
         scratch = args.scratch.resolve() / role / name
@@ -175,23 +323,103 @@ def _main(argv, interrupt):
                          LCM_D1_THREAD_REPORT=str(args.output.resolve() / f"{role}-{name}-threads.json"),
                          LCM_D1_CACHE_MODE=mode, HERMES_HOME=str(scratch / "home"), TMPDIR=str(scratch))
         if mode == "build":
-            child_env["LCM_D1_DISPATCH_LOG"] = str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl")
-        if name == "preembed":
-            child_env.update(LCM_D1_ORT_THREADS=str(build_threads_requested), OMP_NUM_THREADS=str(build_threads_requested))
-        if part is not None:
+            child_env.update(LCM_D1_DISPATCH_LOG=str(args.output.resolve() / f"{role}-{name}-dispatch.jsonl"), PYTHONHASHSEED="0")
+        if mode == "build" and name in {"preembed-aa", "preembed-lookup"}:
+            child_env["LCM_D1_LOOKUP_LOG"] = str(args.output.resolve() / f"{role}-{name}-lookups.jsonl")
+        if name in {"preembed", "preembed-lookup"} or part is not None or own_cache is not None:
             # Matching serial threads keeps ORT arithmetic the same; 1 thread needs measured byte-identity proof.
+            child_env.update(build_env)
+        if part is not None:
             child_env.update(LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"part-{part}.sqlite"),
-                             LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}",
-                             LCM_D1_ORT_THREADS=str(build_threads_requested), OMP_NUM_THREADS=str(build_threads_requested))
+                             LCM_D1_BUILD_PARTITION=f"{part}/{args.build_workers}")
+        if own_cache is not None:
+            # Plan and verify children write only their own scratch DB, never the merge target.
+            label, extra = own_cache
+            child_env.update(extra, LCM_LONGMEMEVAL_EMBED_CACHE=str(caches[role].parent / "parts" / f"{label}.sqlite"))
         with (args.output / f"{role}-{name}.log").open("w") as log:
             return run_child([sys.executable, str(Path(__file__).resolve()), "--worker", products[role], pins[role], instrument, *command], cwd=products[role], env=child_env, stdout=log, stderr=subprocess.STDOUT, timeout=args.worker_timeout, interrupt=interrupt)
 
     # Enumerate the product's actual chunk/summary units in each tree, including
     # the placebo corpus. Only this pre-embed phase is allowed to write the cache.
     from benchmarking.d1_cache import merge, seal
-    manifests, role_threads, build_threads, preembed = {}, {}, {}, []
+    manifests, role_threads, build_threads, preembed, partition_proof = {}, {}, {}, [], {}
+    if sealed_roles:
+        compare = importlib.import_module("bench.tools.d1-shard-check.compare_d1_caches")
+    out = args.output.resolve()
+    command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
+    for role, record in sealed_roles.items():
+        proof = record["load_proof"] = {"failure": None, "file_unchanged": False}
+        cache = caches[role]
+        try:
+            (cache.parent / "parts").mkdir(parents=True)
+            for source, target, digest in ((Path(record["path"]) / "embeddings.sqlite", cache, record["sha256"]),
+                                           (Path(record["path"]) / "embeddings.manifest.json", cache.with_suffix(".manifest.json"), record["manifest_sha256"])):
+                shutil.copyfile(source, target)
+                target.chmod(0o444)
+                if file_sha256(target) != digest:
+                    raise PartitionProofError("sealed copy hash differs")
+
+            def prove(name, cmd=command, own=None):
+                result = invoke(role, name, cmd, "build", own_cache=own)
+                preembed.append({"role": role, "arm": name, **result})
+                return result
+
+            result = prove("preembed-lookup")
+            lookups = compare.jsonl(out / f"{role}-preembed-lookup-lookups.jsonl") if (out / f"{role}-preembed-lookup-lookups.jsonl").exists() else []
+            dispatch = out / f"{role}-preembed-lookup-dispatch.jsonl"
+            proof.update(lookup_units=sum(row["keys"] for row in lookups), lookup_hits=sum(row["hits"] for row in lookups),
+                         dispatches=sum(row["sent"] for row in compare.jsonl(dispatch)) if dispatch.exists() else 0)
+            if proof["dispatches"]:
+                raise PartitionProofError("sealed full-corpus lookup dispatched units")
+            if result["exit_code"] or interrupt[0] or not proof["lookup_units"] or proof["lookup_hits"] != proof["lookup_units"]:
+                raise PartitionProofError("sealed full-corpus lookup failed coverage")
+            if file_sha256(cache) != record["sha256"]:
+                raise PartitionProofError("sealed cache file changed")
+            build_threads[role] = [json.loads((out / f"{role}-preembed-lookup-threads.json").read_text())]
+            if prove("preembed-plan", own=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))["exit_code"]:
+                raise PartitionProofError("sealed plan worker failed")
+            plan = compare.jsonl(out / f"{role}-preembed-plan-dispatch.jsonl")
+            proof["plan_units"] = sum(row["sent"] for row in plan)
+            if proof["plan_units"] != record["entries"]:
+                raise PartitionProofError("sealed plan units differ from manifest entry count")
+            proof["verify_calls"] = verify_sample([row["call"] for row in plan], args.build_workers)
+            verify_log = out / f"{role}-preembed-verify-verify.jsonl"
+            result = prove("preembed-verify", own=("verify", {"LCM_D1_VERIFY_CALLS": json.dumps(proof["verify_calls"]),
+                           "LCM_D1_VERIFY_AGAINST": str(cache), "LCM_D1_VERIFY_LOG": str(verify_log)}))
+            if result["exit_code"]:
+                raise PartitionProofError("sealed verify worker failed")
+            verified = compare.jsonl(verify_log)
+            proof["verify_mismatches"] = sum(row["mismatches"] for row in verified)
+            if sorted(row["call"] for row in verified) != proof["verify_calls"]:
+                raise PartitionProofError("sealed verify coverage differs")
+            if proof["verify_mismatches"]:
+                raise PartitionProofError("sealed verify re-embed mismatch")
+            aa = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
+            result = prove("preembed-aa", aa)
+            lookup_log = out / f"{role}-preembed-aa-lookups.jsonl"
+            lookups = compare.jsonl(lookup_log) if lookup_log.exists() else []
+            dispatch = out / f"{role}-preembed-aa-dispatch.jsonl"
+            if result["exit_code"] or not sum(row["keys"] for row in lookups) or sum(row["keys"] - row["hits"] for row in lookups) or sum(row["keys"] for row in lookups) > proof["plan_units"] or (dispatch.exists() and dispatch.stat().st_size):
+                raise PartitionProofError("sealed A-prime pre-embed failed")
+            role_threads[role] = json.loads((out / f"{role}-preembed-aa-threads.json").read_text())
+            actual = embedding_path_fingerprint(products[role], build_threads[role], model_files_sha256(env))["sha256"]
+            expected = record["expected_fingerprint"]
+            proof["fingerprint"] = {"actual": actual, "expected": expected, "equal": actual == expected}
+            if not actual or actual != expected:
+                raise PartitionProofError("sealed embedding path fingerprint differs")
+            manifests[role] = record["manifest_sha256"]
+        except Exception as exc:
+            proof["failure"] = str(exc) if isinstance(exc, PartitionProofError) else f"{type(exc).__name__}: {exc}"
+        finally:
+            proof["file_unchanged"] = cache.is_file() and cache.with_suffix(".manifest.json").is_file() and file_sha256(cache) == record["sha256"] and file_sha256(cache.with_suffix(".manifest.json")) == record["manifest_sha256"]
+            if not proof["file_unchanged"]:
+                proof["failure"] = proof["failure"] or "sealed cache file changed"
+        if proof["failure"] or interrupt[0]:
+            building = []
+            break
+    load_ok = all(record.get("load_proof", {}).get("file_unchanged") and not record["load_proof"]["failure"] for record in sealed_roles.values())
     if args.build_workers == 1:
-        for role in products:
+        for role in building:
             if interrupt[0]:
                 break
             caches[role].parent.mkdir()
@@ -210,34 +438,97 @@ def _main(argv, interrupt):
                 continue
             manifests[role] = seal(caches[role])
     else:
-        for role in products:
+        compare = importlib.import_module("bench.tools.d1-shard-check.compare_d1_caches")
+        for role in building:
             (caches[role].parent / "parts").mkdir(parents=True)
+        out = args.output.resolve()
+        command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
 
         def build(task):
             role, part = task
-            command = ["prewarm-cache", "--prepared-dir", str(args.prepared_dir.resolve()), "--shards-manifest", str(args.prepared_dir.resolve()), *common]
             began = time.monotonic()
-            result = invoke(role, f"preembed-part-{part}", command, "build", part=part)
-            return {"role": role, "part": part, "arm": "preembed", **result, "elapsed_s": time.monotonic() - began}
+            name, arm = ("preembed-plan", "preembed-plan") if part is None else (f"preembed-part-{part}", "preembed")
+            try:
+                if part is None:
+                    result = invoke(role, name, command, "build", own_cache=("plan", {"LCM_D1_BUILD_PARTITION": "plan"}))
+                else:
+                    result = invoke(role, name, command, "build", part=part)
+            except Exception as exc:
+                # A launch failure fails its role, never the receipt.
+                launch_errors.setdefault(role, f"{name} failed to launch: {type(exc).__name__}: {exc}")
+                result = {"exit_code": 1, "timed_out": False}
+            return {"role": role, "part": part, "arm": arm, **result, "elapsed_s": time.monotonic() - began}
 
-        builds = run_pool([(role, part) for role in products for part in range(args.build_workers)], 2 * args.build_workers, build)
-        preembed = builds
+        # One plan worker per role runs beside the parts; it enumerates only and embeds nothing.
+        tasks = [(role, part) for role in building for part in range(args.build_workers)] + [(role, None) for role in building]
+        launch_errors = {}
+        preembed += run_pool(tasks, max(1, len(building) * (args.build_workers + 1)), build)
         merged_entries, duplicate_keys = {}, {}
-        for role in products:
+        for role in building:
             rows = [row for row in preembed if row["role"] == role]
+            proof = partition_proof[role] = {"workers": args.build_workers, "build_threads": build_threads_requested, "env": dict(build_env),
+                                             "plan_calls": None, "plan_units": None, "dispatch_compare": None, "verify_calls": None,
+                                             "verify_mismatches": None, "merged_entries": None, "aprime_units": None, "aprime_dispatches": None,
+                                             "sealed": False, "failure": None}
             if interrupt[0] or any(row["exit_code"] for row in rows):
+                proof["failure"] = "interrupted" if interrupt[0] else launch_errors.get(role, "a part or plan worker failed")
                 continue
-            build_threads[role] = [json.loads((args.output / f"{role}-{row['arm']}-part-{row['part']}-threads.json").read_text()) for row in rows]
-            parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
-            merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
-            command = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
-            began = time.monotonic()
-            result = invoke(role, "preembed-aa", command, "build")
-            preembed.append({"role": role, "part": None, "arm": "preembed-aa", **result, "elapsed_s": time.monotonic() - began})
-            if result["exit_code"] or interrupt[0]:
-                continue
-            role_threads[role] = json.loads((args.output / f"{role}-preembed-aa-threads.json").read_text())
-            manifests[role] = seal(caches[role])
+            try:
+                build_threads[role] = [json.loads((out / f"{role}-preembed-part-{row['part']}-threads.json").read_text()) for row in rows if row["arm"] == "preembed"]
+                parts = [caches[role].parent / "parts" / f"part-{part}.sqlite" for part in range(args.build_workers)]
+                merged_entries[role], duplicate_keys[role] = merge(parts, caches[role])
+                proof["merged_entries"] = merged_entries[role]
+                plan_log = out / f"{role}-preembed-plan-dispatch.jsonl"
+                plan = compare.jsonl(plan_log)
+                proof.update(plan_calls=len(plan), plan_units=sum(row["sent"] for row in plan))
+                part_logs = [path for part in range(args.build_workers) for path in [out / f"{role}-preembed-part-{part}-dispatch.jsonl"] if path.exists()]
+                found, equal = compare.dispatch(plan_log, *part_logs)
+                proof["dispatch_compare"] = {"exit": int(not equal), "only_serial": found["only_serial"], "only_parts": found["only_parts"],
+                                             "count_mismatch": found["count_mismatches"], "hash_mismatch": found["hash_mismatches"],
+                                             "duplicate_plan_calls": found["duplicate_serial_calls"], "duplicate_part_calls": found["duplicate_part_calls"]}
+                if not equal:
+                    raise PartitionProofError("the parts' dispatch logs differ from the plan log")
+                if not plan:
+                    raise PartitionProofError("the plan logged no calls")
+                if merged_entries[role] != proof["plan_units"]:
+                    raise PartitionProofError("merged entries differ from the plan's unique units")
+                proof["verify_calls"] = verify_sample([row["call"] for row in plan], args.build_workers)
+                verify_log = out / f"{role}-preembed-verify-verify.jsonl"
+                began = time.monotonic()
+                result = invoke(role, "preembed-verify", command, "build", own_cache=("verify", {
+                    "LCM_D1_VERIFY_CALLS": json.dumps(proof["verify_calls"]), "LCM_D1_VERIFY_AGAINST": str(caches[role]), "LCM_D1_VERIFY_LOG": str(verify_log)}))
+                preembed.append({"role": role, "part": None, "arm": "preembed-verify", **result, "elapsed_s": time.monotonic() - began})
+                if result["exit_code"] or interrupt[0]:
+                    raise PartitionProofError("the verify worker failed")
+                verified = compare.jsonl(verify_log)
+                proof["verify_mismatches"] = sum(row["mismatches"] for row in verified)
+                if sorted(row["call"] for row in verified) != proof["verify_calls"]:
+                    raise PartitionProofError("the verify log does not cover exactly the requested calls")
+                if proof["verify_mismatches"]:
+                    raise PartitionProofError("the verify re-embed differs from the merged cache")
+                command_aa = ["prewarm-cache", "--prepared-dir", str(args.aprime_dir.resolve()), "--shards-manifest", str(args.aprime_dir.resolve()), *common]
+                began = time.monotonic()
+                result = invoke(role, "preembed-aa", command_aa, "build")
+                preembed.append({"role": role, "part": None, "arm": "preembed-aa", **result, "elapsed_s": time.monotonic() - began})
+                if result["exit_code"] or interrupt[0]:
+                    raise PartitionProofError("the A-prime pre-embed failed")
+                role_threads[role] = json.loads((out / f"{role}-preembed-aa-threads.json").read_text())
+                # Positive evidence: A-prime's questions are a subset of the build's, so it must look up
+                # at least one unit, at most the plan's units, and find every one in the merged cache.
+                lookups = compare.jsonl(out / f"{role}-preembed-aa-lookups.jsonl") if (out / f"{role}-preembed-aa-lookups.jsonl").exists() else []
+                proof["aprime_units"] = sum(row["keys"] for row in lookups)
+                if not proof["aprime_units"]:
+                    raise PartitionProofError("the A-prime pre-embed looked up no units")
+                if sum(row["hits"] for row in lookups) != proof["aprime_units"] or proof["aprime_units"] > proof["plan_units"]:
+                    raise PartitionProofError("the A-prime pre-embed looked up units the plan does not cover")
+                aa_log = out / f"{role}-preembed-aa-dispatch.jsonl"
+                proof["aprime_dispatches"] = len(aa_log.read_text().splitlines()) if aa_log.exists() else 0
+                if proof["aprime_dispatches"]:
+                    raise PartitionProofError("the A-prime pre-embed sent units the merged cache lacks")
+                manifests[role] = seal(caches[role])
+                proof["sealed"] = True
+            except Exception as exc:
+                proof["failure"] = str(exc) if isinstance(exc, PartitionProofError) else f"{type(exc).__name__}: {exc}"
     tasks = [(role, path.parent.name, path.parent) for role in products for path in shards]
     tasks += [(role, name, args.aprime_dir) for role in products for name in ("aa-A", "aa-Aprime")]
 
@@ -255,6 +546,7 @@ def _main(argv, interrupt):
             metrics = [json.loads(line) for line in (out / "embedding-metrics.jsonl").read_text().splitlines()]
             hits, misses = (sum(row[field] for row in metrics) for field in ("hits", "misses"))
             status.update(questions=sum("question_id" in row for row in rows),
+                          scored_questions=sum("question_id" in row and row.get("abstention") is not True for row in rows),
                           embedding_wall_ms=sum(row["wall_ms"] for row in metrics),
                           cache_hits=hits, cache_misses=misses,
                           cache_hit_rate=hits / (hits + misses) if hits + misses else None,
@@ -267,18 +559,35 @@ def _main(argv, interrupt):
     built = [row["effective_intra_op_threads"] for rows in build_threads.values() for row in rows]
     # The A-prime build report runs at the shard setting in both modes, so it alone decides the shard verdict.
     shard_ok = args.jobs * max((n for n in effective if n is not None), default=threads) <= args.thread_budget
-    # Serial builds run one at a time; parallel builds run both roles' P parts.
-    build_concurrency = 1 if args.build_workers == 1 else 2 * args.build_workers
+    # Serial builds and sealed-only proofs run one at a time; parallel builds run the building roles' P parts.
+    build_concurrency = 1 if args.build_workers == 1 or not building else len(building) * args.build_workers
     build_ok = not built or build_concurrency * max((n for n in built if n is not None), default=1) <= args.thread_budget
     budget_ok = shard_ok and build_ok
-    arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if budget_ok and not interrupt[0] else []
+    arms = run_pool([task for task in tasks if task[0] in manifests], args.jobs, launch) if load_ok and budget_ok and not interrupt[0] else []
+    for role, record in sealed_roles.items():
+        if any(arm["role"] == role and (arm.get("cache_misses", 0) or arm.get("cache_corruptions", 0)) for arm in arms):
+            record["load_proof"]["failure"] = "sealed scoring cache miss or corruption"
+            load_ok = False
+        elif any(arm["role"] == role and arm.get("scored_questions", 0) > 0 and arm.get("cache_hits") == 0 for arm in arms):
+            # A non-abstention checkpoint proves scoring ran; an unstarted arm has no question count.
+            record["load_proof"]["failure"] = "sealed scoring cache had no hits"
+            load_ok = False
+    embedding_path = {}
+    try:
+        model_files = model_files_sha256(env)
+        for role in products:
+            embedding_path[role] = embedding_path_fingerprint(products[role], build_threads.get(role, []), model_files)
+    except Exception as exc:
+        embedding_path = {role: {"error": f"{type(exc).__name__}: {exc}", "sha256": None} for role in products}
+    for role, proof in partition_proof.items():
+        proof.update(embedding_path_fingerprint=embedding_path[role]["sha256"], runtime=embedding_path[role].get("runtime"))
     receipt = {"instrument_sha": instrument, "products": pins, "jobs": args.jobs,
                # A clean A-prime arm that found every unit cached never creates its log: that is 0, not unknown.
                "aprime_dispatches": {role: (len(path.read_text().splitlines()) if path.exists() else 0)
                                      if not interrupt[0] and any(row["role"] == role and row["arm"] == "preembed-aa" and not row["exit_code"] and not row["timed_out"] for row in preembed)
                                      else None
                                      for role in products for path in [args.output / f"{role}-preembed-aa-dispatch.jsonl"]},
-               "cache_manifests": manifests, "role_threads": role_threads,
+               "cache_manifests": manifests, "role_threads": role_threads, "embedding_path": embedding_path,
                "thread_budget_ok": budget_ok, "build_thread_budget_ok": build_ok, "shard_thread_budget_ok": shard_ok,
                "thread_budget_fully_known": len(effective) == 2 and None not in effective,
                "worker_timeout": args.worker_timeout, "preembed": preembed, "interrupted": bool(interrupt[0]),
@@ -287,11 +596,14 @@ def _main(argv, interrupt):
                "wall_seconds": time.monotonic() - started, "arms": arms,
                "not_proven": "Eight-hour acceptance requires the complete quiet-window run; recall equivalence is a separate gate."}
     if args.build_workers > 1:
-        receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads)
+        receipt.update(build_workers=args.build_workers, build_threads_requested=build_threads_requested, merged_entries=merged_entries, duplicate_keys=duplicate_keys, build_threads=build_threads, partition_proof=partition_proof)
     elif args.build_threads is not None:
         receipt["build_threads_requested"] = build_threads_requested
+    if sealed_roles:
+        receipt["sealed_roles"] = sealed_roles
     (args.output / "d1-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return 128 + interrupt[0] if interrupt[0] else int(not budget_ok or any(row["exit_code"] for row in preembed) or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
+    return 128 + interrupt[0] if interrupt[0] else int(not load_ok or not budget_ok or any(row["exit_code"] for row in preembed) or any(proof["failure"] for proof in partition_proof.values())
+                                                         or any(arm["exit_code"] or arm["parse_error"] for arm in arms))
 
 
 if __name__ == "__main__":

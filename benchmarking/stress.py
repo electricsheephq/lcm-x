@@ -124,8 +124,6 @@ class StressRun:
         }
         self._original_summarize: Any = None
         self._original_synthesize: Any = None
-        self._engine_mod: Any = None
-        self._tools_mod: Any = None
 
     def prepare(self) -> None:
         self.results_dir.mkdir(parents=True, exist_ok=True)
@@ -146,11 +144,8 @@ class StressRun:
     def patched_summarizers(self) -> Iterator[None]:
         _ensure_hermes_lcm_package(self.plugin_dir, reload_submodules=True)
         import hermes_lcm.engine as engine_mod
-        import hermes_lcm.tools as tools_mod
         import hermes_lcm.expand_query_tools as expand_query_mod
 
-        self._engine_mod = engine_mod
-        self._tools_mod = tools_mod
         self._original_summarize = engine_mod.summarize_with_escalation
         self._original_synthesize = expand_query_mod._synthesize_expansion_answer
         engine_mod.summarize_with_escalation = deterministic_summary

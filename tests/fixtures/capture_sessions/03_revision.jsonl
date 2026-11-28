@@ -1,0 +1,2 @@
+{"type": "user", "uuid": "revision", "sessionId": "revision", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "before"}}
+{"type": "user", "uuid": "revision", "sessionId": "revision", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "after"}}

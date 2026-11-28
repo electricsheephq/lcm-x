@@ -26,6 +26,7 @@ from tests.behaviour.compress_trace_harness import (
     first_difference,
     observe,
 )
+from tests.behaviour.frontier_observer import REFUSED_INPUT
 
 
 def _self_attributes(tree: ast.AST) -> set[str]:
@@ -98,7 +99,7 @@ def test_compress_observed_attributes_complete() -> None:
         engine_names.update(vars(cls))
     # Reserved by the extraction contract; absent is itself a frozen observation
     # until the phase helpers introduce this state. All other names must exist.
-    removed = frozen - engine_names - {"_frontier"}
+    removed = frozen - engine_names - {"_frontier", REFUSED_INPUT}
     assert not removed, (
         f"Observed attributes removed from the whole engine class: {sorted(removed)}; update OBSERVED_ATTRIBUTES.\n"
         + TRACE_GUIDANCE)
@@ -131,6 +132,8 @@ class OtherMixin:
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_compress_golden(case: Scenario, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; with transaction control removed, every scenario is unchanged.
     expected = json.loads(GOLDEN.read_text())[case.name]
     assert len(json.dumps(expected, indent=0).encode()) <= 40000, (
         f"{case.name}: trace exceeds 40000 bytes; review the trace size bound.\n" + TRACE_GUIDANCE)

@@ -294,6 +294,10 @@ def retry_call(call, records, receipt, retryable=None):
                 receipt["attempts"] = attempt
 
 
+# Set by the leased-run SIGTERM handler: no new model subprocess starts while the run drains.
+STOPPING = threading.Event()
+
+
 class Harness:
     def __init__(self, root, quota, runner=None, binary=None, timeout=(600, 1800)):
         self.root = Path(root) / "harness"
@@ -328,6 +332,8 @@ class Harness:
         return call / "cwd"
 
     def run(self, cmd, call, prompt, env, agentic=False):
+        if STOPPING.is_set():
+            raise RuntimeError("stopping")
         prompt_path = call / "prompt.txt"
         prompt_path.write_text(prompt)
         try:
@@ -360,7 +366,7 @@ class Harness:
                 failure = exc
             record = records[-1]
             log = Path(record["mcp_log"])
-            events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            events = [json.loads(line) for line in log.read_text().split("\n") if line.strip()] if log.exists() else []
             initialized = next((e for e in events if e.get("event") == "initialize"), {})
             offered = next((e for e in reversed(events) if e.get("event") == "tools/list"), {})
             status = initialized.get("startup_status", "no_initialize")
@@ -383,14 +389,19 @@ class Harness:
 class Codex(Harness):
     kind = "codex"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, codex_home=None, include_total_tokens=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.include_total_tokens = include_total_tokens
         # Isolated CODEX_HOME (no user config, AGENTS.md, rules or MCP servers) and HOME (no host skills).
         # Auth is a symlink to the plan login: no token is copied or written.
         self.home, self.fake_home = self.scratch / "codex-home", self.scratch / "home"
-        self.home.mkdir()
         self.fake_home.mkdir()
-        (self.home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
+        if codex_home is None:
+            self.home.mkdir()
+            (self.home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
+        else:
+            # A leased home is passed through untouched; rollouts remain available for readback.
+            self.home = Path(codex_home)
 
     def command(self, model, effort, call, mcp):
         cmd = [self.binary, "exec", "--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
@@ -398,6 +409,8 @@ class Codex(Harness):
                "-c", "web_search=disabled"]
         for feature in CODEX_DISABLED:
             cmd += ["--disable", feature]
+        # codex-cli 0.167 no longer enables code mode by default; without it MCP tools are deferred and unreachable.
+        cmd += ["--enable", "code_mode"]
         if mcp:
             prefix = f"mcp_servers.{SERVER}."
             cmd += ["-c", prefix + "command=" + json.dumps(mcp["command"]),
@@ -491,6 +504,8 @@ class Codex(Harness):
             transcripts=[str(call / "events.jsonl"), str(rollout) if rollout else None], exit_code=proc.returncode)
         record.update({k: usage.get(v) for k, v in zip(("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"),
                                                      ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"))})
+        if self.include_total_tokens and "total_tokens" in usage:
+            record["total_tokens"] = usage["total_tokens"]
         record.update(identity_source=info["identity_source"], wrapper_overhead_tokens=None,
                       input_tokens_label="total incl. retrieved evidence")
         if limited(failure) or ((proc.returncode != 0 or done is None or not texts) and limited(proc.stderr)):

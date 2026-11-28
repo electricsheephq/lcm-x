@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import codecs
 import copy
+import heapq
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
+import stat
 import threading
 import time
+import unicodedata
+from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from functools import partial
@@ -21,6 +26,7 @@ from . import recall_delivery
 from .cpu_capacity import effective_cpus
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
+    _read_externalized_payload_metadata_prefix_from_handle,
     extract_externalized_ref,
     find_externalized_payload_for_message,
     get_large_output_storage_dir,
@@ -83,6 +89,7 @@ from .retrieval_core import (
     collapse_duplicate_candidates,
     collapse_duplicate_hits,
     duplicate_identity_rows,
+    fts_anchor_index,
     place_fts_anchor,
     _lcm_grep_confidence,
     _lcm_grep_deadline_error,
@@ -98,11 +105,12 @@ from .retrieval_core import (
 from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
     normalize_search_sort, recall_content_terms,
-    requires_like_fallback, sanitize_fts5_query,
+    requires_like_fallback, agent_grep_operands,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import effective_embedding_model, LCMConfig, embedding_provider_id, normalize_embedding_provider, profile_bound
+from .config import _recall_extra_entries, _recall_later_statements, _recall_snippet_window_hits
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -120,7 +128,7 @@ def _combined_result_sort_key(result: dict[str, Any], sort: str) -> tuple:
     # BM25 ranks and payload byte offsets are incomparable. Keep the existing
     # history ordering in tier 0; sidecars follow in tier 1 and use byte offset
     # only as their native in-tier tie-break.
-    rank_tier = 1 if result.get("type") == "externalized" else 0
+    rank_tier = 1 + int(result.get("_match_tier") or 0) if result.get("type") == "externalized" else 0  # #2586
     role = result.get("role")
     if role == "user":
         role_bias = 0
@@ -176,6 +184,28 @@ def _session_expand_hint(node_id: int, session_id: str) -> str:
     return f"lcm_expand(node_id={node_id}, session_id={session_id!r})"
 
 
+def _reader_any_session(engine: "LCMEngine") -> bool:
+    """True only on the read-only ``lcm-x mcp`` reader's engine (#1192).
+
+    The reader has no current session and serves one store the local user owns, so
+    its externalized-payload lookups may reach any session of that store. Hermes'
+    engine never sets the attribute; the identity check keeps a mock engine (whose
+    auto-attributes are truthy) on today's session-scoped behaviour.
+    """
+    return getattr(engine, "_reader_any_session", False) is True
+
+
+def _engine_vector_store_cls(engine: "LCMEngine") -> Any:
+    """The KNN backend class: this module's ``VectorStore`` unless the engine binds one (#1192).
+
+    Resolved at call time through the module namespace, so tests that monkeypatch
+    ``tools.VectorStore`` still govern the backend. Only the read-only reader binds
+    ``_vector_store_cls`` (its constructor never writes the store).
+    """
+    bound = getattr(engine, "_vector_store_cls", None)
+    return bound if isinstance(bound, type) else VectorStore
+
+
 def _externalized_expand_hint(ref: str, session_id: str) -> str:
     return f"lcm_expand(externalized_ref={ref!r}, session_id={session_id!r})"
 
@@ -199,6 +229,19 @@ def _is_inside_named_profile(path: Path, home: Path) -> bool:
     return False
 
 
+def _payload_storage_contained(engine, storage_dir: Path, ref: str = "") -> bool:
+    try:
+        home = Path(engine._hermes_home).expanduser().resolve()
+        storage_dir = storage_dir.resolve()
+        payload_path = (storage_dir / ref).resolve()
+        return bool(engine._hermes_home) and storage_dir.is_relative_to(home) and (
+            payload_path.is_relative_to(storage_dir)
+            and not _is_inside_named_profile(storage_dir, home)
+            and not _is_inside_named_profile(payload_path, home))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
@@ -206,21 +249,17 @@ def _get_externalized_payload(
     allowed_session_ids: set[str] | None = None,
     require_profile_containment: bool = False,
 ) -> dict[str, Any] | None:
-    if require_profile_containment:
+    # The reader reads any session's payload only when the caller gives no session filter (an explicit
+    # session_id, or node expansion's sessions, filters as in Hermes). That read crosses sessions, so
+    # it first runs the containment checks Hermes runs for an explicit session.
+    any_session = _reader_any_session(engine) and not require_profile_containment and not allowed_session_ids
+    if require_profile_containment or any_session:
         if not engine._hermes_home or not ref or Path(ref).name != ref:
             return None
         try:
-            home = Path(engine._hermes_home).expanduser().resolve()
             storage_dir = get_large_output_storage_dir(
-                engine._config, hermes_home=engine._hermes_home, create=False
-            ).resolve()
-            payload_path = (storage_dir / ref).resolve()
-            storage_dir.relative_to(home)
-            payload_path.relative_to(storage_dir)
-            if (
-                _is_inside_named_profile(storage_dir, home)
-                or _is_inside_named_profile(payload_path, home)
-            ):
+                engine._config, hermes_home=engine._hermes_home, create=False)
+            if not _payload_storage_contained(engine, storage_dir, ref):
                 return None
         except (OSError, RuntimeError, ValueError):
             return None
@@ -230,6 +269,8 @@ def _get_externalized_payload(
     payload_session_id = payload.get("session_id") or ""
     if require_profile_containment and not payload_session_id:
         return None
+    if any_session:
+        return payload
     allowed = allowed_session_ids
     if not allowed:
         # #680: a ref written before a compression-boundary rotation stays readable.
@@ -276,7 +317,7 @@ def _coerce_query_arg(value: Any) -> str:
 def _parse_int_value(value: Any, default: int) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -465,6 +506,8 @@ _LCM_GREP_VALID_CONTENT_SCOPES = frozenset({"history", "externalized", "both"})
 _LCM_MEMORY_LOOKUP_LIMITS = (20, 50)
 _LCM_MEMORY_LIST_LIMITS = (50, 200)
 _LCM_GREP_HARD_LIMIT_CAP = 200
+READER_PAYLOAD_FILE_CAP = 128
+READER_PAYLOAD_BYTE_CAP = 8 * 1024 * 1024
 _LCM_GREP_EXTERNALIZED_FILE_CAP = 256
 _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP = 4096
 _LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES = 64 * 1024
@@ -1055,17 +1098,43 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         time_from=time_from,
         time_to=time_to,
     )
-    rows = engine._store.load_session_page(
-        session_id,
-        after_store_id=after_store_id,
-        limit=limit + 1,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
+    if "anchor_store_id" in args:
+        anchor, error = _parse_strict_int(args["anchor_store_id"], "anchor_store_id")
+        if error:
+            return json.dumps({"error": error})
+        row = engine._store.get(anchor) if anchor is not None else None
+        if not row or row.get("session_id") != session_id:
+            return json.dumps({"error": "anchor_store_id must identify a message in session_id"})
+        window = {}
+        for key, default in (("before", 6), ("after", 12)):
+            value, error = _parse_strict_int(args.get(key, default), key)
+            if error or value is None:
+                return json.dumps({"error": error or f"{key} must be an integer"})
+            window[key] = max(0, min(40, value))
+        rows = engine._store.load_session_window(
+            session_id, anchor_store_id=anchor, window_cap=40, **window)
+        window_end = rows[-1]["store_id"]
+        if roles or time_from is not None or time_to is not None:
+            rows = [r for r in engine._store.load_session_page(
+                session_id, after_store_id=rows[0]["store_id"] - 1, limit=len(rows),
+                roles=roles or None, time_from=time_from, time_to=time_to)
+                if r["store_id"] <= window_end]
+        remaining = [r for r in rows if r["store_id"] > after_store_id]
+        page_rows = remaining[:limit]
+        # Never hand back a cursor behind the caller's own exclusive cursor.
+        next_cursor = page_rows[-1]["store_id"] if len(remaining) > limit else max(window_end, after_store_id)
+        has_more = bool(next_cursor is not None and engine._store.load_session_page(
+            session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
+            time_from=time_from, time_to=time_to))
+        if not has_more:
+            next_cursor = None
+    else:
+        rows = engine._store.load_session_page(
+            session_id, after_store_id=after_store_id, limit=limit + 1,
+            roles=roles or None, time_from=time_from, time_to=time_to)
+        page_rows = rows[:limit]
+        has_more = len(rows) > limit
+        next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
 
     response: dict[str, Any] = {
         "session_id": session_id,
@@ -1123,6 +1192,160 @@ def _annotate_subagent_lineage(engine: "LCMEngine", hits: list[dict[str, Any]]) 
         if parent:
             hit["parent_session_id"] = parent
             hit["lineage"] = f"subagent of {parent}"
+
+
+def _reader_payload_search(path: Path, budget: int, in_scope) -> dict[str, Any]:
+    """Validate and search one no-follow file; every unbuffered read spends the budget."""
+    result = {"status": "unreadable", "bytes_read": 0}
+    fd = -1
+    try:
+        expected = path.lstat()
+        if "\\" in path.name or not stat.S_ISREG(expected.st_mode):
+            return result
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+        if os.open in os.supports_dir_fd:
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                fd = os.open(path.name, flags, dir_fd=directory)
+            finally:
+                os.close(directory)
+        else:
+            fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            return result
+        with os.fdopen(fd, "rb", buffering=0) as handle:
+            fd = -1
+            def read(size):
+                allowed = budget - result["bytes_read"]
+                data = handle.read(min(size, allowed))
+                if allowed < size and len(data) == allowed and handle.tell() < os.fstat(handle.fileno()).st_size:
+                    # The budget, not the file's end, stopped this read: the file's checks did not finish, so a
+                    # rejection here is not a confirmed failure.
+                    result["budget_cut"] = True
+                result["bytes_read"] += len(data)
+                return data
+            header = bytearray()
+            def read_header(size):
+                data = read(size)
+                header.extend(data)
+                return data
+            try:
+                prefix, fields, seen, _ = _read_externalized_payload_metadata_prefix_from_handle(
+                    SimpleNamespace(read=read_header), max_read_bytes=_LCM_GREP_EXTERNALIZED_METADATA_READ_BYTES)
+            except ValueError as exc:
+                # A cut can split a character, so a decode failure is confirmed only when the bytes read hold an
+                # invalid sequence; any other parse failure is about bytes already read, so it is confirmed too.
+                try:
+                    if not isinstance(exc.__cause__, UnicodeDecodeError):
+                        raise UnicodeDecodeError("utf-8", b"", 0, 1, "not a decode failure")
+                    codecs.getincrementaldecoder("utf-8")("strict").decode(bytes(header), final=False)
+                except UnicodeDecodeError:
+                    result.pop("budget_cut", None)
+                return result
+            if not seen:
+                return result
+            if not in_scope(fields.get("session_id")):
+                return {**result, "status": "out_of_scope"}
+            prefix = prefix.encode("utf-8")
+            offset = max(len(prefix), opened.st_size - _LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
+            handle.seek(offset)
+            tail = read(_LCM_GREP_EXTERNALIZED_DOCUMENT_TAIL_BYTES)
+            for index, byte in enumerate(tail):
+                if byte != 34:
+                    continue
+                cursor = index - 1
+                while cursor >= 0 and tail[cursor] == 92:
+                    cursor -= 1
+                if (index - cursor - 1) % 2:
+                    continue
+                try:
+                    document = json.loads(prefix + b'"' + tail[index + 1:])
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(document, dict) or document.get("session_id") != fields["session_id"]:
+                    continue
+                created = float(document.get("created_at") or 0)
+                encoded_size = offset + index - len(prefix)
+                handle.seek(len(prefix))
+                raw = read(min(encoded_size, _LCM_GREP_EXTERNALIZED_CONTENT_BYTES))
+                for trim in range(min(7, len(raw) + 1)):
+                    try:
+                        content = json.loads(b'"' + raw[:len(raw) - trim] + b'"')
+                        return {**result, "status": "ok", **fields, "content": content,
+                                "created_at": created if math.isfinite(created) else 0,
+                                "original_content_bytes": document.get("content_bytes"),
+                                "original_content_chars": document.get("content_chars"),
+                                "content_scanned_bytes": len(raw), "scan_truncated": len(raw) < encoded_size}
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                return result
+    except (OSError, ValueError, TypeError, OverflowError):
+        pass
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return result
+
+
+_PAYLOAD_TERM_CAP = 16  # #2586: words across all operands; a longer query keeps the literal match only
+# A token character as the message index's unicode61 tokenizer sees it: letters and digits plus combining marks; the
+# underscore separates tokens.
+_COMBINING_MARKS = "".join(f"{chr(low)}-{chr(high)}" for low, high in (
+    (0x0300, 0x036F), (0x1AB0, 0x1AFF), (0x1DC0, 0x1DFF), (0x20D0, 0x20FF), (0xFE20, 0xFE2F)))
+_PAYLOAD_TOKEN = f"(?:[^\\W_]|[{_COMBINING_MARKS}])"
+# The non-ASCII characters a case-insensitive regex treats as equal to an ASCII letter (dotted and dotless i, long s,
+# Kelvin sign). Content without them lets an ASCII first word be found with str.find on lower(), exactly as the regex
+# would find it; other content takes the regex search.
+_ASCII_CASE_FOLDS = re.compile("[" + "".join(map(chr, (0x130, 0x131, 0x17F, 0x212A))) + "]")
+
+
+def _operand_hit(pattern: "re.Pattern[str]", content: str, lower: str | None, first: str) -> "re.Match[str] | None":
+    """#2586: the leftmost match of ``pattern`` (which starts with ``first``), as ``pattern.search`` returns it. With
+    ``lower`` (content.lower(), proven equivalent by the caller) and an ASCII ``first``, find candidate starts at C
+    speed and check the boundaries and the phrase only there."""
+    if lower is None or not first.isascii():
+        return pattern.search(content)
+    first, position = first.lower(), lower.find(first.lower())
+    while position != -1:
+        if (hit := pattern.match(content, position)) is not None:
+            return hit
+        position = lower.find(first, position + 1)
+    return None
+
+
+def _payload_match(content: str, query: str, tokens: list[str], operands: list[str],
+                   any_term: bool = False) -> tuple[int, int, int, int] | None:
+    """#2586: (tier, start, end, terms) for a saved output, in one pass. Tier 0 is the query as typed; tier 1 is every
+    operand of one OR group (a quoted operand as a phrase) in any order, groups split as FTS5 does (AND binds tighter
+    than OR); tier 2 is any operand, only when ``any_term`` asks for the retry's candidates. The span is the first
+    matched operand. Case-insensitive, on message-index token boundaries. At most 1 + 16 searches, each linear in the
+    content times a phrase of at most 16 words."""
+    if (match := re.search(re.escape(query), content, flags=re.IGNORECASE)) is not None:
+        return 0, match.start(), match.end(), len(operands)
+    words = {operand: re.findall(_PAYLOAD_TOKEN + "+", operand) for operand in operands}
+    # Emoji and CJK go to message search's raw substring route, so a saved output matches them only as typed too.
+    if requires_like_fallback(query) or "NOT" in tokens or not operands or sum(map(len, words.values())) > _PAYLOAD_TERM_CAP or not all(words.values()):
+        return None
+    groups, hits = [[]], {}
+    for token in tokens:
+        if token == "OR" and not any_term:  # the retry's OR query is flat: tier 1 needs every operand
+            groups.append([])
+        elif token in words:
+            groups[-1].append(token)
+    lower = content.lower()
+    lower = lower if len(lower) == len(content) and _ASCII_CASE_FOLDS.search(content) is None else None
+    for operand, parts in words.items():
+        prefix = not operand.startswith('"') and operand.endswith("*")
+        pattern = re.compile(f"(?<!{_PAYLOAD_TOKEN})" + f"(?:(?!{_PAYLOAD_TOKEN})[\\s\\S])+".join(map(re.escape, parts))
+                             + ("" if prefix else f"(?!{_PAYLOAD_TOKEN})"), re.IGNORECASE)
+        if (hit := _operand_hit(pattern, content, lower, parts[0])) is not None:
+            hits[operand] = hit
+    full = [group for group in groups if group and all(operand in hits for operand in group)]
+    if not full and not (any_term and hits):
+        return None
+    first = min((hits[o] for o in (sum(full, []) if full else hits)), key=lambda hit: hit.start())
+    return (1 if full else 2), first.start(), first.end(), len(hits)
 
 
 def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
@@ -1248,12 +1471,28 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             requested_session_scope,
         )
 
+    reader_mode = _reader_any_session(engine)
+    reader_default_payloads = reader_mode and args.get("_reader_default_payloads") is True and session_scope != "current"
+    if reader_default_payloads:
+        content_scope = "both"
+    reader_session_ids = {search_session_id}
+    reader_sessions = {}
+
+    def payload_in_scope(session_id):
+        if not reader_mode:
+            return session_id == engine.current_session_id
+        if not session_id or session_id in excluded_session_ids or (session_scope != "all" and session_id not in reader_session_ids):
+            return False
+        if session_id not in reader_sessions:
+            reader_sessions[session_id] = engine._store.has_session_messages(session_id)
+        return reader_sessions[session_id]
+
     searches_externalized = content_scope in {"externalized", "both"}
-    if searches_externalized and session_scope != "current":
+    if searches_externalized and session_scope != "current" and not reader_mode:
         return json.dumps({
             "error": "Externalized payload search supports session_scope=current only",
         })
-    if searches_externalized and not engine.current_session_id:
+    if searches_externalized and session_scope == "current" and not engine.current_session_id:
         return json.dumps({"error": "Externalized payload search requires an active session"})
 
     current_session_id = engine.current_session_id
@@ -1262,19 +1501,18 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     results: list[Dict[str, Any]] = []
     message_search_error: str | None = None
 
-    if (
-        content_scope in {"history", "both"}
-        and search_session_id not in excluded_session_ids
-    ):
+    if content_scope in {"history", "both"}:
         try:
             # #1931: 'current' also covers the current session's delegated subagents (session_lineage).
-            descendant_ids = [
-                child_id for child_id in (
-                    getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
-                    if session_scope == "current" and has_current_session else ()
-                ) if child_id not in excluded_session_ids
+            descendant_ids = (
+                getattr(engine._store, "session_lineage_descendants", lambda _sid: ())(current_session_id)
+                if session_scope == "current" and has_current_session else ()
+            )
+            scoped_session_ids = [
+                scoped_id for scoped_id in (search_session_id, *descendant_ids)
+                if scoped_id not in excluded_session_ids
             ]
-            for scoped_session_id in (search_session_id, *descendant_ids):
+            for scoped_session_id in scoped_session_ids:
                 msg_hits = engine._store.search(
                     query,
                     session_id=scoped_session_id,
@@ -1343,8 +1581,29 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         except Exception as exc:
             logger.warning("Node search failed: %s", exc)
 
+    if reader_default_payloads and len(results) >= limit:
+        searches_externalized = False
+    payload_slots = max(0, limit - len(results)) if reader_default_payloads else limit
+    partial_reasons: list[str] = []
+    payload_bytes = 0
+    payloads_searched = 0
+    if searches_externalized and reader_mode:
+        try:
+            reader_storage = get_large_output_storage_dir(
+                engine._config, hermes_home=engine._hermes_home, create=False).resolve()
+            if not reader_storage.exists():
+                if externalized_refs is not None:  # a named ref with no payload folder is missing, not a clean miss
+                    return json.dumps({"error": f"Externalized ref is not readable or not owned by the requested scope: {externalized_refs[0]}"})
+                searches_externalized = False
+            contained = not searches_externalized or _payload_storage_contained(engine, reader_storage)
+        except (OSError, ValueError, RuntimeError):  # RuntimeError: a symlink loop before Python 3.13
+            contained = False
+        if not contained:
+            searches_externalized = False
+            partial_reasons.append("containment")
     externalized_scan: dict[str, Any] | None = None
     externalized_results_omitted = False
+    stashed_any_term: list[dict[str, Any]] = []
     if searches_externalized and externalized_filter_active:
         # Externalized sidecars are tool/ingest payloads, not raw messages, and
         # carry no role/timestamp/source/conversation lane comparable to history
@@ -1354,7 +1613,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         externalized_results_omitted = True
     elif searches_externalized and current_session_id not in excluded_session_ids:
         try:
-            storage_dir = get_large_output_storage_dir(
+            storage_dir = reader_storage if reader_mode else get_large_output_storage_dir(
                 engine._config,
                 hermes_home=engine._hermes_home,
                 create=False,
@@ -1373,10 +1632,21 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
             "rejected_invalid_or_unreadable": 0,
             "rejected_session_mismatch": 0,
         }
-        if externalized_refs is None:
+        if externalized_refs is None or reader_mode:
             discovered_refs = []
             try:
-                for entries_seen, path in enumerate(storage_dir.iterdir(), start=1):
+                if externalized_refs is not None:
+                    paths = (storage_dir / ref for ref in externalized_refs)
+                elif reader_mode:
+                    # The reader keeps the newest names, not the first ones the file system lists: names only (no
+                    # stat or open), streamed into a heap that keeps the newest cap+1 by name (memory and sort bounded
+                    # by the cap), then capped below. Path.iterdir is never called here: from 3.13 it lists eagerly.
+                    with os.scandir(storage_dir) as entries:
+                        paths = [storage_dir / name for name in heapq.nlargest(
+                            _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP + 1, (entry.name for entry in entries))]
+                else:
+                    paths = storage_dir.iterdir()
+                for entries_seen, path in enumerate(paths, start=1):
                     if entries_seen > _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP:
                         scan_counts["discovery_truncated"] = True
                         break
@@ -1385,6 +1655,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     discovered_refs.append(path.name)
             except OSError:
                 discovered_refs = []
+                if reader_mode and externalized_refs is None:
+                    partial_reasons.append("unreadable")  # the payload folder could not be listed: nothing was searched
             # Bound directory consumption before sorting so one busy payload
             # directory cannot make a search materialize every sidecar name.
             discovered_refs.sort(reverse=True)
@@ -1394,6 +1666,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 path = storage_dir / ref
                 if path.is_symlink():
                     scan_counts["rejected_symlink"] += 1
+                    if reader_mode and externalized_refs is not None:
+                        return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
+                    continue
+                if reader_mode:
+                    candidate_refs.append(ref)
                     continue
                 metadata = _inspect_externalized_payload_metadata(
                     engine,
@@ -1420,7 +1697,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                         scan_counts["rejected_symlink"] += 1
                     elif status != "ok":
                         scan_counts["rejected_invalid_or_unreadable"] += 1
-                    elif payload.get("session_id") != engine.current_session_id:
+                    elif not payload_in_scope(payload.get("session_id")):
                         scan_counts["rejected_session_mismatch"] += 1
                     else:
                         candidate_refs.append(ref)
@@ -1432,11 +1709,34 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     scan_counts["rejected_invalid_or_unreadable"] += 1
         else:
             candidate_refs = externalized_refs
+        if reader_mode:
+            def newest(ref):
+                try:
+                    return (1, ref, ref) if re.match(r"^\d{8}_\d{6}_", ref) else (0, (storage_dir / ref).lstat().st_mtime, ref)
+                except OSError:
+                    return (0, 0, ref)
+            candidate_refs.sort(key=newest, reverse=True)
+            if scan_counts["discovery_truncated"]:
+                partial_reasons.append("discovery_cap")
         scan_counts["candidate_files"] = len(candidate_refs)
 
         externalized_matches: list[dict[str, Any]] = []
+        # #2586: one parse with message search. The reader's history-only any-term retry gets the payload any-term hits
+        # from this scan (content already read, no second payload budget).
+        _, match_tokens, match_operands = agent_grep_operands(query)
+        stash_any_term = (reader_default_payloads and args.get("_payload_any_term_stash") is True
+                          and len(match_operands) >= 2 and not {"OR", "NOT"}.intersection(match_tokens))
+        any_term_matches: list[dict[str, Any]] = []
         for ref in candidate_refs:
-            if externalized_refs is not None:
+            content_bytes = _LCM_GREP_EXTERNALIZED_CONTENT_BYTES
+            if reader_mode:
+                if payloads_searched >= READER_PAYLOAD_FILE_CAP:
+                    partial_reasons.append("file_cap")
+                    break
+                if payload_bytes >= READER_PAYLOAD_BYTE_CAP:
+                    partial_reasons.append("byte_cap")
+                    break
+            if externalized_refs is not None and not reader_mode:
                 path = storage_dir / ref
                 if path.is_symlink():
                     scan_counts["rejected_symlink"] += 1
@@ -1455,12 +1755,18 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     scan_counts["rejected_invalid_or_unreadable"] += 1
                     return json.dumps({"error": f"Externalized ref is not readable: {ref}"})
             try:
-                payload = read_externalized_payload_search_prefix(
-                    ref,
-                    config=engine._config,
-                    hermes_home=engine._hermes_home,
-                    max_content_bytes=_LCM_GREP_EXTERNALIZED_CONTENT_BYTES,
-                )
+                if reader_mode:
+                    payload = _reader_payload_search(storage_dir / ref, READER_PAYLOAD_BYTE_CAP - payload_bytes, payload_in_scope)
+                    payload_bytes += payload["bytes_read"]
+                    payloads_searched += payload["status"] != "out_of_scope"
+                    if payload_bytes >= READER_PAYLOAD_BYTE_CAP and (payload.get("scan_truncated") or payload["status"] != "ok"):
+                        partial_reasons.append("byte_cap")
+                    elif payload.get("scan_truncated"):
+                        partial_reasons.append("prefix")
+                else:
+                    payload = read_externalized_payload_search_prefix(
+                        ref, config=engine._config, hermes_home=engine._hermes_home,
+                        max_content_bytes=content_bytes)
             except (OSError, ValueError) as exc:
                 return json.dumps({
                     "error": f"Externalized payload storage is unavailable: {exc}",
@@ -1472,24 +1778,30 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     return json.dumps({"error": f"Externalized ref is a symlink: {ref}"})
                 continue
             if status != "ok":
-                scan_counts["rejected_invalid_or_unreadable"] += 1
+                if reader_mode and payload.get("budget_cut") and status != "out_of_scope":
+                    break  # the budget ran out before this file's checks finished: byte_cap is recorded, earlier matches stand
+                scan_counts["rejected_session_mismatch" if status == "out_of_scope" else "rejected_invalid_or_unreadable"] += 1
                 if externalized_refs is not None:
-                    return json.dumps({"error": f"Externalized ref is not readable: {ref}"})
+                    return json.dumps({"error": f"Externalized ref is not readable{' or not owned by the requested scope' if reader_mode else ''}: {ref}"})
+                if reader_mode and status != "out_of_scope":
+                    partial_reasons.append("unreadable")  # a payload this reader could not parse was not searched
                 continue
             scan_counts["scanned_files"] += 1
-            if payload.get("session_id") != engine.current_session_id:
+            if not payload_in_scope(payload.get("session_id")):
                 scan_counts["rejected_session_mismatch"] += 1
                 if externalized_refs is not None:
                     return json.dumps({"error": f"Externalized ref is not owned by the active session: {ref}"})
                 continue
             content = str(payload.get("content") or "")
-            match = re.search(re.escape(query), content, flags=re.IGNORECASE)
+            match = _payload_match(content, query, match_tokens, match_operands,
+                                   stash_any_term or args.get("_grep_any_term") is True)
             if match is None:
                 continue
-            byte_position = len(content[: match.start()].encode("utf-8"))
-            line = content.count("\n", 0, match.start()) + 1
-            snippet_start = max(0, match.start() - 120)
-            snippet_end = min(len(content), match.end() + 180)
+            tier, start, end, terms = match
+            byte_position = len(content[:start].encode("utf-8"))
+            line = content.count("\n", 0, start) + 1
+            snippet_start = max(0, start - 120)
+            snippet_end = min(len(content), end + 180)
             item = {
                 "type": "externalized",
                 "depth": "payload",
@@ -1506,7 +1818,14 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 "_sort_ts": payload.get("created_at") or 0,
                 "_sort_rank": byte_position,
                 "_sort_directness": 10.0,
+                "_match_tier": tier,
+                "_terms": terms,
             }
+            if reader_mode:
+                item.update(session_id=payload.get("session_id"), from_current_session=False)
+            if stash_any_term and tier == 2:
+                any_term_matches.append(item)  # only the any-term retry shows it, after history
+                continue
             externalized_matches.append(item)
             scan_counts["matched_files"] += 1
 
@@ -1515,19 +1834,29 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         # payload's native byte position, while recency uses its timestamp.
         externalized_matches.sort(key=lambda result: _combined_result_sort_key(result, sort))
         response_chars = 0
-        for item in externalized_matches:
+        for item in (externalized_matches[:payload_slots] if reader_default_payloads else externalized_matches):
             item_chars = len(json.dumps(item, ensure_ascii=False))
             if response_chars + item_chars > _LCM_GREP_RESPONSE_CHAR_CAP:
+                if reader_mode:
+                    partial_reasons.append("response_cap")
                 break
             response_chars += item_chars
             results.append(item)
+        any_term_matches.sort(key=lambda result: (-result["_terms"], _combined_result_sort_key(result, sort)))
+        for item in any_term_matches[:payload_slots]:
+            for key in ("_sort_ts", "_sort_rank", "_sort_directness", "_match_tier", "_terms"):
+                item.pop(key, None)
+            if (response_chars := response_chars + len(json.dumps(item, ensure_ascii=False))) > _LCM_GREP_RESPONSE_CHAR_CAP:
+                stashed_any_term.append({"_response_cap": True})  # marker: the retry reports response_cap
+                break
+            stashed_any_term.append(item)
         externalized_scan = {
             **scan_counts,
-            "file_limit": _LCM_GREP_EXTERNALIZED_FILE_CAP,
+            "file_limit": READER_PAYLOAD_FILE_CAP if reader_mode else _LCM_GREP_EXTERNALIZED_FILE_CAP,
             "discovery_limit": _LCM_GREP_EXTERNALIZED_DISCOVERY_CAP,
             "content_bytes_per_file": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES,
             "response_char_limit": _LCM_GREP_RESPONSE_CHAR_CAP,
-            "active_session_only": True,
+            "active_session_only": not reader_mode,
         }
 
     if sort == "hybrid":
@@ -1545,6 +1874,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         result.pop("_sort_rank", None)
         result.pop("_sort_directness", None)
         result.pop("_hybrid_summary_override", None)
+        result.pop("_match_tier", None)
+        result.pop("_terms", None)
     _annotate_subagent_lineage(engine, results)
 
     response: Dict[str, Any] = {
@@ -1558,7 +1889,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         "total_results": len(results),
         "results": results[:limit],
     }
-    if args.get("_stemmed"):
+    if args.get("_stemmed") and content_scope in {"history", "both"}:
         response["fts_index"] = getattr(engine._store, "_last_fts_index", "plain")
     if role is not None:
         response["role"] = role
@@ -1584,8 +1915,17 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    if reader_default_payloads and len(results) >= limit and externalized_scan is None:
+        response["externalized_skipped"] = "history_filled_limit"
+    if partial_reasons:
+        response["partial"] = {"payloads_searched": payloads_searched,
+                               "payloads_total": (">4096" if scan_counts["discovery_truncated"] else len(candidate_refs)) if externalized_scan else 0,
+                               "reasons": list(dict.fromkeys(partial_reasons)),
+                               "prefix_bytes": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES}
     if message_search_error is not None:
         response["message_search_error"] = message_search_error
+    if stashed_any_term:
+        response["_payload_any_term"] = stashed_any_term  # private: the dispatch pops it (#2586)
     return json.dumps(response)
 
 
@@ -2185,7 +2525,8 @@ def _lcm_grep_semantic(
 
     def _run_knn() -> Any:
         # VectorStore is resolved through this module's namespace so tests that
-        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend.
+        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend;
+        # the read-only reader binds its own class on the engine (#1192).
         return run_knn(
             engine,
             query_vector=query_vector,
@@ -2196,7 +2537,7 @@ def _lcm_grep_semantic(
             until=time_to,
             conversation_ids=knn_conversation_ids,
             source=source,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
         )
 
     try:
@@ -2447,16 +2788,19 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args.pop("_agent_operators", None)
     parsed_args.pop("_grep_any_term", None)
     parsed_args.pop("_stemmed", None)
+    parsed_args.pop("_payload_any_term_stash", None)
     parsed_args["_agent_operators"] = True
+    parsed_args["_reader_default_payloads"] = _reader_any_session(engine) and mode == "full_text" and "content_scope" not in args
     if mode == "full_text":
-        payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
+        if getattr(engine._config, "recall_grep_stemmed", False):
+            # MessageStore.search owns the same readiness/failure fallback as recall.
+            parsed_args["_stemmed"] = True
+            if "sort" not in args and "OR" in agent_grep_operands(_coerce_query_arg(args.get("query")))[1]:
+                parsed_args["sort"] = "relevance"
+        payload = json.loads(_lcm_grep_full_text({**parsed_args, "_payload_any_term_stash": True}, **kwargs))
+        stashed = payload.pop("_payload_any_term", None) or []
         query = _coerce_query_arg(args.get("query"))
-        safe = sanitize_fts5_query(query, agent_operators=True)
-        tokens = re.findall(r'"[^"]*"|[^\s"]+', safe)
-        operands = list(dict.fromkeys(
-            token for token in tokens
-            if token.startswith('"') or token.upper() not in {"NOT", "NEAR", "OR", "AND"}
-        ))
+        safe, tokens, operands = agent_grep_operands(query)
         or_query = " OR ".join(operands)
         if (
             payload.get("total_results") == 0 and not payload.get("message_search_error")
@@ -2468,7 +2812,27 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         ):
             retry_args = {**parsed_args, "query": or_query,
                           "_agent_operators": True, "_allow_operators": True, "_grep_any_term": True}
-            payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
+            if _reader_any_session(engine):
+                retry_args["content_scope"] = "history"  # one payload budget per call; OR is history syntax
+                retry_args.pop("externalized_refs", None)  # payload-only: refused with content_scope=history
+                retry_args["_reader_default_payloads"] = False
+            retried_payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
+            if _reader_any_session(engine):
+                for key in ("partial", "externalized_scan", "externalized_results_omitted", "content_scope", "externalized_refs"):
+                    if key in payload:
+                        retried_payload[key] = payload[key]
+                if stashed and isinstance(retried_payload.get("results"), list):
+                    # #2586: payload any-term hits rank after every history hit in each sort, so they follow it
+                    hits = [item for item in stashed if "_response_cap" not in item]
+                    if len(hits) < len(stashed):
+                        scan = retried_payload.get("externalized_scan") or {}
+                        partial = retried_payload.setdefault("partial", {
+                            "payloads_searched": scan.get("scanned_files", 0), "payloads_total": scan.get("candidate_files", 0),
+                            "reasons": [], "prefix_bytes": _LCM_GREP_EXTERNALIZED_CONTENT_BYTES})
+                        partial["reasons"] = list(dict.fromkeys([*partial.get("reasons", []), "response_cap"]))
+                    retried_payload["total_results"] += len(hits)
+                    retried_payload["results"] = (retried_payload["results"] + hits)[:retried_payload["limit"]]
+            payload = retried_payload
             payload["query"] = query
             payload["retried"] = "any_term"
         return json.dumps(payload)
@@ -2778,7 +3142,6 @@ class _LcmRecallStrictSelector:
         self._missing: set[int] = set()
         self.ledger = _LcmRecallSelectionLedger()
         self.rows: dict[int, dict[str, Any]] = {}
-        self.batched_reads = 0
 
     @property
     def unreferenced_dropped(self) -> int:
@@ -2847,7 +3210,6 @@ class _LcmRecallStrictSelector:
             if store_id not in self.rows and store_id not in self._missing
         ]
         if wanted:
-            self.batched_reads += 1
             fetched = self._engine._store.get_batch(wanted)
             # A row the store does not have is remembered as MISSING, or the walk
             # cannot tell "not fetched yet" from "fetched and absent" and keeps
@@ -3176,6 +3538,105 @@ def _lcm_recall_event_time_rows(
     }, None
 
 
+# Numeric observed_at values _normalize_observed_at accepts as they stand: > 0
+# and before year 10000. SQL aggregates only these; every other stored form
+# (ISO text, out-of-range numbers) comes back for Python normalization.
+_OBSERVED_AT_SQL_SAFE = (
+    "typeof(m.observed_at) IN ('integer', 'real') "
+    "AND m.observed_at > 0 AND m.observed_at < 253402300800"
+)
+
+
+def _lcm_recall_summary_event_time_rows(
+    engine: "LCMEngine", node_ids: list[int], *, deadline: float
+) -> tuple[dict[int, dict[str, str]], str | None]:
+    """Read each summary node's event-time span, inside the deadline.
+
+    Returns ``({node_id: {"event_time_start", "event_time_end"}}, reason)``:
+    the MIN/MAX host ``observed_at`` over ALL the node's source messages,
+    walked through condensed nodes with no cap, in one statement for the whole
+    batch. A span over any stamped source carrying a ``carried_stamp`` relation
+    (the message path's ``time_uncertain: "carried"`` test) also gets
+    ``time_uncertain: "carried"``. Write times (``messages.timestamp``, ``earliest_at``/``latest_at``,
+    ``created_at``) are never used; a node with no stamped source is absent.
+    ``reason`` follows ``_lcm_recall_event_time_rows``: ``"deadline"`` or
+    ``"read_error"``, and then the mapping is empty (atomic), on the same
+    private read-only connection bounded by the remaining budget.
+    """
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        # Stores predating the optional relation table have no carried markers
+        # (the same fallback as MessageStore.get_carried_stamp_ids).
+        relation = "message_relations" if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+        ).fetchone() else "(SELECT NULL AS store_id, NULL AS kind)"
+        rows = conn.execute(
+            f"""WITH RECURSIVE walk(root, source_type, source_id) AS (
+                    SELECT n.node_id, n.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes n, json_each(n.source_ids) j
+                    WHERE n.node_id IN ({",".join("?" for _ in node_ids)})
+                    UNION
+                    SELECT walk.root, child.source_type, CAST(j.value AS INTEGER)
+                    FROM walk JOIN summary_nodes child
+                      ON walk.source_type = 'nodes' AND child.node_id = walk.source_id
+                    JOIN json_each(child.source_ids) j
+                )
+                SELECT walk.root,
+                       MIN(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       MAX(CASE WHEN {_OBSERVED_AT_SQL_SAFE} THEN m.observed_at END),
+                       group_concat(CASE WHEN typeof(m.observed_at) IN ('text', 'integer', 'real')
+                                         AND NOT ({_OBSERVED_AT_SQL_SAFE})
+                                    THEN json_quote(m.observed_at) END, ','),
+                       MAX(m.store_id IN (SELECT store_id FROM {relation} WHERE kind = 'carried_stamp'))
+                FROM walk JOIN messages m
+                  ON walk.source_type = 'messages' AND m.store_id = walk.source_id
+                WHERE m.observed_at IS NOT NULL
+                GROUP BY walk.root""",
+            [int(node_id) for node_id in node_ids],
+        ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
+        logger.debug("lcm_recall summary event_time read failed: %s", exc)
+        if expired[0] or time.monotonic() >= deadline:
+            return {}, "deadline"
+        return {}, "read_error"
+    finally:
+        if conn is not None:
+            conn.close()
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    spans: dict[int, dict[str, str]] = {}
+    for root, low, high, other, carried in rows:
+        values = [low, high, *(json.loads(f"[{other}]") if other else [])]
+        normalized = [v for v in map(_normalize_observed_at, values) if v is not None]
+        if normalized:
+            spans[int(root)] = {
+                key: datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                for key, value in (("event_time_start", min(normalized)),
+                                   ("event_time_end", max(normalized)))
+            }
+            if carried:
+                spans[int(root)]["time_uncertain"] = "carried"
+    return spans, None
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -3184,6 +3645,7 @@ def _lcm_recall_answer_ready_content(
     expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
     rows_by_id: dict[int, dict[str, Any]] | None = None,
     fts_arm_index: int | None = None,
+    char_cap: int = _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
 ) -> dict[tuple, dict[str, Any]]:
     """Hydrate selected exact refs with bounded reads and no retrieval search.
 
@@ -3220,7 +3682,7 @@ def _lcm_recall_answer_ready_content(
                 content,
                 match_start=0,
                 match_end=min(len(content), _LCM_RECALL_SNIPPET_CHARS),
-                char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+                char_cap=char_cap,
             )
             hydrated[identity] = {
                 **window,
@@ -3236,7 +3698,7 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
-        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+        if not span and len(content) > char_cap:
             # Short rows keep their legacy evidence_span and output bytes.
             # Emoji has no lexical hydration terms; use LIKE's verified span.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -3249,7 +3711,8 @@ def _lcm_recall_answer_ready_content(
                 if like_span is not None:
                     span = {"char_start": like_span[0], "char_end": sum(like_span)}
                     break
-        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+        if not span and (hit.get("later_statement_of") is not None or
+                         fts_arm_index is not None and fts_arm_index in entry.get("ranks", {})):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
             for candidate in [hit, *entry.get("_alternates", [])]:
@@ -3283,7 +3746,7 @@ def _lcm_recall_answer_ready_content(
             content,
             match_start=match_start,
             match_end=match_end,
-            char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+            char_cap=char_cap,
         )
         hydrated[identity] = {
             **window,
@@ -3293,6 +3756,54 @@ def _lcm_recall_answer_ready_content(
             **_lcm_recall_event_time(stored),
         }
     return hydrated
+
+
+def _lcm_recall_snippet_windows(
+    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float,
+    extra_entries: bool = False, **kwargs,
+) -> tuple[dict[tuple, dict[str, Any]], str | None]:
+    """Optional content read on a private connection, bounded by recall's budget."""
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    try:
+        messages = [entry for entry in entries if entry["hit"].get("kind") == "message_excerpt"
+                    and entry["hit"].get("store_id") is not None] if extra_entries else entries
+        db_path = Path(engine._store.db_path).resolve()
+        with closing(sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro", uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )) if messages else nullcontext() as conn:
+            if conn is not None:
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            ids = [int(entry["hit"]["store_id"]) for entry in messages]
+            columns = "content, role, source" + (", observed_at, observed_at_source" if extra_entries else "")
+            rows = conn.execute(
+                "SELECT store_id, " + columns + " FROM messages WHERE store_id IN ("
+                + ",".join("?" for _ in ids) + ")", ids,
+            ).fetchall() if conn is not None else []
+            rows_by_id = {row[0]: dict(zip(columns.split(", "), row[1:])) for row in rows}
+            # An extra shows only event_time, so a carried (borrowed) stamp is
+            # shown as no time rather than as the row's own.
+            timed = [int(sid) for sid, row in rows_by_id.items() if row.get("observed_at") is not None]
+            carried = (engine._store.get_carried_stamp_ids(timed, connection=conn)
+                       if extra_entries and timed else set())
+            for sid in carried:
+                rows_by_id[sid]["observed_at"] = None
+            content = _lcm_recall_answer_ready_content(engine, messages, rows_by_id=rows_by_id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        logger.warning("lcm_recall %s read failed: %s",
+                       "extra entries" if extra_entries else "snippet window", type(exc).__name__)
+        return {}, "deadline" if time.monotonic() >= deadline else "read_error"
+    if extra_entries:
+        for entry in entries:
+            hit = entry["hit"]
+            if _hit_identity(hit) not in content:
+                snippet = hit.get("snippet") or ""
+                content[_hit_identity(hit)] = _lcm_recall_content_window(
+                    snippet, match_start=0, match_end=len(snippet), char_cap=300,
+                )
+    return ({}, "deadline") if time.monotonic() >= deadline else (content, None)
 
 
 def _lcm_recall_bounded_reason(
@@ -3630,7 +4141,7 @@ def _lcm_recall_summary_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -3704,7 +4215,7 @@ def _lcm_recall_chunk_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -4096,6 +4607,281 @@ def default_semantic_cpu_limited(config) -> bool:
             and effective_cpus() <= 2)
 
 
+_LCM_RECALL_ADJACENT_SQL = (
+    "SELECT store_id, session_id, conversation_id, role, source, tool_calls, content, "
+    "timestamp, observed_at FROM messages WHERE session_id = ? AND store_id > ? "
+    "ORDER BY store_id LIMIT 1"
+)
+
+
+def _lcm_recall_next_row(conn, session_id: str, store_id: int) -> dict[str, Any] | None:
+    """The next stored row of ``session_id`` after ``store_id`` (one indexed read)."""
+    found = conn.execute(_LCM_RECALL_ADJACENT_SQL, (session_id, int(store_id))).fetchone()
+    return dict(found) if found is not None else None
+
+
+def _lcm_recall_adjacent_reply(
+    engine, ordered, source_rows, *, limit, deadline, excluded, allowed, read_next=None,
+):
+    """Atomically place up to three same-conversation replies; never write rows.
+
+    A reply is the next stored row of the source's session when it comes from the
+    other conversational role (user/assistant) and is not older than the source.
+    Reads use a private read-only connection bounded by the recall deadline.
+    """
+    placed = list(ordered)
+    pairs = []
+    conn = None
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        for rank, source in enumerate(ordered[:min(3, limit)]):
+            hit = source["hit"]
+            row = source_rows.get(hit.get("store_id"))
+            if (hit.get("kind") == "summary" or hit.get("node_id") is not None
+                    or row is None or row.get("role") not in ("user", "assistant")):
+                continue
+            if rank and not str(row.get("content") or "").strip().endswith("?"):
+                continue
+            session_id = row.get("session_id")
+            if (not session_id or session_id in excluded
+                    or (allowed is not None and session_id not in allowed)):
+                continue
+            if read_next is None:
+                uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+                conn = sqlite3.connect(uri, uri=True, timeout=max(0.001, deadline - time.monotonic()))
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                read_next = partial(_lcm_recall_next_row, conn)
+            neighbour = read_next(session_id, int(hit["store_id"]))
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            if neighbour is None:
+                continue
+            content = str(neighbour.get("content") or "")
+            sid = neighbour.get("session_id")
+            source_seen = _normalize_observed_at(row.get("observed_at"))
+            reply_seen = _normalize_observed_at(neighbour.get("observed_at"))
+            if (sid != session_id
+                    or (neighbour.get("conversation_id") or "") != (row.get("conversation_id") or "")
+                    or neighbour.get("role") not in ("user", "assistant")
+                    or neighbour.get("role") == row.get("role")
+                    or neighbour.get("tool_calls") or not content.strip()
+                    or neighbour.get("source") == _SUBAGENT_SOURCE
+                    or (source_seen is not None and reply_seen is not None
+                        and reply_seen < source_seen)):
+                continue
+            store_id = int(neighbour["store_id"])
+            # Locate the source before moving anything: an earlier reply may have
+            # moved it as a copy, so match its store_id among message entries.
+            source_index = next((i for i, item in enumerate(placed)
+                                 if item["hit"].get("kind") != "summary"
+                                 and item["hit"].get("store_id") == hit["store_id"]), None)
+            existing = next((i for i, entry in enumerate(placed)
+                             if entry["hit"].get("kind") != "summary"
+                             and (entry["hit"].get("store_id") == store_id
+                                  or store_id in entry["hit"].get("duplicate_store_ids", []))), None)
+            if source_index is None or existing == source_index:
+                continue
+            if existing is not None and existing < limit:
+                continue
+            if existing is not None:
+                # A pool entry keeps its own scores, ranks and arms; it is only moved.
+                entry = placed.pop(existing)
+                entry = {**entry, "hit": dict(entry["hit"])}
+                if existing < source_index:
+                    source_index -= 1
+            else:
+                reply = {
+                    "kind": "message_excerpt", "store_id": store_id,
+                    "session_id": sid, "role": neighbour.get("role"),
+                    "source": neighbour.get("source") or "",
+                    "timestamp": neighbour.get("timestamp") or 0,
+                    "content_offset": 0, "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
+                    "from_current_session": sid == engine.current_session_id,
+                }
+                reply["expand_hint"] = _lcm_recall_excerpt_expand_hint(reply)
+                # No arm ranks: the reply was not retrieved by any arm.
+                entry = {"hit": reply, "rrf_score": source["rrf_score"],
+                         "_final_score": source["_final_score"], "ranks": {}}
+            entry["hit"]["adjacent_to"] = hit["store_id"]
+            placed.insert(source_index + 1, entry)
+            pairs.append({"store_id": store_id, "after_store_id": hit["store_id"]})
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+    except TimeoutError:
+        return ordered, [], "deadline"
+    except sqlite3.OperationalError as exc:
+        if time.monotonic() >= deadline:
+            return ordered, [], "deadline"
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    except Exception as exc:  # noqa: BLE001 - optional read must never fail recall
+        return ordered, [], f"read_failed:{type(exc).__name__}"
+    finally:
+        if conn is not None:
+            conn.close()
+    # Every placed pair; delivery publishes those whose reply the final hits carry.
+    return placed, pairs, None
+
+
+def _lcm_recall_later_statements(engine, ordered, identity_rows, *, n, limit, query, seen_refs, fts_arm_index, deadline, excluded, allowed,
+                               hydrate=None, rows_by_id=None, reference_strict=False, answer_ready_content=None,
+                               delta_requested=False, fts_anchor_identity=None):
+    """Place one later lexical match per source, atomically and read-only."""
+    started, now = time.monotonic(), time.time()
+    info = dict(requested=n, searched=0, found=0, delivered=0, ms=0, displaced=0)
+    placed, tail = ordered[:limit], ordered[limit:]
+    def replay_ids(hit):
+        return {hit.get("store_id"), *hit.get("duplicate_store_ids", [])}
+    seen = set().union(*(replay_ids(e["hit"]) for e in placed))
+    sources = [entry for entry in placed[:limit] if entry["hit"].get("store_id") is not None
+               and entry["hit"].get("kind") != "summary" and entry["hit"].get("node_id") is None
+               and entry["hit"].get("adjacent_to") is None]
+    def normalize(text):
+        return " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())
+    reason, children, child_rows, displaced, child_sources = None, [], {}, [], {}
+    try:
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if any(s["hit"]["store_id"] not in identity_rows for s in sources):
+            raise OSError
+        for source in sources[:n]:
+            hit = source["hit"]
+            row = identity_rows.get(hit["store_id"], {})
+            if not str(row.get("content") or "").strip():
+                continue
+            observed = _normalize_observed_at(row.get("observed_at"))
+            source_time = observed or _normalize_observed_at(hit.get("timestamp"))
+            if source_time is None:
+                continue
+            info["searched"] += 1
+            candidates, error = _lcm_recall_fts_arm(
+                engine, hit.get("_fts_snippet") or hit.get("snippet") or "",
+                candidate_limit=10, deadline=deadline, excluded_session_ids=excluded,
+            )
+            if error:
+                raise TimeoutError if time.monotonic() >= deadline or error.get("timeout") else OSError
+            candidates = [c for c in candidates if c["store_id"] not in seen
+                          and c.get("session_id") not in excluded
+                          and (allowed is None or c.get("session_id") in allowed)]
+            rows, reason = _lcm_recall_event_time_rows(
+                engine, [c["store_id"] for c in candidates], deadline=deadline,
+            ) if candidates else ({}, None)
+            if reason:
+                raise TimeoutError if reason == "deadline" else OSError
+            prior = [{"hit": {"store_id": sid}, "rrf_score": 0.0, "ranks": {}} for sid in seen if sid is not None]
+            fresh = [{"hit": c, "rrf_score": 0.0, "ranks": {}} for c in candidates]
+            texts = duplicate_identity_rows(engine, prior + fresh, deadline=deadline) if candidates else {}
+            if any(c["store_id"] not in texts or c["store_id"] not in rows for c in candidates):
+                raise OSError
+            child_rows.update(texts)
+            # Replay copies of a delivered or already chosen row join its group, never a second slot.
+            candidates = [g["hit"] for g in collapse_duplicate_candidates(prior + fresh, texts)
+                          if not replay_ids(g["hit"]) & seen]
+            for candidate in candidates:
+                candidate_observed = _normalize_observed_at(rows[candidate["store_id"]].get("observed_at"))
+                if ((observed is None) != (candidate_observed is None)
+                        or normalize(texts[candidate["store_id"]]["content"]) == normalize(row.get("content"))):
+                    continue
+                stamp = candidate_observed if observed is not None else _normalize_observed_at(candidate.get("timestamp"))
+                if stamp is None or not source_time < stamp <= now:
+                    continue
+                store_id = candidate["store_id"]
+                group = replay_ids(candidate)
+                group |= set().union(*(replay_ids(e["hit"]) for e in tail if e["hit"].get("kind") != "summary" and group & replay_ids(e["hit"])))
+                if group - {store_id}:
+                    candidate = {**candidate, "duplicate_store_ids": sorted(group - {store_id})}
+                children.append({"hit": {**candidate, "later_statement_of": hit["store_id"]},
+                                 "rrf_score": source["rrf_score"], "_final_score": source["_final_score"], "ranks": {}})
+                child_sources[_hit_identity(candidate)] = _hit_identity(hit)
+                seen |= group
+                info["found"] += 1
+                break
+        _annotate_subagent_lineage(engine, [child["hit"] for child in children])
+        hydrated = hydrate(children, query=query, expanded_limit=len(children),
+                           rows_by_id={**child_rows, **(rows_by_id or {})},
+                           fts_arm_index=fts_arm_index) if hydrate and children else {}
+        for child in children:
+            hit = child["hit"]
+            ref = recall_delivery._exact_ref(hit, hydrated.get(_hit_identity(hit)))
+            source = next((e for e in placed if _hit_identity(e["hit"]) == child_sources[_hit_identity(hit)]), None)
+            if source is None or ref in seen_refs or (reference_strict or delta_requested) and ref is None:
+                continue
+            if len(placed) >= limit:
+                removable = next((e for e in reversed(placed)
+                                  if e is not source and _hit_identity(e["hit"]) != fts_anchor_identity
+                                  and not e["hit"].get("has_later_statements") and "later_statement_of" not in e["hit"]), None)
+                if removable is None:
+                    continue
+                placed.remove(removable)
+                displaced.insert(0, removable)
+                info["displaced"] += 1
+            index = placed.index(source)
+            placed[index:index + 1] = [{**source, "hit": {**source["hit"], "has_later_statements": [hit["store_id"]]}}, child]
+            tail = [e for e in tail if e["hit"].get("kind") == "summary" or not replay_ids(e["hit"]) & replay_ids(hit)]
+        placed += displaced + tail
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if answer_ready_content is not None:
+            answer_ready_content.update(hydrated)
+    except Exception as exc:  # noqa: BLE001 - optional expansion never fails recall
+        reason = "deadline" if isinstance(exc, TimeoutError) or time.monotonic() >= deadline else "read_error"
+        placed, info["displaced"] = ordered, 0
+    info["ms"] = round((time.monotonic() - started) * 1000, 3)
+    return placed, info, reason
+
+
+def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | None:
+    try:
+        store_id = hit.get("store_id")
+        if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
+            sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
+            store_id = sources[0] if sources else None
+        row = engine._store.get(store_id) if store_id is not None else None
+        session = row.get("session_id") if row else None
+        return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})" if session else None
+    except Exception:  # Optional hints must not fail recall or suppress other hints.
+        logger.debug("LCM session hint skipped", exc_info=True)
+        return None
+
+
+def _lcm_recall_session_floor(
+    ordered: list[dict[str, Any]], limit: int, requested: int,
+    *, protected_entry: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Promote missing sessions; retain every entry and score (#1213)."""
+    result = list(ordered)
+    pool = {entry["hit"].get("session_id") for entry in ordered} - {None, ""}
+    target = min(requested, limit, len(pool))
+    promoted = 0
+    for candidate in ordered:
+        sessions = [entry["hit"].get("session_id") for entry in result[:limit]]
+        represented = set(sessions) - {None, ""}
+        if len(represented) >= target:
+            break
+        sid = candidate["hit"].get("session_id")
+        if not sid or sid in represented:
+            continue
+        seen = set()
+        cut = None
+        for i, session in enumerate(sessions):
+            if result[i] is not protected_entry and (not session or session in seen):
+                cut = i
+            seen.add(session)
+        if cut is None:
+            break
+        index = next(i for i, entry in enumerate(result) if entry is candidate)
+        result.pop(index)
+        displaced = result.pop(cut)
+        result.insert(limit - 1, candidate)
+        result.insert(limit, displaced)
+        promoted += 1
+    achieved = len({entry["hit"].get("session_id") for entry in result[:limit]} - {None, ""})
+    return result, {"requested": requested, "achieved": achieved,
+                    "promoted": promoted, "delivered": None}
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -4125,6 +4911,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "limit must be a positive integer"})
     requested_limit = parsed_limit
     limit = min(requested_limit, _LCM_RECALL_LIMIT_CAP)
+
+    floor_default = max(0, min(10, _parse_int_value(getattr(engine._config, "recall_min_sessions", 0), 0)))
+    floor_arg = kwargs.get("min_sessions", args.get("min_sessions"))
+    try:
+        min_sessions = (floor_default if isinstance(floor_arg, bool) or (
+            isinstance(floor_arg, float) and not floor_arg.is_integer()) else
+                        max(0, min(10, _parse_int_value(floor_arg, floor_default))))
+    except OverflowError:
+        min_sessions = floor_default
 
     scope_bias, scope_bias_error = _parse_optional_float(args.get("scope_bias"), "scope_bias")
     if scope_bias_error:
@@ -4177,6 +4972,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     )
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
+    if min_sessions:
+        candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(100, limit * 8))
     rerank_window = min(50, max(1, limit * 4))
     rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
     if rerank_window_limit > 0:
@@ -4560,9 +5357,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
     )
-    ordered = collapse_duplicate_candidates(
-        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
-    )
+    identity_rows = duplicate_identity_rows(engine, ordered, deadline=deadline)
+    ordered = collapse_duplicate_candidates(ordered, identity_rows)
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()
     scope_session_ids = set(_recent._recent_conversation_scope_session_ids(engine))
@@ -4571,7 +5367,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             scope_session_ids.update(engine._store.session_lineage_descendants(str(engine.current_session_id or "")))
     except Exception as exc:
         logger.debug("LCM subagent scope read failed: %s", exc)
-    ordered = apply_prior(ordered, scope_session_ids, now, scope_bias)
+    ordered = apply_prior(
+        ordered, scope_session_ids, now, scope_bias,
+        recency_floor=kwargs.get("recency_floor", getattr(engine._config, "recall_recency_floor", 0.5)),
+    )
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
@@ -4584,6 +5383,16 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
     #    a tool argument): it filters hits by a score floor after the call, so
     #    an FTS-only anchor below that floor would displace an eligible hit. --
+    # -- Optional adjacent replies (default OFF), before the FTS anchor so the
+    #    #950 anchor guarantee still holds over the final window. --
+    adjacent_pairs, adjacent_unavailable = [], None
+    if (kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session"
+            and kwargs.get("adjacent_reply", getattr(engine._config, "recall_adjacent_reply", False))):
+        ordered, adjacent_pairs, adjacent_unavailable = _lcm_recall_adjacent_reply(
+            engine, ordered, identity_rows, limit=limit, deadline=deadline,
+            excluded=excluded_session_ids, allowed=candidate_session_ids,
+        )
+    later_n = _recall_later_statements(kwargs.get("later_statements", getattr(engine._config, "recall_later_statements", 0)))
     fts_anchor_info: dict[str, Any] | None = None
     if bool(kwargs.get("fts_anchor", True)) and bool(
         getattr(engine._config, "recall_fts_anchor", True)
@@ -4591,8 +5400,30 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ordered, fts_anchor_info = place_fts_anchor(
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
+    anchor_index = (fts_anchor_info["position"] - 1 if fts_anchor_info["fired"] else
+                    fts_anchor_index(ordered, arm_hits, arm_order, limit, arm_weights)) if (later_n or min_sessions) and fts_anchor_info is not None else None
+    protected_entry = ordered[anchor_index] if anchor_index is not None else None
+    session_floor_info = None
+    if min_sessions:
+        ordered, session_floor_info = _lcm_recall_session_floor(
+            ordered, limit, min_sessions, protected_entry=protected_entry)
+        if fts_anchor_info is not None and fts_anchor_info["fired"]:
+            fts_anchor_info["position"] = next(
+                i for i, entry in enumerate(ordered, 1) if entry is protected_entry)
+    place_later = partial(
+        _lcm_recall_later_statements, engine, identity_rows=identity_rows, n=min(later_n, limit),
+        deadline=deadline, excluded=excluded_session_ids, allowed=candidate_session_ids,
+        query=query, fts_arm_index=fts_arm_index,
+        fts_anchor_identity=_hit_identity(protected_entry["hit"]) if protected_entry is not None else None,
+    ) if later_n and kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) != "session" else None
 
     _annotate_subagent_lineage(engine, [entry["hit"] for entry in ordered if isinstance(entry.get("hit"), dict)])
+    # Only the model's own call follows config; internal callers pin it off.
+    read_summary_event_time = (
+        partial(_lcm_recall_summary_event_time_rows, engine)
+        if kwargs.get("summary_event_time", getattr(engine._config, "recall_summary_event_time", False))
+        else None
+    )
     session_delivery = None
     if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
         from .recall_session import deliver_session
@@ -4602,6 +5433,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
+            **({"summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
         )
     return recall_delivery.deliver_recall(
         ordered,
@@ -4628,8 +5460,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         degraded_reasons=degraded_reasons,
         timed_out=timed_out,
         fts_anchor_info=fts_anchor_info,
+        session_floor_info=session_floor_info,
         fts_rerun=fts_rerun,
         summary_leads=summary_leads,
+        session_hint=partial(_lcm_recall_session_hint, engine) if kwargs.get(
+            "session_hints", getattr(engine._config, "recall_session_hints", False)) else None,
+        guidance_v2=kwargs.get("recall_guidance", getattr(engine._config, "recall_guidance", "v1")) == "v2",
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
         response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP,
@@ -4638,6 +5474,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         content_chars=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
         strict_selector_factory=partial(_LcmRecallStrictSelector, engine=engine),
         hydrate=partial(_lcm_recall_answer_ready_content, engine),
+        read_snippet_windows=partial(_lcm_recall_snippet_windows, engine),
+        read_extra_entries=partial(_lcm_recall_snippet_windows, engine, extra_entries=True),
         read_event_time=partial(_lcm_recall_event_time_rows, engine),
         event_time_fields=_lcm_recall_event_time,
         read_occurrence_source=lambda store_id: (
@@ -4646,6 +5484,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        adjacent_reply=adjacent_pairs,
+        adjacent_reply_unavailable=adjacent_unavailable,
+        place_later=place_later,
+        extra_entries=_recall_extra_entries(
+            kwargs.get("extra_entries", getattr(engine._config, "recall_extra_entries", 0)),
+        ),
+        snippet_window_hits=_recall_snippet_window_hits(
+            kwargs.get("snippet_window_hits", getattr(engine._config, "recall_snippet_window_hits", 0)),
+        ),
+        delivery_order=kwargs.get("delivery_order", getattr(engine._config, "recall_delivery_order", "score")),
+        **({"read_summary_event_time": read_summary_event_time} if read_summary_event_time else {}),
     )
 
 
@@ -4899,7 +5748,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             consent_option = ""
             consent_note = ""
             if "chunk" in stale_tasks:
-                from .command import _is_local_embedding_provider
+                from .embedding_provider import _is_local_embedding_provider
 
                 corpus_option = " --corpus both" if "summary" in stale_tasks else " --corpus chunks"
                 if not _is_local_embedding_provider(provider_id):
@@ -5202,7 +6051,10 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     # something usable.
     session_id = engine.current_session_id
     # #622: another process of this profile where Hermes did not take LCM-X.
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_process = inactive_record_notice(
+        getattr(engine, "_hermes_home", ""),
+        pending_record=getattr(engine, "_inactive_load_record", None),
+    )
     inactive_payload = {"inactive_process": inactive_process} if inactive_process else {}
     if not session_id:
         return json.dumps({
@@ -5256,6 +6108,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         **({"background_leaf_prep": full_status["background_leaf_prep"]}  # #787; absent while off
            if "background_leaf_prep" in full_status else {}),
         "zero_leaf_streak": full_status.get("zero_leaf_streak"),  # #1162
+        "hidden_only_streak": full_status.get("hidden_only_streak", 0),
+        **({"hidden_only_last_pass": full_status["hidden_only_last_pass"]}
+           if "hidden_only_last_pass" in full_status else {}),
         "model": full_status.get("model", ""),
         "provider": full_status.get("provider", ""),
         "raw_context_length": full_status.get("raw_context_length", engine.context_length),
@@ -5314,7 +6169,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "deferred_maintenance_max_passes": engine._config.deferred_maintenance_max_passes,
             "critical_budget_pressure_ratio": engine._config.critical_budget_pressure_ratio,
             "threshold_full_sweep_enabled": engine._config.threshold_full_sweep_enabled,
+            "depth_target_ratio": engine._config.depth_target_ratio,
             "summary_prefix_target_tokens": engine._config.summary_prefix_target_tokens,
+            "summary_prefix_target_ratio": engine._config.summary_prefix_target_ratio,
             "threshold_full_sweep_max_passes": 12,
             "threshold_full_sweep_max_seconds": engine._foreground_budget_seconds()[1],
             "foreground_soft_seconds": engine._foreground_budget_seconds()[0],
@@ -5403,12 +6260,22 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         })
 
     checks: list[dict] = []
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_process = inactive_record_notice(
+        getattr(engine, "_hermes_home", ""),
+        pending_record=getattr(engine, "_inactive_load_record", None),
+    )
     checks.append({
         "check": "inactive_process",
         "status": "warn" if inactive_process else "pass",
         "detail": inactive_process or "no live inactive process",
     })
+    from .store import records_doctor
+    try:
+        records_detail = records_doctor(engine._store)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        records_detail = f"records: unavailable ({exc})"
+    checks.append({"check": "records", "status": "warn" if "refused" in records_detail or "unavailable" in records_detail
+                   else "pass", "detail": records_detail})
     # Diagnose the foreground session, not whatever side-channel session
     # currently owns engine._session_id. Falls back to the bound id when no
     # foreground has ever been bound.
@@ -5496,12 +6363,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    for check_name, conn, spec in (
-        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
-        ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
+    # #2345: each check's SAVEPOINT/ROLLBACK TO runs under the lock its connection's
+    # writers take, so it cannot interleave with an ingest or a summary-tree write.
+    for check_name, conn, lock, spec in (
+        ("messages_fts_integrity", engine._store.connection, engine._store._write_lock, build_message_fts_spec()),
+        ("nodes_fts_integrity", engine._dag.connection, getattr(engine._dag, "_db_lock", nullcontext()),
+         build_nodes_fts_spec()),
     ):
         try:
-            fts_integrity = check_external_content_fts_integrity(conn, spec)
+            with lock:
+                fts_integrity = check_external_content_fts_integrity(conn, spec)
             status = fts_integrity["status"]
             checks.append({
                 "check": check_name,
@@ -5777,12 +6648,18 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception:
         survival_fit = None
 
-    # 8. Compaction progress (#1162): consecutive over-threshold passes that stored no leaf
+    # 8. Compaction progress: no stored leaf (#1162) or only hidden leaves (#3081).
     streak = engine._zero_leaf_streak_status() if hasattr(engine, "_zero_leaf_streak_status") else None
+    hidden = engine._hidden_only_streak_status() if hasattr(engine, "_hidden_only_streak_status") else {}
+    zero_leaf_warning = bool(streak and streak.get("passes", 0) >= 3)
+    hidden_warning = hidden.get("hidden_only_streak", 0) >= 3
+    detail = streak or {"passes": 0}
+    if hidden_warning:
+        detail = {**(detail if zero_leaf_warning else {}), **hidden}
     checks.append({
         "check": "compaction_progress",
-        "status": "warn" if streak and streak.get("passes", 0) >= 3 else "pass",
-        "detail": streak or {"passes": 0},
+        "status": "warn" if hidden_warning or zero_leaf_warning else "pass",
+        "detail": detail,
     })
 
     overall = "healthy"

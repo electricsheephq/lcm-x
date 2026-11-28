@@ -96,3 +96,21 @@ def test_error_predicate_table(message: str, status: int, expected: tuple[bool, 
         escalation.is_summary_context_length_error(error),
         escalation.is_summary_content_filter_error(error),
     ) == expected
+
+
+@pytest.mark.parametrize("status", [None, 429])
+@pytest.mark.parametrize(("message", "size_refusal"), [
+    ("Rate limit reached for model on tokens per min: too many tokens", False),
+    ("rate-limit reached: too many tokens", False),
+    ("rate_limit_error: too many tokens per minute", False),
+    ("rate  limit reached: too many tokens", False),
+    ("OpenRouter: too many requests; token limit reached", False),
+    ("Hermes wrapper: rate-limit reached: too many tokens", False),
+    ("Request too large on tokens per min (TPM): token limit exceeded", True),
+    ("maximum context length exceeded", True),
+])
+def test_context_length_provider_wording(message, size_refusal, status):
+    error = RuntimeError(message)
+    if status is not None:
+        error.status_code = status
+    assert escalation.is_summary_context_length_error(error) is (size_refusal and status is None)

@@ -81,10 +81,30 @@ B1 and B2 are scored per session lineage: the chat lineage is S0 and its compres
 The expected assistant rows come from the provider log, not the host result: exactly one scripted reply per
 completed non-cancel attempt (a reply the host dropped is a deficit), plus the host's own cited failed-turn copy
 (`agent/turn_failure_copy.py` `FAILED_TURN_NOTICE`/`PARTIAL_FAILED_TURN_NOTICE`, exact text) only on an attempt
-the host reported `interrupted`. Any other assistant row is surplus.
+the host reported `interrupted`. B1/B2 also expect host-held in-flight replies as follows. An attempt with an
+emit and no turn end contributes its nonempty last emit only when host assistant evidence in its lineage has
+capacity after already expected assistant items of the same `multiset.h` key: the first
+`max(0, host_count - ended_count)` such attempts in transcript order are expected once each. Host counts use the
+same per-session maximum active count and inactive floor of one as user parity, with the same carrier/recovery
+exclusions and fail-closed reasons; attempts needing an unknown session get no reply expectation. These are
+expectations in both directions, never surplus licences: a missing stored reply or an extra copy fails.
+`numbers.B2.host_held_inflight_replies` lists each selected tag, lineage, 12-character key and host row ids, and is
+absent when empty. Any other assistant row is surplus.
+On the upstream-main and upstream-uid hosts a restart resumes the parent session and abandons the rotation child
+whose last row is the interrupted turn's reply, so the host keeps a reply the plugin is never shown again; the
+scorer fails that run on B1 and B2, tracked in #2624.
 - **B1** every `[Tnn]` user tag (`[A-Z]\d{2,3}`: T100-T103 on 100-turn cells) and `reply to Tnn` sits in
   exactly as many stored rows as expected,
-  and every stored `continue` row is followed by the reply of its own turn (position-bound).
+  and every stored `continue` row has the reply of its own host occurrence.
+
+  A `continue` reply is identified by the row following it in the host record, then matched in the store by
+  lineage, role, content, tool-call fields and host timestamp (`observed_at`), with single-use reply capacity.
+  Store adjacency is not required: session-end head reconciliation can append earlier host rows after already
+  durable rows without losing any occurrence. Duplicate host copies bind when there is exactly one distinct
+  non-None successor binding; copies followed by a summary or session end add no choice. No binding or multiple
+  distinct reply bindings fail. If state.db is missing/unreadable, the store lacks `observed_at`, or a stored
+  continue or its host copy lacks a timestamp, that lineage uses the old store-order check instead; B1 details
+  record the lineage and reason in `continue_fallbacks`. Tag deficit and surplus checks still apply.
 - **B2** multiset-v1 (port of the gauntlet's `lossless_bar_multiset.py`), per session lineage: per (role,
   sha256(content with only leading/trailing whitespace stripped, the host's ACP prompt strip
   `acp_adapter/server.py` `_extract_text(prompt).strip()`)) stored count == expected count; internal whitespace
@@ -98,14 +118,72 @@ the host reported `interrupted`. Any other assistant row is surplus.
   existing edge-whitespace rule; tool-result hashes remain exact). Missing/unreadable payloads or
   absent content are real deficits and fail B2; `numbers.B2.externalized` reports resolved/unresolved
   counts, loss reasons and up to 10 store ids, separately from ordinary deficits.
+- **B2 visibility split (P1h, design r3.5 §5).** `numbers.B2.visible_surplus_rows` and
+  `silent_surplus_rows` partition only the existing unlicensed user, assistant and tool surplus, across all
+  stored lineages. B2's verdict, existing numbers and `failed_bars.B2` stay unchanged. Host-parity licences,
+  embedded credits, merges and projections retain their existing accounting.
+  `supersedes` / `generated_unproven` explain their own row; an unordered `possible_replay_of` pair explains
+  one endpoint only when both rows have the same B2 key in the same lineage. Relations are read from the whole
+  store, but a pair across lineages or keys explains nothing. `composite`, `split` and absent relation tables
+  explain nothing. Copies are counted, not rows: a row whose `tool_calls` holds one call entry twice holds two
+  copies of that key. Store order identifies a key's expected copy only when the key keeps at most one copy
+  (expected, licensed or loose-allowed): that copy is its earliest stored copy (by store ID), so only its last
+  *surplus* copies can be explained. A self relation counts only on such a row and a pair explains only such an
+  endpoint, so a relation on the expected copy (an edited revision's `supersedes`, say) never explains a later
+  copy that carries none. A key that keeps two or more copies (genuine repeats, host-licensed copies) counts its
+  worst case, because a silent re-store stored before a related later copy cannot be told apart: its surplus
+  fills rows without a self relation first, then the self-related rows that hold the most copies, and each
+  self-related row it reaches explains one copy; pairs explain nothing there. A copy that a host merge record
+  consumed as a composite's part is a kept copy of its key and stays in the key's ID list. A key takes the worst
+  case whatever it keeps when its ID list holds such a consumed copy or a copy an embedded credit reserved: #823
+  merges and #804 licensed parts pick their copies around reserved rows, so store order no longer identifies the
+  kept copy.
+  Maximum matching assigns distinct witnesses to distinct stored rows within each key, capped by
+  that key's unlicensed surplus; a stored row explains at most one copy of each key it holds, so an assistant row
+  whose content and tool entries were stored twice explains one copy of each. A row whose `tool_calls` holds the
+  same call entry twice can explain only one of those copies, so the other stays silent. Duplicate/reversed pairs and
+  repeated self relations add no capacity. `silent_surplus_examples` are best-effort: up to 10 of the
+  highest-numbered rows of each key that still hold an unexplained copy, rows without a self relation first,
+  usually the later copies.
+  Complete store-ID lists drive this split; existing truncated display lists stay as they are.
+  `silent_surplus_examples` merges user, assistant and tool examples (up to 10, sorted by store ID/role/hash):
+  `{store_id, role, sha256}`. Tool hashes are SHA256 of `json.dumps(key[1:], sort_keys=True)` (the existing
+  tool key without its lineage, with default JSON separators); call/malformed-call roles are `assistant`.
+  Examples are deterministic representatives among rows left unexplained by the matching.
+  Attribution forms (#2377, #2212; `multiset.attribution_forms`) are self witnesses too, each in one function:
+  `link_pending_ids` (a `link_pending` relation with `related_store_id` NULL; the ingest writes one only when
+  computing a row's links raised, and then over-marks, new rows of that ingest included, so a surplus copy that
+  carries one is visible) and `composite_witness` (a stored user row C with
+  `composite_of` relations, ordinals 0..n-1 contiguous with n >= 2, each naming an earlier stored user row of C's
+  session (store id < C's), or NULL only at ordinal 0 for the host scaffold; with one NULL the leftover span starts
+  with the todo injection header
+  `_PRESERVED_TODO_CONTEXT_PREFIX`, with none ordinal 0 names a stored user row that starts with it; C's content is
+  the segments joined by `\n\n`, byte for byte; only C is credited, never its parts). The relation format is
+  provisional. Valid composites consume their non-NULL parts once, lowest C store id first; any shared claimed
+  part prevents credit, and the replay needs its own `possible_replay_of`. NULL claims nothing. The gate audit's
+  `composite_store_ids` lists the composite-credited surplus copies; `composite_rows` counts the visible surplus
+  the form adds beyond the other links, so it can be lower when another link already explains a listed copy (a
+  key that keeps at most one copy never lists its expected copy; in a worst-case key the listed ids are the rows
+  the matching picked for its surplus slots; sorted per lineage, unioned in totals). Composite credit leaves M3
+  unchanged. `link_pending_rows` and `composite_rows` count the visible surplus each
+  form adds to the relation
+  witnesses alone (a row two forms credit counts in both); `link_pending_rows_total` counts every store row with a
+  `link_pending` relation, surplus or not: non-zero is a defect signal of its own. The scorer has no log input, so
+  logged intended links are credited by the gate audit only. Scaffold provenance metadata
+  (`real_user_scaffold_store_id:<id>`) is not accounting and credits nothing.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
   one session of L holds at once, else 1 if L holds it only on inactive rows; rotation copies, in-place generation
-  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed. No
+  copies and H1's fresh-stamp re-issues never add up. Deficits, assistant and tool rows are never licensed as
+  surplus; the separate host-held in-flight expectation above uses assistant evidence. No
   readable state.db, no licence (`unavailable` records why). Every licence is reported: `host_parity_licensed`
   under `numbers.B1`/`numbers.B2` (count + up to 10 records: LCM store ids, host row ids, content sha256, tags), the
   MATRIX `host-dup` column and "PASS with host-parity licences" section, and the ISSUE-MAP licence list.
+B10's inputs are unchanged; a child's own reply with the same bytes as an ended parent reply is labelled by
+B10 today, a limit this change does not alter; no recorded cell holds such a collision (the scripted child reply
+differs from every parent reply).
+
 - **B3** zero `publication_invariant_conflict` log lines across phases.
 - **B8** zero `LCM survival fit applied` log lines across phases (#582): a survival fit keeps an over-window
   session alive, so on a normal cell it marks a compaction that did not bring the list under the window.
@@ -346,10 +424,21 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 - **customer-0.21.2 lcm-tool-mid-turn is UNSUPPORTED over ACP.** That host defers plugin tools behind the
   `tool_search`/`tool_call` bridge by default (`tools.tool_search.enabled: "auto"`, `hermes_cli/config_defaults.py:1793`),
   so the scripted direct `lcm_grep` call is never dispatched ("scenario not proven"). The default is not changed.
+- **delegated-child/{in-place,rotation} (#1931, acp-process only).** Turns 5, 17 and 29 call `delegate_task` (the
+  `delegation` toolset); each goal is the child's own tagged user row (`[Dnn] user turn ...`, `probe.child_goal`), and
+  the provider answers a request whose last user row carries that tag with `reply to Dnn: child done.` before any
+  parent step. The observer records the child's run as `child_user_sent` / `child_turn_end` under its own session and
+  the parent's dispatch at `AIAgent._dispatch_delegate_task` (top-level delegations run in the background). A
+  state.db session with source `subagent` whose parent is not a subagent session roots its own lineage, so B1/B2
+  score each child apart from the chat lineage. B10 (`scorers/delegated.py`) fails on a host child count other than
+  the issued delegates, a child with no stored rows, a missing or different lcm.db `session_lineage` parent, a
+  child-tagged row in another lineage, or a chat-lineage prompt or reply stored under a child (its own goal excepted).
+  A delegate whose child never ran or completed, or a child the host did not record as `subagent`, is UNSUPPORTED.
+  R1 in-process reports the cells UNSUPPORTED: the host builds the child with its own provider client.
 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
-`bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. The workflow
+`bench/instruments/reliability/**` and the workflow file. This is an advisory GitHub check. The workflow
 names its hosts in its own matrix (adding a `hosts.ci.json` entry alone adds no nightly coverage); each named host is
 pinned in `hosts.ci.json`: ref-0.21.5, floor-0.21.3, r34.4-0.21.5 and r34.10-0.21.5 on Python 3.11, r34.15-0.21.5
 (the fleet runtime candidate) on 3.12, upstream-main and upstream-uid on 3.14. floor-0.21.3 is upstream v2026.9.14 (345cd2b0), the oldest host the plugin declares (`requires_hermes: ">=0.21.3"`).
@@ -369,6 +458,22 @@ plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-e
 A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars, and a
 target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
 G-REL-1 diagnostics list uncovered bars, targets and open targets.
+
+The scheduled comparison reads all three rounds, including default-window R1, against the latest completed scheduled run
+on the same branch that published `reliability-tables`. A new failing cell, a baseline cell missing from tonight's
+tables, unreadable baseline or candidate tables, or a missing baseline makes the comparison red. A readable
+bootstrap night publishes tables while red. Later nights publish after a clean comparison or a red comparison
+whose alarm job succeeded. A fresh failure that passes one retry is FLAKE. The comparison retries at most 20
+fresh failures within 60 minutes. A second FLAKE for the same host, round and cell in seven comparable nights is NEW.
+The open `nightly-regression` issue records NEW cells and their run links, and a tracked cell stays NEW while it fails.
+A clean comparison leaves a comment on an open alarm. Review the recorded verdicts and failed bars, link the fix or accepted
+disposition, and close the alarm after every tracked cell is dispositioned. For a release respin, dispatch
+`gh workflow run reliability-nightly.yml --ref <candidate-ref> -f baseline_run=<GA run id>`.
+The dispatch reads the open alarm's tracked cells, compares with the named run, and uploads its tables for another
+dispatch. A cell tracked on main counts as NEW in the respin table while it fails.
+Omit `baseline_run` to use the scheduled baseline selection for the candidate ref. To compare downloaded runs locally, use
+`python -m bench.instruments.reliability.ci compare --mode respin --candidate <candidate-tables> --baseline <ga-tables>`
+with the candidate and previous GA runs.
 The exact-cell additions in `ci.CELL_GATE` are: R2 `continuity/forced-compaction-then-turn/{in-place,rotation}`
 on every pinned host at B1/B2/B3/B4/B8/F4, plus B9 on `upstream-uid`; R1 `native-on-off/{v0.23.3,v0.24.3}/in-place`
 at B3/B4/B8; and R1 `overflow-recovery-restart/{in-place,rotation}` and `upgrade-crash-after-rotation/rotation`
@@ -376,6 +481,15 @@ at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain e
 and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
 On runtime hosts, R1 `publication-failure/rotation-child-persistent` gates only on derived `B2D`: a B2 FAIL
 with a positive or missing deficit count; B1 mismatches and B2 surplus remain accepted under #1588, independently of #1797's open state.
+
+`B2S` is an available exact-cell CI predicate beside `B2D`: any deficit (including tool/externalized
+loss), positive silent surplus, or missing/invalid visibility split fails closed. Invalid means any of the
+counts is missing, not an int or negative, or `visible_surplus_rows + silent_surplus_rows` differs from
+`surplus_rows + tool_surplus_rows`. A split assistant reply (`split_keys` above 0) also fails B2S: the scorer
+counts no deficit for a split key whatever its expected count, so a split could hide a lost copy. Visible
+surplus alone passes B2S while still failing B2. B2S checks
+receipts even on a reported PASS. A B2S-gated row reported UNSUPPORTED, INCONCLUSIVE or any verdict other than
+PASS or FAIL fails closed even when its counts are clean, because its scenario was not proven. This change promotes no `CELL_GATE` entry and does not prove that the P1 gate passes.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
@@ -397,3 +511,83 @@ The nightly gate checks this pattern per host and transport, with B9 required in
 `controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
 may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
+
+## Held-reply crash (#2624)
+
+`crash_after_host_reply_before_store` runs only under `acp-process`: reserve the
+plugin store with `BEGIN IMMEDIATE`, release the scripted MAIN reply, poll the
+read-only host DB every 2 ms for a new assistant row, then kill immediately.
+Validate the row's ACP root and compression depth, check that the host kept the
+reply and the store did not, release all connections, and restart the same ACP
+session. Phase B must finish `done`. Reservation failure, a five-second poll
+timeout, invalid lineage, host group did not exit, failed post-kill checks, or failed restart yields ERROR
+with `reply-held fault INVALID`. Evidence records contain times and counts, not content.
+
+The held-reply fault follows this order:
+
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before release | Store writer is blocked | — |
+| release | Release turn N's reply | Reservation precedes response bytes | — |
+| poll | Read-only poll every 2 ms | Witness a new host reply | Yes, once written |
+| kill | Signal on the poll that sees the row; no read in between | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s, else INVALID | No writer in the host's process group can commit later | — |
+| validity read | Check new row, root, depth | Correct reply and lineage | Yes |
+| post-kill check | Host has the witnessed row; store has none | Confirm the held-reply window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks; release before restart | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+The `tool_results` position arms on step 0's tool-call response, before any tools run.
+It polls for every issued call id's tool result in the host DB. The next main request
+still records `tool_seen`, then is held until killed and never released: no final reply
+exists. Root/depth and the call row plus all results are checked after group exit;
+Reservation failure, response release failure, or a poll timeout or exception also
+kills and confirms exit, without firing the fault.
+
+| step | what happens | invariant it protects | final when read? |
+|---|---|---|---|
+| reservation | `BEGIN IMMEDIATE` before the tool-call response | Store writer is blocked | — |
+| release | Release the tool-call response | Reservation precedes response bytes | — |
+| host writes | Call row and both results | Host owns the tool turn | — |
+| poll | Wait until every result row of the step exists | Witness the whole step | Yes, once written |
+| next main request | Held, never released (may overlap the poll) | No final reply exists | — |
+| kill | Signal on the witnessing poll; no intervening read | Close the witnessed window | — |
+| exit confirmed | Group gone and leader exited; bounded 5 s | No writer in the host's process group can commit later | — |
+| validity read | One session, ACP root and expected depth | Correct tool turn and lineage | Yes |
+| post-kill check | Call row and every result in host; none in store | Confirm the held tool-loop window | Yes |
+| ROLLBACK | Last, on every path | Hold reservation through checks | — |
+| restart | Phase B `session/load` must end `done` | Recovery completes in the same session | — |
+
+In both orders, `fire()` reads the host-log commit count between kill and exit;
+that count is diagnostic only and is not final when read.
+
+The five cells use provisional turn/depth pairs: `rotation-turn` (12/1),
+`plain-turn` (15/1), `multi-hop` (22/2), `pre-rotation` (5/0), and `in-place`
+(15/0). The first three target #2624; the controls gate every host. On main,
+upstream-main and upstream-uid should FAIL the first three with B1/B2, classified
+KNOWN under #2624: `rotation-turn` lacks the T12 reply (B1 `reply T12`, B2 deficit
+1), and in some runs also the T12 user row (B1 `T12` and `reply T12`, B2 deficit
+2), because at a run's first rotation the plugin sometimes stores the user row
+only together with the reply; `plain-turn` lacks the T15 user row and reply
+(B1 `T15` and `reply T15`, B2 deficit 2); `multi-hop` lacks the T22 user row and
+reply (B1 `T22` and `reply T22`, B2 deficit 2). Both controls should PASS.
+All five should PASS on r34.10-0.21.5.
+The two additional cells use turn/depth 15/1 and two distinct `read_file` paths.
+On upstream-main and upstream-uid, KNOWN under #2624: `tool-turn` should FAIL B1
+(`T15`, `reply T15`), B2 deficit 2 and `tool_missing_rows` 4; `tool-loop` should
+FAIL B1 (`T15`), B2 deficit 1 and `tool_missing_rows` 4. Both should PASS on every
+other host. The opt-in `reply-held-crash-control/tool-loop-in-place` (15/0) should
+PASS on every host; it is excluded from `--cells all` and the nightly matrix.
+B6 is judged when a tool group is stored or a split, orphan drop, or tool execution
+failure is recorded. For these held tool cells alone, no stored group otherwise
+makes B6 not applicable when host tool rows are readable. Unavailable host tool rows
+keep B6 applicable and cap a passing B2 at INCONCLUSIVE.
+Other exact known failures retain their existing classification; other failed bars
+remain findings. Depth validation decides validity, not the cell's name.
+
+The measured upstream-main store uses WAL journal mode. The reservation blocks
+every writer in either WAL or delete journal mode. This proves behavior while
+the reservation prevents a store commit. The
+reservation, rather than natural slowness, creates that window. It does not prove
+natural crash timing, real-model timing, or behavior on host versions other than
+the pins. No timed-crash variant is provided.

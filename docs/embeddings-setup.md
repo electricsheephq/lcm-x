@@ -67,20 +67,19 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the commands below
 Then verify in Hermes:
 
 ```text
-# Cloud provider-bound copies are protected automatically. Durable storage stays raw.
+# The experimental cloud embedding filter defaults to off.
 /lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
 /lcm status                        # checks the active provider and coverage
 ```
 
-Known cloud providers protect every provider-bound copy — embedding documents
-and queries, recall/grep/proactive query payloads, and rerank inputs — using
-`LCM_SENSITIVE_PATTERNS`, while the durable corpus remains lossless by default.
-Set `LCM_SENSITIVE_PATTERNS_ENABLED=true` only if you also want irreversible
-redaction on future durable ingest. To deliberately send raw embedding input,
-set `LCM_EMBEDDING_PRIVACY_ENABLED=false`; this opt-out is recorded as the
-`privacy:off` vector revision, so changing the posture requires re-embedding.
+Known cloud providers receive unfiltered embedding documents, queries, and
+rerank inputs by default under the `privacy:off` vector revision. Set
+`LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to experimental provider-input
+filtering with `LCM_SENSITIVE_PATTERNS`. Changing the setting requires
+re-embedding. `LCM_SENSITIVE_PATTERNS_ENABLED=true` separately enables
+irreversible redaction on future durable ingest (unsupported; do not enable).
 
 Notes: requests are batched under Voyage's caps — both the token budget and the 1000-item
 per-request cap; over-length documents are skipped and reported, never silently truncated;
@@ -193,6 +192,30 @@ companion selected across host updates: the host records its dependency, while
 ordinary LCM-X version updates leave the stable carrier manifest unchanged.
 Disabling or uninstalling the carrier may remove fastembed on the next sync.
 
+### Source checkouts: check optional host extras after enabling the companion
+
+A Hermes source checkout installed outside the host installer may have no recorded
+extras. Enabling the companion can build a new plugin generation environment that
+drops extras such as `acp`: LCM-X still loads, but an ACP editor transport can fail
+to start with an import error. After enabling, check each extra you use with the
+Python interpreter from the plugin generation reported by Hermes, for example:
+
+```bash
+<plugin-python> -c 'import acp'
+```
+
+If it is missing, read the `acp` optional dependency in **that Hermes checkout's**
+`pyproject.toml` and install its exact pinned requirement into that same environment:
+
+```bash
+uv pip install --python <plugin-python> '<host-pinned-acp-requirement>'
+```
+
+Replace both placeholders with the active generation's interpreter and the host's
+requirement. `hermes pm install --extra acp` can refuse before environment sync on
+these checkouts when the tool closure is absent. Recheck the import, then restart
+Hermes and retry ACP. A later generation sync can drop a manual install again.
+
 If fastembed is missing after an update, install or enable the companion, restart
 Hermes and run `/lcm doctor`; background preparation and catch-up fill the gap. The
 store and existing vectors are preserved while recall degrades to full text.
@@ -221,7 +244,20 @@ found model-card prefixes raised EmbeddingGemma 2 nDCG@10 by about 6% and pixie-
 
 The contributor reported that `embeddinggemma-2:270m` with Ollama's default batch size rejected inputs over about 2,000 tokens
 with HTTP 413 even with `num_ctx` 8192; raising `num_batch` to 8192 as well worked. LCM-X does not send Ollama `options`.
-Try setting both on the model with Modelfile `PARAMETER` entries; that method was not verified by the contributor.
+Setting both on a derived model with Modelfile `PARAMETER` entries works; the contributor verified it on Ollama 0.40.13
+([#1118](https://github.com/electricsheephq/lcm-x/issues/1118#issuecomment-6550418215)):
+
+```text
+FROM embeddinggemma-2:270m
+PARAMETER num_ctx 8192
+PARAMETER num_batch 8192
+```
+
+```bash
+ollama create embeddinggemma-2-8k -f Modelfile
+```
+
+Then set `LCM_EMBEDDING_MODEL=embeddinggemma-2-8k`.
 
 Ollama requests set `truncate: false`, so an input that exceeds the model's context fails loudly
 rather than being silently truncated to a misleading embedding. As with Voyage, an Ollama
@@ -417,12 +453,11 @@ FTS-only instantly.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the
 chunk corpus starts from raw message bytes, including tool-result output and error/traceback content.
-For known cloud providers the configured provider-input privacy transform applies by default
-(`LCM_EMBEDDING_PRIVACY_ENABLED` unset) and rejects residual detector matches before
-transport; `LCM_EMBEDDING_PRIVACY_ENABLED=false` sends chunk text raw under the `privacy:off`
-revision. Neither posture redacts your durable history — the chunk corpus is read from raw
-message bytes either way. This protects configured patterns but cannot
-classify every possible sensitive fact in source-derived chunk text.
+Known cloud providers receive unfiltered chunk text by default under the
+`privacy:off` revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to the
+experimental filter, which applies configured patterns to the provider input
+and rejects residual matches before transport. Both modes read from the same
+durable history.
 
 Because of this, `--corpus chunks --apply` and `--corpus both --apply` **refuse** on a cloud provider
 unless you pass an explicit acknowledgment:

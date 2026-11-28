@@ -9,7 +9,7 @@ from typing import Any, Collection, Dict, List
 
 from hermes_lcm.search_query import (
     AGE_DECAY_RATE,
-    build_snippet,
+    build_snippet_with_span,
     compute_like_fallback_fetch_limit,
     compute_search_candidate_cap,
     compute_search_fetch_limit,
@@ -166,7 +166,7 @@ class ReferenceLikeSearch:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                result["snippet"] = build_snippet_with_span(content, terms)[0]
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)

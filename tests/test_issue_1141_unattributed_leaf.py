@@ -73,6 +73,15 @@ def _two_passes(engine, view, summarize, caplog):
     engine._run_pre_compaction_extraction = extraction
     engine._schedule_pre_compaction_assertions = extraction
     engine._config.extraction_enabled = engine._config.assertion_extraction_enabled = True
+    # The warning reads the pass's own store-id map, which the pass restores on exit (#2344); keep what it saw.
+    warned_maps = []
+    warn = engine._warn_unattributed_leaf
+
+    def record_map(rows):
+        warned_maps.append(dict(engine._current_compress_store_ids_by_message_id or {}))
+        return warn(rows)
+
+    engine._warn_unattributed_leaf = record_map
     for _ in range(2):
         engine._clear_persisted_no_progress_hold()
         engine._no_progress_hold = None  # exercise another pass after the hold expires
@@ -89,7 +98,7 @@ def _two_passes(engine, view, summarize, caplog):
     warnings = [record.getMessage() for record in caplog.records if record.getMessage().startswith(WARNING)]
     assert len(warnings) == 1
     assert f"frontier={frontier} rows=" in warnings[0]
-    full_map = engine._current_compress_store_ids_by_message_id or {}
+    full_map = warned_maps[0]
     first = min((sid for sid in full_map.values() if sid > frontier), default="none")
     assert warnings[0].endswith(f"first_mapped_store_id={first}")
 

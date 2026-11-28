@@ -1,0 +1,228 @@
+{
+  "run_id": "returning-work-reach-hermes-kit7-gpt-6-luna-20261113",
+  "claim_class": "advisory",
+  "product_commit": "1fc6112e38a11e99080ccc0a9288b93aea396cd7",
+  "product": "LCM-X 0.30.0 runtime payload",
+  "host": {
+    "name": "Hermes",
+    "version": "v0.23.1",
+    "commit": "3b421578588243f920886e6fe79a6faa87ea026e"
+  },
+  "model": "gpt-6-luna",
+  "sent": {
+    "models": [
+      "gpt-6-luna"
+    ],
+    "efforts": [
+      "medium"
+    ],
+    "tiers": [
+      "priority"
+    ]
+  },
+  "kit_build": "7",
+  "kit_manifest_sha256": "3e44bc40d295cacbaf339656731177ec1ad77ac70eeb6078737464c749678fe4",
+  "store_sha256": "2d301b849af73185c554ccaa2082d3835a2dbc76b53defe542acd76cdda08696",
+  "analysis_script_sha256": "6e66c9bf4be4130905f32e6e419304eaef1cd3744a0a41c5cf2be30206416531",
+  "analysis_status": "clean",
+  "rows": {
+    "read": 225,
+    "final": 225,
+    "infra": 0,
+    "left_out": 0,
+    "no_reply_within_limit": 0
+  },
+  "headline": {
+    "metric": "reach_at_shipped_defaults_of_25",
+    "value": 7,
+    "n": 25
+  },
+  "reach_under_instruction_ci95": {
+    "instruction_exact_search": {
+      "k": 24,
+      "n": 25,
+      "ci95": [
+        0.796483,
+        0.998988
+      ]
+    },
+    "instruction_recall": {
+      "k": 24,
+      "n": 25,
+      "ci95": [
+        0.796483,
+        0.998988
+      ]
+    }
+  },
+  "cells": {
+    "unchanged_plugin": {
+      "made_up_id": {
+        "n": 25,
+        "reached": 8,
+        "reached_with_id": 6,
+        "right_at_once": 0,
+        "wrong_at_once": 0,
+        "asked_for_examples": 25,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 20.94
+      },
+      "real_id": {
+        "n": 25,
+        "reached": 8,
+        "reached_with_id": 7,
+        "right_at_once": 0,
+        "wrong_at_once": 1,
+        "asked_for_examples": 24,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 21.65
+      }
+    },
+    "instruction_exact_search": {
+      "made_up_id": {
+        "n": 25,
+        "reached": 25,
+        "reached_with_id": 25,
+        "right_at_once": 0,
+        "wrong_at_once": 0,
+        "asked_for_examples": 25,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 22.26
+      },
+      "real_id": {
+        "n": 25,
+        "reached": 24,
+        "reached_with_id": 24,
+        "right_at_once": 2,
+        "wrong_at_once": 11,
+        "asked_for_examples": 11,
+        "other": 1,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 32.84
+      }
+    },
+    "instruction_recall": {
+      "made_up_id": {
+        "n": 25,
+        "reached": 24,
+        "reached_with_id": 24,
+        "right_at_once": 0,
+        "wrong_at_once": 0,
+        "asked_for_examples": 25,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 28.47
+      },
+      "real_id": {
+        "n": 25,
+        "reached": 24,
+        "reached_with_id": 24,
+        "right_at_once": 2,
+        "wrong_at_once": 9,
+        "asked_for_examples": 13,
+        "other": 1,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 32.6
+      }
+    },
+    "card": {
+      "made_up_id": {
+        "n": 25,
+        "reached": 9,
+        "reached_with_id": 8,
+        "right_at_once": 0,
+        "wrong_at_once": 0,
+        "asked_for_examples": 25,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 20.3
+      },
+      "real_id": {
+        "n": 25,
+        "reached": 6,
+        "reached_with_id": 6,
+        "right_at_once": 8,
+        "wrong_at_once": 7,
+        "asked_for_examples": 9,
+        "other": 1,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 27.77
+      }
+    },
+    "card_second_miss_line_wording": {
+      "made_up_id": {
+        "n": 25,
+        "reached": 9,
+        "reached_with_id": 8,
+        "right_at_once": 0,
+        "wrong_at_once": 0,
+        "asked_for_examples": 25,
+        "other": 0,
+        "no_reply_within_limit": 0,
+        "infra": 0,
+        "median_seconds": 21.35
+      }
+    }
+  },
+  "bars": {
+    "reach_under_instruction": {
+      "what": "reach under an instruction (better of the two instruction designs, real ids)",
+      "verdict": "pass at this size"
+    },
+    "card_vs_instruction": {
+      "what": "card against the better instruction design",
+      "verdict": "pass"
+    },
+    "card_vs_instruction_right_at_once": {
+      "what": "card against the better instruction design: right at once",
+      "verdict": "pass"
+    },
+    "card_vs_instruction_wait": {
+      "what": "card against the better instruction design: the user's wait",
+      "verdict": "pass, clear at this size"
+    },
+    "no_wrong_after_made_up_id": {
+      "what": "wrong first answers after a made-up id (instructions and card)",
+      "verdict": "pass at this size"
+    },
+    "no_wrong_after_made_up_id_second_wording": {
+      "what": "wrong first answers after a made-up id (card, second miss-line wording)",
+      "verdict": "pass at this size"
+    },
+    "no_self_hits_flagged_search": {
+      "what": "self-hits on exact searches that pass the exclusion flag",
+      "verdict": "pass"
+    },
+    "no_self_hits_flagged_search_real_ids": {
+      "what": "self-hits on exact searches that pass the exclusion flag, real ids only",
+      "verdict": "pass"
+    },
+    "control_card_line": {
+      "what": "miss line against the unchanged plugin on made-up ids (control, no verdict)",
+      "verdict": "no difference seen at this size"
+    },
+    "control_second_wording": {
+      "what": "second miss-line wording against the unchanged plugin on made-up ids (control, no verdict)",
+      "verdict": "no difference seen at this size"
+    }
+  },
+  "raw_sha256": {
+    "trials.jsonl": "8854be616849e4410b9106b5fce6cb29ad951a433c82c8df83b0969f8dccdefd",
+    "report.json": "bd397333f494ad099bb754aadf58907890bdceae45770886e5ccbd46a11aa9be",
+    "analysis-hermes-kit7-gpt-6-luna.json": "5a0ed2a81f2195c2ab96d01fd94080fd163ea45098ad4215d584ba0f7d3779f1"
+  },
+  "t2_tag": null,
+  "t2_state": "unpublished; raw rows (which hold model replies) retained privately",
+  "token_figures": "not included"
+}

@@ -294,8 +294,6 @@ def _temporal_rollups_status(engine: "LCMEngine") -> dict[str, Any]:
             for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS
         },
         "oldest_stale_age_seconds": None,
-        "last_build_cursors": {kind: None for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS},
-        "last_built_at": {kind: None for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS},
         "last_error": None,
     }
     # Disabled deployments deliberately avoid even the metadata reads. This
@@ -342,20 +340,6 @@ def _temporal_rollups_status(engine: "LCMEngine") -> dict[str, Any]:
             payload["oldest_stale_age_seconds"] = max(
                 0, int((datetime.now(timezone.utc) - stale_start).total_seconds())
             )
-
-        cursor_rows = conn.execute(
-            """
-            SELECT period_kind, last_build_cursor, last_built_at
-            FROM lcm_rollup_state
-            WHERE period_kind IN ('day', 'week', 'month') AND scope = ?
-            """,
-            (scope,),
-        ).fetchall()
-        for period_kind, cursor, built_at in cursor_rows:
-            kind_key = str(period_kind)
-            if kind_key in payload["last_build_cursors"]:
-                payload["last_build_cursors"][kind_key] = cursor
-                payload["last_built_at"][kind_key] = built_at
 
         error_row = conn.execute(
             """

@@ -4,6 +4,7 @@ Uses tiktoken when available, falls back to char-based estimate.
 """
 
 import logging
+import re
 import threading
 from functools import lru_cache
 from typing import Any, Dict, List
@@ -13,6 +14,13 @@ from .message_content import normalize_content_value, split_image_parts
 logger = logging.getLogger(__name__)
 
 _CHARS_PER_TOKEN = 4
+# #2863: without a tokenizer, long hex payloads (trace dumps, hex-encoded blobs) size at 2 chars/token. Only runs of
+# 65+ hex characters holding both a letter a-f and a digit count denser, so digests (64 hex), git SHAs and LCM's own
+# pointer names keep the legacy estimate.
+_HEX_RUN = re.compile(r"[0-9a-fA-F]{65,}")
+_HEX_LETTER = re.compile(r"[a-fA-F]")
+_DIGIT = re.compile(r"[0-9]")
+_HEX_CHARS_PER_TOKEN = 2.0
 # Host default per-image price (agent.image_token_cost.DEFAULT_IMAGE_TOKEN_COST).
 _DEFAULT_IMAGE_TOKEN_COST = 1500
 _encoder = None
@@ -91,6 +99,23 @@ def _get_encoder():
     return _encoder if _encoder_ready else None
 
 
+def start_encoder_load() -> None:
+    """Start the background load without waiting for it (#2179).
+
+    A server that must answer at once calls this before it serves: no later
+    caller is then the first, so none waits _ENCODER_FIRST_WAIT_S; each uses
+    the estimator until the load finishes.
+    """
+    global _encoder_thread
+    with _encoder_lock:
+        if _encoder_ready or _encoder_thread is not None:
+            return
+        _encoder_thread = threading.Thread(
+            target=_encoder_loader, name="lcm-tiktoken-load", daemon=True
+        )
+        _encoder_thread.start()
+
+
 def token_counter_status() -> Dict[str, str]:
     """Report the active counter (#615) without starting or waiting on its load."""
     with _encoder_lock:
@@ -109,12 +134,16 @@ def _fallback_token_estimate(text: str) -> int:
     # tokenize far denser (~1-2 tokens/char). A flat len//4 undercounts them
     # ~3-4x, so preflight under-triggers and assembly can overflow the real
     # budget. ASCII-only text is overwhelmingly common and can use the cheap
-    # legacy estimate without scanning every character.
+    # legacy estimate after one regex pass for long hex runs (#2863).
     length = len(text)
     if length == 0:
         return 0
     if text.isascii():
-        return length // _CHARS_PER_TOKEN + 1
+        hex_chars = sum(m.end() - m.start() for m in _HEX_RUN.finditer(text)
+                        if _HEX_LETTER.search(m.group(0)) and _DIGIT.search(m.group(0)))
+        if not hex_chars:
+            return length // _CHARS_PER_TOKEN + 1
+        return int(hex_chars / _HEX_CHARS_PER_TOKEN + (length - hex_chars) / _CHARS_PER_TOKEN) + 1
     non_ascii = sum(1 for ch in text if ord(ch) > 127)
     ratio = non_ascii / length
     if ratio >= 0.5:

@@ -68,10 +68,14 @@ BASE_ARMS.update({n: ({"LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS": "
 
 # D5-A (2026-10-14): the reference agent's own `LCM_*` set, read from the file named by S2_ARM_ENV_FILE (KEY=VALUE lines).
 ENV_FILE_ARM = "LCMX-env-file"
+ENV_FILE_OPEN_ARM = ENV_FILE_ARM + "-open"
 HARNESS_KEYS = ("LCM_DATABASE_PATH", "LCM_HERMES_BASE_DIR")  # set inside the run dir by the harness; file values ignored
 SECRET_ENV: dict = {}  # VOYAGE_API_KEY from the file (embeddings on only); applied to the process env, never recorded
 
-def env_file_arm() -> dict:
+def is_env_file_arm(name: str) -> bool:
+    return name in (ENV_FILE_ARM, ENV_FILE_OPEN_ARM)
+
+def env_file_arm(open_: bool = False) -> dict:
     """Only `LCM_*` keys are taken, plus VOYAGE_API_KEY when the file turns embeddings on; every other key is ignored and
     named in env_file.ignored_keys. No fleet value is merged in."""
     path = os.environ.get("S2_ARM_ENV_FILE")
@@ -86,7 +90,8 @@ def env_file_arm() -> dict:
     SECRET_ENV.clear()
     if on and raw.get("VOYAGE_API_KEY"):
         SECRET_ENV["VOYAGE_API_KEY"] = raw["VOYAGE_API_KEY"]
-    return {"name": ENV_FILE_ARM, "base": ENV_FILE_ARM, "open": False, "kind": "plain", "env": env,
+    return {"name": ENV_FILE_OPEN_ARM if open_ else ENV_FILE_ARM, "base": ENV_FILE_ARM,
+            "open": open_, "kind": "open" if open_ else "plain", "env": env,
             "note": "reference agent LCM_* set from S2_ARM_ENV_FILE (D5-A)", "unsupported": None,
             "env_file": {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "keys": len(env),
                          "ignored_keys": sorted(k for k in raw if k not in env and k not in SECRET_ENV),
@@ -97,8 +102,8 @@ def all_arms() -> list[str]:
 
 def resolve(arm: str) -> dict:
     """{name, base, open, kind, env|None, note, unsupported|None}"""
-    if arm == ENV_FILE_ARM:
-        return env_file_arm()
+    if is_env_file_arm(arm):
+        return env_file_arm(open_=arm == ENV_FILE_OPEN_ARM)
     pins = json.loads(os.environ.get("S2_ARM_PINS", "{}"))  # {arm: {worktree, sha}}; supplied by the orchestrator
     if arm.removesuffix("-open") in ("L0", "L1", "L1-H", "L1-noptr", "H") and not all(
             pins.get(arm.removesuffix("-open"), {}).get(k) for k in ("worktree", "sha")):

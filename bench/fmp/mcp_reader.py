@@ -43,12 +43,19 @@ class Reader:
         from . import delivery
         started = time.monotonic()
         counted = self.counted < self.spec["max_calls"]
-        if counted:
-            with delivery.question_clock(self.spec["question"]["question_date"]):  # D12
-                raw = delivery.dispatch(name, arguments if arguments is not None else {}, self.engine, self.offered)
-            self.counted += 1
-        else:
-            raw = OVER_BUDGET
+        fatal, metadata = None, {}
+        try:
+            if counted:
+                with delivery.question_clock(self.spec["question"]["question_date"]):  # D12
+                    raw = delivery.dispatch(name, arguments if arguments is not None else {}, self.engine, self.offered)
+                self.counted += 1
+            else:
+                raw = OVER_BUDGET
+        except delivery.SemanticRecallUnavailable as exc:
+            fatal, metadata = exc, {**exc.recall_metadata, "fatal": type(exc).__name__}
+            raw = json.dumps({"error": exc.code})
+        if name == "lcm_recall" and fatal is None:
+            metadata = delivery.recall_metadata(raw)
         try:
             error = "error" in json.loads(raw)
         except (ValueError, TypeError):
@@ -56,7 +63,10 @@ class Reader:
         with self.log.open("a") as stream:
             stream.write(json.dumps({"at": utc(), "tool": name, "counted": counted, "error": error,
                 "args_sha256": sha(json.dumps(arguments, sort_keys=True).encode()),
-                "latency_s": time.monotonic() - started, "output_bytes": len(raw.encode())}) + "\n")
+                "latency_s": time.monotonic() - started,
+                "output_bytes": 0 if fatal else len(raw.encode()), **metadata}) + "\n")
+        if fatal is not None:
+            raise fatal
         return raw, error
 
     def handle(self, request):
@@ -97,7 +107,8 @@ def prepare(spec, stack):
                                  spec["question"]["question_date"], False, [], spec["question"]["store_id"],
                                  spec["question"]["session_map"])
     stores = Stores(spec["store_root"], spec["config"], spec["repo"], spec["dataset_sha"], lme,
-                    spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"))
+                    spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"),
+                    **({"recall_options": spec["recall_options"]} if spec.get("recall_options") else {}))
     engine, _ = stack.enter_context(stores.engine(question))
     if spec.get("delivery_unit", "hits") == "session":
         delivery.session_mode(engine)

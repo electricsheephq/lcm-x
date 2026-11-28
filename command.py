@@ -83,7 +83,8 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage
+from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_ingest_ledger_rows, delete_message_relations, delete_session_lineage, \
+    run_session_purges, RecordsFormatError
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY as SURVIVAL_FIT_COUNTER_KEY, survival_counter_store_key as survival_counter_store_key
 from .host_uid import host_uid_doctor_lines as host_uid_doctor_lines
 from .chunking import (
@@ -108,6 +109,7 @@ from .embedding_provider import (
     _VOYAGE_CONTEXT_MAX_REQUEST_CHUNKS,
     _VOYAGE_CONTEXT_REQUEST_TOKEN_BUDGET,
     _VOYAGE_MAX_BATCH_ITEMS,
+    _is_local_embedding_provider,
     _is_voyage_context_model,
     _plan_contextualized_requests,
     default_chunk_model,
@@ -855,11 +857,15 @@ def _scan_fts_repair(engine) -> dict[str, Any]:
         "messages_fts": build_message_fts_spec(),
         "nodes_fts": build_nodes_fts_spec(),
     }
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     for label, spec in specs.items():
         try:
             structural_needs_repair = external_content_fts_needs_repair(conn, spec)
-            integrity_check = check_external_content_fts_integrity(conn, spec)
+            # #2345: the integrity check's SAVEPOINT/ROLLBACK TO must not interleave
+            # with a foreground ingest's rows on this shared connection.
+            with store._write_lock:
+                integrity_check = check_external_content_fts_integrity(conn, spec)
             integrity_status = str(integrity_check.get("status") or "fail")
             needs_repair = structural_needs_repair or integrity_status == "fail"
             content_count = int(conn.execute(
@@ -932,15 +938,19 @@ def _doctor_repair_apply_text(engine) -> str:
     # via a race (F3).
     join_background_integrity_scans()
 
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
-        nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
-        with conn:
-            conn.execute("BEGIN IMMEDIATE")
-            _create_stem_fts(conn, build_message_stem_fts_spec())
-            conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
-                             [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
+        # #2345: the store write lock keeps a concurrent foreground ingest on this
+        # shared connection out of these transactions. The FTS helpers own their
+        # own BEGIN/COMMIT; the stem setup joins the store's transaction owner.
+        with store._write_lock:
+            messages_result = repair_external_content_fts(conn, build_message_fts_spec())
+            nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+            with store.atomic(immediate=True):
+                _create_stem_fts(conn, build_message_stem_fts_spec())
+                conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                                 [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
         dispatch_background_stem_backfill(conn, build_message_stem_fts_spec())
     except sqlite3.Error as exc:
         return "\n".join([
@@ -1391,7 +1401,8 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     apply is destructive, so do the coordinated deletes on one connection to
     avoid half-cleaned state if a later table delete fails.
     """
-    conn = engine._store.connection
+    store = engine._store
+    conn = store.connection
     # Protect the actively-bound session id, not current_session_id. While a
     # cron tick has rebound the engine, _session_id is the row the engine is
     # actively writing to via lifecycle hooks; deleting it during cleanup
@@ -1407,8 +1418,10 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "lifecycle_skipped": 0,
         }
 
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    # #2345: own the transaction under the store write lock, so a concurrent
+    # foreground ingest on this shared connection commits first instead of
+    # being rolled back by a failed BEGIN here.
+    with store._write_lock, store.atomic(immediate=True):
         SummaryDAG.stage_delete_session_scope(conn, session_ids)
         scope_table = SummaryDAG.DELETE_SESSION_SCOPE_TABLE
         # Capture the store_ids about to be deleted so their raw-history chunks
@@ -1442,6 +1455,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             "WHERE scope.session_id = messages.session_id)"
         ))
         delete_session_lineage(conn, f"SELECT session_id FROM {scope_table}")
+        run_session_purges(conn, f"SELECT session_id FROM {scope_table}")
         msg_cur = conn.execute(
             f"DELETE FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
@@ -1520,10 +1534,6 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             )
             lifecycle_deleted += cur.rowcount if cur.rowcount is not None else 0
         lifecycle_skipped = scoped_count - lifecycle_deleted
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
 
     return {
         "messages_deleted": msg_cur.rowcount if msg_cur.rowcount is not None else 0,
@@ -1575,7 +1585,7 @@ def _doctor_clean_apply_text(engine) -> str:
     session_ids = {item["session_id"] for item in candidates}
     try:
         deleted = _delete_clean_candidates_atomically(engine, session_ids)
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, RecordsFormatError) as exc:
         return "\n".join([
             "LCM doctor clean apply",
             "status: error",
@@ -1927,11 +1937,6 @@ def _rollups_status_text(engine) -> str:
         "oldest_stale_age_seconds: "
         + (str(oldest_age) if oldest_age is not None else "(none)")
     )
-    for kind in ("day", "week", "month"):
-        cursor = status["last_build_cursors"][kind]
-        built_at = status["last_built_at"][kind]
-        lines.append(f"last_build_cursor_{kind}: {cursor or '(none)'}")
-        lines.append(f"last_built_at_{kind}: {built_at or '(never)'}")
     lines.append(f"last_error: {status['last_error'] or '(none)'}")
     if status.get("query_error"):
         lines.append(f"query_error: {status['query_error']}")
@@ -3632,6 +3637,35 @@ def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int 
         logging.getLogger(__name__).debug("Could not record embedding catch-up state", exc_info=True)
 
 
+def _summary_backfill_privacy_migration(
+    config, profile: sqlite3.Row, *, retry_uncertain: bool,
+) -> EmbeddingIdentity | None:
+    """Plan the replacement identity for an ordinary backfill of filtered summaries."""
+    if retry_uncertain or getattr(config, "embedding_privacy_enabled", None) is True:
+        return None
+    revision, suffix = split_prefix_revision(str(profile["revision"] or ""))
+    if not revision.startswith("privacy:v"):
+        return None
+
+    provider_name = str(profile["provider"])
+    configured_provider = config_choices.normalize_embedding_provider(config.embedding_provider)
+    model = str(profile["model_name"])
+    dtype = str(profile["dtype"] or "float32")
+    if (
+        provider_name != embedding_provider_id(configured_provider)
+        or not embedding_provider_requires_privacy(provider_name)
+        or model != effective_embedding_model(configured_provider, config.embedding_model)
+        or suffix != embedding_prefix_suffix(config, provider_name)
+        or dtype != _resolve_storage_dtype(config)
+    ):
+        return None
+
+    return EmbeddingIdentity.canonical(
+        provider_name, model, "privacy:off" + suffix, profile["dim"], dtype,
+        profile["byteorder"], "summary+prefix" if suffix else "summary",
+    )
+
+
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
@@ -3694,6 +3728,10 @@ def _embedding_backfill_summary_run(
             if profile_suffix != getattr(prefix_provider, "identity_revision_suffix", ""):
                 return "configured provider does not match the current profile: embedding prefix settings changed; run /lcm embed warmup, then backfill"
         if not apply:
+            replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+            if replacement is not None:
+                identity = replacement.identity_hash
+                profile_revision, _ = split_prefix_revision(replacement.revision)
             pending, rows = _embedding_pending_rows(read_conn, identity, limit)
     except sqlite3.Error as exc:
         return "\n".join([
@@ -3794,6 +3832,17 @@ def _embedding_backfill_summary_run(
                 "status: refused",
                 "error: another embedding backfill holds the lease; retry after it exits or after the lease TTL expires",
             ]), reason="lease_held")
+        # Register the default-off summary identity alongside the old vectors.
+        # Ordinary backfill discovers the summaries as pending under it.
+        replacement = _summary_backfill_privacy_migration(config, profile, retry_uncertain=retry_uncertain)
+        if replacement is not None:
+            with store._write_transaction():
+                if _embedding_current_profile(conn) == profile and lease.renew(force=True):
+                    profile_revision, _ = split_prefix_revision(replacement.revision)
+                    identity = store.register_profile(
+                        replacement.model_name, replacement.provider, replacement.dim, revision=profile_revision,
+                        revision_suffix=profile_suffix, dtype=replacement.dtype, byteorder=replacement.byteorder,
+                    )
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)
         if captured_identity.identity_hash != identity:
@@ -5293,15 +5342,6 @@ def _chunk_backfill_remaining(
     return remaining, in_flight, uncertain
 
 
-# Providers that embed on this machine and never transmit text off-box. The raw-
-# text consent gate on the chunk corpus is waived for these (F1).
-_LOCAL_EMBEDDING_PROVIDERS = frozenset({"fastembed", "ollama"})
-
-
-def _is_local_embedding_provider(provider_name: str) -> bool:
-    return str(provider_name or "").strip().lower() in _LOCAL_EMBEDDING_PROVIDERS
-
-
 def _chunk_backfill_text(
     engine, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
     confirm_raw_text: bool = False, include_next_hint: bool = True,
@@ -5498,14 +5538,29 @@ def _chunk_backfill_run(
     # acknowledgment before sending that to a CLOUD provider; local providers
     # (fastembed/ollama) keep the text on this machine and are exempt (F1).
     if not _is_local_embedding_provider(provider_name) and not confirm_raw_text:
+        try:
+            consent_privacy_revision = embedding_privacy_revision(config)
+        except EmbeddingPrivacyPolicyError as exc:
+            return _refused(str(exc))
+        if consent_privacy_revision == "privacy:off":
+            # The filter is off by default (#2977): say plainly that nothing is removed.
+            privacy_note = (
+                "No provider-input privacy filter is applied, so the text is sent as stored. "
+                "The filter is on only when LCM_EMBEDDING_PRIVACY_ENABLED is set to true. "
+                "Re-run with `--confirm-raw-text` to acknowledge sending it, "
+            )
+        else:
+            privacy_note = (
+                "The v0.23.1 provider-input privacy transform removes configured "
+                "detector matches but cannot classify every possible sensitive fact. "
+                "Re-run with `--confirm-raw-text` to acknowledge the residual content boundary, "
+            )
         return _refused(
             f"the chunk corpus derives provider input from RAW, VERBATIM message text — including "
             f"tool-result and error/traceback content that the summary corpus "
             f"never exposes — to the '{provider_name}' cloud embedding provider. "
-            f"The v0.23.1 provider-input privacy transform removes configured "
-            f"detector matches but cannot classify every possible sensitive fact. "
-            f"Re-run with `--confirm-raw-text` to acknowledge the residual content "
-            f"boundary, or switch to a local provider (fastembed/ollama)."
+            f"{privacy_note}"
+            f"or switch to a local provider (fastembed/ollama)."
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()

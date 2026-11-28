@@ -21,6 +21,38 @@ def write(path, value):
     path.write_text(json.dumps(value))
 
 
+@pytest.mark.parametrize("scorer", ["score_deep", "score_decision"])
+def test_checkpoint_cleanup_ignores_files_and_symlinks(tmp_path, monkeypatch, scorer):
+    import importlib
+    module = importlib.import_module(scorer)
+    material, out = tmp_path / "material", tmp_path / "out"
+    write(material / "seed-1/material.manifest.json", {})
+    name = "H.seed-1.fixture.json"
+    preserved = []
+    for population in ("scores", "loss"):
+        root = out / population
+        write(root / "cp-real" / name, {"stale": True})
+        (root / "cp-file").write_text("unrelated file")
+        target = tmp_path / population
+        write(target / name, {"keep": True})
+        (root / "cp-link").symlink_to(target, target_is_directory=True)
+        (root / "cp-dangling").symlink_to(tmp_path / "absent")
+        preserved.extend([root / "cp-file", target / name])
+    before = [path.read_bytes() for path in preserved]
+    monkeypatch.setattr(module, "runs", lambda *a: [("H", "fixture", tmp_path / "missing", {})])
+    args = SimpleNamespace(material=material, out=out, logs=tmp_path / "logs", seeds=[1], arms=["H"])
+    if scorer == "score_deep":
+        module.aggregate(args)
+    else:
+        monkeypatch.setattr(sys, "argv", [scorer, "--material", str(material), "--out", str(out),
+            "--run-root", str(tmp_path / "runs"), "--logs", str(args.logs), "--seeds", "1", "--arms", "H"])
+        module.main()
+    assert [path.read_bytes() for path in preserved] == before
+    for population in ("scores", "loss"):
+        assert not (out / population / "cp-real" / name).exists()
+        assert all((out / population / link).is_symlink() for link in ("cp-link", "cp-dangling"))
+
+
 @pytest.fixture
 def cell(tmp_path):
     mat = tmp_path / "material" / "seed-1"

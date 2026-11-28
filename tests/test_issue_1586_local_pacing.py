@@ -7,6 +7,7 @@ import pytest
 
 from hermes_lcm import command, embedding_maintenance as maintenance
 from hermes_lcm import embedding_provider as providers, engine as engines
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -23,8 +24,8 @@ def local_store(tmp_path, monkeypatch):
                        embeddings_enabled=True, embedding_provider="fastembed",
                        embedding_model="fixture-local", temporal_rollups_enabled=False)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
-    scheduler = engines._RollupMaintenanceScheduler(kind="incremental embedding")
-    monkeypatch.setattr(engines, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(kind="incremental embedding")
+    monkeypatch.setattr(maintenance_scheduler, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
     monkeypatch.setattr(providers, "probe_provider_availability", lambda _c: {"available": True})
     monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: FakeProvider(c.embedding_provider, c.embedding_model))
     store = VectorStore(config.database_path, config=config)
@@ -104,6 +105,7 @@ def test_duty_wait_is_retirement_interruptible(local_store, monkeypatch, interru
     clock = Clock()
     monkeypatch.setattr(maintenance, "time", clock)
     monkeypatch.setattr(engines, "time", clock)
+    monkeypatch.setattr(maintenance_scheduler, "time", clock)
     admitted = threading.Event()
     waits = []
     observed = []
@@ -308,7 +310,7 @@ def test_failing_row_is_not_rewritten_on_each_bind(local_store, monkeypatch):
 
 @pytest.mark.parametrize("retire_ready", [False, True])
 def test_queue_re_admits_65th_database(retire_ready):
-    scheduler = engines._RollupMaintenanceScheduler(kind="incremental embedding")
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(kind="incremental embedding")
     ran = []
     try:
         with scheduler._condition:

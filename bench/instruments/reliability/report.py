@@ -18,6 +18,10 @@ BOUNDARY_R2 = ("Claim class: advisory / code_green_local. Transport {t}: real ho
 VERDICTS = ("PASS", "FAIL", "INCONCLUSIVE", "ERROR", "UNSUPPORTED")
 
 
+def edges(text: str, head: int = 200, tail: int = 400) -> str:
+    return text if len(text) <= head + tail else text[:head] + " ... " + text[-tail:]
+
+
 def cell_word(r: dict) -> str:
     if r["verdict"] == "FAIL":
         return "FAIL " + "/".join(sorted(r.get("failed_bars", {})))
@@ -122,7 +126,7 @@ def write(out: Path, results: list[dict], wall: float, lcm_env: dict | None = No
             elif r["verdict"] == "INCONCLUSIVE":
                 lines.append(f"- INCONCLUSIVE `{r['cell']}` on {r['host']}: {json.dumps(r['inconclusive_bars'])[:300]}")
             elif r["verdict"] in ("ERROR", "UNSUPPORTED"):
-                lines.append(f"- {r['verdict']} `{r['cell']}` on {r['host']}: {str(r.get('reason'))[:300]}")
+                lines.append(f"- {r['verdict']} `{r['cell']}` on {r['host']}: {edges(str(r.get('reason')))}")
         lines += ["", "### PASS with host-parity licences", ""]
         lines += [f"- `{r['cell']}` on {r['host']}: " + "B2 {} / B1 {} rows licensed".format(*licensed(r))
                   for r in sorted(rs, key=lambda r: (r["cell"], r["host"])) if r["verdict"] == "PASS" and any(licensed(r))] or ["- none"]

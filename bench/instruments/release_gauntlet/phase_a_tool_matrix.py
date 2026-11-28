@@ -153,6 +153,9 @@ def _load_inner(worktree, hermes_repo, release, snapshot, inserted_path):
     sys.modules["hermes_lcm"] = package
     names = ("assertion_store", "command", "config", "dag", "embedding_provider", "engine", "ingest_protection", "tools")
     modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in names}
+    if (worktree / "maintenance_scheduler.py").is_file():
+        # Trees from the scheduler move on keep the process-wide schedulers there.
+        modules["maintenance_scheduler"] = importlib.import_module("hermes_lcm.maintenance_scheduler")
 
     def cleanup():
         _restore_module_world(snapshot, inserted_path)
@@ -291,12 +294,10 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"])
     elif tool == "lcm_status":
         status = _payload(engine, tool, {})
-        # The cloud-default posture's privacy battery ingests 10 extra rows before
-        # the matrix runs, so totals are posture-aware exact values.
-        expected_total = 40 if posture == "cloud-default" else 30
+        # Both matrix databases contain only the three 10-message sessions from _seed.
         assert (
             status["store"]["messages"] == 10
-            and status["lifecycle_fragmentation"]["messages_total"] == expected_total
+            and status["lifecycle_fragmentation"]["messages_total"] == 30
             and status["ingest_protection"]["enabled"] is patterns
             and status["proactive_recall"]["privacy_policy_errors"] == 0
         )
@@ -566,7 +567,6 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     if known and expect_365_fixed:
         raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
-    engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
     return bool(known)
 
 
@@ -789,11 +789,12 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
         try:
             context = _seed(mod, cloud)
             try:
-                known = _planted_secret(mod, cloud, outbound, expect_365_fixed=expect_365_fixed)
-                batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "lossless durable rows, protected dispatch, revision, raw recall checks passed"))
-            except Exception as exc:
-                batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
-            try:
+                command = mod["command"].handle_lcm_command
+                # Register and populate the cloud identities used by recall and doctor.
+                assert "status: ready" in command("embed warmup", cloud), "cloud matrix warmup failed"
+                assert "status: complete" in command("embed backfill --apply --limit 50", cloud), "cloud matrix summary backfill failed"
+                chunk_report = command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", cloud)
+                assert "status: complete" in chunk_report, "cloud matrix chunk backfill failed"
                 assert "Constellation anchor" in json.dumps(_payload(cloud, "lcm_recall", {"query": "Constellation anchor"})["hits"])
                 default_control_error = None
             except Exception as exc:
@@ -801,6 +802,16 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
             records = _run_matrix(cloud, registered, context, patterns=False, posture="cloud-default", missing=missing)
         finally:
             cloud.shutdown()
+
+        outbound = []
+        planted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-privacy-opt-in-", dir=state_root)), "cloud", patterns=False, embedding_privacy=True)
+        try:
+            known = _planted_secret(mod, planted, outbound, expect_365_fixed=expect_365_fixed)
+            batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "lossless durable rows, protected dispatch, revision, raw recall checks passed"))
+        except Exception as exc:
+            batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
+        finally:
+            planted.shutdown()
 
         outbound = []
         opt_out = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-opt-out-", dir=state_root)), "cloud", patterns=False, embedding_privacy=False)
@@ -813,7 +824,7 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
             opt_out.shutdown()
 
         outbound = []
-        redacted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-durable-redaction-", dir=state_root)), "cloud", patterns=True)
+        redacted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-durable-redaction-", dir=state_root)), "cloud", patterns=True, embedding_privacy=True)
         try:
             known = _durable_redaction(mod, redacted, outbound, expect_365_fixed=expect_365_fixed)
             batteries.append(("durable-redaction", "KNOWN-LEAK-ON-BASE" if known else "PASS", "opt-in durable, dispatch, revision, recall checks passed"))
@@ -894,7 +905,7 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
             if world_cleanup is not None:
                 # Late maintenance must finish before the ambient home returns.
                 for name in ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER"):
-                    if not getattr(mod["engine"], name).quiesce(10.0):
+                    if not getattr(mod.get("maintenance_scheduler", mod["engine"]), name).quiesce(10.0):
                         preflight.append(f"HERMES_HOME maintenance did not quiesce: {name}")
                 # Restore the host interpreter's module world (agent.* and
                 # hermes_lcm families + the inserted sys.path entry): the

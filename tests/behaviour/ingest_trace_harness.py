@@ -40,7 +40,7 @@ if __name__ == "__main__":
     sys.modules["hermes_lcm"] = package
 
 import tests.conftest  # noqa: E402, F401
-from tests.behaviour.frontier_observer import legacy_frontier_fields, observed_attribute  # noqa: E402
+from tests.behaviour.frontier_observer import REFUSED_INPUT, frontier_fields, observed_attribute  # noqa: E402
 from tests.behaviour.reconcile_trace_harness import (  # noqa: E402
     Canonical, LiteralPattern, NOTE, Scenario as ReplayScenario, encoded, fingerprint,
     first_difference as first_difference, install_clock as install_replay_clock, rows, seed_proof,
@@ -53,15 +53,28 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "fixtures" / "ingest_trace.json"
 TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trace_harness --repo . --regenerate"
 LEDGER_SQL = re.compile(r"\b(?:ledger_meta|occurrence_bindings|ledger_emissions|stamp_observations|ingest_views|lineage_marks)\b")
+# #2042: reachable only through diagnostic helpers; observe their INFO records,
+# not locks, thread locals or dedupe metadata as durable ingest outcomes.
+DIAGNOSTIC_ATTRIBUTES = frozenset({
+    "_auxiliary_lineage_session_ids", "_auxiliary_session_ids", "_auxiliary_session_lock",
+    "_diagnostic_engine_token", "_lcm_current_start_allows_bypass_lineage",
+    "_session_diagnostic_logs", "_thread_context",
+    # #2856: read by the replay-identity wrapper only, never an ingest outcome: the live identity memo
+    # (output-neutral by its own oracle and the session differential) and the storage-open flag that gates it.
+    "_replay_identity_memo", "_storage_ready",
+    # Ingest restores these labels for the session-end diagnostic; the proof itself is observed.
+    "_compress_commit_publication", "_compress_commit_reason",
+})
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
     "_no_progress_ingest_generation", "_no_progress_observed_tokens", "_ingest_replay_redaction_changes",
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
+    REFUSED_INPUT,
     "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
-    "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
+    "_config", "_hermes_home", "_db_path", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
     "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
@@ -79,12 +92,19 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_generated_ignored_active_replay_placeholder_messages", "_host_uid_counters", "_host_uid_error_logged",
     "_host_uid_read_error", "_identity_anchor_chain_cache", "_identity_anchor_recent", "_identity_anchor_text_memo",
     "_identity_anchor_recoveries", "_identity_anchor_recovery", "_identity_anchor_user_generation",
+    "_identity_anchor_durable_recovery_pending", "_rotation_lineage_unrecorded",
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
     "_pending_ingest_frontier", "_last_ingest_attribution", "_end_attribution", "_ingest_read_only",
+    "_ingest_attempt_index",
+    # Topic 9: the trip witness is a pure function of the previous completed ingest's host list, session and ignore
+    # patterns (all observed); the audit's copy is taken and cleared at ingest entry.
+    "_trip_witness", "_trip_witness_for_audit",
     "_ingest_ledger_attempt", "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
-    "_compress_calls", "_emission_handle",
-})
+    "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned",
+    "_ledger_rollback_failures_published", "_ledger_adopted", "_ledger_rebind_too_large", "_frozen_ledger_prepared", "_frozen_tail_reached",
+    "_compress_calls", "_compress_refusal", "_emission_handle", "_pressure_yield_reset_epoch",
+}) | DIAGNOSTIC_ATTRIBUTES
 Trace = list[str]
 Message = dict[str, Any]
 
@@ -200,7 +220,7 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
             continue
         visited.add(name)
         method = methods[name]
-        attributes |= legacy_frontier_fields(method)
+        attributes |= frontier_fields(method)
         owner = next((key.split(".")[0] for key, value in methods.items() if "." in key and value is method), "")
         mro = [cls.__name__ for cls in engine_module.LCMEngine.__mro__]
         for node in ast.walk(method):
@@ -240,6 +260,34 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
 
 class TraceConnection(sqlite3.Connection):
     failure_observer: Callable[[str, Any, Exception], None] | None = None
+    # Test instruments (tests/prelock_instrument.py) may install a recording
+    # authorizer while a harness fault is active. The harness verdict is consulted
+    # first; a DENY wins. harness_denials positively controls fault scenarios.
+    _product_authorizer: Callable[..., int] | None = None
+    _harness_authorizer: Callable[..., int] | None = None
+    harness_denials = 0
+
+    def set_authorizer(self, authorizer: Callable[..., int] | None, /) -> None:
+        self._product_authorizer = authorizer
+        self._install_authorizers()
+
+    def set_harness_authorizer(self, authorizer: Callable[..., int] | None) -> None:
+        self._harness_authorizer = authorizer
+        self._install_authorizers()
+
+    def _install_authorizers(self) -> None:
+        harness, product = self._harness_authorizer, self._product_authorizer
+        if harness is None:
+            super().set_authorizer(product)
+            return
+
+        def combined(*args: Any) -> int:
+            verdict = harness(*args)
+            if verdict != sqlite3.SQLITE_OK:
+                self.harness_denials += 1
+                return verdict
+            return sqlite3.SQLITE_OK if product is None else product(*args)
+        super().set_authorizer(combined)
 
     def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
         try:
@@ -265,6 +313,7 @@ class IngestCanonical(Canonical):
         self.path_hashes: dict[str, str] = {}
         self.replay_digests: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
+        self.engine_tokens: dict[int, str] = {}
         # Labels outlive individual snapshots. Keep their objects alive too, so
         # a later placeholder cannot inherit a freed object's address/label.
         self.retained_messages = {id(row): row for row in messages}
@@ -325,6 +374,9 @@ def recovery_receipts(engine: Any, value: Any) -> Any:
 
 def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     state: dict[str, Any] = {}
+    # #2152: path-only state lookup uses binding metadata. Check it against the
+    # real store at every snapshot, without duplicating it into frozen outcomes.
+    assert Path(engine._db_path) == Path(engine._store.db_path), "storage binding path differs from open store"
     # Match address-keyed ledgers to the actual retained message objects before
     # serializing a set/map. These labels preserve sharing, never addresses.
     def register(value: Any) -> None:
@@ -340,12 +392,36 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             for field in dataclasses.fields(value):
                 register(getattr(value, field.name))
-    for name in sorted(OBSERVED_ATTRIBUTES - {"_store", "_dag", "_lifecycle", "_host_rewrite_store"}):
+    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {
+        "_store", "_dag", "_lifecycle", "_host_rewrite_store", "_compress_refusal",
+    }):
         register(observed_attribute(engine, name))
-    for name in sorted(OBSERVED_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+    for name in sorted(OBSERVED_ATTRIBUTES - DIAGNOSTIC_ATTRIBUTES - {"_last_ingest_attribution", "_ingest_ledger_attempt",
+                                            "_frozen_ledger_prepared",  # Transient attempt, cleared before return.
+                                            "_frozen_tail_reached",  # Queue-decision flag; pending tails retain the outcome.
                                             "_compress_calls", "_emission_handle",
-                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned"}):
+                                            "_pressure_yield_reset_epoch",  # Binding check for the pending refusal.
+                                            "_ledger_rollback_failures_published",
+                                            "_ledger_adopted",  # Commit-only optimization; observed in the attribute stream.
+                                            "_identity_anchor_durable_recovery_pending",  # Read admission only; writes recheck scope.
+                                            "_ledger_rebind_too_large",  # In-process cap memo; observed, not a durable outcome.
+                                            "_ingest_attempt_index",  # #1815: this ingest's attempt number; reset every ingest.
+                                            # Topic 9: derived from observed inputs; the audit copy is per ingest.
+                                            "_trip_witness", "_trip_witness_for_audit",
+                                            "_ingest_ledger_observations", "_ingest_ledger_counters", "_ingest_ledger_warned",
+                                            # P1h lock-hold telemetry; no ingest decision reads it.
+                                            "_ingest_lock_guard", "_ingest_lock_records", "_ingest_lock_totals", "_ingest_lock_warned"}):
         value = observed_attribute(engine, name)
+        if name == "_rotation_lineage_unrecorded" and value == {"absent": True}:
+            continue  # New fail-closed guard: observe it when set; preserve existing absent-state outcomes.
+        if name == REFUSED_INPUT and value is None:
+            continue  # Observe the guard only when it carries a refused input.
+        if name == "_compress_refusal":
+            if not value or value.get("refused") is not True:
+                continue
+            value = True  # Only the deferred mark is stable; the snapshot owns live objects.
+        if name == "_db_path":
+            continue  # Observed by the binding assertion above.
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
         elif name == "_dag":
@@ -391,6 +467,11 @@ class Logs(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         args = record.args
+        if str(record.msg) == "LCM session decision: session=%s platform=%s parent=%s decision=%s reason=%s engine=%s":
+            # Like retained-message/nonce labels, preserve identity and sharing
+            # without freezing the process-global engine counter in a golden.
+            args = (*args[:-1], self.canonical.engine_tokens.setdefault(
+                args[-1], f"<engine-{len(self.canonical.engine_tokens)}>"))
         if str(record.msg).startswith("LCM attribution phase=ingest lock_hold_ms="):
             args = (0, args[1], 0, args[3])
         self.events.append("log " + encoded([record.name, record.levelname,
@@ -709,6 +790,9 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
     return engine, incoming
 
 
+AUTHORIZER_FAULTS = frozenset({"append", "metadata", "relation", "durable", "probe", "prematch"})
+
+
 @contextmanager
 def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
     """Fail real SQL, without mocking ingest phases or store implementations."""
@@ -758,11 +842,12 @@ def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
 
-    conn.set_authorizer(authorize)
+    set_harness = getattr(conn, "set_harness_authorizer", conn.set_authorizer)
+    set_harness(authorize)
     try:
         yield
     finally:
-        conn.set_authorizer(None)
+        set_harness(None)
 
 
 def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) -> Trace:
@@ -901,8 +986,10 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                     scoped_failure = inject_faults and (
                         (case.fault == "probe" and name == "has_session_messages")
                         or (case.fault == "prematch" and name == "find_rows_by_observed_at"))
+                    scoped_conn = engine._store._conn
+                    set_harness = getattr(scoped_conn, "set_harness_authorizer", scoped_conn.set_authorizer)
                     if scoped_failure:
-                        engine._store._conn.set_authorizer(lambda action, table, *_:
+                        set_harness(lambda action, table, *_:
                             sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "messages"
                             else sqlite3.SQLITE_OK)
                     try:
@@ -912,7 +999,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         raise
                     finally:
                         if scoped_failure:
-                            engine._store._conn.set_authorizer(None)
+                            set_harness(None)
                     emit("store result " + name, result)
                     return result
                 return observed
@@ -955,6 +1042,8 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         log.removeHandler(handler)
                         log.setLevel(old_level)
 
+            store_conn = engine._store._conn
+            denials_before = getattr(store_conn, "harness_denials", 0)
             with observing(inject_faults=True), sqlite_fault(engine, case.fault, events):
                 for attempt in range(2 if case.fault == "duplicate-tail" else 1):
                     try:
@@ -964,6 +1053,9 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                         emit(f"aliases-{attempt}", aliases(incoming, result))
                     except Exception as exc:
                         emit(f"raise-{attempt}", [type(exc).__name__, str(exc)])
+            if case.fault in AUTHORIZER_FAULTS and isinstance(store_conn, TraceConnection):
+                # Positive control: an authorizer fault that never fired tests nothing.
+                assert store_conn.harness_denials > denials_before, f"{case.name}: injected fault never fired"
             after = snapshot(engine, canonical)
             for name, value in after.items():
                 if before.get(name) != value:

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import hermes_lcm.engine as engine_mod
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_maintenance as maintenance_mod
 import hermes_lcm.embedding_provider as provider_mod
@@ -179,10 +180,10 @@ def test_interrupted_multichunk_message_resumes(tmp_path, scheduler, monkeypatch
 
 @pytest.fixture
 def scheduler(monkeypatch):
-    scheduler = engine_mod._RollupMaintenanceScheduler(
+    scheduler = maintenance_scheduler._RollupMaintenanceScheduler(
         kind="incremental embedding", thread_name="lcm-embedding-maintenance",
     )
-    monkeypatch.setattr(engine_mod, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
+    monkeypatch.setattr(maintenance_scheduler, "_EMBEDDING_MAINTENANCE_SCHEDULER", scheduler)
     return scheduler
 
 
@@ -357,12 +358,26 @@ def test_quiesce_bounds_wait_drops_pending_and_closes(scheduler, caplog, short_p
         assert started.wait(5)
         assert scheduler.schedule(key, pending_ran.set, owner=owner)
         assert scheduler.schedule(queued_key, pending_ran.set, owner=owner)
+        timeout, waits = (1 if short_pass else 0.1), []
+        real_wait, quiescing = scheduler._condition.wait, threading.get_ident()
+
+        def wait(remaining=None):  # record the quiesce thread's own waits: the bound it asked for and how it ended
+            woken = real_wait(remaining)
+            if threading.get_ident() == quiescing:
+                waits.append((remaining, woken))
+            return woken
+        scheduler._condition.wait = wait
         with caplog.at_level(logging.WARNING, logger=engine_mod.__name__):
             before = time.monotonic()
-            result = scheduler.quiesce(timeout=1 if short_pass else 0.1)
+            result = scheduler.quiesce(timeout=timeout)
             elapsed = time.monotonic() - before
         assert result is short_pass
-        assert (0.2 if short_pass else 0.08) <= elapsed < (1 if short_pass else 0.5)
+        # The wait is proven from the recorded calls, not timed (#2573): each wait was bounded by the quiesce timeout,
+        # and a timed-out quiesce that waited ended on a wait that timed out. A hang backstop stays. (Either case may
+        # not wait at all: a pass can finish, or a runner pause can pass the deadline, before the first wait.)
+        assert all(remaining is not None and 0 < remaining <= timeout for remaining, _ in waits), waits
+        assert short_pass or not waits or waits[-1][1] is False, waits
+        assert elapsed < 5
         assert any(
             "timeout" in record.getMessage().lower()
             and f"database={key[0]}" in record.getMessage()
@@ -433,7 +448,7 @@ spec = importlib.util.spec_from_file_location(
 )
 package = importlib.util.module_from_spec(spec)
 sys.modules["hermes_lcm"] = package
-from hermes_lcm import engine, command, embedding_maintenance, embedding_provider
+from hermes_lcm import engine, command, embedding_maintenance, embedding_provider, maintenance_scheduler
 from tests.test_issue_1330_retire_embedding_maintenance import _seed_batches, _SlowBatches
 
 os.environ["LCM_EMBEDDING_BACKFILL_BATCH_SIZE"] = "40"
@@ -446,7 +461,7 @@ def job():
     embedding_maintenance.run_incremental_embedding_pass(config.database_path, config)
     Path(marker + ".pass").write_text(str(provider.completed))
 
-assert engine._EMBEDDING_MAINTENANCE_SCHEDULER.schedule(("exit-test", "embeddings"), job)
+assert maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.schedule(("exit-test", "embeddings"), job)
 assert started.wait(30)
 """
     result = subprocess.run(
@@ -579,35 +594,89 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         active.set()
         started.set()
         try:
-            release.wait(0.4)
+            release.wait(60)  # held until shutdown's retire step releases it; 60 s only bounds a lost release
         finally:
             active.clear()
 
     monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", run)
+    # The test releases the pass; a loaded runner must not expire the retire wait first.
+    monkeypatch.setattr(engine_mod, "_EMBEDDING_RETIRE_TIMEOUT_S", 30.0)
     engine = make_engine()
-    active_at_close = []
+    active_at_retire, active_at_close, errors = [], [], []
+    retiring, waited = threading.Event(), threading.Event()
     close = engine._store.close
+    retire = engine._retire_embedding_maintenance
 
     def close_store():
         active_at_close.append(active.is_set())
         close()
 
+    def retire_and_record(wait):
+        if wait:  # shutdown's retire step; session end's does not wait
+            active_at_retire.append(active.is_set())
+            retiring.set()
+        retire(wait=wait)
+
+    def shut_down():
+        try:
+            engine.shutdown()
+        except BaseException as exc:
+            errors.append(exc)
+
+    shutdown = threading.Thread(target=shut_down, daemon=True)
+
+    class ReleaseOnRetireWait:
+        """The scheduler's condition, which releases the pass once shutdown's retire step waits on it.
+
+        `wait()` frees the condition's lock, which the pass's worker needs to report the pass done,
+        so the pass cannot be seen to end before the retire wait has begun.
+        """
+
+        def __init__(self, condition):
+            self._condition = condition
+
+        def __enter__(self):
+            return self._condition.__enter__()
+
+        def __exit__(self, *exc):
+            return self._condition.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._condition, name)
+
+        def wait(self, timeout=None):
+            if retiring.is_set() and threading.current_thread() is shutdown:
+                waited.set()
+                release.set()
+            return self._condition.wait(timeout)
+
     monkeypatch.setattr(engine._store, "close", close_store)
+    monkeypatch.setattr(engine, "_retire_embedding_maintenance", retire_and_record)
+    monkeypatch.setattr(scheduler, "_condition", ReleaseOnRetireWait(scheduler._condition))
     try:
         _bind(engine)
         assert started.wait(5)
         before = time.monotonic()
         engine.on_session_end("session", [])
-        assert time.monotonic() - before < 0.5
+        # The pass is held, so session end returned without waiting for it (a wait would last 30 s).
+        assert time.monotonic() - before < 1.5
         assert active.is_set()
-        before = time.monotonic()
-        engine.shutdown()
-        assert 0.2 <= time.monotonic() - before < 2.5
+        shutdown.start()
+        # On a thread, so a hang fails here. 10 s also fails a shutdown that waited out the 30 s retire timeout.
+        shutdown.join(10)
+        assert not shutdown.is_alive(), "shutdown did not return within 10 s"
+        assert not errors
+        # Shutdown reached its retire step while the pass ran, waited there, and closed the stores only after the
+        # pass ended.
+        assert active_at_retire == [True]
+        assert waited.is_set()
         assert active_at_close == [False]
         assert not active.is_set()
         assert not scheduler._retired_active_keys
     finally:
         release.set()
+        if shutdown.ident is not None:
+            shutdown.join(30)
 
 
 
@@ -621,14 +690,14 @@ def test_1399_retirement_fences_late_insertion_and_rebind_rearms(make_engine, sc
     assert engine.drain_embedding_maintenance(timeout=5)
     ran.clear()
     checked, release = threading.Event(), threading.Event()
-    allowed = maintenance_mod._automatic_chunks_allowed
+    allowed = provider_mod._automatic_chunks_allowed
 
     def pause_after_check(*args):
         checked.set()
         assert release.wait(5)
         return allowed(*args)
 
-    monkeypatch.setattr(maintenance_mod, "_automatic_chunks_allowed", pause_after_check)
+    monkeypatch.setattr(provider_mod, "_automatic_chunks_allowed", pause_after_check)
     worker = threading.Thread(target=engine._schedule_embedding_maintenance)
     worker.start()
     old_owner = engine._embedding_maintenance_owner

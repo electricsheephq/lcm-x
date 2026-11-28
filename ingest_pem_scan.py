@@ -488,10 +488,10 @@ def _pem_marker_with_inline_body(text: str) -> bool:
     """True when a surviving private-key marker shares a line with a base64 run.
 
     Marker-independent backstop (#383 rounds 4-5): prose that merely MENTIONS a
-    marker ("see -----BEGIN PRIVATE KEY----- for format") carries English
-    tokens, no 16+ base64 run, and passes; a marker the transform failed to
-    parse as structure but which sits beside real body material is blocked
-    fail-closed instead of shipping.
+    marker (a sentence that names the private-key header line and points at it
+    for format) carries English tokens, no 16+ base64 run, and passes; a marker
+    the transform failed to parse as structure but which sits beside real body
+    material is blocked fail-closed instead of shipping.
     """
     lower = text.lower()
     if "private key-----" not in lower:

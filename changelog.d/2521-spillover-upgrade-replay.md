@@ -1,0 +1,1 @@
+- Fix: Replaying a bare spillover tool-result marker stored by v0.29.2 after an upgrade no longer stores a second copy when the spillover file is still available.

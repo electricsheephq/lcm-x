@@ -19,7 +19,6 @@ resolution = importlib.import_module("hermes_lcm.access_policy.resolution")
 catalog = importlib.import_module("hermes_lcm.teams.catalog")
 scope_storage = importlib.import_module("hermes_lcm.scope_storage")
 externalize = importlib.import_module("hermes_lcm.externalize")
-preanswer = importlib.import_module("hermes_lcm.preanswer_evidence")
 
 
 @pytest.fixture(autouse=True)
@@ -170,23 +169,6 @@ def test_externalization_removes_partial_file_on_fsync_failure(
     assert not list(storage.iterdir())
 
 
-@pytest.mark.parametrize("question, operation, kind", [
-    ("What is the total of the two costs?", "sum", "missing_operand"),
-    ("What is the difference between the two costs?", "difference", "missing_operand"),
-    ("How many days between 2024-01-01 and 2024-01-03?", "date_interval", "missing_operand"),
-])
-def test_preanswer_names_missing_operand_without_fabricating_context(
-    tmp_path: Path, question: str, operation: str, kind: str,
-) -> None:
-    with harness.engine_context(tmp_path) as engine:
-        result = preanswer.build_preanswer_evidence(question, engine=engine, enabled=True)
-        assert result["context"] is None
-        missing = result["decision"]["missing_requirement"]
-        assert missing["operation"] == operation
-        assert missing["kind"] == kind
-        assert missing["current_operands"] == 0
-
-
 @pytest.mark.xfail(strict=True, reason="known gap: scope scanner misses concatenated INSERT; issue #1458")
 def test_scope_writer_discovery_handles_concatenated_sql(tmp_path: Path) -> None:
     (tmp_path / "writer.py").write_text(
@@ -210,7 +192,6 @@ def test_generated_payload_ref_is_recognized_without_file(tmp_path: Path) -> Non
     assert not externalize.is_generated_payload_ref_name("")
 
 
-@pytest.mark.xfail(strict=True, reason="known gap: evidence-pack fallback exceeds response cap; issue #1459")
 def test_evidence_pack_falls_back_without_partial_computation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pack = importlib.import_module("hermes_lcm.evidence_pack")
     with harness.engine_context(tmp_path, window=32000) as engine:

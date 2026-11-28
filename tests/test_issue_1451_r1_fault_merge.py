@@ -82,6 +82,9 @@ CASES = [(mode, tail, site, kind) for mode, tail, (site, kind) in itertools.prod
 @pytest.mark.parametrize("mode,tail,site,kind", CASES)
 def test_fault_then_host_merge_loses_no_turn(tmp_path, mode, tail, site, kind):
     result = run(tmp_path, mode, tail, site, kind)
+    # #1451 item 4 (#1904 item 3): a fault case must fire. For this test's published proof, an in-place
+    # boundary rewrites neither the proof nor the snapshot, so its "boundary" cases run as no-fault cases.
+    assert result["fired"] is (site != "none" and not (mode == "inplace" and site == "boundary")), result
     assert result["error"] is None, result
     assert not result["missing_turns"], result
     assert result["new_rows"] == 1, result

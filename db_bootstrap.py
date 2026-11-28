@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
@@ -900,8 +901,8 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(rollup_id, node_id)
         );
 
-        -- The (rollup_id, node_id) PK cannot serve purge's node_id lookup; add a
-        -- dedicated index so purging by deleted source node is not a full scan.
+        -- A node_id index for lookups by source node. Its reader (the purge by
+        -- deleted source node) has been removed; the schema keeps the index.
         CREATE INDEX IF NOT EXISTS idx_lcm_rollup_sources_node
             ON lcm_rollup_sources(node_id);
 
@@ -1064,8 +1065,8 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX idx_lcm_rollup_invalidations_scope_coverage "
         "ON lcm_rollup_invalidations(scope, covered_start, covered_end, event_id)",
     )
-    # Cursor state is keyed per (period_kind, scope) so multiple scopes sharing a
-    # database do not clobber one another's build cursor. A pre-scope table (from
+    # Cursor state is keyed per (period_kind, scope). No production path writes it
+    # (its only writer, a test-only helper, has been removed). A pre-scope table (from
     # an earlier revision) only cached vestigial introspection data, so recreate
     # it rather than attempt an unsupported PRIMARY KEY migration.
     state_exists = conn.execute(
@@ -2564,6 +2565,40 @@ def mark_migration_step_complete(conn: sqlite3.Connection, step_name: str) -> No
         """,
         (step_name,),
     )
+
+
+STORE_UUID_METADATA_KEY = "store_uuid"
+
+
+def ensure_store_uuid(conn: sqlite3.Connection) -> None:
+    """Stamp a stable per-store id once (#1192); readers outside Hermes qualify ids with it.
+
+    Hermes' migration chain never calls this, so a Hermes store stays byte-identical
+    and the reader derives its id from the file identity instead. A writer that
+    creates its own store may call it. The SELECT keeps a repeat call free of write
+    locks (#622); OR IGNORE makes a racing second writer a no-op. Not a
+    schema-version step: older builds simply ignore the extra metadata row.
+    """
+    if conn.execute(
+        "SELECT 1 FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone():
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)",
+        (STORE_UUID_METADATA_KEY, uuid.uuid4().hex),
+    )
+
+
+def read_store_uuid(conn: sqlite3.Connection) -> str:
+    """Return the stamped store_uuid, or '' when absent; never creates anything."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone():
+        return ""
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone()
+    return str(row[0] or "") if row else ""
 
 
 def set_schema_version(conn: sqlite3.Connection, version: int = SCHEMA_VERSION) -> None:

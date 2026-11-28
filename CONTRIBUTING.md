@@ -45,8 +45,9 @@ Use focused commits with clear subjects such as `fix: ...`, `docs: ...`, or `tes
 mix unrelated cleanup, generated secrets, customer data, live Hermes configuration, or local
 authentication state into a change.
 
-- Please don't change version numbers, create tags, or add release headings to
-  `CHANGELOG.md`. Maintainers cut releases; notes under `## Unreleased` are welcome.
+- Please don't change version numbers or create tags. Add a changelog fragment under
+  `changelog.d/` (see its README) instead of editing `CHANGELOG.md`; maintainers fold fragments into
+  `CHANGELOG.md` when they cut a release.
 
 ### Pull Requests
 
@@ -68,7 +69,7 @@ Run the narrowest focused regression first. GitHub Actions is authoritative for 
 matrix. The repository defaults are:
 
 ```bash
-pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q
+pytest tests/test_lcm_core.py tests/test_lcm_engine*.py tests/test_packaging_install.py -q
 pytest -q
 bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'
 ruff check .
@@ -119,7 +120,7 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 - every review thread is resolved before merge; a bot thread is resolved only after a reply
   that records its disposition;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
-- enqueue the reviewed head with `gh pr merge --merge --match-head-commit <head>` after checks pass and threads are resolved; never squash,
+- enqueue the reviewed head through the merge queue's `enqueuePullRequest` mutation pinned to `expectedHeadOid: <head>` (the form in AGENTS.md) after checks pass and threads are resolved, never with `gh pr merge`, which requests auto-merge on a pull request whose merge state is UNSTABLE; never squash,
   rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency. Do not update the branch first; stop on dequeue.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,

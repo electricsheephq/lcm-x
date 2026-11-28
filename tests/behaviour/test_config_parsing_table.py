@@ -15,8 +15,8 @@ import re
 import pytest
 
 from hermes_lcm import command, config, db_bootstrap, diagnostics
-from hermes_lcm import embedding_provider, externalize, identity_anchor, presets
-from hermes_lcm.engine import LCMEngine
+from hermes_lcm import embedding_provider, externalize, presets
+from hermes_lcm.engine import LCMEngine, _shutdown_compaction_wait_s
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +36,7 @@ STRING = (D, *VALUES[1:])
 # Frozen ENV_FIELD_SPECS rows: field, environment key, parser, default.
 CONFIG_ROWS = (
     ('recall_delivery_unit', 'LCM_RECALL_DELIVERY_UNIT', 'str', 'hits'),
+    ('recall_delivery_order', 'LCM_RECALL_DELIVERY_ORDER', 'str', 'score'),
     # config._parse_bool_env -> LCMConfig.from_env (construction time).
     ('fresh_tail_pressure_yield_enabled', 'LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED', 'bool', True),
     ('dynamic_leaf_chunk_enabled', 'LCM_DYNAMIC_LEAF_CHUNK_ENABLED', 'bool', False),
@@ -51,15 +52,28 @@ CONFIG_ROWS = (
     ('sensitive_patterns_enabled', 'LCM_SENSITIVE_PATTERNS_ENABLED', 'bool', False),
     ('embedding_privacy_enabled', 'LCM_EMBEDDING_PRIVACY_ENABLED', 'bool', None),
     ('large_output_externalization_enabled', 'LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED', 'bool', True),
+    ('host_row_recovery_enabled', 'LCM_HOST_ROW_RECOVERY_ENABLED', 'bool', False),
     ('large_output_active_replay_stubbing_enabled', 'LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED', 'bool', True),
     ('large_output_transcript_gc_enabled', 'LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED', 'bool', False),
     ('stub_first_exit_target_ratio', 'LCM_STUB_FIRST_EXIT_TARGET_RATIO', 'float', 0.0),
+    ('depth_target_ratio', 'LCM_DEPTH_TARGET_RATIO', 'float', 0.0),
+    ('summary_prefix_target_ratio', 'LCM_SUMMARY_PREFIX_TARGET_RATIO', 'float', 0.0),
     ('native_recovery', 'LCM_NATIVE_RECOVERY', 'bool', False),
     ('survival_fit', 'LCM_SURVIVAL_FIT', 'bool', True),
     ('embeddings_enabled', 'LCM_EMBEDDINGS_ENABLED', 'bool', True),
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
+    ('recall_adjacent_reply', 'LCM_RECALL_ADJACENT_REPLY', 'bool', False),
+    ('recall_snippet_window_hits', 'LCM_RECALL_SNIPPET_WINDOW_HITS', 'int', 0),
+    ('recall_extra_entries', 'LCM_RECALL_EXTRA_ENTRIES', 'int', 0),
+    ('recall_later_statements', 'LCM_RECALL_LATER_STATEMENTS', 'int', 0),
+    ('recall_recency_floor', 'LCM_RECALL_RECENCY_FLOOR', 'float', 0.5),
+    ('recall_grep_stemmed', 'LCM_RECALL_GREP_STEMMED', 'bool', False),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
+    ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
+    ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
+    ('recall_summary_event_time', 'LCM_RECALL_SUMMARY_EVENT_TIME', 'bool', False),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
     ('preanswer_evidence_enabled', 'LCM_PREANSWER_EVIDENCE_ENABLED', 'bool', False),
     ('selective_compiler_enabled', 'LCM_SELECTIVE_COMPILER_ENABLED', 'bool', False),
@@ -75,6 +89,7 @@ CONFIG_ROWS = (
     ('l2_budget_ratio', 'LCM_L2_BUDGET_RATIO', 'float', 0.5),
     ('assertion_extraction_timeout_seconds', 'LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS', 'float', 30.0),
     ('survival_reserve', 'LCM_SURVIVAL_RESERVE', 'float', 0.15),
+    ('turn_start_defer_ceiling', 'LCM_TURN_START_DEFER_CEILING', 'float', 0.0),
     ('rerank_margin', 'LCM_RERANK_MARGIN', 'float', 0.0),
     ('recall_scan_budget_s', 'LCM_RECALL_SCAN_BUDGET_S', 'float', 0.0),
     ('proactive_recall_min_score', 'LCM_PROACTIVE_RECALL_MIN_SCORE', 'float', 0.01),
@@ -174,15 +189,28 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_min_sessions": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, 10),
+    "recall_snippet_window_hits": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
+    "recall_extra_entries": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 25),
+    "recall_later_statements": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, D, D, 5),
+    "recall_recency_floor": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
     "embeddings_enabled": FLAG,  # R3: unset local ON; invalid/blank stays OFF.
     "embedding_provider": (D, D, *VALUES[2:]),  # R4: blank provider follows unset local default.
     "recall_delivery_unit": ("hits",) * 16,
+    "recall_delivery_order": ("score",) * 16,
+    "recall_guidance": ("v1",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
     "leaf_target_max_tokens": (D, D, D, D, D, D, D, D, D, D, D, D, D, D, D, HUGE),
     "summary_prompt_version": (1,) * 16,
     "stub_first_exit_target_ratio": (D, D, D, D, 1.0, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "depth_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "summary_prefix_target_ratio": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    "turn_start_defer_ceiling": (D, D, D, D, D, 0.0, D, D, D, D, D, D, D, D, 0.5, D),
+    # #1982: below the 500-token floor falls back to the default; the aged threshold also accepts 0.
+    "large_output_active_replay_stub_threshold_tokens": (D,) * 15 + (HUGE,),
+    "large_output_active_replay_stub_aged_threshold_tokens": (D, D, D, D, D, 0) + (D,) * 9 + (HUGE,),
 }
 
 
@@ -224,6 +252,64 @@ def isolated_environment(monkeypatch):
     monkeypatch.setattr(config, "_host_message_uid_mode_warned", False)
     monkeypatch.setattr(config, "_ingest_ledger_mode_warned", False)
     monkeypatch.setattr(config, "_sqlite_mmap_size_warned", False)
+
+
+@pytest.mark.parametrize("env", [False, True])
+def test_recall_guidance_and_hints_yaml(monkeypatch, tmp_path, env):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": "v2", "recall_session_hints": True}})
+    if env:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", "v1")
+        monkeypatch.setenv("LCM_RECALL_SESSION_HINTS", "false")
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == ("v1" if env else "v2")
+    assert cfg.recall_session_hints is (not env)
+    assert not {"recall_guidance", "recall_session_hints"} & set(cfg.ignored_config_yaml_lcm_keys)
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert cfg.config_sources[name] == (f"env:LCM_{name.upper()}" if env else f"config_yaml:lcm.{name}")
+
+
+@pytest.mark.parametrize("guidance,hints", [(2, "true"), ("unknown", 1), (None, None)])
+def test_invalid_recall_guidance_and_hints_yaml(monkeypatch, guidance, hints):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {"recall_guidance": guidance, "recall_session_hints": hints}})
+    cfg = config.LCMConfig.from_env()
+    assert cfg.recall_guidance == "v1" and cfg.recall_session_hints is False
+    for name in ("recall_guidance", "recall_session_hints"):
+        assert any(f"invalid config.yaml lcm.{name}" in w for w in cfg.config_source_warnings)
+        assert cfg.config_sources[name] == "default"
+        assert name not in cfg.ignored_config_yaml_lcm_keys
+
+
+@pytest.mark.parametrize("raw", ["V2", " v2 "])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_normalizes_case_and_spaces(monkeypatch, raw, yaml):
+    if yaml:
+        monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {"lcm": {"recall_guidance": raw}})
+    else:
+        monkeypatch.setenv("LCM_RECALL_GUIDANCE", raw)
+    assert config.LCMConfig.from_env().recall_guidance == "v2"
+
+
+@pytest.mark.parametrize("name,yaml_value,default", [
+    ("recall_guidance", "v2", "v1"), ("recall_session_hints", True, False),
+])
+@pytest.mark.parametrize("raw", ["", " \t", "invalid"])
+@pytest.mark.parametrize("yaml", [False, True])
+def test_recall_guidance_and_hints_empty_invalid_env(monkeypatch, name, yaml_value, default, raw, yaml):
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda *a: {
+        "lcm": {name: yaml_value} if yaml else {}})
+    key = "LCM_" + name.upper()
+    monkeypatch.setenv(key, raw)
+    cfg = config.LCMConfig.from_env()
+    invalid = bool(raw.strip())
+    assert getattr(cfg, name) == (yaml_value if yaml and not invalid else default)
+    assert cfg.config_sources.get(name, "default") == (f"config_yaml:lcm.{name}" if yaml and not invalid else "default")
+    warnings = [w for w in cfg.config_source_warnings if key in w]
+    assert bool(warnings) is invalid
+    if invalid:
+        assert "invalid env " + key in warnings[0]
 
 
 @pytest.fixture(scope="module")
@@ -268,7 +354,7 @@ DYNAMIC_ROWS = (
      ("shadow",) * 8 + ("on", "off") + ("shadow",) * 6),
     ("LCM_SQLITE_MMAP_SIZE", config.sqlite_mmap_size,
      (268435456,) * 4 + (1, 0) + (268435456,) * 9 + (HUGE,)),
-    ("LCM_IDENTITY_ANCHOR", identity_anchor.identity_anchor_enabled, SWITCH),
+    ("LCM_IDENTITY_ANCHOR", config.identity_anchor_enabled, SWITCH),
     ("LCM_FTS_INTEGRITY_BACKGROUND", db_bootstrap._background_integrity_enabled, SWITCH),
     ("LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS", db_bootstrap._integrity_check_interval_hours,
      tuple(24.0 if value is D else value for value in FLOAT)),
@@ -280,6 +366,8 @@ DYNAMIC_ROWS = (
      (0.0,) * 4 + (1.0, 0.0) + (0.0,) * 8 + (0.5, 1e100)),
     ("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", command._embedding_backfill_batch_size,
      (32,) * 4 + (1, 32) + (32,) * 9 + (1000,)),
+    ("LCM_SHUTDOWN_COMPACTION_WAIT_S", _shutdown_compaction_wait_s,
+     (10.0,) * 4 + (1.0, 0.0) + (10.0,) * 8 + (0.5, 86400.0)),
 )
 
 
@@ -400,7 +488,9 @@ def test_key_inventory_is_complete():
     covered.update(row[0] for row in DYNAMIC_ROWS)
     covered.update({"LCM_ENABLE_SLASH_COMMAND", "LCM_DISABLED_TOOLS",
                     "LCM_ABSOLUTE_THRESHOLD_TOKENS", "LCM_HERMES_BASE_DIR", "LCM_EMBEDDING_API_KEY",
-                    "LCM_SENDER_CAPTURE"})
+                    "LCM_SENDER_CAPTURE",
+                    # Default-off recorder (#2243), read by register() and recorder.py; tests/test_recorder.py.
+                    "LCM_RECORDER_ENABLED", "LCM_RECORDER_DIR", "LCM_RECORDER_MAX_BYTES"})
     assert derive_environment_keys() == covered
 
 

@@ -1,0 +1,5 @@
+{"type": "user", "uuid": "pre", "sessionId": "compact", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "before compact"}}
+{"type": "system", "subtype": "compact_boundary", "uuid": "boundary", "sessionId": "compact"}
+{"type": "summary", "uuid": "summary", "sessionId": "compact", "summary": "synthetic summary"}
+{"type": "user", "uuid": "compact-summary", "sessionId": "compact", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "synthetic compact summary"}, "isCompactSummary": true}
+{"type": "user", "uuid": "post", "sessionId": "compact", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "after compact"}}

@@ -26,8 +26,31 @@ def test_assembly_attribute_inventory() -> None:
         'update OBSERVED_ATTRIBUTES/EXTERNAL_ATTRIBUTES.\n' + TRACE_GUIDANCE)
 
 
+def test_public_context_manager_has_its_own_service_identity(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from functools import wraps
+    store = importlib.import_module('hermes_lcm.store')
+    @contextmanager
+    def synthetic_context(self, marker):
+        yield marker
+    monkeypatch.setattr(store.MessageStore, 'synthetic_context', synthetic_context, raising=False)
+    original = engine_module.LCMEngine._assemble_context
+    @wraps(original)
+    def assemble(self, *args, **kwargs):
+        with self._store.synthetic_context('synthetic'):
+            return original(self, *args, **kwargs)
+    monkeypatch.setattr(engine_module.LCMEngine, '_assemble_context', assemble)
+    events = observe(SCENARIOS[0], tmp_path)
+    calls = [event for event in events if event.startswith('store.synthetic_context call ')]
+    assert calls and all('marker' in event for event in calls)
+    assert all('args' not in event and 'kwds' not in event for event in calls)
+
+
 @pytest.mark.parametrize('case', SCENARIOS, ids=lambda case: case.name)
 def test_assembly_golden(case: Scenario, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; compress-scaffold also records prelock=True, atomic(immediate=False), and two
+    # write_generation call/return pairs. The other 84 scenarios match after SQL control normalization.
     expected = json.loads(GOLDEN.read_text())[case.name]
     actual = observe(case, tmp_path.resolve())
     difference = first_difference(expected, actual)

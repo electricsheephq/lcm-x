@@ -48,7 +48,7 @@ def test_request_scheduled_maintenance_captures_background_context(corpus, monke
     db, manifest, mod = corpus
     em = mod("engine")
     jobs, seen = [], []
-    monkeypatch.setattr(em._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+    monkeypatch.setattr(mod("maintenance_scheduler")._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
                         lambda key, job, **kw: jobs.append(job))
     monkeypatch.setattr(em, "run_incremental_embedding_pass",
                         lambda *a, **kw: mod("command")._chunk_backfill_run())

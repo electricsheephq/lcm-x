@@ -1,0 +1,29 @@
+# Dependabot keeps the commit-pinned GitHub Actions current.
+# Checked monthly. A new action release waits 7 days before Dependabot proposes it
+# (the cool-down applies to version updates, not security updates).
+# Python dependencies get security updates only, from the repository's Dependabot security-updates
+# setting: requirements-semantic.txt must keep the companion plugin's range (regression-tested), so
+# routine version bumps are not opened here.
+# Minor and patch updates share one pull request; each major update opens its own, for its own review.
+# The lcmx-1586 workflows run only on dispatch, so a pull request that changes them needs a dispatch of
+# lcmx-1586-floor.yml on its branch before merge; only `cell: recall` also runs lcmx-1586-covered-store.yml.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "ci"

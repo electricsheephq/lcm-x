@@ -153,6 +153,43 @@ def _retry_and_measure(engine, provider, messages):
     }
 
 
+def test_default_chunk_cold_rebind_preserves_gen2_replay(tmp_path, provider):
+    """#1133: threshold sweeps and cold replay on unmodified product defaults."""
+    def open_default():
+        instance = LCMEngine(config=LCMConfig(), hermes_home=str(tmp_path / "default-home"))
+        instance.on_session_start(SID, platform="cli", conversation_id=CID, context_length=200_000)
+        return instance
+
+    engine = open_default()
+    try:
+        first = _transcript()
+        assert count_messages_tokens(first[:-engine._config.fresh_tail_count]) >= 24_000
+        engine.ingest(first)
+        out1 = deepcopy(engine.compress(first, current_tokens=engine.threshold_tokens + 1, force=True))
+        assert engine._last_compression_status == "compacted"
+        assert engine.get_status()["threshold_full_sweep"]["leaf_passes"] > 0
+        _adopt(engine, first)
+        host = out1 + _more(0, 180)
+        engine.ingest(host)
+        out2 = _rows(_compress(engine, host))
+        assert engine._last_compression_status == "compacted"
+        before = engine._store.get_session_messages(SID, limit=100_000)
+        assert [row["content"] for row in before] == [row["content"] for row in first + _more(0, 180)]
+        engine.shutdown()
+        engine = open_default()
+        new = _more(180, 2)
+        got = _retry_and_measure(engine, provider, deepcopy(host) + new)
+        assert (got["rows"], got["status"], got["calls"], got["reason"]) == (
+            len(before) + len(new), "compacted", 0, REASON)
+        assert got["out"] == out2 + _rows(new)
+        stored = engine._store.get_session_messages(SID, limit=100_000)
+        assert [(row["store_id"], row["content"]) for row in stored[:-len(new)]] == [
+            (row["store_id"], row["content"]) for row in before]
+        assert [row["content"] for row in stored[-len(new):]] == [row["content"] for row in new]
+    finally:
+        engine.shutdown()
+
+
 def _lost(engine, messages):
     """Retry rows no stored row of the session holds (a carrier by its glued row)."""
     stored = [str(row.get("content") or "") for row in engine._store.get_session_messages(engine._session_id, limit=100_000)]

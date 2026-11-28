@@ -23,7 +23,8 @@ canonical policy is `skills/hermes-lcm/references/recall-policy.md`. It is
 distributed as product-owned skill guidance, not injected into user
 `api_content`.
 
-Retrieval still defaults to current-session scope. Discovery of earlier sessions
+Most retrieval tools still default to the current session; `lcm_recall` searches every
+conversation in the local store (per-tool defaults: the README's Retrieval contract). Discovery of earlier sessions
 remains `session_search`/`lcm_recall`/`lcm_grep`; once an LCM session id and node
 id are known, they can be retrieved directly through the explicit cross-session
 arguments documented below.
@@ -37,7 +38,7 @@ tool, even when its flag is enabled. The manifest retains all 16 declarations.
 | Tool | Use |
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Set `exclude_current_session=true` or pass `exclude_session_ids` to remove sessions before candidate caps, fusion, and final ranking. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
-| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); transient failures (no provider, network, deadline) skip silently to RRF order, while an embedding-privacy policy error propagates as an error instead. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing; a stale cloud identity preserves the full-text arm and reports `embedding_identity_stale:`, while invalid-policy, residual-blocked, and dispatch-drift errors still raise (#370). Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Every verbatim message hit, in both `detail='snippets'` and `detail='answer_ready'`, also carries `event_time` (ISO 8601 UTC to the second, e.g. `2024-03-20T13:45:30Z`) when the row has a host observation time (`messages.observed_at`), plus `event_time_source` (e.g. `host_message_timestamp`) when that is recorded; rows without one, such as imported history, carry neither key, and the hit `timestamp` stays LCM's write time. Summary hits do not carry the fields, and they change neither ranking nor `content`. A missing `event_time` means no recorded time only when the response has no `event_time_unavailable` marker: when the event-time read was skipped because the request deadline was spent, or failed, the response carries `event_time_unavailable: true` and `event_time_unavailable_reason` (`deadline` or `read_error`), and the hits it covered carry no event-time fields. The fields never cost a hit under the response cap: the cap sizes hits without them, and a response over the cap with them loses the fields, lowest-ranked hit first, before any hit, with reason `response_cap` (left out only when the marker itself would be what evicts a hit). The read is bounded by `recall_query_timeout_s` and never extends the call. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
+| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); transient failures (no provider, network, deadline) skip silently to RRF order, while an embedding-privacy policy error propagates as an error instead. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing; a stale cloud identity preserves the full-text arm and reports `embedding_identity_stale:`, while invalid-policy, residual-blocked, and dispatch-drift errors still raise (#370). Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Every verbatim message hit, in both `detail='snippets'` and `detail='answer_ready'`, also carries `event_time` (ISO 8601 UTC to the second, e.g. `2024-03-20T13:45:30Z`) when the row has a host observation time (`messages.observed_at`), plus `event_time_source` (e.g. `host_message_timestamp`) when that is recorded; rows without one, such as imported history, carry neither key, and the hit `timestamp` stays LCM's write time. Summary hits do not carry the fields, and they change neither ranking nor `content`. A missing `event_time` means no recorded time only when the response has no `event_time_unavailable` marker: when the event-time read was skipped because the request deadline was spent, or failed, the response carries `event_time_unavailable: true` and `event_time_unavailable_reason` (`deadline` or `read_error`), and the hits it covered carry no event-time fields. The fields never cost a hit under the response cap: the cap sizes the whole response without them, and a response over the cap with them loses the fields, lowest-ranked hit first, before any hit, with reason `response_cap` (left out only when the marker itself would be what evicts a hit). The read is bounded by `recall_query_timeout_s` and never extends the call. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
 | `lcm_query_state` | Query the feature-flagged same-DB V4 assertion sidecar by canonical subject, optional predicate/kind/scope/speaker, and optional as-of boundary. Returns typed lifecycle state with exact message store IDs, character spans, hashes, and quotes. It preserves unresolved conflicts and never treats recency alone as supersession. |
 | `lcm_compute` | Execute a question-derived, provider-neutral date/count/sum/difference/order/latest-state operation over exact raw spans or assertion IDs. Values, units, labels, keys, dates, operand order, completeness, and final wording are validated; unsupported or ambiguous inputs return an evidence-only fallback. |
 | `lcm_compile_evidence` | Turn one bounded semantic proposal into an exact-source-grounded evidence brief. The proposal may name facets and operands, but product code validates refs, quotes, spans, entities, dates, values, units, distinct keys, roles, and sources; finite coverage is never accepted from the proposal alone. |
@@ -51,11 +52,139 @@ tool, even when its flag is enabled. The manifest retains all 16 declarations.
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
-| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
+| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases, each at most 256 characters; returns mention counts, event/write-labelled first/last times (carried times marked `time_uncertain: carried`) and sessions over all matching rows, plus capped cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions across all entity matches, independently of the card limit. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
+
+Set `recall_delivery_order="time"` (or `LCM_RECALL_DELIVERY_ORDER=time`) to deliver
+model-called `lcm_recall` hits oldest to newest by `observed_at`, after score-based
+selection and response caps. Untimed hits and summaries follow timed hits in
+score order; ties keep score order. The default `score` preserves existing output.
+Only time mode adds `provenance.delivery_order: "time"`; session delivery and
+internal recall consumers keep their existing order.
+
+Set `recall_guidance: v2` (env `LCM_RECALL_GUIDANCE=v2`; default `v1`) to
+give the model guidance for questions spanning several conversations. The engine,
+plugin registry and read-only MCP reader serve the same guidance. In hits delivery,
+`detail="answer_ready"` adds `sessions_delivered` and `sessions_in_pool` under
+`provenance.answer_ready`. The counts describe distinct sessions in the returned hits
+and ranked candidate pool plus delivered later-statement children. With
+`detail="answer_ready"`, compare the counts; when fewer sessions were delivered than
+are in the pool, call again with `exclude_session_ids` set to the sessions already read.
+When a hit carries a `session_hint`, use it to read around that hit.
+Session-delivery guidance omits the hits-only provenance instruction. These are bounded
+retrieval signals, not proof that all matching sessions have been searched.
+
+With v2, `lcm_load_session` advertises `anchor_store_id`, `before` (default 6)
+and `after` (default 12). The anchor must belong to the supplied `session_id`;
+otherwise the tool returns an error without rows. Each side clamps to 0..40,
+and rows come back in store order. Role and inclusive stored-write-time filters
+apply within that window, followed by `after_store_id` and the page limit.
+When `has_more` is true, continue with `after_store_id=next_cursor` without the anchor to read onward
+through the session. The handler accepts anchor arguments under either guidance
+version; `next_cursor` is null when `has_more` is false. Existing internal window callers retain their 12-row clamp per side.
+
+Set `recall_min_sessions: 3` (env `LCM_RECALL_MIN_SESSIONS=3`; default `0`,
+clamped to 0..10) to widen the candidate pool and promote missing sessions into
+the ranked window. The best candidate from each missing session replaces only a
+later repeat of an already-represented session or a sessionless slot, never a
+session's first occurrence, keeping every candidate and score and protecting the
+FTS anchor. This runs before later-statement placement.
+Per-call `min_sessions` overrides the key in either guidance mode; null,
+fractional or unparseable values use the key. Guidance v2 exposes this argument; v1 schemas
+remain unchanged. `provenance.session_floor` records `requested`, `achieved`,
+`promoted` and `delivered`; the last counts distinct sessions in final hits after
+size fitting (extra entries are not counted), so the floor is a ranking target rather than a delivery guarantee.
+Proactive recall, pre-answer retrieval and evidence wrappers keep the floor off.
+
+Set `recall_session_hints: true` (env `LCM_RECALL_SESSION_HINTS=true`; default
+`false`) to add `session_hint` to answer-ready hits and summary leads. It is a
+call string such as `lcm_load_session(session_id='session-a', anchor_store_id=42)`.
+The session ID comes from the anchor's stored row, including for summary sources,
+so the hint still works after a compression rollover moves summary ownership.
+A missing source row or failed hint read omits only that hint. The two settings are independent; environment
+values override their `lcm.*` YAML keys. For example:
+
+```yaml
+lcm:
+  recall_guidance: v2
+  recall_session_hints: true
+  recall_min_sessions: 3
+```
+
+Both settings leave internal recall consumers unchanged, including proactive
+recall, pre-answer retrieval and evidence wrappers. Defaults preserve existing
+output and schemas. Agentic FMP runs must set these keys through `--recall-option`;
+FMP constructs its config explicitly and ignores environment overrides.
+
+Set `recall_summary_event_time: true` (or `LCM_RECALL_SUMMARY_EVENT_TIME=true`,
+which wins over the YAML key) to give model-called `lcm_recall` summary hits, and
+session-delivery summary leads, the span of their events:
+
+```yaml
+lcm:
+  recall_summary_event_time: true
+```
+
+`event_time_start` and `event_time_end` are the earliest and latest host
+`observed_at` over the summary's stored source messages, through condensed nodes,
+formatted like a message's `event_time`; sources without a host time, or no longer
+stored (for example after a session purge), do not count. When any stamped source carries a
+carried stamp, the summary also has `time_uncertain: "carried"`. A summary whose sources carry no host
+time has neither field. A summary hit's existing `timestamp` is unchanged: an LCM storage time
+(the node's `latest_at`, else its `created_at`), not an event time. Session leads carry no `timestamp`.
+The read runs inside the recall deadline; a late or failed read omits the fields
+from every summary and sets `provenance.summary_event_time_unavailable` to
+`deadline` or `read_error`. The fields count toward the response cap like
+`event_time`: a response over the cap drops them before any hit and sets
+`event_time_unavailable: true` (reason `response_cap`, or an earlier `deadline` or
+`read_error` reason, which is kept; the marker is left out only when it would itself
+evict a hit), so a missing span there says nothing about the summary. In session
+delivery, spans are added to summary leads after the leads are admitted. A lead
+whose span pushes the payload over the session budget is dropped whole, like any
+lead that does not fit, and this sets no marker. Over budget, summary leads are
+dropped before any evidence group, so a span never displaces evidence. Internal
+recall consumers keep their existing output.
+
+Set `recall_adjacent_reply=true` (or `LCM_RECALL_ADJACENT_REPLY=true`; default
+`false`) to insert the next stored reply after the rank-1 raw message hit and
+after question hits among ranks 1–3 of the delivered window. The reply stays in
+the same session and conversation, respects session exclusions, comes from the
+other conversational role (user ↔ assistant), and is skipped when it carries an
+event time older than its source (a re-stored or imported row). The step runs
+before the FTS anchor (#950), so the anchored hit stays inside the window. Tool rows, tool-call rows, empty
+replies and subagent replies are skipped without looking further. Already
+selected neighbours stay put; neighbours deeper in the pool move up without
+duplication and keep their own score and arms. Newly read replies inherit their
+source score. Both carry `adjacent_to` and arm `adjacent`, and shift the tail beyond the hit limit without deleting it.
+`provenance.adjacent_reply` lists the inserted/moved `{store_id, after_store_id}`
+pairs whose reply is among the final delivered hits (also as a collapsed
+duplicate), after answer_ready selection, refill and the response cap. Its source
+can be absent from the hits when the caller has already seen it. In answer_ready
+the list is left out when it does not fit the cap; the hit still carries
+`adjacent_to`. At most three single-row reads share the recall deadline; a failed read
+or deadline discards the whole step and adds `provenance.adjacent_reply_unavailable`.
+Citation, session-density and character caps still apply; time delivery order
+still sorts the selected hits. Session delivery and internal callers skip the
+step. This is configuration, not a model-visible tool argument.
+
+All `detail="snippets"` responses enforce the 64,000-character `response_char_cap` on the whole serialized JSON, including the query echo, envelope, provenance and JSON escaping. This applies with snippet windows off or on, after skipped window reads, and with extras. Full hits are dropped from the end in rank order when needed, setting `response_cap_truncated: true`. With windows off or a skipped window read, an over-cap whole response cuts a query longer than 4,096 characters to its first 4,096 characters before stripping optional event-time fields or dropping hits. After a successful window read, the query is cut only if the no-hit envelope, including every marker the fit can add, exceeds the cap. A query cut adds top-level `query_truncated: true`; otherwise that key is absent. On the successful windows path, the envelope fit budgets the time-order marker and can evict hits to make room for it; it does not strip event-time fields first. On plain snippets and skipped window reads, optional event-time fields give way before hits, and the time-order marker is included only if it fits without evicting a hit; snippets fall back to score order if it does not fit. Optional `event_time_unavailable` and `extra_entries_skipped` markers are included only when they fit. Responses that already fit stay unchanged; stored rows are never changed.
+
+`recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
+
+- `recall_later_statements` (env `LCM_RECALL_LATER_STATEMENTS`, YAML `lcm.recall_later_statements`; environment overrides YAML) defaults to `0`, preserving recall output and tool schemas. Integers clamp to 0..5; negative or invalid values warn and use 0. After final selection, the first N eligible message hits get one bounded FTS follow-up using their subject terms, with at most one later stored row placed after its source (chronological with time ordering). Scope and exclusions remain in force; candidates already in the window, normalized copies, older/equal rows, and rows after the call’s wall clock are skipped. Compare observed times, or write times only when both observations are absent; failed time reads skip expansion. Adjacent replies and already-seen delta refs are not sources. A child needs an exact ref the caller has not seen in delta mode, and a citable ref in reference-strict mode. Children ship with their source, do not count against the per-session limit, and in a full window displace the last plain hit to the undelivered tail, never a linked source, another child, or the FTS-anchored hit. Children hydrate around their own match with their own allowance, so the expanded count can exceed the expanded-hit limit; `response_char_cap` still applies. Links `later_statement_of` and `has_later_statements` name store IDs; a lexical match does not claim replacement. `provenance.later_statements` reports `requested`, `searched`, `found`, `delivered`, `displaced`, and `ms`; failure discards expansion and adds `later_statements_unavailable` (`deadline` or `read_error`). Internal recall and session delivery skip it. Not a tool argument; no stored rows change.
+
+- `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
+
+Example opt-in in `config.yaml`:
+
+```yaml
+lcm:
+  recall_snippet_window_hits: 5
+```
 
 ### Retrieval contract
 
-LCM retrieval tools default to current-session scope. `lcm_grep` accepts
+Default scopes differ per tool (see the table in the README's Retrieval contract): most tools
+default to the current session, and `lcm_recall` searches every conversation. `lcm_grep` accepts
 `session_scope='all'` or `session_scope='session'` as an explicit opt-in for
 bounded archive search over rows already present in `lcm.db` (raw-message hits
 only). Once a session id is known, `lcm_load_session` can enumerate that session's
@@ -307,7 +436,7 @@ network, or deadline failures keep the incoming order and are reported under
 When the embedding-privacy resolution is ON for the provider, the rerank query and every
 snippet are transformed with the provider-copy transform before transport and validated for
 residuals; ranking indices map back to the original hits, so only what leaves the machine is
-changed. The explicit `privacy:off` opt-out sends raw payloads by choice. A privacy-policy
+changed. The default `privacy:off` setting sends unfiltered payloads. A privacy-policy
 error propagates rather than silently skipping to RRF order (#371/#370).
 
 If the summary or chunk arm ran under `coverage='bounded'` (recency-truncated
@@ -570,7 +699,7 @@ The script is intentionally conservative:
 - changing `--agent`, `--namespace`, or `--session-identity` under the same `--import-id` is treated as the same import and will skip already-tracked source messages; use a new `--import-id` for a different mapping
 - no OpenClaw config or separate secret tables are imported, but raw transcripts and tool payloads are imported and may contain sensitive user data
 
-This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the default current-session retrieval contract for agent tools.
+This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the per-tool default retrieval scopes for agent tools.
 
 ## Related references
 

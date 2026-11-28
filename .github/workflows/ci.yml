@@ -3,17 +3,20 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # release/vX.Y.x are the maintenance branches that release trains are cut on (#2171 item 1), and
+    # release/vX.Y.Z (for example release/v0.30.2) is a patch train's maintenance line (#3021).
+    # The narrow patterns keep PR head branches such as release/v0.29.1-ga-notes from running twice.
+    branches: [main, "release/v*.x", "release/v[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
-    branches: [main]
+    branches: [main, "release/v*.x", "release/v[0-9]+.[0-9]+.[0-9]+"]
   merge_group:
 
 permissions:
   contents: read
 
 # Pull requests share one group per ref, so a new push cancels the older run.
-# Pushes to main and merge-queue runs get a group of their own (run_id), so no
-# run on main is ever cancelled or replaced while pending.
+# Pushes (to main or a release branch) and merge-queue runs get a group of their own
+# (run_id), so no run on those branches is ever cancelled or replaced while pending.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -40,7 +43,7 @@ jobs:
           fetch-depth: 2  # the golden-outcome gate compares the PR's merge commit with its first parent
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
@@ -58,6 +61,10 @@ jobs:
             python scripts/golden_outcome_gate.py --base-ref HEAD^1
           fi
 
+      - name: Gate store contract
+        if: github.event_name == 'pull_request'
+        run: python scripts/store_contract_gate.py --base-ref HEAD^1
+
   test:
     name: test-shard (${{ matrix.python-version }}, ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
@@ -72,7 +79,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -175,7 +182,13 @@ jobs:
       - name: Fetch the rollback-reader commits
         # The old-reader tests run these releases' code against a store the
         # current code wrote; under CI a missing commit fails them (#841).
-        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 849da257b52fc9833955928816dd1585184988b1 77b2b4f795fb6a4f84c55abf6d0441da4469971e 10407e12e33c1d7b09fe0e05141153555aec5d62
+        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 849da257b52fc9833955928816dd1585184988b1 77b2b4f795fb6a4f84c55abf6d0441da4469971e 10407e12e33c1d7b09fe0e05141153555aec5d62 6260c31fbce11e4cd542878f1f6a37410d678ae8 f77d6ed98c8f2e896851b31720876e4c9d10f7b4
+
+      - name: Fetch the busy-bar default-path baseline
+        # tests/test_busy_bar_arms.py::test_default_unchanged runs this commit's busy-bar
+        # driver against the current one; a shallow checkout lacks it. A deliberate change
+        # to the driver's default output moves the test's BASE_SHA and this commit together.
+        run: git fetch --no-tags --depth=1 origin e0b6d0ae7be3795a84547d77aa55efe923ebb91f
 
       - name: Print linked SQLite version
         run: python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
@@ -206,6 +219,7 @@ jobs:
         run: |
           pip install ruamel.yaml==0.18.16 PyYAML==6.0.3
           python -m pytest tests/test_config_yaml_loaders.py tests/test_per_model_threshold.py -q -p no:cacheprovider
+          python -m pytest tests/test_recorder.py -q -p no:cacheprovider -k "yaml_configuration or config_file_changes or legacy_identity or load_config_reads_restored_yaml"
 
       - name: Run static validation
         run: |
@@ -305,6 +319,7 @@ jobs:
           - bench/instruments/compaction_probe
           - bench/instruments/compaction_probe/track_s/decision/tests
           - bench/instruments/compaction_probe/track_s/scorer/tests
+          - bench/instruments/gate_kit/tests
           - bench/instruments/reliability
           - bench/instruments/scale389/tests
           - bench/scoreboard
@@ -315,7 +330,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - run: pip install --no-deps pytest==9.1.1 pytest-xdist==3.8.0 numpy==2.4.2 httpx==0.28.1 PyYAML==6.0.3 psutil==7.2.2 anyio==4.15.1 certifi==2026.10.19 httpcore==1.0.9 idna==3.20 h11==0.16.0 typing_extensions==4.16.0 iniconfig==2.3.1 packaging==26.3 pluggy==1.7.0 pygments==2.21.0 execnet==2.1.2
@@ -352,7 +367,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -374,7 +389,7 @@ jobs:
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/shard-{1,2,3,4}/main.xml
           reports/test-{3.11,3.12,3.13,3.14}/privacy.xml
-          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
+          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-gate_kit-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
 
   session-end-attribution-cost:
     runs-on: ubuntu-latest
@@ -383,7 +398,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - run: pip install pytest==9.1.1 numpy hypothesis==6.141.1 PyYAML==6.0.3

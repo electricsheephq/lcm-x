@@ -59,8 +59,9 @@ filing authority; show the draft and obtain the reporter's approval first.
 - Schema changes follow `docs/process/schema-changes.md`: no new DDL owners, the migration's
   format and oldest reader recorded, forward and rollback tests.
 - Do not implement a `needs-repro` report merely because an upstream PR or issue claims a fix.
+- Before assigning a priority, answer four questions from evidence: can a turn fail, hang or wait without bound; can compaction stop making progress; is the prompt cache rewritten on consecutive turns; is a stored row lost or duplicated. A yes to any of the first three is `P0` unless a measurement shows it cannot reach a user at default settings; the fourth follows the loss rules in this file. A `P0` is fixed before the release that would carry it, never scheduled after it, and never recorded as an optimization.
 - Prioritize verified supported-path impact:
-  - `P0`: active catastrophic data loss, disclosure, or unusable core path.
+  - `P0`: active catastrophic data loss, disclosure, or unusable core path (a turn that cannot complete, compaction that cannot make progress, or a prompt cache rewritten turn after turn).
   - `P1`: severe integrity, security, crash, lockout, or release-blocking failure.
   - `P2`: significant bounded correctness or resource failure.
   - `P3`: limited bug, feature gap, or moderate maintainability/performance issue.
@@ -100,7 +101,7 @@ surface. GitHub Actions is authoritative for the full supported matrix.
 Default repository checks:
 
 ```bash
-pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q
+pytest tests/test_lcm_core.py tests/test_lcm_engine*.py tests/test_packaging_install.py -q
 pytest -q
 bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'
 ruff check .
@@ -171,10 +172,14 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   owner's `pull_request` bypass is for a recorded emergency only, noted on the PR.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
-- Enqueue deterministically with the pinned head (a dequeue after failed merge-group CI is a stop):
+- Enqueue deterministically with the pinned head through the merge queue's `enqueuePullRequest`
+  mutation (a dequeue after failed merge-group CI is a stop). Do not use `gh pr merge`: on a pull
+  request whose merge state is UNSTABLE it requests auto-merge, which is forbidden here.
 
 ```bash
-gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
+PR_ID=$(gh pr view <PR> --json id --jq .id)
+gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h}){mergeQueueEntry{position state}}}' \
+  -f id="$PR_ID" -f h=<HEAD_SHA>
 ```
 
 - After merging, verify the merge commit, linked issue state, final `main` SHA, and required
@@ -217,13 +222,15 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   of the full release diff, upgrade/migration dimension mandatory), Phase C (30+ turn live
   `hermes acp` soak), Phase D (release-over-release scorecard against the previous GA: recall
   flips, Track S facts kept, QA rows, latency) — before the GA tag. From v0.31.0 the spec's
-  tiers select the rows each rc runs (the R tier plus promoted rows, the release's own gate
+  tiers select the rows each rc runs (the R tier, which from v0.30.2's first release candidate
+  includes the live-session rows D9-D12, first required at that candidate, plus promoted rows,
+  the release's own gate
   rows, and the full tier at its cadence); patch releases from v0.29.1 use the same tiers, except
   that before v0.31.0 there is no weekly M run, so a patch's unselected rows are not run and its
   release notes list them as not run; the minor releases v0.29.0 and v0.30.0 run all phases.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
+  link the four phase receipts (A-D; under the tiers, those of the selected rows). A P0/P1 gauntlet finding means fix → new rc → re-run; the
   exceptions are a Phase B shape or a Phase C publication conflict that the previous GA also
   shows, with the candidate no worse than the base; and a Phase B duplicate-only shape reachable
   only under an injected crash or kill, meeting all five conditions in the spec's differential
@@ -235,9 +242,38 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   these conditions by a reviewer from a different model than the classification's author,
   named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
   the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
-  respins. A duplicate on any path without an injected fault still respins; the one recorded
-  exception is the spec's v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
-  upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and from amendment 5 its
-  comparison with v0.29.0 on each bind's own inputs, shape S7).
+  respins. A duplicate on any path without an injected fault still respins. The spec records
+  four exceptions: its v0.29.1-only D5 rc3-window decision, extended to rc4 (#1286's
+  upgrade-time duplicate, probe P-S2; #1674's cold-bind re-store, probes P-S6 and P-S6R, and
+  from amendment 5 its comparison with v0.29.0 on each bind's own inputs, shape S7); from
+  v0.29.2 while #1674 is open, a cold-bind copy that the D5 clone run's bar 2 matches against
+  the previous GA (KNOWN under #1674 and disclosed), and for v0.30.4 alone the same copy in
+  the D9-D12 cells under the v0.30.4-only row's four conditions; and, for v0.30.0 only, the named
+  duplicates #2558 and #2559 at their recorded shapes and counts, in the probe cells the smoke
+  stage runs again, and #2547's helper-agent copy with payload externalization turned off; none
+  is covered in the driven audit. From the 2026-11-11 amendment, and for v0.30.0 only, the
+  third exception also covers the bounded extra after a payload write fault clears (#2599),
+  the two replay shapes recorded as KNOWN because v0.29.2 has them (#2604 with redaction on,
+  #2605 while payload files cannot be written), and the accepted trade on a store that rc1 to
+  rc5 wrote with redaction on (#2604), each at its pinned counts. From the 2026-11-13
+  amendment, and for v0.30.1 only, the third exception covers #2559 in its probe cells and
+  #2547's copy with payload externalization off, at their recorded shapes and counts, #2604
+  and #2605, and #2550's cold-restart copy (added the same day), at the counts v0.30.0 stores in the same
+  probe cells, none in the driven audit;
+  #2599's extra after a write fault clears may stay at v0.30.0's count in the same write-fault
+  replay cells (KNOWN under #2605);
+  #2558 (fixed in v0.30.1) and the trade on rc-written stores are not covered. The fourth, for
+  v0.30.4 only, is #3102's two companion-session shapes of a recovered block at their measured
+  counts, as the v0.30.4-only row records them. No other
+  duplicate is covered. Separately, and for v0.30.0
+  alone, the upgrade/rollback roundtrip row's 0-duplicated-rows bar excludes one named case
+  (#2552), as the spec records where it adopts that row. From v0.29.2
+  the reference-agent canary is judged only by the spec's canary rule and never triggers this
+  respin.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above, which the release-manager delegation meets.
+- LCM-X for Claude Code is its own release unit: annotated `claude-code-v<version>` tags on a
+  `main` commit, with its own gate (the unit's audit gate on real sessions R1-R10, the growth check
+  and the CLI smoke) and no rc tag. The rc-first rule and Phases A-D above govern Hermes `v*`
+  releases only. The rules are in `bench/specs/RELEASE-READINESS-V1.md`, "Claude Code unit
+  releases"; the steps are in `docs/process/claude-code-unit-release.md`.

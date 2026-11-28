@@ -29,6 +29,15 @@ explicit opt-in metered path and needs `--max-spend` and `--spend-ledger`. Defau
 `claude:claude-opus-5-5` on a seeded 10% sample of question ids (`--agreement-judge none` disables),
 4 workers. `run.sh` loads the OpenRouter key only for an OpenRouter spec.
 
+`--codex-home /absolute/existing/DIR` runs Codex readers and judges on a leased
+home without creating an authentication symlink. It requires `--workers 1` and
+holds an exclusive, non-blocking `holder.lock` in that home for the command;
+a busy home is refused before any model call, as is a home holding `AGENTS.md`, `AGENTS.override.md` or
+non-system skills (Codex would load them into every reader prompt). Stop a leased run with one SIGTERM and wait: the
+call in flight finishes (worker threads) or is killed (main-thread calls) before the lock is released. A second
+signal or SIGKILL can leave a Codex child running on the home. Unset, the existing isolated home
+and plan-login symlink behavior is unchanged.
+
 Reader and judge transport failures get at most three attempts, waiting 5 s then
 20 s. Retries reuse the frozen messages; single delivery retrieves once, retaining
 the same trace, labels and evidence digest even if every call fails. Rows with a
@@ -55,7 +64,9 @@ GLM readers support `single`, `full_context` (a conservative 128k admission cap)
 - Codex: isolated `CODEX_HOME` (auth is a symlink to the plan login, never copied) and `HOME`,
   `--ignore-user-config --ignore-rules -s read-only`, every built-in tool feature disabled, a fresh
   empty `--cd` per call under `<output>/harness/`, prompt from a file, stdin from that file. Code mode
-  stays on: in codex-cli 0.162.1 it is the only route to MCP tools, and its JS runtime has no file
+  is enabled explicitly (`--enable code_mode`; verified: codex-cli 0.162.1 reached MCP tools without the flag, 0.167.0 needs it).
+  The canary fails with an explicit message when its MCP run reaches no `mcp__lcmx` tool. It is the only
+  route to MCP tools, and its JS runtime has no file
   system or imports. Any model call other than the code-mode wrapper, any executed item other than an
   lcmx MCP call (or an MCP resource listing), fails the question as `tool_violation`. Model, tokens and
   `rate_limits` come from the rollout; the weekly window at `--quota-stop` (95%) stops new questions.
@@ -126,6 +137,16 @@ LME store data stays identical across variants. Store manifests bind this option
 uses the stored role and ignores the sidecar. Stored prefixes are stripped once.
 Both options are recorded in run manifests and checked for judging; the label is
 `n/a` for agentic and full-context delivery. Score keys distinguish these arm axes.
+
+Repeat `--recall-option KEY=VALUE` on `canary`, `answer`, and `judge`, for example
+`--recall-option recall_later_statements=2`, to override a selected checkout's
+`recall_` config fields using its environment parsers. Invalid keys and values
+are refused before stores or backends are built. Options affect frozen engine
+opens and MCP schemas/results; store building keeps defaults. Repeat the answer's
+options when judging. Non-empty sorted `recall_options` appear in the manifest
+and `/opt:k=v,...` arm suffix (values JSON-encoded, so a string reads `"time"`); control
+and treatment pair on the same harness. `recall_delivery_unit` is refused: use `--delivery-unit`.
+
 For [#995 step 1](https://github.com/electricsheephq/lcm-x/issues/995):
 A0 = `--store-text plain --hit-label role`; A1 = `--store-text plain --hit-label speaker`;
 A2 = `--store-text name-date --hit-label speaker`. The agentic check compares

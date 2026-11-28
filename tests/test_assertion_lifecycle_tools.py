@@ -522,3 +522,16 @@ def test_lcm_query_state_response_cap_omits_whole_rows_never_partial_quotes(tmp_
             assert raw[ref["span_start"]:ref["span_end"]] == ref["quote"]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("key", ["subject_key", "predicate_key", "scope_key"])
+def test_query_state_bounds_oversized_keys_without_matches(state_db, key):
+    from types import SimpleNamespace
+    from hermes_lcm import tools
+
+    _messages, assertions = state_db
+    engine = SimpleNamespace(_assertions=assertions)
+    args = {"subject_key": "user:missing", key: "x" * 70_000}
+    encoded = tools.lcm_query_state(args, engine=engine)
+    assert len(encoded) <= tools._LCM_QUERY_STATE_RESPONSE_CHAR_CAP
+    assert json.loads(encoded) == {"error": f"{key} must be at most 1000 characters"}

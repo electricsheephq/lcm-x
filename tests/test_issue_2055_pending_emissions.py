@@ -405,8 +405,9 @@ def test_ingest_ledger_savepoint_restores_relation_schema(engines, monkeypatch, 
     rows = fail_exit(engine, monkeypatch)
     store, callbacks = engine._store, []
     store_id = store.append_batch("S", rows[:1])[0]
+    # Call site 1 adopts first, before the writer's own savepoint.
     attempt = dict(engine._prepare_ingest_ledger(rows, {"ledger_digest_ms": 0.}),
-                   stored={0: store_id}, matched={}, remainders={}, observations=[])
+                   stored={0: store_id}, matched={}, remainders={}, observations=[], adopted=True)
     store._conn.execute("DROP TABLE IF EXISTS message_relations")
     store._identity_anchor_schema_ready = store._pending_relation_schema = False
 

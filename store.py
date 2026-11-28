@@ -3,9 +3,9 @@ from __future__ import annotations
 """Immutable-first message store — the source of truth.
 
 Every message is persisted durably in SQLite. The normal model is append-only,
-with one narrow opt-in exception: already-externalized summarized tool-result
-rows may be rewritten to compact GC tombstones while preserving the original
-row identity (`store_id`) for DAG/source lookup.
+with a legacy GC rewrite seam retained for tests and old stores. Automatic
+compaction no longer rewrites summarized tool-result rows; old GC placeholders
+retain their row identity (`store_id`) for DAG/source lookup.
 """
 
 
@@ -17,7 +17,9 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
+from collections import Counter
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext, suppress
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -55,10 +57,12 @@ from .search_query import (
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
+from .message_content import canonical_value, count_surrogates
 from .message_content import normalize_content_value as _normalize_content_value
 from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
     _SqliteSavepointError,
+    _IngestReclassify,
     _is_ingest_busy_error,
     _run_sqlite_write_with_snapshot_retry,
     _sqlite_savepoint,
@@ -67,6 +71,13 @@ from .sqlite_util import (
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_message_bind(field: str, value: Any) -> Any:
+    clean = canonical_value(value)
+    if clean is not value:
+        logger.warning("LCM message insert replaced surrogates: field=%s count=%d", field, count_surrogates(value))
+    return clean
 
 INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 _INGEST_LEDGER_TABLES = (
@@ -447,6 +458,22 @@ def delete_session_lineage(conn: sqlite3.Connection, sessions_sql: str, args: tu
         conn.execute(f"DELETE FROM session_lineage WHERE child_session_id IN ({sessions_sql})", args)
 
 
+# Session-scoped tables owned outside core (the Claude Code capture ledger, docs/claude-code-adapter.md)
+# register a purge here. Both session delete paths (``delete_session_messages`` and the doctor clean
+# apply) run every registered purge on their own transaction, with the connection, a query that
+# selects the deleted session ids, and its arguments. Core never imports a registering module.
+_SESSION_PURGES: dict[str, Callable[[sqlite3.Connection, str, tuple], None]] = {}
+
+
+def register_session_purge(name: str, purge: Callable[[sqlite3.Connection, str, tuple], None]) -> None:
+    _SESSION_PURGES[name] = purge  # keyed by name: a reloaded module replaces its purge
+
+
+def run_session_purges(conn: sqlite3.Connection, sessions_sql: str, args: tuple = ()) -> None:
+    for purge in tuple(_SESSION_PURGES.values()):
+        purge(conn, sessions_sql, args)
+
+
 def _database_identity(path: Path, store: object) -> str:
     """#719: the file a store opens, however its path was spelled; ``:memory:`` is one per store."""
     if str(path) == ":memory:":
@@ -457,10 +484,355 @@ def _database_identity(path: Path, store: object) -> str:
         return str(path)
 
 
+# Records format 1; oldest reader v0.30.2; no planned removal. Canonical DDL is unchanged.
+_RECORDS_TABLES: dict[str, tuple[str, dict[str, str]]] = {}
+RECORDS_PURGE_BUSY_MS = 50  # Each purge intent/completion has its own bounded SQLite wait.
+
+
+class RecordsFormatError(ValueError):
+    def __init__(self, version):
+        self.version = version
+        super().__init__(f"records: refused format {version}")
+
+
+def records_path(db_path) -> Path | None:
+    """Bind from MessageStore.db_identity when available; never re-resolve a bound object."""
+    identity = str(getattr(db_path, "db_identity", db_path))
+    if identity.startswith(":memory:"):
+        return None
+    canonical = Path(identity) if hasattr(db_path, "db_identity") else Path(identity).resolve()
+    return Path(str(canonical) + ".records")
+
+
+def register_records_table(name: str, ddl: str, owner_columns: dict[str, str]) -> None:
+    """Map record columns to messages columns: first store_id, then occurrence evidence.
+
+    Writers must include immutable occurrence evidence (e.g. timestamp AND ingested_at),
+    not merely a session or equal text. Scope always comes from the current owner.
+    This registry is process-local; every reader loads the owning writer's registration.
+    """
+    columns = dict(owner_columns)
+    for identifier in (name, *columns, *columns.values()):
+        if not identifier.isidentifier() or not identifier.isascii():
+            raise ValueError("invalid records identifier")
+    if name.startswith("_records_") or len(columns) < 2 or next(iter(columns.values())) != "store_id":
+        raise ValueError("records require owner id and occurrence evidence")
+    if {"session_id", "conversation_id"} & set(columns.values()):
+        raise ValueError("scope is not occurrence evidence")
+    _RECORDS_TABLES[name] = (ddl, columns)
+
+
+def ensure_records_format(conn: sqlite3.Connection) -> None:
+    """Check BEFORE any mutation, including journal mode or registered table DDL."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version not in (0, 1):
+        raise RecordsFormatError(version)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Recheck under the writer reservation: another process may have upgraded
+        # between the initial read and acquiring this lock.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, 1):
+            raise RecordsFormatError(version)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute("CREATE TABLE IF NOT EXISTS _records_purge_intents ("
+                     "token TEXT, table_name TEXT, owner_id INTEGER, evidence TEXT, "
+                     "PRIMARY KEY(token, table_name, owner_id))")
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _records_ro(path):
+    conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True, timeout=0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _recover_records_journal(path):
+    # A read-only handle cannot roll back a crashed writer's hot journal.
+    # Never create a missing file or checkpoint a newer format's WAL.
+    if Path(str(path) + '-journal').exists() and not Path(str(path) + '-wal').exists():
+        with closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=0)) as recovery:
+            recovery.execute('PRAGMA user_version').fetchone()
+
+
+def _records_has_table(conn, table):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+
+
+def _records_owner(canonical, columns, row):
+    names = list(columns)
+    owner = canonical.execute("SELECT * FROM messages WHERE store_id=?", (row[names[0]],)).fetchone()
+    if owner is None or any(owner[col] != row[key] for key, col in columns.items()):
+        return None
+    return owner
+
+
+class RecordsWriter:
+    """Owns only a records connection and frozen paths; never a canonical write lock."""
+
+    def __init__(self, canonical_path, path, conn):
+        self.db_path, self.path, self.connection = canonical_path, path, conn
+
+    def insert(self, table, values):
+        """Return a refusal reason, or None after commit. SQLite failures propagate."""
+        ddl, columns = _RECORDS_TABLES[table]
+        conn = self.connection
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _check_records_write_format(conn)
+            with closing(_records_ro(self.db_path)) as canonical:
+                canonical.execute("BEGIN")
+                self._complete(canonical)
+                owner = _records_owner(canonical, columns, values)
+                if owner is None:
+                    conn.rollback()
+                    return "owner not committed or evidence mismatch"
+                evidence = json.dumps({key: owner[col] for key, col in columns.items()}, sort_keys=True)
+                if conn.execute("SELECT 1 FROM _records_purge_intents WHERE table_name=? "
+                                "AND owner_id=? AND evidence=?", (table, values[next(iter(columns))], evidence)).fetchone():
+                    conn.rollback()
+                    return "pending purge intent"
+                conn.execute(ddl)
+                keys = list(values)
+                if any(not key.isidentifier() or not key.isascii() for key in keys):
+                    raise ValueError("invalid records column")
+                conn.execute(f"INSERT INTO {table} ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                             [values[key] for key in keys])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return None
+
+    def _complete(self, canonical, token=None):
+        # Absence of a matching owner only completes an explicit purge intent.
+        # An unattached record with no intent is NEVER swept.
+        query = "SELECT * FROM _records_purge_intents" + (" WHERE token=?" if token is not None else "")
+        for intent in self.connection.execute(query, () if token is None else (token,)).fetchall():
+            table = intent[1]
+            if table not in _RECORDS_TABLES:
+                continue  # An unloaded writer must not lose its pending cleanup.
+            columns = _RECORDS_TABLES[table][1]
+            evidence = json.loads(intent[3])
+            if _records_owner(canonical, columns, evidence) is not None:
+                continue  # May be an in-flight purge. Never infer rollback.
+            self._delete_intent(intent, evidence)
+
+    def _delete_intent(self, intent, evidence):
+        table = intent[1]
+        if _records_has_table(self.connection, table):
+            clause = ' AND '.join(f'{key} IS ?' for key in evidence)
+            self.connection.execute(f"DELETE FROM {table} WHERE {clause}", list(evidence.values()))
+        self.connection.execute("DELETE FROM _records_purge_intents WHERE table_name=? AND owner_id=? AND evidence=?",
+                                tuple(intent[1:]))
+
+    def maintain(self):
+        """Explicit maintenance point; also run at every records insert."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            _check_records_write_format(self.connection)
+            with closing(_records_ro(self.db_path)) as canonical:
+                canonical.execute("BEGIN")
+                self._complete(canonical)
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def close(self):
+        self.connection.close()
+
+
+def _check_records_write_format(conn):
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version not in (0, 1):
+        raise RecordsFormatError(version)
+
+
+def open_records_writer(db_path, *, _busy_timeout_ms=0) -> RecordsWriter:
+    """The sole file creator. A busy write raises without canonical error handling."""
+    path = records_path(db_path)
+    if path is None:
+        raise ValueError("records unavailable for an in-memory store")
+    if path.exists():
+        _recover_records_journal(path)
+        # Even closing a read-write handle can checkpoint an unknown WAL format.
+        # Refuse it before opening any handle capable of changing its bytes.
+        with closing(_records_ro(path)) as probe:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise RecordsFormatError(version)
+    conn = sqlite3.connect(str(path), timeout=_busy_timeout_ms / 1000)
+    try:
+        ensure_records_format(conn)
+    except BaseException:
+        conn.close()
+        raise
+    return RecordsWriter(Path(str(path)[:-len('.records')]), path, conn)
+
+
+@dataclass
+class RecordsReadCut:
+    path: Path | None
+    records: sqlite3.Connection | None
+    canonical: sqlite3.Connection | None
+    refused_format: int | None = None
+
+
+@contextmanager
+def records_read_cut(db_path, *, _for_backup=False):
+    """Pin rollback-journal records BEFORE the one canonical snapshot used by callers."""
+    path = records_path(db_path)
+    with ExitStack() as stack:
+        records = canonical = None
+        refused = None
+        if path is not None and path.exists():
+            _recover_records_journal(path)
+            records = stack.enter_context(closing(_records_ro(path)))
+            records.execute("BEGIN")
+            version = records.execute("PRAGMA user_version").fetchone()[0]
+            records.execute("SELECT count(*) FROM sqlite_master").fetchone()  # pin even an empty container
+            if version not in (0, 1) and not _for_backup:
+                refused, records = version, None
+        if path is not None:
+            canonical = stack.enter_context(closing(_records_ro(str(path)[:-len('.records')])))
+            canonical.execute("BEGIN")
+            canonical.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        yield RecordsReadCut(path, records, canonical, refused)
+
+
+def read_records(cut, table):
+    """Return (attached dictionaries, unattached count). No writes or orphan deletion."""
+    if cut.records is None or not _records_has_table(cut.records, table):
+        return [], 0
+    columns = _RECORDS_TABLES[table][1]
+    attached, unattached = [], 0
+    for row in cut.records.execute(f"SELECT * FROM {table}"):
+        owner = _records_owner(cut.canonical, columns, row)
+        if owner is None:
+            unattached += 1
+        else:
+            attached.append(dict(row, session_id=owner['session_id'], conversation_id=owner['conversation_id']))
+    return attached, unattached
+
+
+def records_doctor(db_path):
+    with records_read_cut(db_path) as cut:
+        if cut.refused_format is not None:
+            return (f"records: refused format {cut.refused_format}; newer than this version reads; "
+                    "purges refused until LCM-X is upgraded")
+        if cut.records is None:
+            return "records: absent"
+        counts = []
+        for table in _RECORDS_TABLES:
+            rows, unattached = read_records(cut, table)
+            counts.append(f"{table} attached={len(rows)} unattached={unattached}")
+        pending = (cut.records.execute("SELECT count(DISTINCT token) FROM _records_purge_intents").fetchone()[0]
+                   if _records_has_table(cut.records, '_records_purge_intents') else 0)
+        size = cut.path.stat().st_size
+        label = 'format 0 (empty)' if size == 0 else 'format 1'
+        return f"records: {label}; bytes={size}; " + '; '.join([*counts, f"pending purge intents={pending}"])
+
+
+def _purge_records(conn, sessions_sql, args):
+    identity = conn.execute("PRAGMA database_list").fetchone()[2]
+    path = records_path(identity) if identity else None
+    if path is None or not path.exists():
+        return
+    owner = next(item for item in TransactionOwner._active_owners.get() if item.owns(conn))
+    writer = open_records_writer(identity, _busy_timeout_ms=RECORDS_PURGE_BUSY_MS)
+    side = writer.connection
+    token = secrets.token_hex(16)
+    try:
+        side.execute(f"PRAGMA busy_timeout={RECORDS_PURGE_BUSY_MS}")
+        side.execute("BEGIN IMMEDIATE")
+        _check_records_write_format(side)
+        for table, (_, columns) in _RECORDS_TABLES.items():
+            cursor = conn.execute(f"SELECT * FROM messages WHERE session_id IN ({sessions_sql})", args)
+            names = [column[0] for column in cursor.description]
+            for values in cursor:
+                row = dict(zip(names, values))
+                evidence = {key: row[col] for key, col in columns.items()}
+                side.execute("INSERT INTO _records_purge_intents VALUES (?,?,?,?)",
+                             (token, table, row['store_id'], json.dumps(evidence, sort_keys=True)))
+        side.commit()
+    finally:
+        writer.close()
+
+    def finish(committed):
+        # Rebind by frozen identity, never by a mutable profile configuration.
+        _recover_records_journal(path)
+        with closing(_records_ro(path)) as probe:
+            version = probe.execute("PRAGMA user_version").fetchone()[0]
+            if version != 1:
+                raise RecordsFormatError(version)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True,
+                                     timeout=RECORDS_PURGE_BUSY_MS / 1000)) as side:
+            side.execute("BEGIN IMMEDIATE")
+            try:
+                version = side.execute("PRAGMA user_version").fetchone()[0]
+                if version != 1:
+                    raise RecordsFormatError(version)
+                if committed:
+                    worker = RecordsWriter(identity, path, side)
+                    with closing(_records_ro(identity)) as canonical:
+                        canonical.execute("BEGIN")
+                        worker._complete(canonical, token)
+                else:
+                    # A commit can succeed before its caller reports an error.
+                    # Only matching surviving owners prove this intent rolled back.
+                    with closing(_records_ro(identity)) as canonical:
+                        canonical.execute("BEGIN")
+                        for intent in side.execute("SELECT * FROM _records_purge_intents WHERE token=?", (token,)).fetchall():
+                            table, evidence = intent[1], json.loads(intent[3])
+                            if table in _RECORDS_TABLES and _records_owner(canonical, _RECORDS_TABLES[table][1], evidence):
+                                side.execute("DELETE FROM _records_purge_intents WHERE token=? AND table_name=? "
+                                             "AND owner_id=?", tuple(intent[:3]))
+                side.commit()
+            except BaseException:
+                side.rollback()
+                raise
+
+    owner.on_commit.append(lambda: finish(True))
+    owner.on_rollback.append(lambda: finish(False))
+
+
+register_session_purge("records", _purge_records)
+
+
+@dataclass
+class _IngestAttempt:
+    acquire: Callable[[], None]
+    sync: Callable[[], None]
+    rollback_uncovered: Callable[[], bool]
+    G0: tuple
+    timing: dict
+    start_timer: Callable[..., None]
+    phase: str = "prelock"
+    poisoned: bool = False
+    begin_failed: BaseException | None = None
+    busy_budget_spent: bool = False
+    reclassify_pending: bool = False
+    scopes: list = field(default_factory=list)
+    T_clean: int = 0
+    clean_at: float = field(default_factory=time.perf_counter)
+    attempt_after_writes: bool = False
+    validated: bool = False
+    thread: int = field(default_factory=threading.get_ident)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
+    _ingest_prelock = True
+
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+        self.ingest_prelock_counts = Counter()
+        self._ingest_prelock_state = None
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
@@ -532,6 +904,16 @@ class MessageStore:
                 value TEXT
             );
         """)
+        if not self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_msg_session_tool_call'"
+        ).fetchone():
+            # The session scan still works on read-only or busy stores. Retry on the next open.
+            with _temporary_sqlite_busy_timeout([self._conn], 250):
+                try:
+                    self._conn.execute("""CREATE INDEX IF NOT EXISTS idx_msg_session_tool_call
+                ON messages(session_id, tool_call_id) WHERE tool_call_id IS NOT NULL""")
+                except sqlite3.OperationalError:
+                    pass
         ensure_external_content_fts(
             self._conn,
             build_message_fts_spec(),
@@ -621,8 +1003,8 @@ class MessageStore:
             config = self._ingest_protection_config
             if not config.embeddings_enabled:
                 return
-            from . import command, embedding_maintenance
-            if embedding_maintenance._automatic_chunks_allowed(config, command):
+            from . import embedding_provider
+            if embedding_provider._automatic_chunks_allowed(config):
                 return
             if self._conn.in_transaction and not (getattr(self, "_foreground_ingest_owner", False)
                                                   and self._transaction_owner.owns_connection(self._conn)):
@@ -637,6 +1019,7 @@ class MessageStore:
             if self._transaction_owner.owns_connection(self._conn) and (
                 isinstance(exc, _SqliteSavepointError) or _is_ingest_busy_error(exc)
                 or isinstance(exc, sqlite3.Error) and not self._conn.in_transaction
+                and not self._ingest_is_prelock()
             ):
                 raise
             if not was_in_transaction and self._conn.in_transaction:
@@ -665,7 +1048,7 @@ class MessageStore:
             session_id=session_id,
             context_window_tokens=self.get_context_window_tokens(session_id),
         )
-        tool_calls = msg.get("tool_calls")
+        tool_calls = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
         tc_json = json.dumps(tool_calls) if tool_calls else None
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
@@ -678,14 +1061,14 @@ class MessageStore:
                     observed_at, observed_at_source)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    session_id,
-                    _normalize_source_value(source),
-                    _normalize_conversation_id_value(conversation_id),
-                    msg.get("role", "unknown"),
-                    _normalize_content_value(msg.get("content")),
-                    msg.get("tool_call_id"),
+                    _canonical_message_bind("session_id", session_id),
+                    _canonical_message_bind("source", _normalize_source_value(source)),
+                    _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                    _canonical_message_bind("role", msg.get("role", "unknown")),
+                    _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                    _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                     tc_json,
-                    msg.get("tool_name"),
+                    _canonical_message_bind("tool_name", msg.get("tool_name")),
                     ingested_at,
                     token_estimate,
                     0,
@@ -757,7 +1140,7 @@ class MessageStore:
         def insert_messages() -> List[int]:
             ids: List[int] = []
             for index, (msg, est) in enumerate(zip(messages, token_estimates)):
-                tc = msg.get("tool_calls")
+                tc = _canonical_message_bind("tool_calls", msg.get("tool_calls"))
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
@@ -774,14 +1157,14 @@ class MessageStore:
                         observed_at, observed_at_source, sender_id, sender_source)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
-                        session_id,
-                        _normalize_source_value(source),
-                        _normalize_conversation_id_value(conversation_id),
-                        msg.get("role", "unknown"),
-                        _normalize_content_value(msg.get("content")),
-                        msg.get("tool_call_id"),
+                        _canonical_message_bind("session_id", session_id),
+                        _canonical_message_bind("source", _normalize_source_value(source)),
+                        _canonical_message_bind("conversation_id", _normalize_conversation_id_value(conversation_id)),
+                        _canonical_message_bind("role", msg.get("role", "unknown")),
+                        _normalize_content_value(_canonical_message_bind("content", msg.get("content"))),
+                        _canonical_message_bind("tool_call_id", msg.get("tool_call_id")),
                         tc_json,
-                        msg.get("tool_name"),
+                        _canonical_message_bind("tool_name", msg.get("tool_name")),
                         ts,
                         est,
                         0,
@@ -801,6 +1184,11 @@ class MessageStore:
                         else msg
                     )
                     for key, value in metadata_factory(metadata_message, store_id):
+                        if key.startswith("folded_tail_lineage:"):
+                            # A factory can supply arbitrary metadata keys. As
+                            # with write_metadata_json, do not cache after a
+                            # write that an enclosing savepoint may roll back.
+                            self._ingest_folded_tail_reads = None
                         conn.execute(
                             """
                             INSERT INTO metadata(key, value)
@@ -812,6 +1200,7 @@ class MessageStore:
             return ids
 
         with self._write_lock:
+            self._acquire_ingest_prelock()
             if (getattr(self, "_foreground_ingest_owner", False)
                     and self._transaction_owner.owns_connection(conn) and not conn.in_transaction):
                 raise _SqliteSavepointError("Foreground ingest transaction lost before INSERT")
@@ -895,6 +1284,7 @@ class MessageStore:
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_session_lineage(self._conn, "SELECT ?", (session_id,))
+            run_session_purges(self._conn, "SELECT ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -1167,10 +1557,11 @@ class MessageStore:
         anchor_store_id: int,
         before: int = 2,
         after: int = 3,
+        window_cap: int = 12,
     ) -> List[Dict[str, Any]]:
         """Load one bounded ordered window around an exact message anchor."""
-        before = min(12, max(0, int(before)))
-        after = min(12, max(0, int(after)))
+        before = min(window_cap, max(0, int(before)))
+        after = min(window_cap, max(0, int(after)))
         prior = self._conn.execute(
             f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                 FROM messages
@@ -1287,6 +1678,7 @@ class MessageStore:
     def _ensure_identity_anchor_schema(self) -> None:
         """Additive, created on first anchored use: one non-unique index and ``message_relations``
         (no UNIQUE constraint beyond its primary key)."""
+        self._sync_ingest_prelock()
         if getattr(self, "_read_only_ingest_thread", None) == threading.get_ident():
             return  # Session-end fallback may read existing schema, never create it.
         if getattr(self, "_identity_anchor_schema_ready", False):
@@ -1310,6 +1702,7 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
             """
             if self._transaction_owner.owns_connection(self._conn):
+                self._acquire_ingest_prelock()
                 # executescript commits an open transaction before running DDL.
                 # Same schema, same owner; do not cache uncommitted creation.
                 for statement in schema.split(";"):
@@ -1320,6 +1713,8 @@ class MessageStore:
                 self._conn.executescript(schema)
                 self._identity_anchor_schema_ready = True
                 self._carried_relation_connections.add(self._conn)
+                getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
 
     # -- #2055 ingest ledger: additive schema with shadow ingest and emission writers --
 
@@ -1438,12 +1833,13 @@ class MessageStore:
             exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
             # A re-entrant read can see DDL that a failed commit will roll back.
-            if not self._conn.in_transaction:
+            if not self._conn.in_transaction and not self._ingest_is_prelock():
                 self._host_uid_schema_ready = exists
             return exists
 
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
+        self._sync_ingest_prelock()
         if getattr(self, "_host_uid_schema_ready", False):
             return
         if getattr(self, "_pending_host_uid_schema", False) and self._transaction_owner.owns_connection(self._conn):
@@ -1512,11 +1908,11 @@ class MessageStore:
             "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
             "WHERE first_check IS NOT NULL AND kind IN ('canonical', 'version') GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
 
-    def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
-        """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
+    def add_host_uid_bindings(self, lineage_key: str, rows) -> Optional[float]:
+        """Insert unseen bindings and return the timestamp of this insert batch."""
         rows = list(rows)
         if not rows:
-            return
+            return None
         self._ensure_host_uid_schema()
         now = time.time()
         self._host_uid_write(lambda conn: conn.executemany(
@@ -1525,6 +1921,7 @@ class MessageStore:
             "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
             [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
              for store_id, uid, kind, proof_kind in rows]))
+        return now
 
     def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
         """Join the explicit owner, otherwise retain the standalone shadow boundary.
@@ -1686,6 +2083,14 @@ class MessageStore:
         if batched:
             known = getattr(self, '_memory_relation_connections', {})
             self._memory_relation_connections = known
+            generations = getattr(self, '_memory_relation_generations', {})
+            self._memory_relation_generations = generations
+            data_version = None
+            if known.get(conn) is False:
+                data_version = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                if generations.get(conn) != data_version:
+                    known.pop(conn, None)
+                    generations.pop(conn, None)
             available = (conn in self._carried_relation_connections or known.get(conn, False)
                          or conn is self._conn and getattr(self, "_pending_relation_schema", False)
                          and self._transaction_owner.owns_connection(conn))
@@ -1693,8 +2098,13 @@ class MessageStore:
                 available = bool(conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
                 ).fetchone())
-                if not available or not conn.in_transaction:
+                if not available or not conn.in_transaction or not self._transaction_owner.owns_connection(conn):
                     known[conn] = available
+                    if not available:
+                        generations[conn] = (
+                            data_version if data_version is not None
+                            else (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+                        )
             relation = ('message_relations' if available
                         else '(SELECT NULL AS store_id, NULL AS kind)')
             return {int(r[0]) for r in conn.execute(
@@ -1709,6 +2119,8 @@ class MessageStore:
                 return set()
             if conn is self._conn and not conn.in_transaction:
                 self._carried_relation_connections.add(conn)
+                getattr(self, "_memory_relation_connections", {}).pop(conn, None)
+                getattr(self, "_memory_relation_generations", {}).pop(conn, None)
         if session_ids:
             # Collect the entire candidate ID set in SQL before session formatting,
             # including neighbors later rejected by the payload budget.
@@ -1976,7 +2388,7 @@ class MessageStore:
         ).fetchone()
         if not row or not row[0]:
             return None
-        return json.loads(str(row[0]))
+        return canonical_value(json.loads(str(row[0])))
 
     def read_metadata_json_many(self, keys: list[str]) -> Dict[str, Any]:
         """Batch ``read_metadata_json``: {key: value}; malformed values are skipped."""
@@ -1986,7 +2398,7 @@ class MessageStore:
             query = f"SELECT key, value FROM metadata WHERE key IN ({','.join('?' * len(chunk))})"
             for key, value in conn.execute(query, chunk):
                 try:
-                    found[key] = json.loads(str(value)) if value else None
+                    found[key] = canonical_value(json.loads(str(value))) if value else None
                 except ValueError:
                     continue
         return found
@@ -2012,6 +2424,11 @@ class MessageStore:
             return False
         wrote = False
         with self._write_lock:
+            if any(key.startswith("folded_tail_lineage:") for key in keys):
+                # Disable for the remainder of this attempt, including failed
+                # writes and enclosing savepoint rollbacks. A value read after
+                # a write must never survive rollback of that write.
+                self._ingest_folded_tail_reads = None
             for key in keys:
                 if skip_unchanged:
                     existing = conn.execute(
@@ -2036,12 +2453,160 @@ class MessageStore:
         """Commit a standalone helper; an enclosing atomic block owns its commit."""
         self._transaction_owner.commit(self._conn)
 
-    def ingest_atomic(self, *, admission_retry=False):
+    def _ingest_transaction_lost(self, conn=None):
+        """True when a required transaction is gone (SQLite aborted it). A lazy ingest attempt before its first
+        write has none by design (#2293)."""
+        conn = self._conn if conn is None else conn
+        return not conn.in_transaction and not (conn is self._conn and self._ingest_is_prelock())
+
+    def _ingest_is_prelock(self):
+        state = self._ingest_prelock_state
+        return state is not None and state.phase == "prelock" and state.thread == threading.get_ident()
+
+    def _ingest_prelock_before_begin(self) -> None:
+        """Test seam immediately before foreground admission, in either mode."""
+
+    def _ingest_write_generation(self):
+        return (*self.write_generation(), self._conn.execute("PRAGMA schema_version").fetchone()[0])
+
+    def _acquire_ingest_prelock(self):
+        self._sync_ingest_prelock()
+        if not self._ingest_is_prelock():
+            return
+        state = self._ingest_prelock_state
+        self._begin_ingest_prelock(state)
+
+    def _begin_ingest_prelock(self, state):
+        """Explicit admission, also used after discarding implicit writes."""
+        conn = self._conn
+        if state.begin_failed is not None:
+            raise state.begin_failed
+        if conn.in_transaction:  # sync and restart end every implicit transaction before this point
+            raise _SqliteSavepointError("Foreground ingest transaction lost before BEGIN")
+        trace = getattr(conn, "_lcm_trace", None)
+        if trace is not None:
+            trace.ingest_admission = True
+        try:
+            type(self)._ingest_prelock_before_begin(self)
+            with (_temporary_sqlite_busy_timeout([conn], 0) if state.busy_budget_spent else nullcontext()):
+                conn.execute("BEGIN IMMEDIATE")
+        except BaseException as exc:
+            state.begin_failed = exc
+            raise
+        finally:
+            if trace is not None:
+                trace.ingest_admission = False
+        state.start_timer()
+        state.timing["acquired_at"] = time.perf_counter()
+        conn.execute("SAVEPOINT lcm_ingest_attempt")
+        state.phase = "acquired"
+        self.ingest_prelock_counts["acquired"] += 1
+        if self._ingest_write_generation() != state.G0 or state.poisoned:
+            state.reclassify_pending = True
+            raise _IngestReclassify()
+        for scope in state.scopes:
+            if not scope["uncovered"]:
+                conn.execute("SAVEPOINT lcm_ingest")
+                scope["materialized"] = True
+
+    def _sync_ingest_prelock(self):
+        """Promote Python's implicit write transaction before any owner control."""
+        state, conn = self._ingest_prelock_state, self._conn
+        if not self._ingest_is_prelock():  # only the attempt's own thread acts on it
+            return
+        if not conn.in_transaction:
+            state.T_clean, state.clean_at = conn.total_changes, time.perf_counter()
+            if state.T_clean != state.G0[0] and not state.poisoned:
+                logger.warning("LCM foreground ingest saw a write outside its transaction; reclassifying")
+                self._ingest_prelock_write_failed(sqlite3.DatabaseError("write outside ingest transaction"))
+            return
+        # Python began before DML since the last clean control point. All scopes
+        # already open there lack a real savepoint covering those writes.
+        for scope in state.scopes:
+            scope["uncovered"] = True
+        # Even an invalid implicit transaction held the writer lock. Record it
+        # before validation can roll it back and restart the attempt.
+        state.start_timer(state.clean_at)
+        state.timing["acquired_at"] = state.clean_at
+        valid = (state.T_clean == state.G0[0] and not state.poisoned
+                 and self._ingest_write_generation()[1:] == state.G0[1:])
+        if not valid:
+            # Implicit writes precede our attempt savepoint. Discard them before
+            # explicit acquisition and reclassification (the implicit-path D3 exception).
+            self._restart_ingest_prelock()
+            state.reclassify_pending = True
+            raise _IngestReclassify()
+        state.phase = "acquired"
+        conn.execute("SAVEPOINT lcm_ingest_attempt")
+        state.attempt_after_writes = True
+        self.ingest_prelock_counts["acquired"] += 1
+        for scope in state.scopes:
+            if not scope["uncovered"]:
+                conn.execute("SAVEPOINT lcm_ingest")
+                scope["materialized"] = True
+
+    def _rollback_uncovered_ingest_prelock(self):
+        """An evidence scope open at the implicit BEGIN failed. Every write since that BEGIN happened inside it, so
+        discarding the whole transaction is exactly eager's ROLLBACK TO that scope; the attempt continues before the
+        lock. True when done; False sends the caller to the full reclassify."""
+        state, conn = self._ingest_prelock_state, self._conn
+        if (state.phase != "acquired" or not state.attempt_after_writes or state.poisoned
+                or not conn.in_transaction or any(scope["materialized"] for scope in state.scopes)):
+            return False
+        conn.rollback()  # releases the lock: G0 was validated at the BEGIN and nothing could commit since
+        state.phase = "prelock"
+        state.attempt_after_writes = False
+        state.G0 = (conn.total_changes, *state.G0[1:])  # total_changes counts the discarded writes
+        state.timing["acquired_at"] = None  # no lock is held again until the next acquisition
+        for scope in state.scopes:
+            scope["uncovered"] = False
+        state.T_clean, state.clean_at = conn.total_changes, time.perf_counter()
+        self.ingest_prelock_counts["scope_rollback"] += 1
+        return True
+
+    def _restart_ingest_prelock(self):
+        """Re-acquire explicitly when writes predate the attempt savepoint."""
+        state, conn = self._ingest_prelock_state, self._conn
+        conn.rollback()
+        state.timing["acquired_at"] = None
+        state.attempt_after_writes = False
+        state.phase = "prelock"
+        # total_changes includes rolled-back writes: recheck without sync's outside-write guard.
+        self._begin_ingest_prelock(state)
+
+    def _finish_ingest_prelock(self):
+        """Validate a read-only decision and surface swallowed acquisition signals."""
+        self._sync_ingest_prelock()
+        state = self._ingest_prelock_state
+        if state is None or state.validated:  # the engine validated it; a later commit cannot change that decision
+            return
+        if state.begin_failed is not None:
+            raise state.begin_failed
+        if state.reclassify_pending:
+            raise _IngestReclassify()
+        if state.phase == "prelock" and (state.poisoned or self._ingest_write_generation() != state.G0):
+            self._acquire_ingest_prelock()
+        state.validated = state.phase == "prelock"
+
+    def _ingest_prelock_write_failed(self, exc):
+        """A fail-open SQLite error may hide a failed implicit BEGIN: rerun eager."""
+        if self._ingest_is_prelock() and isinstance(exc, sqlite3.Error):
+            state = self._ingest_prelock_state
+            if _is_ingest_busy_error(exc, require_code=True) and not self._conn.in_transaction:
+                # Implicit BEGIN already waited; later admission only rechecks the lock.
+                state.busy_budget_spent = True
+            if not state.poisoned:
+                self.ingest_prelock_counts["poisoned"] += 1
+            state.poisoned = True
+
+    def ingest_atomic(self, *, admission_retry=False, prelock=False):
         """End only an unowned dangling transaction before reserving foreground ingest."""
-        return self._ingest_atomic(admission_retry=admission_retry)
+        return self._ingest_atomic(admission_retry=admission_retry, prelock=prelock)
 
     @contextmanager
-    def _ingest_atomic(self, *, admission_retry=False):
+    def _ingest_atomic(self, *, admission_retry=False, prelock=False):
+        timing = {"hold_ms": None}
+        lazy = prelock and self._ingest_prelock
         with self._write_lock:
             if self._transaction_owner.owns(self._conn):
                 raise _SqliteSavepointError("Foreground ingest cannot join an enclosing transaction")
@@ -2049,25 +2614,86 @@ class MessageStore:
                 self._conn.commit()  # Preserve standalone writes, and end stale read snapshots.
                 logger.debug("LCM ingest committed an unowned transaction before BEGIN IMMEDIATE")
             with ExitStack() as owner:
-                # An ordinary BEGIN wait already spent the configured budget.
-                # Its retry is an immediate recheck, not another full timeout.
                 trace = getattr(self._conn, "_lcm_trace", None)
                 if trace is not None:
                     trace.ingest_admission = True
                 try:
                     with (_temporary_sqlite_busy_timeout([self._conn], 0) if admission_retry else nullcontext()):
-                        owner.enter_context(self.atomic(immediate=True))
+                        start_timer = self._start_lock_timer(timing, owner)
+                        if not lazy:
+                            type(self)._ingest_prelock_before_begin(self)
+                        owner.enter_context(self.atomic(immediate=not lazy))
+                        if not lazy:
+                            start_timer()
+                            timing["acquired_at"] = time.perf_counter()
                 finally:
                     if trace is not None:
                         trace.ingest_admission = False
                 previous = getattr(self, "_foreground_ingest_owner", False)
                 self._foreground_ingest_owner = True
+                self._ingest_folded_tail_reads = {}
                 try:
-                    yield
-                    if not self._conn.in_transaction:
-                        raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                    if lazy:
+                        state = _IngestAttempt(self._acquire_ingest_prelock, self._sync_ingest_prelock,
+                                               self._rollback_uncovered_ingest_prelock,
+                                               self._ingest_write_generation(),
+                                               timing, start_timer)
+                        self._ingest_prelock_state = self._transaction_owner.ingest_state = state
+                        state.T_clean = state.G0[0]
+                        self.ingest_prelock_counts["lazy"] += 1
+                    else:
+                        self._conn.execute("SAVEPOINT lcm_ingest_attempt")
+                    yield timing
+                    self._finish_ingest_prelock()
+                    if self._ingest_is_prelock():
+                        self.ingest_prelock_counts["no_write"] += 1
+                        timing["hold_ms"] = 0.0  # read-only: no lock was held (None still means BEGIN failed)
+                    else:
+                        if not self._conn.in_transaction:
+                            raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT")
+                        try:
+                            self._conn.execute("RELEASE lcm_ingest_attempt")
+                        except sqlite3.OperationalError as exc:
+                            raise _SqliteSavepointError("Foreground ingest transaction lost before COMMIT") from exc
                 finally:
+                    if lazy:
+                        self._ingest_prelock_state = self._transaction_owner.ingest_state = None
+                    self._ingest_folded_tail_reads = None
                     self._foreground_ingest_owner = previous
+
+    @staticmethod
+    def _start_lock_timer(timing, timer):
+        if timing is None:
+            return lambda at=None: None
+        started = None
+        def start(at=None):
+            nonlocal started
+            try:
+                acquired = time.perf_counter() if at is None else at
+                started = acquired if started is None else min(started, acquired)
+                timing["first_acquired_at"] = started  # survives rollback and re-acquisition
+            except Exception as exc:
+                timing["telemetry_error"] = type(exc).__name__
+        try:
+            def finish():
+                if started is None:
+                    return
+                try:
+                    timing["hold_ms"] = (time.perf_counter() - started) * 1000
+                except Exception as exc:
+                    timing["telemetry_error"] = type(exc).__name__
+            timer.callback(finish)
+        except Exception as exc:
+            timing["telemetry_error"] = type(exc).__name__
+        return start
+
+    @contextmanager
+    def _timed_atomic(self, timing):
+        with ExitStack() as timer:
+            start_timer = self._start_lock_timer(timing, timer)
+            timer.enter_context(self.atomic(immediate=True))
+            start_timer()
+            yield
 
     def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
         """Own a transaction under the existing write lock, joining nested entries.
@@ -2106,6 +2732,7 @@ class MessageStore:
             self._identity_anchor_schema_ready = True
             self._carried_relation_connections.add(self._conn)
             getattr(self, "_memory_relation_connections", {}).pop(self._conn, None)
+            getattr(self, "_memory_relation_generations", {}).pop(self._conn, None)
         if getattr(self, "_pending_host_uid_schema", False):
             self._pending_host_uid_schema = False
             self._host_uid_schema_ready = True
@@ -2152,6 +2779,21 @@ class MessageStore:
         except (ValueError, TypeError):
             return None
         return data if isinstance(data, dict) else None
+
+    def try_increment_compaction_telemetry(
+        self, conversation_id: str, increment: int, updates: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Skip a turn's diagnostic update if another thread owns the store."""
+        lock = self._write_lock
+        if lock.acquire(blocking=False):
+            try:
+                if self._conn is not None and not self._conn.in_transaction:
+                    return self.increment_compaction_telemetry(conversation_id, increment, updates)
+            except Exception:
+                logger.debug("LCM turn telemetry write failed", exc_info=True)
+            finally:
+                lock.release()
+        return None
 
     def increment_compaction_telemetry(
         self,
@@ -2761,8 +3403,8 @@ class MessageStore:
         # Deserialize tool_calls JSON
         if d.get("tool_calls"):
             try:
-                d["tool_calls"] = json.loads(d["tool_calls"])
-            except (json.JSONDecodeError, TypeError):
+                d["tool_calls"] = canonical_value(json.loads(d["tool_calls"]))
+            except (ValueError, TypeError):
                 pass
         return d
 
@@ -2804,18 +3446,40 @@ class MessageStore:
 
         Used by the backup path's cross-connection flush so callers do not reach
         the private connection. Requires a live connection: a closed store
-        raises, matching direct ``_conn.commit()`` use.
+        raises, matching direct ``_conn.commit()`` use. #2345: the write lock
+        keeps it from committing a foreground ingest's batch halfway.
         """
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.commit()
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
 
-        Thin wrapper over ``sqlite3.Connection.backup`` so callers snapshot the
-        store without reaching its private connection. Requires a live
-        connection, matching direct ``_conn.backup(dest)`` use.
+        When records exist, copy the pinned pair with SQLite's backup API and
+        publish ``<destination>.records`` only after both copies succeed.
+        The caller supplies a fresh staging file and publishes the pair.
+        Requires a live connection; records formats are copied uninterpreted.
         """
-        self._conn.backup(dest)
+        path = records_path(self)
+        if path is None or not path.exists():
+            self._conn.backup(dest)
+            return
+        destination = dest.execute("PRAGMA database_list").fetchone()[2]
+        if not destination:
+            raise ValueError("a records pair requires a file-backed backup destination")
+        target = Path(destination + ".records")
+        staged = target.with_name(target.name + ".tmp")
+        try:
+            # Pin records first; both backups use precisely the same read cut as attachment.
+            with records_read_cut(self, _for_backup=True) as cut:
+                with closing(sqlite3.connect(str(staged))) as side:
+                    cut.records.backup(side)
+                cut.records.rollback()  # Purges need not wait for the canonical copy.
+                cut.canonical.backup(dest)
+            staged.replace(target)
+        finally:
+            with suppress(OSError):
+                staged.unlink(missing_ok=True)
 
     # -- Lifecycle ----------------------------------------------------------
 

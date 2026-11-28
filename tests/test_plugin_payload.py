@@ -158,6 +158,7 @@ def test_checkout_drift_gate(builder, tmp_path):
     assert result["total_bytes"] <= builder.MAX_TOTAL_BYTES
     assert all(row["bytes"] <= builder.MAX_FILE_BYTES for row in result["files"])
     assert not any(p.split("/")[0] in {"tests", "bench", "scripts", ".github"} for p in paths)
+    assert (tmp_path / "payload/plugin.yaml").read_bytes() == (ROOT / "plugin.yaml").read_bytes()
     # Reviewed file-read sites from the #1946 measure lane: standalone config, skill
     # registration and guidance recall policy. engine/runtime_identity __file__ sites
     # only report provenance; bypass/host_uid_emit import host-owned modules.

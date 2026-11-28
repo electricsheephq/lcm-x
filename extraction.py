@@ -67,7 +67,8 @@ CONTENT:
 
 
 def _call_extraction_llm(prompt: str, model: str = "",
-                          timeout: float | None = None) -> Optional[str]:
+                          timeout: float | None = None,
+                          deadline: float | None = None) -> Optional[str]:
     """Call the Hermes auxiliary LLM for extraction."""
     try:
         from agent.auxiliary_client import call_llm
@@ -80,7 +81,9 @@ def _call_extraction_llm(prompt: str, model: str = "",
         apply_lcm_model_route(call_kwargs, model)
         if timeout is not None:
             call_kwargs["timeout"] = timeout
-        response = call_llm(**call_kwargs)
+        from .escalation import _host_stream_deadline_scope
+        with _host_stream_deadline_scope(deadline):
+            response = call_llm(**call_kwargs)
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
@@ -315,6 +318,7 @@ def extract_before_compaction(
     session_id: str = "",
     model: str = "",
     timeout: float | None = None,
+    deadline: float | None = None,
 ) -> bool:
     """Extract decisions from messages about to be compacted and write to a daily file.
 
@@ -323,7 +327,10 @@ def extract_before_compaction(
     """
     try:
         prompt = EXTRACTION_PROMPT.format(text=serialized_messages)
-        result = _call_extraction_llm(prompt, model=model, timeout=timeout)
+        call_kwargs = {"model": model, "timeout": timeout}
+        if deadline is not None:
+            call_kwargs["deadline"] = deadline
+        result = _call_extraction_llm(prompt, **call_kwargs)
 
         if not result or result.strip() == "NOTHING_TO_EXTRACT":
             logger.debug("Pre-compaction extraction: nothing to extract")

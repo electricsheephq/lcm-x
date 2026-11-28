@@ -3,7 +3,10 @@
 LCM's lossless contract is fidelity to the host's durable conversation, so a stored user-row surplus of key k in
 lineage L is licensed only up to what the host's own state.db holds in L:
 licensed = min(surplus, host_count_L(k) - expected_L(k)), floored at 0 (multiset.licence). Deficits, assistant rows
-and tool rows are never licensed. B2 keys host rows exactly as it keys stored rows (multiset.h: the edge strip only);
+and tool rows are never licensed as surplus. Separately, B1/B2 expect a nonempty last emit without a turn end
+only up to the same lineage's host assistant count minus its already expected assistant items of that key,
+reserving capacity in transcript order; these expectations are reported as ``host_held_inflight_replies``.
+B2 keys host rows exactly as it keys stored rows (multiset.h: the edge strip only);
 B1 counts ``[Tnn] user turn`` tags in the same host occurrences.
 
 host_count counts what one host view holds, never physical copies. Hermes re-issues every durable row on every
@@ -32,8 +35,8 @@ from . import multiset
 USER_TAG = r"\[([A-Z]\d{2,3})\] user turn"
 
 
-def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str | None]:
-    """lineage -> {"keys": {key: {"n", "ids"}}, "tags": {tag: {"n", "ids"}}} from the host's user rows, or (None, why)."""
+def load(state: Path, group, tree: str | None = None, *, assistants=None) -> tuple[dict | None, str | None]:
+    """Return user evidence as (lineage -> keys/tags, why); optionally fill a separate assistant-count sink."""
     if not state.exists():
         return None, "no host state.db in the cell"
     if not tree:
@@ -49,22 +52,24 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
             columns = {r[1] for r in con.execute("pragma table_info(messages)")}
             provenance = {"message_uid", "absorbed_message_uids"} <= columns
             extra = ", message_uid, absorbed_message_uids" if provenance else ", NULL, NULL"
-            rows = con.execute("select id, session_id, content, active" + extra + " from messages"
-                               " where role = 'user' order by id").fetchall()
+            rows = con.execute("select id, session_id, content, active" + extra + ", role from messages"
+                               " where role in ('user', 'assistant') order by id").fetchall()
         finally:
             con.close()
     except sqlite3.Error as exc:
         return None, f"host state.db unreadable: {exc!r}"[:200]
     held, texts = defaultdict(list), {}  # (lineage, key) -> [(row id, session, active)]
     standalone, merges = defaultdict(dict), {}
-    for rid, sid, content, active, uid, raw_absorbed in rows:
+    for rid, sid, content, active, uid, raw_absorbed, role in rows:
         head = (content or "").lstrip()
         if multiset.norm(content or "") and not (header.match(head) or head.startswith(prefixes)
                                                or any(p in head for p in recovery)):
-            key = ("user", multiset.h(content))
+            key = (role, multiset.h(content))
             g = group(sid)
             held[(g, key)].append((rid, sid, active))
             texts[key] = content
+            if role == "assistant":
+                continue
             try:
                 absorbed = json.loads(raw_absorbed or "[]")
             except (ValueError, TypeError):
@@ -81,6 +86,10 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
     for (g, key), rs in held.items():
         n = max([1, *Counter(s for _r, s, a in rs if a == 1).values()])
         ids = [r for r, _s, _a in rs]
+        if key[0] == "assistant":
+            if assistants is not None:
+                assistants.setdefault(g, {})[key[1]] = {"n": n, "ids": ids}
+            continue
         tags = sorted(set(re.findall(USER_TAG, texts[key])))
         out[g]["keys"][key] = {"n": n, "ids": ids, "tags": tags}  # scripted-prompt tags, never the text
         for tag in tags:

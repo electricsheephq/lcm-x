@@ -56,6 +56,18 @@ refused before links or host calls. Native Hermes CLI aliases remain available.
 
 ## High-impact controls
 
+Under `lcm:` in `config.yaml`, `large_output_active_replay_stub_threshold_tokens`
+(first sight; default 10,000) and `large_output_active_replay_stub_aged_threshold_tokens`
+(at compaction; default 2,000) accept integer token thresholds of at least 500.
+Their corresponding `LCM_` environment keys take precedence. Invalid values keep
+the declared default and report a configuration warning. Aged `0` uses the first-sight
+value; an aged value above first-sight is capped at first-sight when used.
+
+`lcm.recall_summary_event_time` (default `false`) gives `lcm_recall` summary hits
+`event_time_start`/`event_time_end` from their sources' host times;
+`LCM_RECALL_SUMMARY_EVENT_TIME` takes precedence, and an invalid YAML value keeps
+`false` with a configuration warning.
+
 Local embeddings are on by default, with provider `fastembed`. The configured
 model remains empty; only fastembed supplies the effective default
 `BAAI/bge-small-en-v1.5`. Explicit models win with an explicit provider; runtime
@@ -97,28 +109,60 @@ export LCM_ENABLE_SLASH_COMMAND=1   # registers /lcm for the setup commands
 ```
 
 Restart Hermes, then run `/lcm embed warmup`, `/lcm embed backfill` (dry run),
-`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is on
-by default for provider-bound copies; durable storage stays raw. See
+`/lcm embed backfill --apply`, then `/lcm status`. Cloud privacy filtering is off
+by default for provider-bound copies (opt in with `LCM_EMBEDDING_PRIVACY_ENABLED=true`);
+durable storage stays raw. See
 [Voyage setup, key creation and current limits](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#option-1--voyage-ai-free-tier).
 
 Use [docs/operator-guide.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/operator-guide.md) as the complete current source. Start with:
 
 - `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
+- `LCM_TURN_START_DEFER_CEILING` (default `0`, env only) defers otherwise threshold-eligible
+  automatic passes during tool turns while prompt pressure is below this share of the active model
+  window. A nonzero setting must be finite, positive and below `1 - LCM_SURVIVAL_RESERVE`.
+  Invalid values disable deferral and appear once in `config_source_warnings`. The host must
+  supply a response stop reason in usage (`tool_use` or `tool_calls`) or supply the normalized
+  finish reason through `post_api_request` with a verifiable current turn ID. Without a phase
+  signal, the gate uses normal trigger behavior. The usual gates apply at turn start,
+  at or above the ceiling and during forced overflow.
+  Starting a foreground compaction pass clears the tool-use phase until the next tool-use response.
+  So if a foreground pass at or above the ceiling, or on forced overflow, leaves the prompt above the
+  trigger, the host's next
+  pre-API check in the same turn can start another pass, as with the setting off. The host's progress
+  latch and attempt cap bound it; that pass logs no deferral line and does not move
+  `turn_start_deferred_checks`.
+
+  LCM-X checks the ceiling against the live trigger, including after Hermes or
+  the LCM assembly cap lowers it. The effective ceiling is the lower of the
+  configured ceiling and any assembly cap, where forced overflow takes over.
+  LCM-X warns when the effective ceiling is at or below the trigger (inert) or
+  above an absolute or lowered trigger (unanchored). Both warnings include the
+  token values and name the cap when it limits deferral. Global and per-model
+  ratio triggers below the effective ceiling are quiet while they retain their
+  window-derived value. The first deferral in each episode logs at INFO and
+  subsequent deferrals log at DEBUG. When enabled, `/lcm status` shows the
+  configured ceiling as a share and in tokens beside the trigger, plus
+  `turn_start_deferred_checks`, the number of gate checks deferred since the
+  last session bind or reset (a side-channel session's bind resets it too).
+
 - `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
 - `LCM_LEAF_CHUNK_TOKENS` (default `24000`): maximum raw material per leaf compaction group;
 - `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
-- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`): the summary-frontier size a threshold sweep condenses toward; `0` means one leaf budget capped at a quarter of the compaction threshold, so a small window's summaries cannot fill it (#1139);
+- `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (default `0`) sets the threshold sweep's summary-frontier budget. A positive value overrides the ratio. With the tokens setting not positive and the ratio at `0`, the budget is one leaf capped at a quarter of the compaction threshold (#1139).
+- `LCM_SUMMARY_PREFIX_TARGET_RATIO` (default `0`, env only) sets the summary-frontier budget as a share of the model window when the tokens setting is not positive.
+- `LCM_DEPTH_TARGET_RATIO` (default `0`, env only) lets an automatic threshold sweep stop its leaf passes at a whole-prompt estimate expressed as a share of the model window. It is off at `0` and requires a target below the trigger. While the target is active, freed tokens are scaled by the host figure minus the booked fixed load over LCM-X's count (clamped 1-4), and, with the foreground settings at their defaults, a bounded catch-up may admit further summary calls once the pass has stored progress, up to about 210 s from `compress()` entry minus the finalization reserve (each extension call capped at 85% of the summary timeout); forced, overflow and recovery passes keep the base budget. Both window ratios accept values from `0` up to but excluding `1`.
 - `LCM_BACKGROUND_LEAF_PREP_ENABLED` (default `false`, #787 slice 1): prepare leaf summaries off-turn above P = threshold − 0.15 × window and publish them at the threshold crossing with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` (default `8`) and `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` (default `600`) bound its own spend guard;
 - `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true` from v0.27.0): background day/week rollup summaries; the first session bind creates the rollup tables and schedules maintenance; `false` opts out;
 - `LCM_LEAF_TARGET_RATIO` (default `0.20`), `LCM_LEAF_TARGET_MIN_TOKENS` (default `2000`) and `LCM_LEAF_TARGET_MAX_TOKENS` (default `2000`): leaf summary target `min(MAX, max(MIN, int(source_tokens * RATIO)))`; the first summary call gets twice the target as `max_tokens`. Defaults give a fixed 2,000-token target. Setting only RATIO has no effect while MIN equals MAX and warns; set `LCM_LEAF_TARGET_MAX_TOKENS` above MIN to enable the ratio. A MIN above the default cap also needs MAX, otherwise MIN resets with a warning naming that key (#614, #1138);
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
+- `LCM_RECORDER_ENABLED` (default `false`, needs Python 3.12 or newer, #2243): opt-in event recorder that writes the engine calls Hermes makes, the message views and the state they read to local files under the profile, for offline replay; `LCM_RECORDER_DIR` (default `$HERMES_HOME/lcm-recorder/`) sets where and `LCM_RECORDER_MAX_BYTES` (default 20 GiB) caps all recorder writes (events, blobs, snapshots, payload copies, manifests, checkpoints and status) across every recording under `LCM_RECORDER_DIR`. Recording preserves what LCM stores and returns during ordinary calls; KeyboardInterrupt propagates and the recorder logs its own diagnostics. With the flag off nothing is imported or created. The files hold message content. See [docs/recorder.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/recorder.md);
 - `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set
 - `LCM_SURVIVAL_FIT` (default `true`) and `LCM_SURVIVAL_RESERVE` (default `0.15`): when compaction cannot bring the list under the model window, the oldest whole user turns leave live context (an oversized newest turn is projected) so the session survives; rows stay stored and searchable, a WARNING `LCM survival fit applied` is logged, the user is warned once and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns that history in its top-level `survival_fit` field (null when no fit is recorded); it is not a health check and does not affect `overall`. `lcm_status.last_survival_fit` describes the latest fit in the current session, or null, including `cause` when recorded; doctor history retains `last_cause`. The reserve is the share of the window kept free;
-- `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
+- `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching. `shadow` writes bindings and never skips a row on a uid alone, but its bindings are read as evidence: store-complete copy exclusion (#1124), the NULL-stamp audit proof (#1403), the tail-rewind veto for a bound stored row, and tool-segment replay binding. In every mode, an incoming `message_uid` on a row vetoes the stamp-tail rewind. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. Under `shadow` and `on`, canonical uid evidence can also exclude a proven hidden re-ingest copy of an assistant message from leaf summary input (the row stays stored and searchable); `off` disables that. `on` behaves exactly like `shadow`: both record count-only would-reject alias UID-conflict diagnostics in the debug log without changing matching, stored rows, bindings, or ingest writes. `off` performs no UID/binding reads on this diagnostic path. One read is not gated: bindings stored by an earlier `shadow` run are still read as occurrence proof for NULL-stamp audit copies (#1403) after a switch to `off`. Unknown values behave as `shadow` and warn once. No-op on hosts without uids;
 - `FASTEMBED_CACHE_PATH` (fastembed's own variable, not an `LCM_*` key): the model cache the local `fastembed` provider loads from (default: the user cache directory); it may be a shared, read-only cache. A read-only cache must be pre-seeded, because preparation cannot download into it. Bge-small uses one ONNX Runtime intra-op thread; other models use two;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
-- `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction, without changing row decisions. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup and ingest ledger work. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
-- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
+- `LCM_INGEST_LEDGER` (default `shadow`; `off`, `shadow`; env only): write foreground ingest bindings, stamp observations and view vectors in the ingest transaction. On a cold or reconciled start, `shadow` also uses the ledger's occurrence-proven prefix as a cursor candidate. It can only move the cursor forward past rows proven stored or skipped by `LCM_IGNORE_MESSAGE_PATTERNS`, so it can change which incoming rows are stored. Ordinary isolated ledger failures fail open; busy errors still retry the ingest, and a lost owner transaction or savepoint error still rolls it back. `off` disables setup, ledger writes and the candidate, and restores the legacy cursor choice. Unknown values mean `shadow` and warn once per process. Tail drain, delegated children and compaction write no ledger rows at P1b-2b;
+- summary/embedding provider settings only after confirming credentials, cost, and data handling; see [docs/embeddings-setup.md, "Install consent, updates and recovery"](https://github.com/electricsheephq/lcm-x/blob/main/docs/embeddings-setup.md#install-consent-updates-and-recovery) for the embedding-dependency recovery note. Known cloud providers receive unfiltered copies by default under the `privacy:off` vector revision. Set `LCM_EMBEDDING_PRIVACY_ENABLED=true` to opt in to experimental filtering with a nonempty list of known patterns. `LCM_SENSITIVE_PATTERNS_ENABLED=true` separately enables irreversible durable redaction (unsupported; do not enable). A change in filter setting requires rebuilding the affected vector identity. `LCM_EMBEDDING_PRIVACY_ENABLED` also governs the query and the candidate snippets that optional cloud rerank (`LCM_RERANK_ENABLED=true`, Voyage only, off by default) sends to Voyage. The privacy transform is off by default, so they are sent unfiltered unless it is `true`.
 
 `LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply only to Ollama and OpenAI-compatible embeddings.
 Environment values override `lcm.embedding_query_prefix` and `lcm.embedding_document_prefix` in YAML; quote values such as `"search_query: "` to keep whitespace.
@@ -152,7 +196,9 @@ except `LCM_EMBEDDINGS_ENABLED`: a blank value there turns embeddings off instea
 keeping the local default.
 Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK_TOKENS`, `LCM_SUMMARY_TIMEOUT_MS`), choice warnings (`LCM_EMBEDDING_PROVIDER`, `LCM_PREANSWER_EVIDENCE_MODE`, `LCM_EMBEDDING_STORAGE_DTYPE`), and dropped-input warnings (`LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS`, `LCM_RECALL_ARM_WEIGHTS`, `LCM_MODEL_THRESHOLDS`) use the same channel without changing values or consumer fallbacks.
 
-`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` are deprecated in v0.28.0 and removed in v0.30.0 (#1246). Each enabled flag adds one `config_source_warnings` entry without changing behavior; false or unset flags and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
+`LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED`, `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS`, and `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` were removed in v0.30.0 (#1246); they are parsed and ignored. Each true flag logs one warning per process; summarized tool rows are no longer rewritten. They add no deprecation entry to `config_source_warnings`, and existing GC placeholders remain readable.
+
+`LCM_DEFERRED_MAINTENANCE_ENABLED` is deprecated in v0.30.0 and removed in v0.31.0 (#1246); `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` only applies while it is on. Enabling it adds one `config_source_warnings` entry without changing behavior; false or unset values and direct `LCMConfig(...)` construction add no deprecation warning. These flags are environment-only; their `lcm.*` YAML keys are ignored and shipped presets do not set them.
 
 ### Tool exposure
 
@@ -171,7 +217,18 @@ The manifest continues to declare all 16 tools.
 
 ### Recall ranking
 
+- `LCM_RECALL_RECENCY_FLOOR` (float, default `0.5`; YAML `lcm.recall_recency_floor`, nonblank environment wins): lower bound in `0..1` for recall's 30-day half-life multiplier. Missing or zero timestamps receive the floor. Set `1.0` to disable recency decay. Out-of-range, non-numeric, boolean and non-finite values warn and fall back to `0.5`; YAML accepts numbers and the environment accepts numeric strings.
+- `LCM_RECALL_GREP_STEMMED` (bool, default `false`; YAML `lcm.recall_grep_stemmed`, environment wins): full-text `lcm_grep` uses the Porter index when ready, with the same plain-index fallback as recall when unavailable or failing. A top-level uppercase `OR` query defaults to relevance ordering; any caller-supplied `sort` is kept. Quoted, lowercase or parenthesized OR text keeps the existing recency default. Semantic and hybrid modes retain their behavior. Omitted options preserve existing answer bytes and tool schemas. FMP accepts `--recall-option recall_recency_floor=1.0 --recall-option recall_grep_stemmed=true` at recall time.
+- `LCM_RECALL_GUIDANCE` (default `v1`; YAML `lcm.recall_guidance`, environment takes precedence): `v2` adds guidance for questions spanning conversations on all three schema paths and advertises `lcm_load_session` anchor parameters. Pass `anchor_store_id` with its owning `session_id`; a foreign anchor returns an error without rows. `before` defaults to 6 and `after` to 12, each clamped to 0..40. Existing role and inclusive stored-write-time filters apply within the window. When `has_more` is true, continue using `after_store_id=next_cursor` without the anchor; otherwise the cursor is null. With `detail="answer_ready"`, hits delivery adds `provenance.answer_ready.sessions_delivered` and `sessions_in_pool` (distinct sessions in the ranked pool plus delivered later-statement children). Compare the counts; when fewer sessions were delivered than are in the pool, call again with `exclude_session_ids` set to the sessions already read. When a hit carries a `session_hint`, use it to read around that hit. Session delivery omits the hits-only provenance instruction. Values are stripped and lowercased; unknown values use `v1`; defaults keep existing output and schemas.
+- `LCM_RECALL_MIN_SESSIONS` (int, default `0`; YAML `lcm.recall_min_sessions`, environment wins), clamped 0..10: promote missing sessions into the ranked window without dropping candidates or displacing the FTS anchor. Per-call `min_sessions` overrides the key in either guidance mode; null or unparseable values fall back to it. Guidance v2 advertises the argument. `provenance.session_floor` reports requested, achieved, promoted and final delivered session counts; fitting may reduce delivery. Proactive recall, pre-answer and evidence retrieval pin it off.
+- `LCM_RECALL_SESSION_HINTS` (bool, default `false`; YAML `lcm.recall_session_hints`, environment takes precedence): adds `session_hint` to answer-ready hits and summary leads, for example `lcm_load_session(session_id='session-a', anchor_store_id=42)`. Uses the anchor row's own session ID, including summary source rows, so summary rollover does not break the call. Missing source rows or failed hint reads omit only the affected hint. Independent of guidance version. Both settings affect model-called recall only; proactive recall, pre-answer retrieval and evidence wrappers keep their existing behavior. Agentic FMP runs set these keys through `--recall-option`, because that bench constructs config explicitly and ignores the environment.
+
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see [docs/retrieval-tools.md](https://github.com/electricsheephq/lcm-x/blob/main/docs/retrieval-tools.md).
+- `LCM_RECALL_ADJACENT_REPLY` (bool, default `false`; YAML `lcm.recall_adjacent_reply`, environment takes precedence): opt in to up to three next-row replies after the rank-1 raw hit and top-three question hits. Same session/conversation only, from the other role (user ↔ assistant), never older than the source by event time; skip tool, tool-call, empty and subagent replies; runs before the FTS anchor. Keeps the hit limit and candidate pool; citation, session-density and character caps remain. Internal recall and session delivery skip it. Failed reads/deadline discard the step with `provenance.adjacent_reply_unavailable`; successful moves appear in `provenance.adjacent_reply`. Not a tool argument.
+- `recall_snippet_window_hits` (env `LCM_RECALL_SNIPPET_WINDOW_HITS`, YAML `lcm.recall_snippet_window_hits`) is off by default (`0`). Set N (clamped to 25) to give the first N selected message-excerpt hits in `detail="snippets"`, from chunk (vector) or keyword search, windows of up to 2,400 characters centred on the matched chunk, else the keyword match, else the query match; shorter messages come back whole. Each window carries `snippet_window` offsets, lengths and truncation metadata. Summary hits, adjacent replies and hits without hydrated content keep their existing snippets. Ranking and selection are unchanged. Larger snippets can mean fewer hits fit under `response_char_cap`; the response then sets `response_cap_truncated: true`. A skipped window read keeps the original snippets and reports `snippet_window_skipped` (`deadline` or `read_error`). Proactive recall ignores this setting. `answer_ready` and `delivery_unit="session"` are unchanged. Invalid values (including bools and negatives) warn and use `0`; environment overrides YAML.
+- `LCM_RECALL_LATER_STATEMENTS` (integer, default `0`; YAML `lcm.recall_later_statements`, environment takes precedence): after final selection, place one later lexical match after each of the first N eligible message hits (chronological with time ordering). Values clamp to 5; invalid/negative values warn and use 0. Bounded FTS, same scope/exclusions, strictly later observed time (write-time fallback only when both observations are absent), never beyond the call’s wall clock. Normalized copies are skipped. Children need an exact ref unseen by the caller in delta mode and a citable ref in reference-strict mode. They ship with their source, bypass the per-session limit, and in a full window displace the last plain hit to the undelivered tail, never a linked source, another child, or the FTS-anchored hit. Each child hydrates around its own match with its own allowance; the expanded count can exceed the expanded-hit limit. `response_char_cap` still applies. Links are `later_statement_of` and `has_later_statements` (store IDs); provenance reports requested/searched/found/delivered/displaced/ms, with `later_statements_unavailable` on deadline/read errors. Read-only, no claim of replacement; internal recall and session delivery skip it. Not a tool argument; default output and schemas are unchanged.
+
+- `recall_extra_entries` (env `LCM_RECALL_EXTRA_ENTRIES`, YAML `lcm.recall_extra_entries`; environment overrides YAML) is off by default (`0`). The value is a cap (clamped to 25); a call appends at most min(cap, floor(L/2)) extras from ranks L+1.. in snippets-only hits delivery, where L is the call's delivered limit (`limit` clamped to 25): at cap 25, L=20 → 10 extras and L=25 → 12. Extras are not counted in `total_results`; the candidate pool and rerank window are still sized from L. Each extra has exactly `kind`, `store_id`, `session_id`, `event_time`, `window` (up to 300 characters centred like snippet windows), and `extra=true`; `event_time` is the row's own host time, or null for summaries, missing rows and rows whose time was carried from a neighbour; summaries and missing rows use their own snippet. Duplicates of full hits (including `duplicate_store_ids`) or earlier extras are skipped without refill. Full hits and existing envelope fields stay unchanged; extras are dropped from the end to fit the response cap. A skipped read reports `extra_entries_skipped` (`deadline` or `read_error`). Response-cap truncation of full hits or exhausted ranking gives no extras or reason flag. Internal recall, `answer_ready` and session delivery ignore it. Invalid values warn and use `0`.
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
 ### Summary circuit
@@ -184,10 +241,12 @@ A 400 or 404 saying the route cannot serve its model (unknown model, model not f
 - `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` (default `6`, #630): results rejected for their content (empty, reasoning-only, integrity contract violated, not shorter than the source) before the route is refused;
 - `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` (default `300`): seconds an open route is refused before a retry is allowed;
 - `LCM_SUMMARY_TIMEOUT_MS` (default `120000`, the host's own compression default; when unset, Hermes `auxiliary.compression.timeout` applies if configured): how long one summary call may run before it counts as a failure. The foreground time budget can cut a call shorter.
+- `LCM_SHUTDOWN_COMPACTION_WAIT_S` (default `10.0`; env only, for example `LCM_SHUTDOWN_COMPACTION_WAIT_S=0.2`): a finite nonnegative float bounding the compaction drain after shutdown acquires its existing unbounded lifecycle lease. Values above `86400` are capped at `86400`; invalid values use `10.0`. Once shutdown starts, new compactions return the host messages unchanged and active passes stop at write checkpoints. On timeout one WARNING is logged and connections remain open; call shutdown again after the active pass exits to close them.
 - `LCM_FOREGROUND_SOFT_SECONDS` (default `60`; `0` = none) and `LCM_FOREGROUND_HARD_SECONDS` (default `120`; `0` or invalid = `120`) (#605): one time budget for a threshold sweep, counted from `compress()` entry. The progress call (a condensation when the summary frontier is over its target, else the first leaf) is tried while 15 s of usable time is left before the hard bound less a finalize reserve; after a stored leaf or condensed node a call starts only if its route's recent duration says it ends, with the reserve, by the hard bound and by the soft target (stop reason `soft_target_reached`). Each call's timeout is at most the usable time left. A step already running is not interrupted, so a compaction can end past the hard bound: read the INFO line `LCM compaction stop:` for the seconds. On `reason=error`, a trailing `failure=` field names the known cause as one token, such as `publication_invariant_conflict` or `exception:RuntimeError` (#1180). A call cut by the budget does not count against the route's circuit, and a compaction takes one spend-guard slot; rollups use their own guard. The budget covers the sweep-off, manual `/compress`, forced overflow and recovery paths too (manual and forced use the hard bound only), and a leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` is written whole as level 3 with no call.
 
 A published retained-occurrence escape logs one WARNING per pass naming the stored rows and the host/store order mismatch (#1162). The stop line adds `escaped=store_id:<id>,role:<role>,kind:<shown|mapped>,n:<count>` for published escapes only. The host copies stay live and the source rows stay stored; a failed summary emits neither this WARNING nor the token.
 
+- `LCM_HOST_ROW_RECOVERY_ENABLED` (default `false`): off by default because of two known issues: live-child recovery duplicates (#2624) and task-list user-row loss during catch-up reconciliation (#2042); `true` enables background host-row recovery under a strict durable proof, recent unended failed-turn catch-up, and the ingest guard together; unproven children store nothing;
 - `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true` from v0.27.0): a large tool result or inline media payload is stored as a payload file under the Hermes home and its row holds an `[Externalized payload: ...]` reference; `lcm_expand(externalized_ref=...)` returns the original bytes; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true` from v0.27.0): ingest durably externalizes a large tool result, per the two thresholds below; below-threshold size-only host adoption waits for a real compression boundary; needs externalization on; `false` opts out;
 - `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` (default `10000`) and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` (default `2000`; `0` = the first-sight value, never above it) (#671): with `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` and `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` both on (the default from v0.27.0), a new tool result over the first value is replaced by its externalized-ref stub at ingest, and at a compaction a tool result outside the fresh tail is stubbed from the aged value. The stub keeps the call row; `lcm_expand(externalized_ref=...)` returns the original. An automatic compaction at or over the threshold first tries these free cuts without a model call and returns them when the host-measured list is at or under min(threshold - leaf chunk, 0.95 x threshold): stop reason `stub_first_exit` (partial; `lcm_status` `last_stub_first_exit`, the doctor, the `LCM compaction stop:` line); the rows no leaf summarised stay stored as backlog.
@@ -198,11 +257,13 @@ A published retained-occurrence escape logs one WARNING per pass naming the stor
 
 ## Generated scalar environment reference
 
+> **Unsupported/experimental: not maintained; do not enable.** Durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) stays off by default. It is no longer maintained, and a bug that occurs only with it enabled is not fixed. The cloud embedding privacy filter (`LCM_EMBEDDING_PRIVACY_ENABLED`) is a separate setting, and this note does not cover it. If you already enabled it, set it to `false`; rows it already redacted stay redacted, and new content is then stored without redaction.
+
 Regenerate this table with the [reference generator](https://github.com/electricsheephq/lcm-x/blob/main/scripts/gen_config_reference.py) from the
 checkout root. It lists every scalar registry entry using the declared constructor
 default, without reading the environment, credentials, or host configuration.
-`""` is an empty string; `null` means unset (automatic provider-dependent protection
-for `LCM_EMBEDDING_PRIVACY_ENABLED`). Empty model/path defaults resolve at runtime;
+`""` is an empty string and `null` means unset. Unset resolves to off for
+`LCM_EMBEDDING_PRIVACY_ENABLED`. Empty model/path defaults resolve at runtime.
 `LCM_CONTEXT_THRESHOLD` and `LCM_SUMMARY_TIMEOUT_MS` can inherit host settings as
 described above. Some defaults are sentinels: `LCM_FOREGROUND_HARD_SECONDS` `0` means 120 s,
 `LCM_PREANSWER_EVIDENCE_MODE` `""` means `legacy_selective` when pre-answer evidence is on,
@@ -215,8 +276,8 @@ their existing clamping, fallback, and normalization rules. `—` means no metad
 in that column, not that every input is valid or that a removed option is active.
 `LCM_NATIVE_RECOVERY` was removed in v0.25.0; it is parsed and ignored.
 The operator guide and the prose above explain behavior and coupled settings.
-Deprecation releases describe the two retiring experiments; enabling either still
-warns without changing its behavior until removal.
+The deprecation release describes deferred maintenance; enabling it still warns
+without changing its behavior until removal.
 
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 | Environment key | Type | Default | Diagnostic range / choices | Deprecation |
@@ -234,9 +295,9 @@ warns without changing its behavior until removal.
 | `LCM_CONDENSATION_FANIN` | `int` | `4` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `bool` | `false` | — | — |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `int` | `40000` | — | — |
-| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED` | `bool` | `false` | — | — |
 | `LCM_CACHE_FRIENDLY_MIN_DEBT_GROUPS` | `int` | `2` | — | — |
-| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | — |
+| `LCM_DEFERRED_MAINTENANCE_ENABLED` | `bool` | `false` | — | Deprecated v0.30.0; removed v0.31.0 |
 | `LCM_DEFERRED_MAINTENANCE_MAX_PASSES` | `int` | `4` | — | — |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `float` | `0.0` | — | — |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `bool` | `true` | — | — |
@@ -263,17 +324,21 @@ warns without changing its behavior until removal.
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `bool` | `false` | — | — |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | `bool` | `null` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `bool` | `true` | — | — |
+| `LCM_HOST_ROW_RECOVERY_ENABLED` | `bool` | `false` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `int` | `12000` | — | — |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH` | `str` | `""` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `bool` | `true` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `int` | `10000` | — | — |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `int` | `2000` | — | — |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | Deprecated v0.28.0; removed v0.30.0 |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `bool` | `false` | — | — |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `float` | `0.0` | — | — |
+| `LCM_DEPTH_TARGET_RATIO` | `float` | `0.0` | — | — |
+| `LCM_SUMMARY_PREFIX_TARGET_RATIO` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_MODEL` | `str` | `""` | — | — |
 | `LCM_NATIVE_RECOVERY` | `bool` | `false` | — | — |
 | `LCM_SURVIVAL_FIT` | `bool` | `true` | — | — |
 | `LCM_SURVIVAL_RESERVE` | `float` | `0.15` | `>= 0.0`, `<= 0.9` | — |
+| `LCM_TURN_START_DEFER_CEILING` | `float` | `0.0` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `int` | `2` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `int` | `300` | — | — |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` | `int` | `6` | — | — |
@@ -295,7 +360,18 @@ warns without changing its behavior until removal.
 | `LCM_RECALL_SCAN_BUDGET_S` | `float` | `0.0` | — | — |
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
 | `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
+| `LCM_RECALL_DELIVERY_ORDER` | `str` | `"score"` | `"score"`, `"time"` | — |
+| `LCM_RECALL_SUMMARY_EVENT_TIME` | `bool` | `false` | — | — |
+| `LCM_RECALL_ADJACENT_REPLY` | `bool` | `false` | — | — |
+| `LCM_RECALL_SNIPPET_WINDOW_HITS` | `int` | `0` | — | — |
+| `LCM_RECALL_EXTRA_ENTRIES` | `int` | `0` | — | — |
+| `LCM_RECALL_LATER_STATEMENTS` | `int` | `0` | — | — |
+| `LCM_RECALL_MIN_SESSIONS` | `int` | `0` | — | — |
+| `LCM_RECALL_SESSION_HINTS` | `bool` | `false` | — | — |
+| `LCM_RECALL_GUIDANCE` | `str` | `"v1"` | — | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
+| `LCM_RECALL_RECENCY_FLOOR` | `float` | `0.5` | — | — |
+| `LCM_RECALL_GREP_STEMMED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `int` | `500` | — | — |
@@ -360,7 +436,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 12 keys are read outside `config.py`, directly or through helper
+These 15 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -369,9 +445,12 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `config.py`, `engine.py` | Absolute compaction threshold override; also settable as `lcm.context_threshold_tokens` in config.yaml; an integer env value wins, including `0` to turn the YAML pin off; empty or non-integer env values fall back to YAML | registration for YAML, provenance, and routed-profile env pins; each `_set_context_length()` call with a positive context length for live env on non-routed hosts, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_RECORDER_ENABLED` | `__init__.py` | Opt-in event recorder (#2243); Python 3.12 or newer | plugin registration |
+| `LCM_RECORDER_DIR` | `recorder.py` | Recording directory | plugin registration, when the recorder starts |
+| `LCM_RECORDER_MAX_BYTES` | `recorder.py` | Cap on all recorder writes under `LCM_RECORDER_DIR`: events, blobs, snapshots, payload copies, manifests, checkpoints and status; each planned write must also leave 20 GiB free | plugin registration, when the recorder starts |
 | `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
-| `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
+| `LCM_IDENTITY_ANCHOR` | `config.py` (called by `identity_anchor.py`, `reconcile.py`, `engine.py`, `store_complete.py`) | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |
 | `LCM_FTS_INTEGRITY_BACKGROUND` | `db_bootstrap.py` | Background integrity-check switch | database open — startup FTS validation, when a deep check is due |
 | `LCM_EMBEDDING_BACKFILL_LEASE_TTL_S` | `command.py` | Backfill claim lifetime | each call — each summary or chunk backfill apply run, before lease acquisition |
@@ -380,7 +459,7 @@ checkout root. Credential entries list only variable names, never values.
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `command.py` | Backfill claim batch size | each call — backfill batch estimates, apply-run batch sizing, and automatic embedding-maintenance pass sizing |
 | `LCM_EMBEDDING_API_KEY` | `embedding_provider.py` | Default credential variable for the compatible endpoint; name selectable via `LCM_EMBEDDING_API_KEY_ENV` | plugin registration — availability probe when compatible embeddings are enabled; also re-read at each compatible-provider `_request()` and availability probe (doctor and automatic maintenance) |
 
-Restart the host for `LCM_ENABLE_SLASH_COMMAND`; the other keys take effect on
+Restart the host for `LCM_ENABLE_SLASH_COMMAND` and the three `LCM_RECORDER_*` keys; the other keys take effect on
 the next named operation (FTS controls on the next database open, and
 `LCM_EMBEDDING_API_KEY` on the next request or probe despite its initial
 registration-time check), provided the running process's environment has been
@@ -391,6 +470,7 @@ On routed profiles, registration snapshots the absolute override for that home;
 model updates and clones keep that snapshot. Routed readers use the host-bound
 profile mapping or that home's registration pin. LCM-X background work runs with
 the profile that scheduled it.
+When the host stamps a profile's secret scope without a home override, LCM-X reads every `config.yaml` key it supports (thresholds, model thresholds, reasoning efforts, the auxiliary compression timeout, embedding prefixes, and the ignored-key warning) from that profile's `config.yaml`, never the launch home's.
 A multiplexed messaging gateway builds every profile's scope, including the launch
 profile, from its `.env` and configured secret sources; process-only settings and
 provider keys do not apply there. `hermes serve` instead supplies its captured launch

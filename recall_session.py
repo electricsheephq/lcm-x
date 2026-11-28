@@ -31,11 +31,15 @@ def session_schema(schema):
     props = schema["parameters"]["properties"]
     props["limit"]["description"] = "Ranked seed limit (default 8, maximum 25), not delivered message count."
     props["include"]["description"] = "Retrieval arms for seeds; session delivery returns raw source messages."
+    props["detail"]["description"] = (
+        "Response detail. Session delivery returns bounded source-message neighborhoods for either value; "
+        "'answer_ready' is still required for seen_refs and include_occurrence_time."
+    )
     return schema
 
 
 def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, seen_refs,
-                    delta_requested, event_time_fields, occurrence, summary_leads):
+                    delta_requested, event_time_fields, occurrence, summary_leads, summary_event_time=None):
     encoder = tokens._get_encoder()
     count = partial(tokens.count_tokens_with_encoder, encoder=encoder)
     delivery = dict(unit="session", seed_limit=response["limit"], requested_seed_limit=response.get(
@@ -66,6 +70,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         priority = {s["session_id"]: i for i, s in enumerate(delivery["sessions"])}
         hits.sort(key=lambda h: (priority[h["session_id"]], h["store_id"]))
         response["hits"], response["total_results"] = hits, len(hits)
+        if "session_floor" in response["provenance"]:
+            response["provenance"]["session_floor"]["delivered"] = len({h["session_id"] for h in hits})
         delivery.update(message_count=len(hits), session_count=len({h["session_id"] for h in hits}))
         for meta in delivery["sessions"]:
             ids = [h["store_id"] for h in hits if h["session_id"] == meta["session_id"]]
@@ -343,6 +349,15 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         if conn is not None:
             conn.close()
         live_reads.close()
+    if summary_event_time is not None and delivery["summary_leads"]:
+        # Opt-in lead span (one read; atomic on failure). Leads are popped
+        # before any evidence group, so these fields never displace evidence.
+        spans, reason = summary_event_time(
+            [int(lead["node_id"]) for lead in delivery["summary_leads"]], deadline=deadline)
+        if reason is not None:
+            response["provenance"]["summary_event_time_unavailable"] = reason
+        for lead in delivery["summary_leads"]:
+            lead.update(spans.get(int(lead["node_id"]), {}))
     delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
         not s["complete"] for s in delivery["sessions"])
     # Final metadata and escaped JSON count too: refit whole groups and delta.

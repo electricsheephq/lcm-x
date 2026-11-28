@@ -1,7 +1,9 @@
 """Record of a Hermes process in which LCM-X did not become active (#622).
 
-``register()`` leaves a per-process JSON file under Hermes home
-``plugin-data/hermes-lcm-x/`` (not in lcm.db: the store open may be slow).
+``register()`` writes a per-process JSON file under the process's own Hermes
+home ``plugin-data/hermes-lcm-x/`` (not in lcm.db: the store open may be slow).
+Foreign-profile preflights keep the notice in memory until first storage use
+in that profile, so unused profiles get no record or directory (#2152).
 Diagnostic surfaces report it while the process lives; legacy root files are
 also read and cleaned for one release. Standalone: no package imports.
 """
@@ -64,10 +66,14 @@ def _process_alive(pid: int, started: str | None) -> bool:
     return not (started and current and started != current)
 
 
-def inactive_record_notice(hermes_home) -> str | None:
+def inactive_record_notice(hermes_home, *, pending_record=None) -> str | None:
     """Report live inactive processes; remove unchanged dead records only."""
+    notices = []
+    if pending_record:
+        notices.append(f"LCM-X was not active in process {os.getpid()} "
+                       f"({pending_record.get('reason') or 'unknown reason'})")
     if not hermes_home:
-        return None
+        return "\n".join(notices) or None
     home = Path(hermes_home)
     try:
         paths = sorted(home.joinpath(*RECORD_DIR).glob(RECORD_NAME.format(pid="*")))
@@ -75,8 +81,7 @@ def inactive_record_notice(hermes_home) -> str | None:
         paths.extend(sorted(home.glob(RECORD_NAME.format(pid="*"))))
         paths.append(home / LEGACY_RECORD_NAME)
     except OSError:
-        return None
-    notices = []
+        return "\n".join(notices) or None
     for path in paths:
         try:
             content = path.read_bytes()

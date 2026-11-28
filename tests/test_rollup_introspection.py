@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 import hermes_lcm.command as command_module
-import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 import hermes_lcm.rollup_builder as builder_module
 from hermes_lcm import tools as lcm_tools
 from hermes_lcm.command import handle_lcm_command
@@ -50,8 +50,6 @@ def _assert_zero_shape(block, *, enabled):
             for kind in ("day", "week", "month")
         },
         "oldest_stale_age_seconds": None,
-        "last_build_cursors": {kind: None for kind in ("day", "week", "month")},
-        "last_built_at": {kind: None for kind in ("day", "week", "month")},
         "last_error": None,
     }
 
@@ -70,7 +68,7 @@ def test_lcm_inspect_rollup_block_is_zeroed_when_feature_is_off(engine):
     _assert_zero_shape(block, enabled=False)
 
 
-def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
+def test_lcm_inspect_reports_counts_stale_age_and_last_error(engine):
     store = RollupStore(engine._dag.db_path)
     try:
         _ready(store, "day", "2026-07-15", engine.current_session_id)
@@ -82,7 +80,6 @@ def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
             "month", "2026-07-01", engine.current_session_id
         )
         store.mark_failed(failed_token, "mocked summary failure")
-        store.set_cursor("day", "2026-07-15", engine.current_session_id, built_at="2026-07-15T12:00:00+00:00")
         store.connection.commit()
 
         block = json.loads(lcm_tools.lcm_inspect({}, engine=engine))["temporal_rollups"]
@@ -91,8 +88,6 @@ def test_lcm_inspect_reports_counts_cursor_stale_age_and_last_error(engine):
         assert block["counts"]["week"]["stale"] == 1
         assert block["counts"]["month"]["failed"] == 1
         assert block["oldest_stale_age_seconds"] >= 0
-        assert block["last_build_cursors"]["day"] == "2026-07-15"
-        assert block["last_built_at"]["day"] == "2026-07-15T12:00:00+00:00"
         assert block["last_error"] == "mocked summary failure"
     finally:
         store.close()
@@ -187,7 +182,7 @@ def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
         if not release.wait(timeout=5):
             raise AssertionError("test did not release background maintenance")
 
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
         key,
         blocking_maintenance,
     )
@@ -207,7 +202,7 @@ def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
         assert "retry" in result.lower()
     finally:
         release.set()
-        assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
+        assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
 
 
 def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
@@ -226,8 +221,8 @@ def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
 
     assert "status: error" in result
     assert "forced store-open failure" in result
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
-    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
 def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
@@ -247,8 +242,8 @@ def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
     with pytest.raises(RuntimeError, match="forced store-close failure"):
         handle_lcm_command("rollups rebuild day 2026-07-15", engine)
 
-    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
-    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
+    assert maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
 def test_rollups_rebuild_all_durably_seeds_unattempted_targets(engine, monkeypatch):

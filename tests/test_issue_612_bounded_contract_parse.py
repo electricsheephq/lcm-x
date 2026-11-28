@@ -49,7 +49,7 @@ def test_t1_named_mistake_is_accepted_with_a_plain_hint(reply, variant):
     body, check, tolerated = _check(reply)
     assert check == "" and tolerated == (variant,)
     assert body == PLAIN_BODY
-    assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == PLAIN_BODY
+    assert escalation._check_summary_contract(reply, NONCE, MAX_TOKENS)[0] == PLAIN_BODY
 
 
 def test_t1_the_three_mistakes_combine():
@@ -92,7 +92,7 @@ def test_t1_a_valid_reply_is_unchanged_and_tolerates_nothing():
         "unequal-emphasis", "unequal-quotes", "long-rule-line"])
 def test_t2_other_violations_are_rejected_with_their_check(reply, expected):
     assert _check(reply) == ("", expected, ())
-    assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == ""
+    assert escalation._check_summary_contract(reply, NONCE, MAX_TOKENS)[0] == ""
 
 
 def test_t2_a_decorated_reply_is_accepted_only_if_its_plain_form_would_be():
@@ -106,7 +106,7 @@ def test_t2_a_decorated_reply_is_accepted_only_if_its_plain_form_would_be():
 
 
 def test_t2_the_no_nonce_path_is_unchanged():
-    assert escalation._unwrap_summary_contract("anything at all", "", MAX_TOKENS) == "anything at all"
+    assert escalation._check_summary_contract("anything at all", "", MAX_TOKENS)[0] == "anything at all"
     assert escalation._check_summary_contract("anything at all", "", MAX_TOKENS) == ("anything at all", "", ())
 
 
@@ -173,7 +173,7 @@ def test_t3_short_and_hintless_replies_name_their_checks(monkeypatch, caplog):
 ], ids=["no-closer", "decorated-hint", "summary-closer-precedence", "trailing-control"])
 def test_1163_unclosed_valid_reply_is_accepted(reply, body, tolerated):
     assert _check(reply) == (body, "", tolerated)
-    assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == body
+    assert escalation._check_summary_contract(reply, NONCE, MAX_TOKENS)[0] == body
 
 
 @pytest.mark.parametrize("reply", [
@@ -213,7 +213,7 @@ def test_1163_unclosed_valid_reply_is_accepted(reply, body, tolerated):
         "inline-spaced-think", "inline-spaced-thinking", "inline-spaced-pipe-think", "inline-spaced-think-closer"])
 def test_1163_unclosed_invalid_reply_keeps_envelope_failure(reply):
     assert _check(reply) == ("", "envelope", ())
-    assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == ""
+    assert escalation._check_summary_contract(reply, NONCE, MAX_TOKENS)[0] == ""
 
 
 def test_1163_unclosed_reply_logs_one_info_line(monkeypatch, caplog):

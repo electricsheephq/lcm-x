@@ -35,7 +35,8 @@ import pytest
 # The plugin is directory-loaded by Hermes, not installed as a Python package.
 # Reuse the suite's registration when invoked with python -m outside pytest.
 import tests.conftest  # noqa: F401
-from tests.behaviour.frontier_observer import observed_attribute
+from tests.behaviour.frontier_observer import REFUSED_INPUT, observed_attribute
+from tests.behaviour.trace_config import LCMConfig, trace_config
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter
 
@@ -115,9 +116,6 @@ SCENARIOS = (
              overrides=(("condensation_fanin", 2),)),
     Scenario("finish-condensation-lock", mode="lock-condensation", seeded_depths=(0, 0, 1),
              overrides=(("condensation_fanin", 2),)),
-    Scenario("finish-gc-lock", shape="tools", mode="lock-gc", overrides=(
-        ("dynamic_leaf_chunk_max", 20000), ("large_output_externalization_enabled", True),
-        ("large_output_externalization_threshold_chars", 100), ("large_output_transcript_gc_enabled", True))),
     Scenario("finish-callable-telemetry", sweep=True),
     Scenario("finish-promoted-keys", setup="prepared", sweep=True, force=False,
              current_tokens=150000, overrides=(("background_leaf_prep_enabled", True),
@@ -231,12 +229,6 @@ SCENARIOS = (
         ("fresh_tail_count", 3), ("ignore_message_patterns", ["IGNORE THIS ROW"]))),
     Scenario("legacy-filtered-eof-dependents", shape="legacy-eof", setup="stored", overrides=(
         ("ignore_message_patterns", ["IGNORE THIS ROW"]),)),
-    Scenario("externalized-transcript-gc", shape="tools", overrides=(
-        ("dynamic_leaf_chunk_max", 20000), ("large_output_externalization_enabled", True),
-        ("large_output_externalization_threshold_chars", 100), ("large_output_transcript_gc_enabled", True))),
-    Scenario("transcript-gc-locked", shape="tools", mode="lock-gc", overrides=(
-        ("dynamic_leaf_chunk_max", 20000), ("large_output_externalization_enabled", True),
-        ("large_output_externalization_threshold_chars", 100), ("large_output_transcript_gc_enabled", True))),
     Scenario("default-sweep-target", sweep=True, overrides=(("summary_prefix_target_tokens", 0),)),
     Scenario("child-without-usage", shape="child", current_tokens=None),
     Scenario("child-with-cached-usage", shape="child", current_tokens=None, setup="child-usage"),
@@ -299,9 +291,6 @@ SCENARIOS = (
       for mode in ("promote-low", "promote-continue", "publish-route", "publish-coverage",
                    "publish-binding", "publish-frontier", "publish-fence", "publish-retry")),
     Scenario("publish-advance-nonlock", mode="publish-error"),
-    Scenario("publish-advance-gc-nonlock", shape="tools", mode="gc-error", overrides=(
-        ("dynamic_leaf_chunk_max", 20000), ("large_output_externalization_enabled", True), ("large_output_active_replay_stubbing_enabled", False),
-        ("large_output_externalization_threshold_chars", 100), ("large_output_transcript_gc_enabled", True))),
     Scenario("publish-advance-hidden-drain", shape="hidden", sweep=True),
     Scenario("publish-advance-dynamic-empty", turns=2, current_tokens=60000, overrides=(
         ("dynamic_leaf_chunk_enabled", True), ("leaf_chunk_tokens", 1), ("dynamic_leaf_chunk_max", 1))),
@@ -410,8 +399,10 @@ class LiteralPattern:
 # The original 123 names include callable fingerprints. Four existing helper
 # state fields complete the original transitive inventory. The two hung-route
 # fields added on the R3 train and the leaf preparation/refusal state are also
-# read/written by compaction. Update deliberately
+# read/written by compaction, as is the #2815 gap diagnostic. Update deliberately
 # when changing this list, never derive the runtime observer from source.
+# The ingest observer also inventories the thread-local container without freezing its internals.
+THREAD_LOCAL_ATTRIBUTES = frozenset({"_thread_context"})
 OBSERVED_ATTRIBUTES = (
     "_active_replay_placeholder_digest",
     "_assemble_committed_compaction_context",
@@ -445,6 +436,7 @@ OBSERVED_ATTRIBUTES = (
     "_foreground_budget",
     "_fresh_tail_start",
     "_frontier",
+    REFUSED_INPUT,
     "_generated_context_carrier_remainder",
     "_generated_placeholder_digest_budget_for_active_replay",
     "_generated_placeholder_digest_ordinals_for_active_replay",
@@ -490,7 +482,6 @@ OBSERVED_ATTRIBUTES = (
     "_matches_ignore_message_patterns",
     "_maybe_condense",
     "_maybe_engage_fresh_tail_pressure_yield",
-    "_maybe_gc_compacted_tool_results",
     "_maybe_reclassify_late_auxiliary_before_compaction_write",
     "_new_foreground_budget",
     "_no_progress_candidate",
@@ -535,6 +526,7 @@ OBSERVED_ATTRIBUTES = (
     "_store_complete_empty_reason",
     "_store_complete_escaped",
     "_store_complete_excluded",
+    "_store_complete_hole",
     "_store_complete_order",
     "_stored_publication_filter_exclusions",
     "_stub_first_exit",
@@ -551,6 +543,7 @@ OBSERVED_ATTRIBUTES = (
     "_sweep_budget_hold_turn_paced",
     "_sweep_budget_hold_until",
     "_take_leaf_summary_model",
+    "_thread_context",
     "_thread_context_session_id",
     "_unattributed_leaf_warned",
     "_working_leaf_chunk_tokens",
@@ -594,6 +587,8 @@ class Canonical:
             return {"bytes_sha256": hashlib.sha256(value).hexdigest()}
         if callable(value):
             return {"callable": value.__qualname__}
+        if isinstance(value, LCMConfig):
+            return trace_config(value, lambda v, name: self.value(v, f"{path}.{name}"))
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f"{path}.{f.name}")
                     for f in dataclasses.fields(value)}
@@ -761,15 +756,9 @@ class Provider:
                 BEGIN SELECT RAISE(ABORT, 'fixture condensation failure'); END""")
         if mode == "reject-pre-only" and self.calls <= 2:
             return "not shorter " * 4000
-        if mode == "lock-gc" and self.calls == 1:
-            self.engine._store._conn.execute("""CREATE TEMP TRIGGER lock_gc BEFORE UPDATE OF content ON messages
-                BEGIN SELECT RAISE(ABORT, 'database is locked'); END""")
         if mode == "publish-error" and self.calls == 1:
             self.engine._dag._conn.execute("""CREATE TEMP TRIGGER fail_publish BEFORE INSERT ON summary_nodes
                 BEGIN SELECT RAISE(ABORT, 'fixture publication failure'); END""")
-        if mode == "gc-error" and self.calls == 1:
-            self.engine._store._conn.execute("""CREATE TEMP TRIGGER fail_gc BEFORE UPDATE OF content ON messages
-                BEGIN SELECT RAISE(ABORT, 'fixture gc failure'); END""")
         if mode.startswith("rescue-read-error"):
             first = 2 if mode.endswith("after") else 1
             if self.calls in (first, first + 1):
@@ -876,7 +865,11 @@ def prepared_state(engine: Any, canonical: Canonical) -> Any:
 def state(engine: Any, canonical: Canonical) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in OBSERVED_ATTRIBUTES:
+        if name in THREAD_LOCAL_ATTRIBUTES:
+            continue
         value = observed_attribute(engine, name)
+        if name == REFUSED_INPUT and value is None:
+            continue
         if name == "_store":
             value = engine._store.get_session_messages(engine._session_id, limit=10000)
         elif name == "_dag":
@@ -1464,10 +1457,10 @@ def observe(case: Scenario, root: Path) -> Trace:
                                 if case.mode == "publish-retry":
                                     assert publication_probe["insert"] == publication_probe["publish"] + 1
                                     assert publication_probe["revalidate"] == promoted
-                            if case.mode in {"publish-error", "gc-error"}:
+                            if case.mode == "publish-error":
                                 assert any(event.startswith("raise IntegrityError") for event in events), (case.name, publication_probe, [e for e in events if e.startswith(("raise ", "log "))])
-                                assert engine._foreground_budget.leaves == (case.mode == "gc-error")
-                                assert bool(engine._dag.get_session_nodes("S")) == (case.mode == "gc-error")
+                                assert engine._foreground_budget.leaves == 0
+                                assert not engine._dag.get_session_nodes("S")
                             events.append("publication probes " + encoded(publication_probe))
                             events.append("publication pass limits " + encoded(publication_passes))
                         if case.name.startswith("leaf-phase-"):
@@ -1582,7 +1575,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                                 assert propagated_frontier_error
                                 assert engine.compression_count == 0
                                 events.append("non-lock error propagated after committed leaf; durable frontier retained")
-                            elif case.mode in {"lock-condensation", "lock-gc"}:
+                            elif case.mode == "lock-condensation":
                                 assert engine._last_compression_status == "error"
                                 assert returned != view
                                 assert engine._ingest_cursor == len(returned)

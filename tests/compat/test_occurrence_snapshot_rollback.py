@@ -20,6 +20,7 @@ try:
     host.append({"role": "user", "content": "Synthetic row after v0.28.1 rollback.", "timestamp": 999.0})
     engine.ingest(host)
     first = engine._store.get_session_messages("S")
+    assert len(first) == len(before) + 1, (len(before), len(first))
     engine.ingest(host)
     replay = engine._store.get_session_messages("S")
     columns = lambda rows: [(r["store_id"], r["session_id"], r["role"], r["content"]) for r in rows]

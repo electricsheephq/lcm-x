@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm import config, db_bootstrap, identity_anchor
+from hermes_lcm import config, db_bootstrap
 from hermes_lcm.engine import LCMEngine
 from bench.instruments.reliability import plugin_tree
 
@@ -34,7 +34,7 @@ def test_legacy_boolean_edges(monkeypatch):
             for plugin in plugins:
                 assert plugin._env_flag_enabled("LCM_ENABLE_SLASH_COMMAND", default) is on
         for key, reader in (
-            ("LCM_IDENTITY_ANCHOR", identity_anchor.identity_anchor_enabled),
+            ("LCM_IDENTITY_ANCHOR", config.identity_anchor_enabled),
             ("LCM_FTS_INTEGRITY_BACKGROUND", db_bootstrap._background_integrity_enabled),
         ):
             monkeypatch.setenv(key, raw)
@@ -81,13 +81,17 @@ BOOLEAN_POLICIES = {
         LCM_QUERY_VIEWS_ENABLED LCM_ADAPTIVE_RETRIEVAL_ENABLED LCM_ASSERTION_EXTRACTION_ENABLED
         LCM_SENSITIVE_PATTERNS_ENABLED LCM_EMBEDDING_PRIVACY_ENABLED
         LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED
+        LCM_HOST_ROW_RECOVERY_ENABLED
         LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED LCM_NATIVE_RECOVERY LCM_SURVIVAL_FIT
-        LCM_EMBEDDINGS_ENABLED LCM_RERANK_ENABLED LCM_RECALL_REFERENCE_STRICT LCM_RECALL_FTS_ANCHOR
+        LCM_EMBEDDINGS_ENABLED LCM_RERANK_ENABLED LCM_RECALL_REFERENCE_STRICT LCM_RECALL_ADJACENT_REPLY LCM_RECALL_FTS_ANCHOR LCM_RECALL_SESSION_HINTS
+        LCM_RECALL_GREP_STEMMED
+        LCM_RECALL_SUMMARY_EVENT_TIME
         LCM_PROACTIVE_RECALL_ENABLED LCM_PREANSWER_EVIDENCE_ENABLED LCM_SELECTIVE_COMPILER_ENABLED
         LCM_EMBEDDING_BINARY_PRESCREEN LCM_DOCTOR_CLEAN_APPLY_ENABLED LCM_EMPTY_LIFECYCLE_GC_ENABLED
         LCM_TEMPORAL_ROLLUPS_ENABLED LCM_BACKGROUND_LEAF_PREP_ENABLED LCM_SENDER_CAPTURE
     """.split(), (None, TRUE_VALUES, FALSE_VALUES)),
     "LCM_ENABLE_SLASH_COMMAND": (False, TRUE_VALUES, ()),
+    "LCM_RECORDER_ENABLED": (False, TRUE_VALUES, ()),
     "LCM_IDENTITY_ANCHOR": (True, (), FALSE_VALUES),
     "LCM_FTS_INTEGRITY_BACKGROUND": (True, (), FALSE_VALUES),
 }
@@ -95,7 +99,9 @@ BOOLEAN_POLICIES = {
 # Raw readers are scalar/path/credential readers, not boolean policy escapes.
 # A new inline env reader must be classified rather than bypassing the table.
 RAW_READERS = {
-    "__init__.py": {"_session_context_value", "register"},
+    # _engine_took_slot reads the scalar HERMES_HOME path for inactive records.
+    "__init__.py": {"_session_context_value", "register", "_engine_took_slot"},
+    "cloud_restore.py": {"_safe_path"},  # Scalar HERMES_HOME restore destination guard.
     "command.py": {"_env_float", "_embedding_backfill_batch_size", "_preset_suggest_text"},
     "config.py": {
         "_parse_int_env", "_parse_float_env", "_parse_bool_env", "_parse_str_env",
@@ -106,6 +112,9 @@ RAW_READERS = {
     "db_bootstrap.py": {"_integrity_check_interval_hours"},
     "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "__init__"},
     "engine.py": {"_set_context_length"},
+    # The default-off recorder (#2243): its directory in install, HERMES_HOME in _hermes_home, its byte cap and
+    # the profile-scoped HERMES_SESSION_* fallback in _command_context.
+    "recorder.py": {"install", "start", "_command_context", "_hermes_home"},
 }
 
 
@@ -129,9 +138,13 @@ def test_boolean_policy_inventory():
             for alias in node.names if alias.name == "_parse_bool_env"
         }
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
-            if any(isinstance(node, ast.Call) and ast.unparse(node.func) in ("os.environ.get", "os.getenv", "lcm_env_get")
-                   for node in ast.walk(function)):
+            reads = [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                     and ast.unparse(node.func) in ("os.environ.get", "os.getenv", "lcm_env_get")]
+            if reads:
                 raw_readers.setdefault(path.name, set()).add(function.name)
+            if (path.name, function.name) == ("cloud_restore.py", "_safe_path"):
+                assert len(reads) == 1 and ast.unparse(reads[0].func) == "os.environ.get"
+                assert ast.literal_eval(reads[0].args[0]) == "HERMES_HOME"
         for call in calls:
             called = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
             if called not in parser_names:
@@ -150,7 +163,7 @@ def test_boolean_policy_inventory():
                 assert key not in derived
                 derived[key] = tuple(policy[name] for name in policy_names)
     assert call_sites == {
-        ("__init__.py", "name"), ("identity_anchor.py", "'LCM_IDENTITY_ANCHOR'"),
+        ("__init__.py", "name"), ("config.py", "'LCM_IDENTITY_ANCHOR'"),
         ("db_bootstrap.py", "BACKGROUND_INTEGRITY_ENV"),
         ("sender_capture.py", "'LCM_SENDER_CAPTURE'"),
     }

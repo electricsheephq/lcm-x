@@ -119,13 +119,14 @@ def rows_for(data, arms, cp):
         if a not in data:
             lines.append(f"| {a} | " + " | ".join("UNSUPPORTED (n=0/0/0; end-only probe)" if a == "codex-native" and cp == 176 else "INCOMPLETE (n=0/0/0)" for _ in cols) + " |")
             continue
-        need = 1 if a in OPEN else 2
-        cs = {c: cell(data.get(a + "-open", {}) if c == "recall" and a != "codex-native" and a not in OPEN else data[a], fn, need=2,
+        is_open = a.endswith("-open")
+        recall_source = a + "-open" if a != "codex-native" and not is_open else a
+        cs = {c: cell(data.get(recall_source, {}) if c == "recall" else data[a], fn, need=2,
                       **truncation(c)) for c, fn in cols}
         js[a] = {c: {"display": v[0], "value": v[1], "n": v[2], "spread": v[3], "incomplete_runs": v[4], "excluded": v[5]}
                  for c, v in cs.items()}
-        js[a]["recall_source"] = a + "-open" if a != "codex-native" and a not in OPEN else a
-        if need == 1:  # -open: one run per seed by design -> INCOMPLETE under the 2-run rule; per-seed values shown
+        js[a]["recall_source"] = recall_source
+        if is_open:  # -open: one run per seed by design -> INCOMPLETE under the 2-run rule; per-seed values shown
             js[a]["note"] = "one run per seed (D6); every cell INCOMPLETE under the 2-run rule"
         lines.append(f"| {a} | " + " | ".join(cs[c][0] for c, _ in cols) + " |")
     return lines, js
@@ -200,9 +201,11 @@ def main():
     md, js = ["# S8 decision run: computed tables (render_decision.py)\n"], {}
     for cp in (176, 304):
         data = load(cp)
-        q, jq = rows_for(data, ARMS, cp)
-        o, jo = rows_for(data, OPEN, cp)
-        b, jb = behaviour(data, ARMS + OPEN)
+        quality_arms = ARMS + tuple(a for a in ("LCMX-env-file",) if a in data)
+        open_arms = OPEN + tuple(a for a in ("LCMX-env-file-open",) if a in data)
+        q, jq = rows_for(data, quality_arms, cp)
+        o, jo = rows_for(data, open_arms, cp)
+        b, jb = behaviour(data, quality_arms + open_arms)
         p, jp = parity(jq, cp)
         md += [f"\n## Checkpoint cp-{cp} (material row_index {cp})\n", "### Quality (mean of two runs per seed, then across seeds)\n",
                *q, "\n### -open runs (tools on; one run per seed)\n", *o, "\n### Behaviour (pooled over every run behind the row)\n", *b,

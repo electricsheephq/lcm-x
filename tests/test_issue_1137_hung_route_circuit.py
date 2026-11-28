@@ -151,7 +151,11 @@ def test_hang_status_cooldown_success_and_one_warning_per_opening(tmp_path, cloc
         opened = breaker.route_status(["m1"])
         assert opened["state"] == "open" and opened["last_error_class"] == "hung"
         assert 0 < opened["seconds_left"] <= breaker.cooldown_seconds
-        assert json.loads(lcm_tools.lcm_status({}, engine=engine))["summary_route"] == opened
+        status_route = json.loads(lcm_tools.lcm_status({}, engine=engine))["summary_route"]
+        # #1561: the fixture clock advances in real time between the two reads, so the
+        # ceil()'d seconds_left may drop by one across a second boundary.
+        assert opened["seconds_left"] - 1 <= status_route.pop("seconds_left") <= opened["seconds_left"]
+        assert status_route == {k: v for k, v in opened.items() if k != "seconds_left"}
         warnings = [r for r in caplog.records if "whole window" in r.getMessage()]
         assert len(warnings) == 1 and "m1" in warnings[0].getMessage()
         clock.offset += breaker.cooldown_seconds + 1

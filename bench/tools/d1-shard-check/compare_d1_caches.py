@@ -1,4 +1,4 @@
-"""Read-only D1 cache, dispatch and ranked-candidate comparisons."""
+"""Read-only D1 cache, dispatch, ranked-candidate and verify-log comparisons."""
 import argparse
 import hashlib
 import json
@@ -69,6 +69,14 @@ def candidates(a, b):
     return out, out["files_equal"]
 
 
+def verify(*logs):
+    rows = [row for path in logs for row in jsonl(path)]
+    out = {"calls": len(rows), "duplicate_calls": len(rows) - len({row["call"] for row in rows}),
+           "keys": sum(row["keys"] for row in rows), "mismatches": sum(row["mismatches"] for row in rows),
+           "mismatched_calls": sorted(row["call"] for row in rows if row["mismatches"])}
+    return out, bool(rows) and not (out["duplicate_calls"] or out["mismatches"])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -76,8 +84,12 @@ def main(argv=None):
         command = commands.add_parser(name)
         command.add_argument("serial", type=Path)
         command.add_argument("other", type=Path, nargs="+" if name == "dispatch" else None)
+    commands.add_parser("verify").add_argument("logs", type=Path, nargs="+")
     args = parser.parse_args(argv)
-    out, equal = dispatch(args.serial, *args.other) if args.command == "dispatch" else globals()[args.command](args.serial, args.other)
+    if args.command == "verify":
+        out, equal = verify(*args.logs)
+    else:
+        out, equal = dispatch(args.serial, *args.other) if args.command == "dispatch" else globals()[args.command](args.serial, args.other)
     print(json.dumps(out, separators=(",", ":")))
     return 0 if equal else 1
 

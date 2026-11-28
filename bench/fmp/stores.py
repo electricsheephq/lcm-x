@@ -2,14 +2,18 @@
 import importlib.metadata
 import json
 import os
+import math
 import sqlite3
 import struct
 import uuid
 from contextlib import contextmanager
+from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from . import delivery
 from .common import commit, sha, write_json
 from .delivery import question_clock
 
@@ -17,6 +21,44 @@ MODELS = {"off": ("", ""), "local": ("fastembed", "BAAI/bge-small-en-v1.5"),
           "voyage": ("voyage", "voyage-context-3")}
 # Optional directory of earlier embedding caches, read only; misses use the run-owned cache.
 CACHE_ROOT = Path(os.environ["FMP_CACHE_ROOT"]) if os.environ.get("FMP_CACHE_ROOT") else None
+
+
+class RecallOptionError(ValueError):
+    """Fixed harness diagnostics safe to show without logging corpus text."""
+
+
+def parse_recall_options(raw):
+    if not raw:
+        return {}
+    from hermes_lcm import config as module
+    allowed = {f.name for f in fields(module.LCMConfig) if f.name.startswith("recall_")}
+    # --delivery-unit owns the delivery unit (session_mode would silently override an option).
+    allowed.discard("recall_delivery_unit")
+    options = {}
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or key not in allowed:
+            raise RecallOptionError("--recall-option requires a known recall_ field and KEY=VALUE")
+        if not value.strip():
+            raise RecallOptionError("invalid --recall-option value for " + key)
+        if key in options:
+            raise RecallOptionError("repeated --recall-option " + key)
+        options[key] = value
+    # Use the selected product's parsers, including bounds, aliases and composite values.
+    # Isolate both environment and YAML inputs; never mutate the process environment.
+    env = {"LCM_" + key.upper(): value for key, value in options.items()}
+    if not all(hasattr(module, name) for name in ("lcm_env", "_load_hermes_config_yaml_for_env")):
+        raise RecallOptionError("--recall-option unsupported by the selected checkout")
+    with patch.object(module, "lcm_env", return_value=env), \
+            patch.object(module, "_load_hermes_config_yaml_for_env", return_value={}):
+        config = module.LCMConfig.from_env()
+    if config.config_source_warnings:
+        raise RecallOptionError("invalid --recall-option value")
+    parsed = {key: getattr(config, key) for key in sorted(options)}
+    # NaN or infinity cannot round-trip a manifest identity check (nan != nan).
+    if any(isinstance(v, float) and not math.isfinite(v) for v in parsed.values()):
+        raise RecallOptionError("invalid --recall-option value")
+    return parsed
 
 
 def safe(value):
@@ -49,11 +91,12 @@ class ReadCache:
 
 
 class Stores:
-    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None, store_text="speaker-prefix"):
+    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None, store_text="speaker-prefix", recall_options=None):
         self.root, self.config, self.repo = Path(root), config, Path(repo)
         self.root.mkdir(parents=True, exist_ok=True)
         self.dataset_sha, self.lme, self.summaries = dataset_sha, lme, summaries
         self.store_text = store_text
+        self.recall_options = recall_options or {}
         self.base, sep, self.rerank = config.partition("+rerank:")
         if self.base not in MODELS or (sep and not self.rerank):
             raise ValueError("unsupported store configuration")
@@ -79,7 +122,7 @@ class Stores:
         self.identity = {"lcmx_commit": commit(repo), "config": self.base,
                          "dataset_sha256": dataset_sha, "summaries": summaries,
                          "provider": self.provider_name, "model": self.model,
-                         "embedding_privacy": "raw-public-benchmark", "format": 3, "store_text": store_text}
+                         "embedding_privacy": "raw-public-benchmark", "format": 4, "store_text": store_text}
         self.identity["effective_config"] = None  # Identity-only callers do not run a product tree.
         if lme is not None:
             lme._ensure_hermes_lcm_package()
@@ -88,6 +131,8 @@ class Stores:
             self.identity["effective_config"] = {"embeddings_enabled": self.base != "off",
                 "embedding_provider": self.provider_name if self.base != "off" else "",
                 "embedding_model": resolve_model(self.provider_name, self.model) if self.base != "off" else ""}
+            if self.base == "voyage":
+                self.identity["embedding_revision"] = self._embedding_revision(self._config(self.root))
         # D8: the path names every build input, so no build is reused across inputs.
         self.generation = "-".join([self.base, summaries, self.identity["lcmx_commit"][:12],
                                     sha(json.dumps(self.identity, sort_keys=True).encode())[:12]])
@@ -107,24 +152,39 @@ class Stores:
     def expected(self, q):
         return {**self.identity, "id": q.store_id or q.qid, "session_map": q.session_map}
 
+    def _config(self, directory):
+        from hermes_lcm.config import LCMConfig
+        return LCMConfig(database_path=str(directory / "lcm.db"), embeddings_enabled=self.base != "off",
+                         embedding_provider=self.provider_name or "fastembed", embedding_model=self.model,
+                         embedding_privacy_enabled=False, rerank_enabled=bool(self.rerank),
+                         rerank_model=self.rerank or "rerank-2.5-lite")
+
+    def _embedding_revision(self, config):
+        from hermes_lcm import ingest_policy
+        if ingest_policy.embedding_provider_requires_privacy(self.provider_name):
+            return ingest_policy.embedding_privacy_revision(config)
+        return None
+
     @contextmanager
     def engine(self, q, path=None, frozen=True):
-        from hermes_lcm.config import LCMConfig
         from hermes_lcm.store import MessageStore
         from hermes_lcm.dag import SummaryDAG
         from hermes_lcm.vector_store import VectorStore
         directory = path or self.directory(q)
         if path is None and json.loads((directory / "build-manifest.json").read_text()) != self.expected(q):
             raise RuntimeError("store manifest mismatch")
-        config = LCMConfig(database_path=str(directory / "lcm.db"), embeddings_enabled=self.base != "off",
-                           embedding_provider=self.provider_name or "fastembed", embedding_model=self.model,
-                           embedding_privacy_enabled=False, rerank_enabled=bool(self.rerank),
-                           rerank_model=self.rerank or "rerank-2.5-lite")
+        config = self._config(directory)
+        if frozen:
+            for key, value in self.recall_options.items():
+                setattr(config, key, value)
         store = MessageStore(config.database_path, ingest_protection_config=config)
         dag = SummaryDAG(config.database_path)
         vector = VectorStore(config.database_path, config=config)
         engine = SimpleNamespace(_config=config, _store=store, _dag=dag, _hermes_home=str(directory),
-                                 current_session_id="__fmp_probe__" + safe(q.qid))
+                                 current_session_id="__fmp_probe__" + safe(q.qid),
+                                 _fmp_local_recall_guard=self.base == "local" and frozen,
+                                 _fmp_voyage_recall_guard=self.base == "voyage" and frozen,
+                                 _fmp_has_summaries=self.summaries == "deterministic")
         if self.provider:
             engine._lcm_embedding_provider_cache = ((self.provider_name, self.model), self.provider)
         if frozen:
@@ -151,8 +211,14 @@ class Stores:
             from hermes_lcm.dag import SummaryNode
             from hermes_lcm.vector_store import EmbeddingIdentity
             if self.provider:
-                vectors.register_profile(self.model, self.provider_name, self.provider.dim, task="chunk")
-                identity = EmbeddingIdentity.canonical(self.provider_name, self.model, "", self.provider.dim,
+                revision = self._embedding_revision(engine._config) if self.base == "voyage" else None
+                revision_options = {"revision": revision} if revision is not None else {}
+                vectors.register_profile(self.model, self.provider_name, self.provider.dim, task="chunk",
+                                         **revision_options)
+                # Cloud recall validates the summary identity even when its corpus is empty.
+                if revision is not None:
+                    vectors.register_profile(self.model, self.provider_name, self.provider.dim, revision=revision)
+                identity = EmbeddingIdentity.canonical(self.provider_name, self.model, revision or "", self.provider.dim,
                                                        "float32", "little", "chunk")
             for order, session in enumerate(q.sessions, 1):
                 rows = [{"role": t["role"], "content": self.content(t, session["date"]),
@@ -181,10 +247,28 @@ class Stores:
                         token_count=len(text.split()), source_token_count=sum(len(r["content"].split()) for r in rows),
                         source_type="messages", created_at=float(order), earliest_at=stamp, latest_at=stamp))
                     if self.provider:
-                        vectors.register_profile(self.model, self.provider_name, self.provider.dim)
+                        if revision is None:
+                            vectors.register_profile(self.model, self.provider_name, self.provider.dim)
                         summary_identity = vectors.capture_identity(self.model, provider=self.provider_name)
                         vectors.record_embedding(str(node_id), "summary", self.model,
                             self.provider.embed_documents([text])[0], identity=summary_identity)
+        if self.base == "local":
+            from hermes_lcm import command
+            from benchmarking.longmemeval import certify_local_recall_store
+            config = engine._config
+            db_path = config.database_path
+            registered = command._embedding_register_profiles(config, db_path, allow_download=False)
+            if not isinstance(registered, dict):
+                raise delivery.LocalRecallUnavailable("store_embedding_registration_failed")
+            certify_local_recall_store(config, db_path, summaries=True)
+        if self.base in ("local", "voyage"):
+            with self.engine(q, stage, frozen=False) as (probe, _):
+                with question_clock(q.question_date):
+                    raw = delivery.dispatch("lcm_recall", {"query": q.question}, probe)
+                if self.base == "voyage":
+                    delivery.require_voyage_semantic(raw, summaries=probe._fmp_has_summaries)
+                else:
+                    delivery.require_local_semantic(raw)
         write_json(stage / "speakers.json", speakers)
         write_json(stage / "build-manifest.json", expected)
         if path.exists():

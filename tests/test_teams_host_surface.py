@@ -65,6 +65,11 @@ WRITES_AS_SELF = {
     "carry_over_new_session_context",
     "rollover_session",
     "rotate_active_session",
+    # #2855: a thin wrapper over the compaction entry point the host already
+    # calls. It adds no store access: after the pass returns it only removes a
+    # row's API-side text when no input row carries the same text with the same
+    # content. The pass itself writes as the bound principal, as ingest does.
+    "compress",
 }
 
 # Host/operator lifecycle, reachable only by something holding the Python
@@ -76,7 +81,8 @@ HOST_ONLY = {
     "enable_teams", "setup_teams", "disable_teams", "preflight_teams",
     "update_model", "shutdown", "clone_for_agent", "drain_rollup_maintenance",
     # Hermes reset callback (#1306): requires the engine object and a finalized
-    # foreground binding; uses ordinary start guards and ignores the host DB.
+    # foreground binding; uses ordinary start guards and keeps the host DB handle
+    # only for read-only recovery (#2624).
     "bind_session_state",
     # Sets the host-facing engine name from the Hermes config at register /
     # clone time (#471); it reads no store and grants nothing.

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.behaviour.reconcile_trace_harness import (
+    CACHE_ATTRIBUTES,
     GOLDEN,
     OBSERVED_ATTRIBUTES,
     SCENARIOS,
@@ -24,6 +25,9 @@ from tests.behaviour.reconcile_trace_harness import (
 
 @pytest.mark.parametrize("case", SCENARIOS, ids=lambda case: case.name)
 def test_reconcile_golden(case: Any, tmp_path: Path) -> None:
+    # #2293 M5: ingest's BEGIN IMMEDIATE moves to its first write and savepoints of scopes that close before it are
+    # never issued; with transaction control removed, every scenario is unchanged.
+    # #2293 step 1, M2: remove repeated folded-tail reads within the public ingest; keep replay decisions and state.
     expected: dict[str, list[str]] = json.loads(GOLDEN.read_text())
     actual = observe(case, tmp_path)
     difference = first_difference(expected[case.name], actual)
@@ -32,15 +36,21 @@ def test_reconcile_golden(case: Any, tmp_path: Path) -> None:
 
 def test_observed_attribute_inventory_is_complete() -> None:
     discovered = engine_attributes(Path(reconcile.__file__).read_text())
-    assert discovered <= OBSERVED_ATTRIBUTES, (
-        f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES)}; update OBSERVED_ATTRIBUTES.\n"
-        + TRACE_GUIDANCE)
+    assert discovered <= OBSERVED_ATTRIBUTES | CACHE_ATTRIBUTES, (
+        f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES - CACHE_ATTRIBUTES)}; "
+        "update OBSERVED_ATTRIBUTES.\n" + TRACE_GUIDANCE)
     # Prove this guard is sensitive to new state used by a transitive helper,
     # independently of the frozen constant and without editing product source.
     source = Path(reconcile.__file__).read_text()
     source = source.replace('return f"{prefix}:', 'self._trace_inventory_probe\n        return f"{prefix}:', 1)
     assert "_trace_inventory_probe" in engine_attributes(source)
     assert "_trace_inventory_probe" not in OBSERVED_ATTRIBUTES
+
+
+def test_cache_attribute_inventory_is_pinned() -> None:
+    # Each name is read but never snapshotted; one more needs this edit and a reason beside it in the harness.
+    assert CACHE_ATTRIBUTES == frozenset({"_replay_identity_memo", "_storage_ready"})
+    assert not CACHE_ATTRIBUTES & OBSERVED_ATTRIBUTES
 
 
 def test_fixture_scenario_inventory_and_size() -> None:

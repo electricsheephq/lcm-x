@@ -3889,19 +3889,6 @@ class TestSummaryDAG:
         ))
         assert len(dag.get_session_nodes("s1")) == 3
 
-    def test_count_at_depth(self, dag):
-        for i in range(4):
-            dag.add_node(SummaryNode(
-                session_id="s1", depth=0, summary=f"D0-{i}",
-                token_count=10, source_ids=[i], source_type="messages",
-            ))
-        dag.add_node(SummaryNode(
-            session_id="s1", depth=1, summary="D1",
-            token_count=20, source_ids=[1, 2, 3, 4], source_type="nodes",
-        ))
-        assert dag.count_at_depth("s1", 0) == 4
-        assert dag.count_at_depth("s1", 1) == 1
-
     def test_search(self, dag):
         dag.add_node(SummaryNode(
             session_id="s1", depth=0,
@@ -5430,6 +5417,53 @@ class TestAssemblyBudgetSelection:
         assert [row["tool_call_id"] for row in rows].count("call_post_cursor_lossy_anchor") == 2
         assert "new assistant after replayed prefix" in contents
         assert rows[-1]["content"] == "new user after post-cursor lossy pair"
+
+    @pytest.mark.parametrize("dangling_call", [True, False], ids=["dangling-call", "full-pair"])
+    def test_cursor_tool_result_reused_id_occurrences(self, tmp_path, monkeypatch, dangling_call):
+        """#2172: a prefix copy cannot prove a fresh same-id occurrence (dangling-call is a no-loss control)."""
+        from hermes_lcm.engine import LCMEngine
+
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_0", "type": "function",
+             "function": {"name": "poll", "arguments": "{}"}},
+        ]}
+        result = {"role": "tool", "tool_call_id": "call_0", "tool_name": "poll", "content": "OK"}
+        u1 = {"role": "user", "content": "turn one poll"}
+        u2 = {"role": "user", "content": "turn two poll"}
+        engine._ingest_messages([u1, call, result, u2] + ([call] if dangling_call else []))
+        before = engine._store.get_session_messages("assembly-session")
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        replay._ingest_messages([u1, call, result, u2, call, result, {"role": "user", "content": "next"}])
+        after = replay._store.get_session_messages("assembly-session")
+        assert after[:len(before)] == before
+        added = after[len(before):]
+        assert [row["role"] for row in added] == (["tool", "user"] if dangling_call else ["assistant", "tool", "user"])
+        assert added[-2]["content"] == "OK"
+        assert added[-2]["tool_call_id"] == "call_0"
+        assert added[-1]["content"] == "next"
+
+    @pytest.mark.parametrize("truncated_tail", [False, True], ids=["full-tail", "truncated-tail"])
+    def test_cursor_tool_result_reserves_whole_prefix(
+        self, tmp_path, monkeypatch, truncated_tail
+    ):
+        """A partial stored window may over-reserve, never over-prove replay."""
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_0", "type": "function",
+             "function": {"name": "poll", "arguments": "{}"}},
+        ]}
+        result = {"role": "tool", "tool_call_id": "call_0", "tool_name": "poll", "content": "OK"}
+        messages = [call, result, call, result]
+        engine._ingest_messages(messages)
+        if truncated_tail:
+            tail = engine._store.get_session_messages("assembly-session")[-2:]
+            monkeypatch.setattr(engine._store, "get_session_tail", lambda *args, **kwargs: tail)
+        cursor = 2
+        expected = set() if truncated_tail else {2, 3}
+        assert engine._replayed_tool_segment_indexes_after_cursor(messages, cursor) == expected
 
     def test_repeated_identical_tool_invocation_is_persisted_not_replayed(
         self, tmp_path, monkeypatch

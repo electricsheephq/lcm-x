@@ -129,11 +129,6 @@ def parse_synthetic_fixture_spec(spec: str) -> ReplayFixture:
     )
 
 
-def iter_fixture_files(directory: str | Path = "benchmarks/fixtures") -> list[Path]:
-    fixture_dir = _resolve_path(directory)
-    return sorted(fixture_dir.glob("*.json"))
-
-
 def _canary_prefix(name: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
     return normalized or "SYNTHETIC"

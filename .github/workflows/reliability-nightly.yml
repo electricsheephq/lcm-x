@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      baseline_run:
+        description: Run ID of this workflow to use as the only baseline
+        type: string
+        required: false
   pull_request:
     paths:
       - "bench/instruments/reliability/**"
@@ -16,8 +21,8 @@ permissions:
   issues: read
 
 concurrency:
-  group: reliability-${{ github.ref }}
-  cancel-in-progress: true
+  group: reliability-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   matrix:
@@ -30,7 +35,6 @@ jobs:
         host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, r34.15-0.21.5, upstream-main, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
-      DEFAULT_WINDOW_REPORT_ONLY: "true"  # One switch for command failures; verdict promotion needs qualification.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -38,7 +42,7 @@ jobs:
           fetch-depth: 0  # full history and tags: native-on-off cells export v0.23.3 / v0.24.3 (plugin_tree.resolve)
 
       - name: Set up Python (harness)
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -61,11 +65,9 @@ jobs:
           gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 --json number --jq '.[].number' > "$RUNNER_TEMP/open-issues.txt"
           python -m bench.instruments.reliability.ci gate "$OUT/r1/results.jsonl" "$OUT/r2/results.jsonl" --open-issues "$RUNNER_TEMP/open-issues.txt"
 
-      # Explicit opt-in cells, after the gate step so they cannot hold up its verdict; R1 only (process_cell.unsupported() rejects
-      # default-window/* under R2). Skipped on cancellation; after a failed gate they add one short report-only step (cells take ~15 s).
-      - name: Default-window R1 in-process (report-only)
+      # R1 only. Collect these rows even after a failed absolute gate so the nightly can compare all rounds.
+      - name: Default-window R1 in-process
         if: ${{ !cancelled() }}
-        continue-on-error: ${{ env.DEFAULT_WINDOW_REPORT_ONLY == 'true' }}
         timeout-minutes: 30
         run: python bench/instruments/reliability/run_matrix.py --hosts-file "$RUNNER_TEMP/hosts.json" --hosts "${{ matrix.host }}" --plugin-ref HEAD --cells 'default-window/*' --jobs 4 --out "$OUT/default-window-r1" --keep-dbs fail
 
@@ -100,6 +102,192 @@ jobs:
             !reliability-out/*/cells/*/*/*/files/**
           if-no-files-found: warn
 
+      # Artifacts cannot be appended to from multiple matrix jobs. Stage these table shards for fan-in.
+      - name: Stage tables for comparison
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-table-shard-${{ matrix.host }}
+          path: |
+            reliability-out/*/results.jsonl
+            reliability-out/*/MATRIX.md
+            reliability-out/*/run.json
+          if-no-files-found: warn
+          retention-days: 2
+          overwrite: true
+
+  compare:
+    needs: matrix
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    outputs:
+      alarm: ${{ steps.compare.outputs.alarm }}
+      status: ${{ steps.compare.outputs.status }}
+      bootstrap: ${{ steps.bootstrap.outcome }}
+    env:
+      BASELINE_RUN: ${{ inputs.baseline_run }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # retries of native-on-off cells export older tags
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Collect current table shards
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: reliability-table-shard-*
+          path: ${{ runner.temp }}/shards
+
+      - name: Assemble nightly tables
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/current"
+          shopt -s nullglob
+          for shard in "$RUNNER_TEMP/shards"/reliability-table-shard-*; do
+            host=${shard##*reliability-table-shard-}
+            mv "$shard" "$RUNNER_TEMP/current/reliability-$host"
+          done
+
+      - name: Download comparison baselines
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python -m bench.instruments.reliability.ci baselines --prior "$RUNNER_TEMP/prior" \
+            --run="$BASELINE_RUN" > "$RUNNER_TEMP/baselines.txt"
+          if [[ ! -s "$RUNNER_TEMP/baselines.txt" ]]; then
+            echo "::error::baseline missing (no published scheduled tables on this branch)"
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+
+      - name: Read tracked regression cells
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m bench.instruments.reliability.ci alarm --read "$RUNNER_TEMP/known-new.json"
+
+      - name: Validate bootstrap tables
+        id: bootstrap
+        if: github.event_name == 'schedule' && steps.baseline.outputs.status == 'missing'
+        run: python -m bench.instruments.reliability.ci validate-tables "$RUNNER_TEMP/current"
+
+      - name: Compare every round
+        id: compare
+        if: steps.baseline.outputs.status == 'ready'
+        timeout-minutes: 170
+        shell: bash
+        run: |
+          mapfile -t runs < "$RUNNER_TEMP/baselines.txt"
+          options=(--mode respin)
+          if [[ -z "$BASELINE_RUN" ]]; then
+            options=(--mode nightly --retry-scratch "$RUNNER_TEMP")
+            for run in "${runs[@]:1}"; do
+              options+=(--history "$RUNNER_TEMP/prior/$run")
+            done
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            options+=(--alarm-result "$RUNNER_TEMP/alarm.json")
+          fi
+          status=0
+          python -m bench.instruments.reliability.ci compare "${options[@]}" \
+            --candidate "$RUNNER_TEMP/current" --baseline "$RUNNER_TEMP/prior/${runs[0]}" \
+            --known-new "$RUNNER_TEMP/known-new.json" > "$RUNNER_TEMP/comparison.md" || status=$?
+          cat "$RUNNER_TEMP/comparison.md" >> "$GITHUB_STEP_SUMMARY"
+          if (( status < 2 )) && [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            payload=$(gzip -n -c "$RUNNER_TEMP/alarm.json" | base64 -w0)
+            printf 'alarm=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dispatch tables
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-tables
+          path: ${{ runner.temp }}/current/
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Stage judged or bootstrap tables for publication
+        if: >-
+          ${{ !cancelled() && github.event_name == 'schedule' &&
+              (steps.bootstrap.outcome == 'success' || steps.compare.outputs.status == '0' ||
+               steps.compare.outputs.status == '1') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-tables-pending
+          path: ${{ runner.temp }}/current/
+          if-no-files-found: error
+          retention-days: 2
+          overwrite: true
+
+      - name: Enforce the comparison
+        if: ${{ !cancelled() }}
+        env:
+          BASELINE_STATUS: ${{ steps.baseline.outputs.status }}
+          COMPARE_STATUS: ${{ steps.compare.outputs.status }}
+        run: test "$BASELINE_STATUS" = ready && test "$COMPARE_STATUS" = 0
+
+  alarm:
+    needs: compare
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.compare.outputs.alarm != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: reliability-regression-alarm
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Update the nightly regression issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALARM_RESULT: ${{ needs.compare.outputs.alarm }}
+        shell: bash
+        run: |
+          printf '%s' "$ALARM_RESULT" | base64 -d | gzip -d > "$RUNNER_TEMP/alarm.json"
+          python -m bench.instruments.reliability.ci alarm --post "$RUNNER_TEMP/alarm.json" --scratch "$RUNNER_TEMP"
+
+  publish:
+    needs: [compare, alarm]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'schedule' &&
+          (needs.compare.outputs.bootstrap == 'success' || needs.compare.outputs.status == '0' ||
+           (needs.compare.outputs.status == '1' && needs.alarm.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: reliability-tables-pending
+          path: ${{ runner.temp }}/tables
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reliability-tables
+          path: ${{ runner.temp }}/tables/
+          if-no-files-found: error
+          overwrite: true
 
   latency:
     runs-on: ubuntu-latest
@@ -110,7 +298,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
 

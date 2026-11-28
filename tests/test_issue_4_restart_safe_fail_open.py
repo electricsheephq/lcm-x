@@ -135,7 +135,7 @@ def test_frontier_failure_rolls_back_insert_and_frontier_together(
     assert state.current_frontier_store_id == 0
 
 
-def test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest(
+def test_post_commit_condensation_lock_returns_compacted_context_without_restart_reingest(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -143,14 +143,13 @@ def test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest(
     identity = "issue-4-post-commit-lock"
     messages = _messages()
     engine = _engine(database_path, identity)
-    engine._config.threshold_full_sweep_enabled = True
-    engine._config.large_output_transcript_gc_enabled = True
+    engine._config.threshold_full_sweep_enabled = False
     engine.threshold_tokens = 1
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
     monkeypatch.setattr(
         engine,
-        "_maybe_gc_compacted_tool_results",
-        lambda *_args: (_ for _ in ()).throw(
+        "_maybe_condense",
+        lambda **_kwargs: (_ for _ in ()).throw(
             sqlite3.OperationalError("database is locked")
         ),
     )
@@ -160,7 +159,6 @@ def test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest(
         state = engine._lifecycle.get_by_conversation(identity)
         nodes = engine._dag.get_session_nodes(identity)
         stored_before_restart = engine._store.get_session_count(identity)
-        telemetry = engine.get_status()["threshold_full_sweep"]
     finally:
         engine.shutdown()
 
@@ -169,8 +167,6 @@ def test_post_commit_gc_lock_returns_compacted_context_without_restart_reingest(
     assert len(nodes) == 1
     assert state is not None
     assert state.current_frontier_store_id == max(nodes[0].source_ids)
-    assert telemetry["leaf_passes"] == 1
-    assert telemetry["total_passes"] == 1
 
     restarted = _engine(database_path, identity)
     try:

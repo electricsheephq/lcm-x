@@ -159,6 +159,16 @@ def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
     return sanitized or _neutralize_bare_operators(neutral)
 
 
+def agent_grep_operands(query: str) -> tuple[str, list[str], list[str]]:
+    """The grep query as agent FTS5 syntax: (sanitized, tokens, operands). One parse for the message any-term retry
+    and for saved-output matching (#2586). An operand is a quoted phrase or a bare term; operators are not operands."""
+    safe = sanitize_fts5_query(query, agent_operators=True)
+    tokens = re.findall(r'"[^"]*"|[^\s"]+', safe)
+    operands = list(dict.fromkeys(token for token in tokens
+                                  if token.startswith('"') or token.upper() not in _BOOLEAN_OPERATORS))
+    return safe, tokens, operands
+
+
 def is_fts5_syntax_error(exc: Exception) -> bool:
     """Distinguish MATCH grammar failures from a missing/broken index."""
     return any(marker in str(exc).lower() for marker in (
@@ -470,10 +480,6 @@ def normalize_search_sort(sort: str | None) -> str:
     """Normalize sort parameter to one of: recency, relevance, hybrid."""
     normalized = (sort or "recency").strip().lower()
     return normalized if normalized in {"recency", "relevance", "hybrid"} else "recency"
-
-
-def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
-    return build_snippet_with_span(text, terms, width)[0]
 
 
 def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tuple[str, int, int]:

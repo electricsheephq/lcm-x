@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -238,6 +239,16 @@ def test_run_candidate(tmp_path):
 def step_script(path, name):
     return subprocess.run(["bash", "-c", '. "$0" && step_script "$1" "$2"', str(HELPER), str(path), name],
                           env=dict(os.environ, PATH=PATH), text=True, capture_output=True, timeout=30)
+
+
+def test_cloud_setup_resolves_every_ci_step_it_runs():
+    """cloud_setup.sh replays CI steps by name; a renamed CI or action step must fail here, not on a bench host."""
+    setup = (REPO / "scripts/dev/cloud_setup.sh").read_text()
+    calls = re.findall(r"step_script (\S+) '([^']+)'", setup)
+    assert len(calls) >= 6
+    for path, name in calls:
+        found = step_script(REPO / path, name)
+        assert found.returncode == 0 and found.stdout.strip(), f"{path}: {name}: {found.stderr}"
 
 
 def test_ci_step_reads_ci_and_fails_closed(tmp_path):

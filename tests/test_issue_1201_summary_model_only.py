@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from hermes_lcm import assertion_extraction, escalation, extraction, host_evidence, selective_compiler
+from hermes_lcm import assertion_extraction, escalation, extraction, selective_compiler
 from hermes_lcm import expand_query_tools
 from tests.harness import make_engine
 from hermes_lcm import engine as engine_module
@@ -148,7 +148,7 @@ print(json.dumps(dict(merged=merged, repairs=repairs)))
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-@pytest.mark.parametrize("key", ["model_only", "host_model_only"])
+@pytest.mark.parametrize("key", [None, "model_only", "host_model_only"])
 @pytest.mark.parametrize("sentinel_row", ["generated", "human"])
 def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sentinel_row):
     _host(monkeypatch, key)
@@ -179,7 +179,8 @@ def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sen
                 merged.append(msg)
         return merged
 
-    generated = {"role": "user", "content": "Generated context."}
+    generated = {"role": "user", "content": "Generated context.",
+                 "display_metadata": {"model_only": True, "origin": "lcm"}}
     human = {"role": "user", "content": "Human request must stay visible."}
     sentinel = generated if sentinel_row == "generated" else human
     sentinel["content"] = "\x00json:" + sentinel["content"]
@@ -188,6 +189,8 @@ def test_r5_pinned_host_sentinel_merge_keeps_human_visible(monkeypatch, key, sen
     merged = pinned_merge(rows)
     assert len(merged) == 1 and human["content"] in merged[0]["content"]
     assert not merged[0].get("display_metadata", {}).get(key), "merged human text was hidden"
+    assert not merged[0].get("display_metadata", {}).get("model_only")
+    assert merged[0]["display_metadata"]["origin"] == "lcm"
 
 
 def _r3_generated_merge_group_display(engine, monkeypatch, human):
@@ -594,7 +597,7 @@ def test_t6_existing_metadata_and_host_constant(engine, monkeypatch):
 
 
 @pytest.mark.parametrize("builder", ["summary-l1", "summary-l2", "extraction", "assertion",
-                                    "host-evidence", "selective", "expansion"])
+                                    "selective", "expansion"])
 def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, monkeypatch, tmp_path, builder):
     engine = expansion_engine
     rows = [{"role": "user", "content": "A synthetic decision to preserve.",
@@ -621,8 +624,6 @@ def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, 
                                   hashlib.sha256(content.encode()).hexdigest())
         prompt = assertion_extraction.build_structured_assertion_prompt(snapshot, SimpleNamespace(query_assertions=lambda **k: []))
         assertion_extraction._call_structured_assertion_llm(prompt, "", 1)
-    elif builder == "host-evidence":
-        host_evidence.call_auxiliary_selector({"question": "What was decided?", "baseline_evidence": rows})
     elif builder == "selective":
         selective_compiler.call_selective_auxiliary_selector({
             "status": "selector_required", "prompt": selective_compiler._prompt(
@@ -656,7 +657,6 @@ def test_t8_second_compress_uses_public_row_noop_shortcut(engine, monkeypatch):
     monkeypatch.setattr(engine, "_public_compression_row", record)
     second = _compress(engine, output)
     assert second is output
-    assert len(candidates) == 1 and candidates[0] is not output
-    assert len(compared) == 2 * len(output)
-    assert all(public_row(left) == public_row(right) for left, right in zip(compared[::2], compared[1::2]))
+    assert len(candidates) == 1 and candidates[0] is output
+    assert not compared
     assert "display_metadata" not in _summary_rows(second)[0]

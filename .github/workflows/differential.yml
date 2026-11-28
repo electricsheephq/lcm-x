@@ -20,7 +20,10 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
+          # scripts/maintainer_gate.py's TURN_PATH_FILES plus DIFFERENTIAL_ONLY_FILES;
+          # tests/test_differential_workflow.py checks that this list is exactly that union.
+          # tests/test_differential_relevance.py checks static engine imports
+          # against the gate's lists and its documented exclusions.
           TURN_PATH_FILES: |-
             __init__.py
             assembly_plan.py
@@ -39,10 +42,14 @@ jobs:
             engine.py
             engine_registry.py
             escalation.py
+            expand_tools.py
             externalize.py
             extraction.py
             frontier_state.py
             fresh_tail.py
+            head_copy.py
+            host_rewrite.py
+            host_row_recovery.py
             host_uid.py
             host_uid_emit.py
             identity_anchor.py
@@ -56,6 +63,7 @@ jobs:
             ingest_protection.py
             leaf_prep.py
             lifecycle_state.py
+            maintenance_scheduler.py
             message_analysis.py
             message_content.py
             message_patterns.py
@@ -66,12 +74,14 @@ jobs:
             recognition_matching.py
             reconcile.py
             reset_state.py
+            retrieval_core.py
             rollup_builder.py
             rollup_periods.py
             rollup_store.py
             sender_capture.py
             sanitize.py
             schemas.py
+            search_query.py
             session_patterns.py
             sqlite_util.py
             store.py
@@ -84,6 +94,8 @@ jobs:
             tokens.py
             tool_pairs.py
             tool_registry.py
+            tools.py
+            unended_catchup.py
         run: |
           relevant=true
           if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
@@ -103,7 +115,7 @@ jobs:
           if [[ "$relevant" == false ]]; then
             echo "No differential-relevant changes; skipping."
           fi
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: steps.relevance.outputs.relevant == 'true'
         with: {python-version: '3.12'}
       - run: pip install pytest numpy

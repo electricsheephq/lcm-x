@@ -200,7 +200,8 @@ class SummaryCoverageGap(AssertionError):
 def test_i1247_32k_history_is_live_or_summarized(outputs):
     import json
     cid = "i1139_small_window_32k"
-    path = outputs / cid / "summary.json"
+    # #1485: its own directory; test_exact_shape[cid] may be writing outputs / cid on another xdist worker.
+    path = outputs / "i1247" / cid / "summary.json"
     if not path.exists():
         evaluate([next(case for case in exact_cases() if case["id"] == cid)], path.parent)
     count = json.loads(path.read_text())["coverage"][cid]["candidate"]

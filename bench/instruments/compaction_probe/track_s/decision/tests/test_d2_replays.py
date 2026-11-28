@@ -73,7 +73,7 @@ def test_r1_frozen_base_golden(producer_env):
     # Frozen from 736af0f7: compare generated arguments and every generated path.
     assert sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()) == [
         "cell.json", "commands.jsonl", f"decision/logs/s2-{arm}-d1-r1.log",
-        f"decision/logs/s2-{arm}-d1-r1.log.wall", "score.log"]
+        f"decision/logs/s2-{arm}-d1-r1.log.wall", "host-after.json", "host-before.json", "host.json", "score.log"]
     log = json.loads((root / f"decision/logs/s2-{arm}-d1-r1.log").read_text())
     assert log == dict(argv=["--arm", arm, "--seed", "1", "--run", "d1-r1", "--lane", "codex-sol",
                              "--reader", "glm", "--turn-end-notify", "--checkpoints", "176,304"],

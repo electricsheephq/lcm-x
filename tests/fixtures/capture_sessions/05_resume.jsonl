@@ -1,0 +1,6 @@
+{"type": "user", "uuid": "u1", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "synthetic amber compass beacon"}}
+{"type": "assistant", "uuid": "a1", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "checking"}, {"type": "tool_use", "id": "call1", "name": "Read", "input": {"path": "synthetic.txt"}}]}}
+{"type": "user", "uuid": "r1", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call1", "content": "synthetic result"}, {"type": "text", "text": "continue synthetic session"}]}}
+{"type": "assistant", "uuid": "a2", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "synthetic answer"}}
+{"type": "user", "uuid": "u2", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "second synthetic turn"}}
+{"type": "assistant", "uuid": "a3", "sessionId": "resume", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "second answer"}}

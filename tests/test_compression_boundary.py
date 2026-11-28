@@ -309,11 +309,21 @@ def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
     pre = list(host)
     compressed = engine.compress(list(host), force=True)
     assert engine._last_compression_status == "compacted"
+    _drain_session_end_maintenance(engine)
     return engine, pre, compressed
 
 
 def _row_count(engine, session_id="S0"):
     return engine._store.get_session_count(session_id)
+
+
+def _drain_session_end_maintenance(engine):
+    # Bind-time rollups and incremental embeddings can write to this database
+    # on private connections while session end uses a short SQLite busy timeout.
+    # _compacted_engine drains after its bind; a test that binds again drains
+    # again before its session end.
+    assert engine.drain_rollup_maintenance(timeout=10)
+    assert engine.drain_embedding_maintenance(timeout=10)
 
 
 def test_compaction_commit_end_finalizes_without_reingest(tmp_path, monkeypatch):
@@ -478,9 +488,9 @@ def test_host_that_keeps_the_compress_input_resumes_after_it(tmp_path, monkeypat
         engine.shutdown()
 
 
-def _refused_commit(tmp_path, monkeypatch):
-    """Cycle 1 commits in place. Cycle 2 compresses and the host runs the commit end, then its
-    would_grow guard refuses the candidate: no compression start, the host keeps `pre` + reply."""
+def _unadopted_commit(tmp_path, monkeypatch):
+    """Legacy lifecycle order: the commit end ran, the compression start never arrived,
+    and the host continued with the input list."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     engine.on_session_end("S0", pre)
     engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -522,7 +532,7 @@ def test_compress_rebinds_after_a_commit_end_the_host_did_not_adopt(tmp_path, mo
     """The commit end finalized the row and the compression start never came: the next compress
     re-binds the session at its finalized frontier instead of publishing against frontier 0."""
     caplog.set_level(logging.INFO)
-    engine, host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         assert frontier > 0
         _compress_next(engine, host)
@@ -544,7 +554,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
     """(i) a normal start binds the row (nothing left to re-bind); (ii) another conversation and (iii) a
     reset after the finalize never re-bind."""
     caplog.set_level(logging.INFO)
-    engine, host, _frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, host, _frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         if control == "start":
             engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -568,7 +578,7 @@ def test_no_rebind_when_the_commit_end_was_followed_up(tmp_path, monkeypatch, ca
 def test_rebind_never_advances_from_the_in_process_frontier(tmp_path, monkeypatch, caplog):
     """(iv) the in-process frontier differs from the row: warn, move nothing without a publication."""
     caplog.set_level(logging.INFO)
-    engine, _host, frontier = _refused_commit(tmp_path, monkeypatch)
+    engine, _host, frontier = _unadopted_commit(tmp_path, monkeypatch)
     try:
         engine._last_compacted_store_id = frontier + 5
         monkeypatch.setattr(engine._lifecycle, "advance_frontier", lambda *a, **k: pytest.fail("advanced"))
@@ -634,6 +644,13 @@ def test_r5_3a_another_clone_unbinding_the_row_never_costs_the_bound_engine_a_co
         other = proto.clone_for_agent()  # a fresh AIAgent's clone, started without the gateway key
         other.on_session_start(sid, platform="cli", context_length=200_000)
         assert other._conversation_id == _CLONE_CONV  # the same lifecycle row
+        # Bind-time rollup maintenance writes on a private connection (engine.py:2970-2984;
+        # rollup_builder.py:786 -> rollup_store.py:594). Drain both owners before this end.
+        assert turn_engine.drain_rollup_maintenance(timeout=10)
+        assert other.drain_rollup_maintenance(timeout=10)
+        assert turn_engine.drain_embedding_maintenance(timeout=10)
+        assert other.drain_embedding_maintenance(timeout=10)
+        before = turn_engine._store.get_session_messages(sid)
         other.on_session_end(sid, [] if other_end == "empty" else [dict(m) for m in host[-4:]])
         other.shutdown()
         assert _lifecycle_row(turn_engine) == (None, 0, sid)
@@ -644,11 +661,120 @@ def test_r5_3a_another_clone_unbinding_the_row_never_costs_the_bound_engine_a_co
         caplog.clear()
         turn_engine.compress(list(host), force=True)
         after = _lifecycle_row(turn_engine)
+        rows = turn_engine._store.get_session_messages(sid)
+        covered = Counter(i for n in turn_engine._dag.get_session_nodes(sid) if n.source_type == "messages"
+                          for i in n.source_ids)
     finally:
         turn_engine.shutdown()
     conflicts = [r.getMessage() for r in caplog.records if "publication_invariant_conflict" in r.getMessage()]
     assert not conflicts and turn_engine._last_compression_status == "compacted", conflicts[:1]
     assert after[0] == sid and after[1] > frontier
+    assert rows[:len(before)] == before
+    expected = Counter(
+        (m["role"], m["content"]) for i in range(1, count[0] + 1)
+        for m in (_turn(i)[:1] if i == count[0] else _turn(i))
+    )
+    # #2779: a cold clone replays exactly turns 12 and 13 at a messages end.
+    if other_end == "messages":
+        expected.update((m["role"], m["content"]) for i in (12, 13) for m in _turn(i))
+    assert Counter((r["role"], r["content"]) for r in rows) == expected
+    assert all(covered[r["store_id"]] == 1 for r in rows if r["store_id"] <= after[1])
+
+
+@pytest.mark.parametrize("other_end", ["empty", "messages"], ids=["hygiene-cleanup-end", "background-review-end"])
+def test_r5_3a_clone_losing_the_unbind_lock_preserves_the_bound_engine(
+        tmp_path, monkeypatch, caplog, other_end):
+    """#1429: a clone's session end loses SQLITE_BUSY while the turn engine stays bound.
+    The next compress must keep the durable binding/frontier, publish without a conflict,
+    and preserve every raw row and its summary coverage.
+    """
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    cfg = LCMConfig(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=6, leaf_chunk_tokens=400,
+                    large_output_externalization_path=str(tmp_path / "ext"))
+    proto = LCMEngine(config=cfg, hermes_home=str(tmp_path / "home"))
+    turn_engine = proto.clone_for_agent()
+    sid, host, count = "S0", [], [0]
+    turn_engine.on_session_start(sid, platform="telegram", context_length=200_000, conversation_id=_CLONE_CONV)
+
+    def turns(n):
+        for _ in range(n):
+            count[0] += 1
+            user, reply = _turn(count[0])
+            host.append(user)
+            turn_engine.ingest(host)
+            host.append(reply)
+            turn_engine.ingest(host)
+
+    try:
+        turns(12)
+        count[0] += 1
+        host.append(_turn(count[0])[0])
+        turn_engine.ingest(host)
+        pre = list(host)
+        compressed = turn_engine.compress(list(host), force=True)
+        turn_engine.on_session_end(sid, pre)
+        turn_engine.on_session_start(sid, boundary_reason="compression", old_session_id=sid, platform="telegram",
+                                     conversation_id=_CLONE_CONV)
+        host[:] = [*compressed, _turn(count[0])[1]]
+        turn_engine.ingest(host)
+        bound, frontier, _fin = _lifecycle_row(turn_engine)
+        assert bound == sid and frontier > 0
+        other = proto.clone_for_agent()  # a fresh AIAgent's clone, started without the gateway key
+        other.on_session_start(sid, platform="cli", context_length=200_000)
+        assert other._conversation_id == _CLONE_CONV  # the same lifecycle row
+        # Bind-time rollup maintenance writes on a private connection (engine.py:2970-2984;
+        # rollup_builder.py:786 -> rollup_store.py:594). Drain both owners before this end.
+        assert turn_engine.drain_rollup_maintenance(timeout=10)
+        assert other.drain_rollup_maintenance(timeout=10)
+        assert turn_engine.drain_embedding_maintenance(timeout=10)
+        assert other.drain_embedding_maintenance(timeout=10)
+        before = turn_engine._store.get_session_messages(sid)
+        before_state = _lifecycle_row(turn_engine)
+        caplog.clear()
+        writer = sqlite3.connect(cfg.database_path)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            other.on_session_end(sid, [] if other_end == "empty" else [dict(m) for m in host[-4:]])
+        finally:
+            writer.rollback()
+            writer.close()
+        busy_path = "lifecycle finalization" if other_end == "empty" else "raw-message ingest"
+        busy = [r.getMessage() for r in caplog.records
+                if r.getMessage().startswith(f"LCM session-end {busy_path} skipped due to SQLite lock")]
+        assert busy, "the clone's session end must hit the held write lock"
+        assert _lifecycle_row(turn_engine) == before_state
+        assert turn_engine._store.get_session_messages(sid) == before
+        other.shutdown()
+        assert _lifecycle_row(turn_engine) == before_state
+        binds = _spy_binds(turn_engine, monkeypatch)
+        turns(6)
+        count[0] += 1
+        host.append(_turn(count[0])[0])
+        turn_engine.ingest(host)
+        caplog.clear()
+        turn_engine.compress(list(host), force=True)
+        after = _lifecycle_row(turn_engine)
+        rows = turn_engine._store.get_session_messages(sid)
+        covered = Counter(i for n in turn_engine._dag.get_session_nodes(sid) if n.source_type == "messages"
+                          for i in n.source_ids)
+    finally:
+        turn_engine.shutdown()
+    conflicts = [r.getMessage() for r in caplog.records if "publication_invariant_conflict" in r.getMessage()]
+    assert not conflicts and turn_engine._last_compression_status == "compacted", conflicts[:1]
+    assert binds == []  # The failed unbind left this session bound; no recovery bind is needed.
+    assert after[0] == sid and after[1] > frontier
+    assert rows[:len(before)] == before
+    expected = Counter(
+        (m["role"], m["content"]) for i in range(1, count[0] + 1)
+        for m in (_turn(i)[:1] if i == count[0] else _turn(i))
+    )
+    # #2779: a cold clone replays exactly turns 12 and 13 at a messages end.
+    if other_end == "messages":
+        expected.update((m["role"], m["content"]) for i in (12, 13) for m in _turn(i))
+    assert Counter((r["role"], r["content"]) for r in rows) == expected
+    assert all(covered[r["store_id"]] == 1 for r in rows if r["store_id"] <= after[1])
+
 
 
 def test_r6_2_a_stale_rebind_never_overwrites_a_session_that_bound_after_its_read(tmp_path, monkeypatch, caplog):
@@ -1604,6 +1730,7 @@ def test_profile_rebind_clears_the_commit_proof(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", context_length=200_000, hermes_home=str(tmp_path / "other-home"))
         assert engine._compress_commit_proof is None
+        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
         state = engine._lifecycle.get_by_session("S0")
         assert state.current_session_id is None
@@ -1622,6 +1749,7 @@ def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is not None
         engine.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
         assert engine._conversation_id == "other-conversation" != old_conversation
+        _drain_session_end_maintenance(engine)
         engine.on_session_end("S0", pre)
         assert engine._compress_commit_proof is None or not engine._compress_commit_proof.get("end_consumed")
         state = engine._lifecycle.get_by_conversation("other-conversation")

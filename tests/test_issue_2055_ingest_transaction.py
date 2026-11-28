@@ -12,6 +12,7 @@ from contextlib import contextmanager, nullcontext
 import pytest
 
 from hermes_lcm.sqlite_util import _SqliteSavepointError
+from tests.p1_gate import expect_from_view, install_former_commit_faults, record, store_outcome
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 
 
@@ -56,11 +57,17 @@ class Crash(BaseException):
     """Escapes each writer's Exception handler, like a process exit before COMMIT."""
 
 
-@pytest.mark.parametrize("fault", ["error", "crash"])
-@pytest.mark.parametrize("boundary", ["b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k"])
+@pytest.mark.parametrize("boundary,fault", [
+    *((boundary, fault) for boundary in ("b", "c", "d", "e", "f", "INSERT", "h", "i", "j", "k", "l", "m")
+      for fault in ("error", "crash") if (boundary, fault) != ("m", "crash")),
+    pytest.param("m", "crash", id="m-crash"),  # #2305: the re-bound copies are linked (visible), never silent
+])
 def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary, fault):
     caplog.set_level("DEBUG")
     engine, seed, host = ingest_case
+    if boundary == "m":
+        _rekey_fault_case(engine, monkeypatch, caplog, fault)
+        return
     store = engine._store
     before = durable(engine)
     frontier = copy.deepcopy(engine._frontier)
@@ -79,88 +86,9 @@ def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary,
             fired.append(point)
             raise (Crash if fault == "crash" else sqlite3.OperationalError)("injected former commit " + point)
 
-    def wrap(target, name, point, after=None):
-        original = getattr(target, name)
-
-        def wrapped(*args, **kwargs):
-            result = original(*args, **kwargs)
-            if after:
-                after(*args, **kwargs)
-            fail(point(*args, **kwargs) if callable(point) else point)
-            return result
-
-        monkeypatch.setattr(target, name, wrapped)
-
-    capture = engine._capture_host_rewrites
-
-    def rewrites(messages):
-        capture(messages)
-        if boundary == "b":
-            row = store.get(seed)
-            changed = {**messages[0], "content": " seed"}
-            engine._host_rewrite_state()[0][seed] = (engine._message_replay_identity(row), row["content"], [changed])
-            capture([changed])
-
-    monkeypatch.setattr(engine, "_capture_host_rewrites", rewrites)
-    wrap(engine, "_capture_host_rewrite", "b")
-    reconcile = engine._reconcile_ingest_cursor_from_store
-    rewrite_carry = store.write_metadata_json
-    in_c = []
-
-    def metadata(keys, *args, **kwargs):
-        result = rewrite_carry(keys, *args, **kwargs)
-        if in_c and any(key.startswith("compaction_commit_proof:") for key in keys):
-            fail("c")
-        return result
-
-    monkeypatch.setattr(store, "write_metadata_json", metadata)
-
-    def reconciled(*args, **kwargs):
-        result = reconcile(*args, **kwargs)
-        key = engine._replay_snapshot_metadata_key("compaction_commit_proof")
-        store.write_metadata_json([key], json.dumps({"carry_ranges": []}))
-        in_c.append(True)
-        try:
-            engine._rewrite_own_carry_ranges([], "transaction probe", [])
-        finally:
-            in_c.clear()
-        return result
-
-    monkeypatch.setattr(engine, "_reconcile_ingest_cursor_from_store", reconciled)
-    backfill = store.backfill_observed_at_many
-
-    def backfilled(pairs):
-        result = backfill([*pairs, (seed, 10.)])
-        fail("d")
-        return result
-
-    monkeypatch.setattr(store, "backfill_observed_at_many", backfilled)
-    prematch = engine._identity_anchor_prematch
-
-    def prematched(*args, **kwargs):
-        if boundary == "e":
-            engine._capture_merged_user_head({**host[0], "content": "seed\n\nextra", "_merged_turn_prefix": "seed"},
-                                             [(store.get(seed), ())], set())
-        return prematch(*args, **kwargs)
-
-    monkeypatch.setattr(engine, "_identity_anchor_prematch", prematched)
-    wrap(engine, "_record_ws_host_rewrite", "e")
-
-    def anchor_evidence(plan, remainder_ids=None):
-        store.add_message_relations([[(seed, "alt_stamp", None, None, 10.)]])
-        store.write_metadata_json([engine._identity_anchor_carry_key()], "[]")
-
-    wrap(engine, "_identity_anchor_commit", lambda plan, remainder_ids=None: "f" if remainder_ids is None else "i",
-         anchor_evidence)
-    wrap(store, "_append_protected_batch", "INSERT")
-    for point, name in (("h", "_identity_anchor_mark_carried"), ("j", "_identity_anchor_record_versions")):
-        def evidence(*args, _point=point, **kwargs):
-            newest = store.get_session_tail("S", limit=1)[0]["store_id"]
-            store.add_message_relations([[(newest, "carried_stamp" if _point == "h" else "supersedes",
-                                          seed, None, 10.)]])
-        wrap(engine, name, point, evidence)
-    wrap(store, "_host_uid_write", "k")
-    aborts = fault == "crash" or boundary == "INSERT"
+    install_former_commit_faults(engine, monkeypatch.setattr, boundary, fail)
+    # l is unguarded: a non-busy error aborts the entire transaction.
+    aborts = fault == "crash" or boundary in {"INSERT", "l"}
     if fault == "crash":
         with pytest.raises(Crash):
             engine._ingest_messages(host)
@@ -194,6 +122,10 @@ def test_fault_at_each_former_commit(ingest_case, monkeypatch, caplog, boundary,
         0 if boundary == "k" and not aborts else 1)
     engine.ingest(host)
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+    outcome = store_outcome(store._conn, expect_from_view(host, "conv"))
+    record(dict(family="former_commit", boundary=boundary, fault=fault), outcome, engine)
+    assert outcome["loss"] == outcome["silent"] == 0, outcome
+
 
 
 @pytest.mark.parametrize("load_fails", [False, True])
@@ -370,7 +302,10 @@ def test_begin_precedes_classification_and_reads_see_own_evidence(ingest_case, m
     finally:
         store._conn.set_trace_callback(None)
     assert observed == [True]
-    assert trace[0] == "BEGIN IMMEDIATE"
+    # #2293 M5: BEGIN IMMEDIATE moves from the attempt's start to its first write (here the prefix backfill), which
+    # still precedes the pre-match, so the pre-match reads see the attempt's own evidence inside its transaction.
+    begin = trace.index("BEGIN IMMEDIATE")
+    assert not any(sql.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")) for sql in trace[:begin])
     assert [sql for sql in trace if sql in ("BEGIN IMMEDIATE", "COMMIT")] == ["BEGIN IMMEDIATE", "COMMIT"]
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
     assert engine._last_ingest_attribution["rows_written"] == 1
@@ -597,7 +532,9 @@ def test_ingest_ends_only_unowned_transactions(ingest_case, owned, shape):
                 assert replay_fields(engine._ingest_messages(host)) == replay_fields(host)
         finally:
             store._conn.set_trace_callback(None)
-        assert ("COMMIT" not in trace) if owned else (trace[0] == "COMMIT" and trace[1] == "BEGIN IMMEDIATE")
+        # #2293 M5: the unowned transaction still ends first; BEGIN IMMEDIATE now comes at the attempt's first write.
+        assert ("COMMIT" not in trace) if owned else (
+            trace[0] == "COMMIT" and "BEGIN IMMEDIATE" in trace and "COMMIT" not in trace[1:trace.index("BEGIN IMMEDIATE")])
         with sqlite3.connect(store.db_path) as reader:
             assert reader.execute("SELECT COUNT(*) FROM messages WHERE content='fresh'").fetchone()[0] == int(not owned)
             if shape == "write":
@@ -841,13 +778,16 @@ def test_session_end_classifies_read_only_and_freezes_once(ingest_case, monkeypa
     assert [row["content"] for row in engine._store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
 
 
-def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch, caplog):
+@pytest.mark.parametrize("prelock", [False, True], ids=["eager", "lazy"])
+def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeypatch, caplog, prelock):
     from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 
     engine, _seed, host = ingest_case
+    monkeypatch.setattr(engine._store, "_ingest_prelock", prelock)
     host = host[:2]  # An already stored view reaches shadow counting without appending a tail.
     engine.ingest(host)
     store = engine._store
+    counters_before = dict(engine._host_uid_counters)
     before = store.read_metadata_json(HOST_UID_COUNTER_KEY)
     assert before is not None
     classify, count = engine._ingest_messages_transaction, engine._host_uid_count
@@ -889,7 +829,13 @@ def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeyp
         store._conn.set_trace_callback(None)
         locker.rollback()
         locker.close()
-    assert fallback == [True] and len(counted) == 1
+    if not store._ingest_prelock:
+        assert fallback == [True] and len(counted) == 1
+    else:
+        # #2293: an already stored view needs no write, so the lazy attempt never meets the held lock and never
+        # falls back; nothing below may differ from the eager shadow's outcome.
+        assert fallback == [] and counted == []
+        counted = [({}, {}, {})]
     delta, previous, current = counted[0]
     assert delta.get("errors", 0) == 0
     assert current.get("errors", 0) == previous.get("errors", 0)
@@ -898,6 +844,7 @@ def test_session_end_read_only_shadow_keeps_tally_in_memory(ingest_case, monkeyp
     assert store.read_metadata_json(HOST_UID_COUNTER_KEY) == before
     assert engine._pending_session_tails == []
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply"]
+    assert dict(engine._host_uid_counters) == counters_before  # the same in both modes
 
 
 def test_read_only_backfill_plan_falls_back_to_anchor_disabled_tail(ingest_case, monkeypatch):
@@ -1071,7 +1018,9 @@ def test_prematch_failure_is_counted_only_after_commit(ingest_case, monkeypatch,
     monkeypatch.setattr(engine._store, "_append_protected_batch", appended)
     monkeypatch.setattr(engine, "_record_ingest_failure", recorded_failure)
     engine._ingest_messages(host)
-    assert len(matches) == len(inserts) == 2
+    # #1815: the first attempt's pre-match fault rolls back and classifies again before any insert, so three
+    # pre-matches run for the two attempts that insert (the second of which is BUSY-aborted).
+    assert (len(matches), len(inserts)) == (3, 2)
     assert recorded == (["identity-anchor pre-match"] if fail_committing_attempt else [])
     assert engine._ingest_failure_count == int(fail_committing_attempt)
 
@@ -1262,3 +1211,82 @@ def test_begin_waits_for_a_writer_within_the_existing_budget(ingest_case):
     assert released.is_set() and not errors and engine._ingest_failure_count == 0
     assert engine._last_ingest_attribution["busy_snapshot_retry"] is False
     assert [row["content"] for row in store.get_session_messages("S")] == ["seed", "seed reply", "fresh"]
+
+
+def _rekey_fault_case(fixture_engine, monkeypatch, caplog, fault):
+    from pathlib import Path
+    from tests.p1_gate import prepare_rekey_case
+
+    root = Path(fixture_engine._hermes_home) / "rekey"
+    root.mkdir()
+    host, view, expected = prepare_rekey_case(root, "field_chain_replace")
+    engine = host.engine
+    before = durable(engine)
+    fired = []
+
+    def fire(point):
+        if not fired:
+            fired.append(point)
+            raise (Crash if fault == "crash" else sqlite3.OperationalError)("injected re-key fault")
+
+    try:
+        with monkeypatch.context() as patch:
+            install_former_commit_faults(engine, patch.setattr, "m", fire)
+            if fault == "crash":
+                with pytest.raises(Crash):
+                    engine._ingest_messages(view)
+                assert durable(engine) == before
+            else:
+                engine.ingest(view)
+                assert engine._ingest_failure_count == 0
+                assert "re-key failed" in caplog.text
+        assert fired == ["m"]
+        engine.ingest(view)
+        engine.ingest(view)
+        outcome = store_outcome(engine._store._conn, expected)
+        record(dict(family="former_commit", boundary="m", fault=fault), outcome, engine)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
+    finally:
+        host.close()
+
+
+def test_overlapping_ingests_on_one_engine_isolate_pending_frontier(ingest_case, monkeypatch):
+    """#2073: a second thread entering _ingest_messages waits for the write lock before touching _pending_ingest_frontier."""
+    engine, _seed, host = ingest_case
+    later = [*host, _m("assistant", "fresh reply", 21., "fresh-reply-uid")]
+    append = engine._store._append_protected_batch
+    first_in_append = threading.Event()
+    second_started = threading.Event()
+    errors = []
+
+    def second_ingest():
+        try:
+            second_started.set()
+            engine._ingest_messages(later)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=second_ingest)
+
+    def slow_append(*args, **kwargs):
+        result = append(*args, **kwargs)
+        if not first_in_append.is_set():
+            first_in_append.set()
+            thread.start()
+            assert second_started.wait(2)
+            # Give the second thread a window to reach _ingest_messages while the first still holds the transaction.
+            threading.Event().wait(0.05)
+        return result
+
+    monkeypatch.setattr(engine._store, "_append_protected_batch", slow_append)
+    try:
+        engine._ingest_messages(host)
+    finally:
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert [row["content"] for row in engine._store.get_session_messages("S")] == [
+        "seed", "seed reply", "fresh", "fresh reply"
+    ]
+    assert engine._ingest_cursor == len(later)
+    assert engine._frontier.cursor == len(later)
+    assert getattr(engine, "_pending_ingest_frontier", None) is None

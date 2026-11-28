@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
 import tests.conftest  # noqa: E402, F401
 from tests.behaviour.frontier_observer import observed_attribute  # noqa: E402
+from tests.behaviour.trace_config import LCMConfig, trace_config  # noqa: E402
 from tests.phase0_hygiene import product_env_keys
 from tests.harness import engine_context, pin_char_counter  # noqa: E402
 
@@ -65,6 +66,12 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_out_of_band_durable_rows", "_pending_ingest_frontier",
     "_foreground_budget", "_ingest_cursor", "_consecutive_ingest_failures",
     "_pruned_tool_source_generation", "_pruned_tool_source_identities", "_pruned_tool_source_store",
+})
+# Read on the reconcile path but never snapshotted, pinned by test_cache_attribute_inventory_is_pinned: adding a
+# name fails until that test is edited and the name's line says why it cannot change an output.
+CACHE_ATTRIBUTES = frozenset({
+    "_replay_identity_memo",  # #2856 live identity memo: output-neutral by its own oracle and the session differential
+    "_storage_ready",  # read only by the identity wrapper, to leave the memo off until storage is open
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -222,6 +229,8 @@ class Canonical:
         if isinstance(value, (str, Path)):
             return self.text(str(value), identity=not in_payload and path in {
                 "message_uid", "_absorbed_message_uids", "_tool_call_uids", "_tool_call_uid"})
+        if isinstance(value, LCMConfig):
+            return trace_config(value, lambda v, name: self.value(v, name, in_payload=in_payload))
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {f.name: self.value(getattr(value, f.name), f.name, in_payload=in_payload)
                     for f in dataclasses.fields(value)}

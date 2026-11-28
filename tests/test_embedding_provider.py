@@ -10,7 +10,7 @@ import pytest
 
 import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_provider as provider_mod
-from tests.timing_helpers import deadline_block, returns_while_blocked
+from tests.timing_helpers import deadline_block
 
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
@@ -1046,16 +1046,61 @@ def test_document_dispatch_callback_runs_once_per_actual_request(monkeypatch):
     assert len(transport.calls) == 2
 
 
+class _ControlledClock:
+    """The provider module's clock, advanced only by the test.
+
+    A real 10 ms budget can expire during document preprocessing on a loaded
+    runner (a worker thread and its slot), before the dispatch callback the
+    test is about. The deadline then moves only when the callback advances it.
+    """
+
+    def __init__(self, monkeypatch):
+        self.now = 1000.0
+        monkeypatch.setattr(provider_mod, "time", self)
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+class _WorkerClock(_ControlledClock):
+    """A controlled clock whose advances only the advancing thread sees.
+
+    FastEmbed runs the dispatch callback and its recheck in a worker thread, while
+    the caller's join reads the same module clock. With one shared clock, a worker
+    that advances it and is descheduled before it exits leaves the caller a zero
+    join timeout, so the caller's own deadline error fires instead of the recheck.
+    Here the caller keeps its time, and its join waits for the worker's error.
+    """
+
+    def __init__(self, monkeypatch):
+        self._offsets = {}
+        super().__init__(monkeypatch)
+
+    def monotonic(self):
+        return self.now + self._offsets.get(threading.get_ident(), 0.0)
+
+    def advance(self, seconds):
+        ident = threading.get_ident()
+        self._offsets[ident] = self._offsets.get(ident, 0.0) + seconds
+
+
 def test_voyage_rechecks_deadline_after_dispatch_callback(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
     transport = FakeTransport(_voyage_success(1))
-    provider = VoyageProvider("voyage-test", transport=transport, timeout=0.01)
+    clock = _ControlledClock(monkeypatch)
+    provider = VoyageProvider("voyage-test", transport=transport, timeout=5.0)
     dispatched: list[tuple[int, ...]] = []
 
     def slow_dispatch(indexes):
         dispatched.append(indexes)
-        time.sleep(0.03)
+        clock.advance(10.0)
 
     with pytest.raises(ProviderPreDispatchError) as exc_info:
         list(
@@ -1069,12 +1114,13 @@ def test_voyage_rechecks_deadline_after_dispatch_callback(monkeypatch):
     assert transport.calls == []
 
 
-def test_ollama_rechecks_deadline_after_dispatch_callback():
+def test_ollama_rechecks_deadline_after_dispatch_callback(monkeypatch):
     transport = FakeTransport(_response(200, {"embeddings": [[1.0, 0.0]]}))
-    provider = OllamaProvider("model", transport=transport, timeout=0.01)
+    clock = _ControlledClock(monkeypatch)
+    provider = OllamaProvider("model", transport=transport, timeout=5.0)
 
     def slow_dispatch(_indexes):
-        time.sleep(0.03)
+        clock.advance(10.0)
 
     with pytest.raises(ProviderPreDispatchError):
         list(
@@ -1218,18 +1264,50 @@ def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path, l
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
     provider = FastembedProvider("local", cache_dir=tmp_path, timeout=0.01)
-    with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, latency_check) as block:
-        started = time.monotonic() if latency_check else None
+    if not latency_check:
+        with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, False) as block:
+            with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+                provider.embed_query("slow")
+        return
+
+    release = threading.Event()
+    workers = []
+    joins = []
+    original_join = threading.Thread.join
+
+    def block():
+        assert release.wait(10), "deadline worker was never released"
+
+    def join(worker, timeout=None):
+        if worker.name == "lcm-fastembed-embedding":
+            workers.append(worker)
+            # Slot acquisition and thread start may already have spent the entire 10 ms budget. Zero is
+            # then the correct production timeout; waiting for the encoder to start would add test-only delay.
+            assert timeout is not None and 0 <= timeout <= provider.timeout, "join must use the remaining request budget"
+            joins.append((time.monotonic(), timeout))
+        return original_join(worker, timeout=timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    try:
         with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
             provider.embed_query("slow")
-        if latency_check:
-            assert time.monotonic() - started < 0.04
+        returned = time.monotonic()
+        assert len(joins) == 1, "the deadline join was not exercised"
+        started, remaining = joins[0]
+        elapsed = returned - started
+        print(f"\nFASTEMBED join budget={remaining * 1000:.1f} ms return={elapsed * 1000:.1f} ms")
+        # Measure the real join and caller return, excluding startup scheduling. Keep the original 30 ms
+        # scheduling slack beyond the remaining deadline; the worker stays blocked until after this assertion.
+        assert elapsed < remaining + 0.03, f"{elapsed * 1000:.1f} ms for {remaining * 1000:.1f} ms remaining"
+    finally:
+        release.set()
+        for worker in workers:
+            original_join(worker, timeout=10)
+            assert not worker.is_alive(), "deadline worker did not exit after release"
 
 
 def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, tmp_path):
     calls = 0
-    worker_started = threading.Event()
-    release_worker = threading.Event()
 
     class SlowFastembedModel:
         def __init__(self, **_kwargs):
@@ -1238,8 +1316,7 @@ def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, t
         def query_embed(self, texts):
             nonlocal calls
             calls += 1
-            worker_started.set()
-            release_worker.wait()
+            block()
             return ([1.0, 0.0] for _ in texts)
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
@@ -1255,23 +1332,22 @@ def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, t
 
     def bounded_acquire(blocking=True, timeout=None):
         capacity_timeouts.append(timeout)
-        assert timeout is not None and 0 < timeout <= 0.01, "capacity acquisition must use the request budget"
+        # 1e-9: the logical clock subtracts larger floats (1.02 - 1.01) than the real clock does.
+        assert timeout is not None and 0 < timeout <= 0.01 + 1e-9, "capacity acquisition must use the request budget"
         return original_acquire(blocking=blocking, timeout=timeout)
 
     monkeypatch.setattr(slots, "acquire", bounded_acquire)
-    try:
+    # A logical clock expires the first call only after its worker has reached the encoder and holds the
+    # slot; with the real 10 ms deadline a loaded runner could start the worker late, and the worker's
+    # pre-dispatch deadline check would then skip the encode and free the slot (the latency twin below
+    # keeps the real clock).
+    with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, False) as block:
         with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
             first.embed_query("slow")
-        assert worker_started.is_set()
-        def rejected_call():
-            with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
-                second.embed_query("must-not-start")
-
-        returns_while_blocked(rejected_call, release_worker)
+        with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
+            second.embed_query("must-not-start")
         assert len(capacity_timeouts) == 2
         assert calls == 1
-    finally:
-        release_worker.set()
 
 
 @pytest.mark.latency
@@ -1362,18 +1438,19 @@ def test_fastembed_does_not_encode_after_dispatch_callback_exhausts_deadline(
         query_embed = embed
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: CachedFastembedModel)
-    provider = FastembedProvider("cached", cache_dir=tmp_path, timeout=0.01)
+    clock = _WorkerClock(monkeypatch)
+    provider = FastembedProvider("cached", cache_dir=tmp_path, timeout=5.0)
 
     def slow_dispatch(_indexes):
-        time.sleep(0.03)
+        clock.advance(10.0)
 
-    with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+    # The recheck after the callback must be the one that fires, not the caller's join timeout.
+    with pytest.raises(EmbeddingProviderError, match="deadline exceeded before encode"):
         list(
             provider.embed_document_batches(
                 ["document"], before_dispatch=slow_dispatch
             )
         )
-    time.sleep(0.04)
     assert encode_calls == 0
 
 

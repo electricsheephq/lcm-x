@@ -159,7 +159,9 @@ def test_t5_session_end_retry_freeze_trim_and_alignment(tmp_path, monkeypatch):
         current["content"] = "synthetic mutated after freeze"
         monkeypatch.setattr(e, "_append_ingest_batch", original)
         e._store.append_batch("S", [old], conversation_id="conv")
-        e._trim_replayed_pending_tail(tail)
+        covered, last_id, *_ = e._match_pending_tail(tail)
+        assert covered == 1
+        tail.update(e._slice_tail(tail, covered), after_store_id=last_id)
         assert len(tail["messages"]) == len(tail["senders"]) == 1
         e._retry_pending_session_tails()
         assert not e._pending_session_tails

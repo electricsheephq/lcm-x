@@ -58,6 +58,14 @@ def _codex_oauth_context_cap(model: str | None, provider: str | None) -> int | N
     bare_model = _bare_model_slug(model)
     if not bare_model:
         return None
+    if bare_model.endswith("-900k"):
+        try:
+            from agent.model_metadata import is_codex_context_variant
+        except ImportError:
+            pass  # Older hosts retain the conservative family cap.
+        else:
+            if is_codex_context_variant(bare_model):
+                return 900_000
     for slug, cap in sorted(
         _CODEX_OAUTH_CONTEXT_CAPS.items(), key=lambda item: len(item[0]), reverse=True
     ):

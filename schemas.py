@@ -32,7 +32,7 @@ LCM_GREP = {
                     "Indexed history full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
                     "(at least 2 alphanumeric characters) are honoured. In mode='full_text', zero hits with multiple terms retry once "
                     "as any-term matching (retried='any_term'), except top-level OR/NOT queries and CJK/emoji substring searches. "
-                    "content_scope='externalized' matches the literal query text; operators and retry do not apply."
+                    "content_scope='externalized' matches the query as typed or all its terms in any order (quoted phrases kept, uppercase OR honoured); a NOT query matches only as typed."
                 ),
             },
             "limit": {
@@ -1266,8 +1266,8 @@ LCM_MEMORY = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["lookup", "list"]},
-            "name": {"type": "string", "description": "Required for lookup."},
-            "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "name": {"type": "string", "maxLength": 256, "description": "Required for lookup."},
+            "aliases": {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 8},
             "question": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200,
                       "description": "Lookup: default 20, cap 50. List: default 50, cap 200."},
@@ -1275,3 +1275,43 @@ LCM_MEMORY = {
         "required": ["action"],
     },
 }
+
+
+def recall_guidance_schemas(schemas, variant):
+    """Select read-path guidance without imports or changing the input schemas."""
+    if variant != "v2":
+        return schemas
+    selected = []
+    for schema in schemas:
+        name = schema.get("name")
+        if name == "lcm_recall":
+            schema = {**schema, "description": schema["description"] + " " + (
+                "For questions that combine or compare facts from several conversations, read across "
+                "sessions to support totals, lists, changes over time, 'how many' or 'which ... first'. "
+                + ('With detail="answer_ready", check `provenance.answer_ready.sessions_delivered` '
+                   "against `provenance.answer_ready.sessions_in_pool`. "
+                   "If fewer sessions were delivered than are in the pool, call again with "
+                   if "Session delivery" not in schema["description"] else "To look for more sessions, call again with ") +
+                "`exclude_session_ids` set to the sessions you have read or raise `min_sessions`. "
+                "When a hit carries a session_hint, read around it using that hint. "
+                "Stop when cited spans support every part of the question or a call finds no new sessions; say what you could not find.")}
+            params = schema["parameters"]
+            schema = {**schema, "parameters": {**params, "properties": {**params["properties"],
+                "min_sessions": {"type": "integer", "minimum": 0, "maximum": 10,
+                    "description": "minimum distinct sessions in the window; 0 disables; when omitted uses LCM_RECALL_MIN_SESSIONS"}}}}
+        elif name == "lcm_load_session":
+            params = schema["parameters"]
+            schema = {**schema, "description": schema["description"].replace(
+                "Use this after session_search or lcm_grep has identified a session_id "
+                "that already exists in lcm.db.",
+                "Use this after lcm_recall, session_search or lcm_grep has identified a session_id "
+                "that already exists in lcm.db; pass anchor_store_id to read the conversation around one hit."),
+                "parameters": {**params, "properties": {**params["properties"],
+                    "anchor_store_id": {"type": "integer", "description":
+                        ("Optional exact message anchor belonging to session_id; returns its surrounding window. "
+                         "To read past the window, call again without anchor_store_id and with after_store_id set to next_cursor.")},
+                    **{key: {"type": "integer", "default": default, "description":
+                             f"Rows {key} the anchor, clamped to 0..40; used only with anchor_store_id."}
+                       for key, default in (("before", 6), ("after", 12))}}}}
+        selected.append(schema)
+    return selected

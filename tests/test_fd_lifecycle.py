@@ -10,6 +10,7 @@ import pytest
 
 import benchmarking.longmemeval as lme
 import hermes_lcm.engine as engine_module
+import hermes_lcm.maintenance_scheduler as maintenance_scheduler
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from tests.conftest import _MAINTENANCE_SCHEDULERS, _wait_scheduler_idle
@@ -76,14 +77,14 @@ def test_ingest_compress_shutdown_releases_file_descriptors(tmp_path, monkeypatc
         before = fd_count()
         engine = LCMEngine(config=config, hermes_home=str(tmp_path))
         try:
-            assert fd_count() > before  # The observer sees this engine's open files.
             engine.on_session_start('fd-lifecycle', platform='cli', context_length=200_000)
+            assert fd_count() > before  # First real use opens the engine's files.
             engine.ingest(messages)
             engine.compress(messages, current_tokens=100_000, force=True)
             assert engine._last_compression_status == 'compacted'
             # Default-on maintenance owns separate connections until its jobs finish.
             for name in _MAINTENANCE_SCHEDULERS:
-                scheduler = getattr(engine_module, name, None)
+                scheduler = getattr(maintenance_scheduler, name, None)
                 if scheduler is not None:
                     assert _wait_scheduler_idle(scheduler, timeout=30.0), name
         finally:

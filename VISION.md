@@ -6,12 +6,14 @@ LCM-X keeps a lossless record of everything an agent sees and does. Today it run
 
 **The objective:** everything the agent has seen is kept, used correctly when it matters, at shipped defaults, in any harness, without the user noticing.
 
+**The long horizon.** An agent that lives for months should wake up as itself and act on the right memories, across restarts, compactions, crashes, model swaps and long silences, inside the harness it really runs in. That is the question the [Bicentennial](https://github.com/electricsheephq/bicentennial) benchmark asks, and it is where the objective leads: continuity that outlives any one session, harness or machine. The project's reference agent proposed this framing on 2026-10-26.
+
 It is built on Lossless Context Management (the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman, Voltropy PBC, 2026):
 - every message is kept in a durable store;
 - older turns are folded into a summary DAG;
 - the agent can always walk back from a summary or a memory to the exact source.
 
-This page states what we are building and how we will know it works. The [roadmap](ROADMAP.md) says when; issue [#658](https://github.com/electricsheephq/lcm-x/issues/658) tracks the work.
+This page states what we are building and how we will know it works. The [roadmap](ROADMAP.md) says when; the old tracker, issue [#658](https://github.com/electricsheephq/lcm-x/issues/658), was closed on 2026-11-06.
 
 ## The promise
 
@@ -24,7 +26,7 @@ This page states what we are building and how we will know it works. The [roadma
    - Two opt-ins discard content by design: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`) and message ignore patterns (`LCM_IGNORE_MESSAGE_PATTERNS`).
    - Deleting on purpose: the operator's `/lcm doctor clean apply` (off by default, takes a backup first) and, once it ships, forgetting a memory on request ([#1171](https://github.com/electricsheephq/lcm-x/issues/1171)).
 2. **The right evidence at the right moment.**
-   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default from v0.29.0 if it passes its measurement, and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
+   - Recall finds what matters across months of history. Full-text search is built in today; local semantic search is built in and on by default since v0.29.0 (an exception to the quality rule below), and a built-in reranker follows once it passes its measurement, re-screened in facts that update (today reranking needs the Voyage cloud provider).
    - Next (with compaction you don't notice): evidence the agent needs is put in front of it before it answers, not only when it thinks to search.
    - The agent can always open the exact source behind what it was shown.
 3. **Memory that grows.**
@@ -33,8 +35,11 @@ This page states what we are building and how we will know it works. The [roadma
 4. **Long sessions keep working.**
    - The same record runs the context window: a session can run for weeks and the model stays inside its window. Today the user waits for compaction (p90 about 55 s); compaction you don't notice removes that wait.
    - Anything compacted can be recovered exactly.
+   - **LCM-X never stops the agent.** A turn always completes: no LCM-X work may make a turn fail, hang or wait without bound. Compaction makes progress whenever the window needs it: a pass that runs and shrinks nothing, pass after pass, is a bug against this promise. A restart costs seconds at any history length.
+   - From v0.30.2 every release is gated on this as it is on 0 lost rows: the release spec's live-session rows require a long, real-shaped session to start, compact and keep its prompt cache on the release candidate. v0.30.1 is held to it by a release-manager decision for that release: the [reference-agent gate sheet](bench/specs/v0.30.1-reference-agent-gate.md)'s copy checks and live stand-in decide GA, and its 24-hour field period starts at the final install and continues after GA. v0.30.2 is a one-time exception, not a new default (release decisions T1-482 and T1-521): it carries only the merged-reply loss fix, a P0 loss fix that should not wait on the full campaign, so its live-session rows are not run. Every later release runs them, except a hotfix candidate whose live-session producer has not merged or passed its dry run. Such a hotfix may ship with D9–D12 UNRUN under a disclosed release-manager decision; the L1 checks always run. v0.30.2's GA follows the first hour of its reference-agent canary on the release candidate, which by the release spec's canary rule blocks GA only on a confirmed lost row that the candidate causes, so the canary does not stand in for those rows. A known exception is tracked and listed in that release's Known issues, the same as a loss.
+   - Next (after v0.30.2): LCM-X reports its own health on every turn (how long it held the store, rows stored again, how the list changed, prompt-cache reads and writes), so a broken agent is found by its instruments and not by its user.
 5. **One memory, any harness.**
-   - Next (Claude Code preview by 2026-11-18): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
+   - LCM-X for Claude Code (preview since 2026-11-07; GA after [its gate in the roadmap](ROADMAP.md#the-order-roadmap-v6)): Claude Code sessions are kept in their own store and recalled over MCP. Grok Build follows, then a hosted store that recalls across harnesses, then Codex, OpenClaw and any MCP client.
    - Each event keeps a stable identity across hosts, so the record stays lossless when several harnesses share it.
 6. **We measure it.** Claims about recall, continuity and speed come with a pinned commit, a configuration and a published number. From v0.29.0 our rows are read and judged by current frontier models; earlier rows name the judge they used.
 
@@ -44,7 +49,7 @@ This page states what we are building and how we will know it works. The [roadma
 - **A durable store** (SQLite) with:
   - a summary DAG;
   - externalized large outputs;
-  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default from v0.29.0 if it passes its measurement), a built-in reranker and source-linked derived memory (facts that update) next.
+  - full-text search, with optional semantic search and cloud reranking today; local semantic search (built in and on by default since v0.29.0), a built-in reranker and source-linked derived memory (facts that update) next.
 - **Agent tools** (`lcm_*`), **operator commands** (`/lcm`, the doctor), and, from LCM-X for Claude Code, a read-only endpoint so other harnesses can read the same memory, plus adapters that capture other harnesses into their own store.
 
 ## What LCM-X is not
@@ -56,19 +61,24 @@ This page states what we are building and how we will know it works. The [roadma
 ## Principles
 
 - **Lossless before clever.** A change that can lose or duplicate a stored row does not ship, however much it improves anything else.
+- **Improve what we depend on.** When the limit between users and the objective sits in something LCM-X depends on (the storage engine, a host, the models we measure with), working on that dependency itself is in scope, not only working around it inside LCM-X.
 - **Proven quality ships on.**
   - A feature becomes the default when it passes one pre-declared, paired measurement on held-out questions, read by a frontier model.
   - The measurement must show a significant gain in evidence or answer quality.
+  - Local semantic search is the exception so far: it has been on by default since v0.29.0 by a release decision, without the significant answer-quality gain this rule asks for (v0.29.0 claims none), and its measurement continues ([#950](https://github.com/electricsheephq/lcm-x/issues/950)).
   - It ships on even when it uses more tokens; we publish tokens per query beside every number, and every default can be turned off. Token cost is not a gate; losslessness and the user's wait are.
-- **Built in, not bolted on.** From v0.29.0 the default install includes local semantic search, on by default if it passes its measurement; a local reranker follows if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
+- **Built in, not bolted on.** The default install includes local semantic search, on by default since v0.29.0 (the exception noted above); a local reranker follows if it passes its measurement. Cloud providers are optional upgrades. The built-in models are the best we can run locally, chosen by measurement and checked again when better open models ship ([#1715](https://github.com/electricsheephq/lcm-x/issues/1715)).
 - **Local first, offline capable.** The memory layer needs no cloud: one SQLite database, with a folder beside it for large externalized payloads, and local embeddings, built in from v0.29.0. With a local summariser model it runs fully offline. So agents on laptops today, and on-device agents and robots later (research), keep their whole memory on the device.
 - **The user's wait is a product metric.** Compaction time and prompt-cache breaks count as much as summary quality.
+- **Cost with no benefit is a defect.** Tokens spent for a better answer are a cost of quality, and are not a gate. A prompt-cache rewrite that changes nothing the user can see, work repeated on every turn in proportion to the length of the history, and rows stored a second time are waste, and waste on every turn is a bug. A compaction that does not shrink the prompt must change nothing that is sent.
 - **Defaults target the best measured quality.** We choose, tune and gate defaults on the reference machine: an Apple M-series laptop (M3 or newer) with 16 GB of RAM. Smaller hosts are an option, not a priority. They adapt on their own, using shorter time budgets and lighter work and falling back to full-text search instead of making the user wait, and they never lower the default that everyone else gets. Robots and on-device agents are expected to carry more compute than the reference machine, not less.
 - **Default configuration is the product.** The numbers we publish are for the configuration users actually run, beside our best configuration and labelled as such.
 - **Frontier-first measurement.** Our own benchmark rows use current frontier models as readers and judges, and we publish the protocol and the reasons. Where a shared-reader board (every system run with the same reader and judge by someone other than the vendor) fixes its own models, we enter it on its terms.
 - **Release in themes, by gate.** Each themed minor has a written exit criterion, and a feature ships in the first release after it passes its own gate. Patches only for defects that:
   - lose data or duplicate rows;
   - wedge or reset a session;
+  - stop compaction from making progress;
+  - rewrite the prompt cache turn after turn;
   - send an over-window request;
   - break security.
 
@@ -90,8 +100,10 @@ This page states what we are building and how we will know it works. The [roadma
   - Agentic rows (the reader drives LCM-X's tools) and single-retrieval rows are reported separately.
 - **The objective scorecard.** From v0.29.1, each release reports one row against the objective, with six cells: kept in store, kept in view, used correctly, at shipped defaults, any harness, unnoticed.
    - Each cell is read from an existing gate where one exists, links its receipt and states its claim class. A cell with no gate, or no gate result, stays in the table, empty.
-   - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from cloud step 2, one store with many harnesses). Unnoticed: compaction wait and tokens per turn. Kept in view has no gate yet, so its cell stays empty until one exists.
-- **Boards are targets, not gates.** Our own benchmark ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)) becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults.
+   - Kept in store: the lossless gates (0 lost and 0 duplicate rows). Used correctly: facts kept and the never-below-Hermes-built-in floor, per fact class ([#1595](https://github.com/electricsheephq/lcm-x/issues/1595)). At shipped defaults: the board targets, run with the default configuration ([#2018](https://github.com/electricsheephq/lcm-x/issues/2018)). Any harness: the cross-harness parity audit (from cloud step 2, one store with many harnesses). Unnoticed: compaction wait and tokens per turn, and from v0.30.2 the live-session rows of the release spec (a cold start on a large store, alone and with a busy thread; a shrink over eight passes; an unchanged prompt prefix across a pass that does not shrink). Kept in view has no gate yet, so its cell stays empty until one exists.
+- **Boards are targets, not gates.**
+  - Future-facing boards come first: those that test long-lived, agentic and changing memory, such as Bicentennial, BEAM, HaluMem and MemoryArena. Older single-retrieval boards (LongMemEval, LoCoMo) stay as regression guards, not targets.
+  - Bicentennial ([#1964](https://github.com/electricsheephq/lcm-x/issues/1964)), the long-horizon benchmark maintained alongside LCM-X, becomes a headline measure only after it validly scores LCM-X against Hermes built-in at shipped defaults. It runs under a firewall: LCM-X's developers use it as any outside developer does, on public packs, and never see its held-out seeds or keys.
 - **Shared-reader boards.** We enter boards that run every system with the same models. Until local semantic recall becomes the default (v0.29.0), we enter the configuration we ship to the managed fleet, labelled as such; after that, the shipped default. We report where we place.
 - **Compaction parity.** Facts kept, instruction continuity and compaction wall time against other compaction systems, on the same material, three seeds.
 - **Lifecycle reliability.** Every release candidate runs a real-host gauntlet (install, upgrade, rollback, restart, rotation, long sessions). Only a candidate that passes the [release spec](bench/specs/RELEASE-READINESS-V1.md) becomes GA. v0.27.0 shipped with two disclosed exceptions; #1305 proposes a narrow spec clause for those two cases only.

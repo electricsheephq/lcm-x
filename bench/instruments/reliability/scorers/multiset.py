@@ -13,11 +13,36 @@ nothing.
 """
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
+import importlib
+import importlib.util
 import json
 import re
+import sys
 import unicodedata
+from bisect import bisect_right
 from collections import Counter, defaultdict
+from pathlib import Path
+
+
+def stripped_replay_content(content):
+    """The product's replay transform (escalation.stripped_replay_content), loaded on first use.
+
+    Bench-only runs do not register the plugin package, so register it here the way tests/conftest.py does
+    (without executing its plugin entry point); the scorer never re-implements the transform."""
+    module = sys.modules.get("hermes_lcm.escalation")
+    if module is None:
+        if "hermes_lcm" not in sys.modules:
+            root = Path(__file__).resolve().parents[4]
+            spec = importlib.util.spec_from_file_location(
+                "hermes_lcm", root / "__init__.py", submodule_search_locations=[str(root)])
+            package = importlib.util.module_from_spec(spec)
+            package.__path__ = [str(root)]
+            sys.modules["hermes_lcm"] = package
+        module = importlib.import_module("hermes_lcm.escalation")
+    return module.stripped_replay_content(content)
 
 
 def norm(text: str) -> str:
@@ -246,10 +271,11 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
 
 
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None,
-          *, _key=None) -> dict:
+          *, _key=None, surplus_keys=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
     stored_rows = sorted(stored_rows, key=lambda r: r[0])
+    replay_rows = {sid: (session, role, content) for sid, session, role, content in stored_rows}
     key_of = _key or (lambda role, text: (role, h(text)))
     stored, by_session = defaultdict(list), defaultdict(list)
     for sid, session, role, content in stored_rows:
@@ -261,6 +287,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     want = Counter(key_of(role, text) for role, text in expected if norm(text))
     texts = {key_of(role, text): text for role, text in expected}
     composites, paired, spent = [], Counter(), Counter()
+    consumed = defaultdict(list)  # copies a host merge record took as a composite's parts: kept copies of their key
     embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
     embedded_ids = {c["store_id"] for c in span_credits}
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
@@ -279,6 +306,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             for k, count in uses.items():
                 ids = available[k][:count]
                 stored[k] = [sid for sid in stored[k] if sid not in ids]
+                consumed[k] += ids
                 parts.append({"sha256": k[1], "uses": count, "store_ids": ids})
             paired[key] += 1
             spent.update(uses)  # the host rows that prove the record license no surplus too
@@ -308,12 +336,18 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 entry["licensed"] = lic["licensed"]
             if have - n > entry.get("licensed", 0):
                 duplicated.append(entry)
+                if surplus_keys is not None:
+                    surplus_keys.append((key, have - n - entry.get("licensed", 0), stored[key] + consumed[key],
+                                         consumed[key] + [sid for sid in stored[key] if sid in embedded_ids], replay_rows))
     extra = []
     for k, v in stored.items():
         if k not in want:
             lic = licence(k, len(v), 0, host, v, spent[k])
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
+                if surplus_keys is not None:
+                    surplus_keys.append((k, len(v) - (lic or {}).get("licensed", 0), v + consumed[k],
+                                         consumed[k] + [sid for sid in v if sid in embedded_ids], replay_rows))
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
     # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
@@ -363,9 +397,15 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     }
 
 
+def _nonspace_nfd_len(text):
+    # Exact: NFD counts add across joins and vkey preserves them; isspace() agrees with regex \s.
+    return sum(not ch.isspace() for ch in unicodedata.normalize("NFD", text))
+
+
 def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     """Phase C adopts the release multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn
     prompt rule; unlike r2, user boundaries span the owning conversation. Store order guards own turns.
+    Runs are bounded by the turn (user rows), departing from r2's 8-fragment cap (#2214).
     Rows: (store_id, session_id, role, content, conversation_id). v2 normalization is split-only."""
     rows = sorted(rows, key=lambda r: r[0])
     items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
@@ -379,28 +419,39 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
         return role, re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "").replace("\r\n", "\n")).strip()
     want = Counter(vkey(r, t) for r, t in expected)
     held = Counter(vkey(r, t) for _, _, r, t in owned if norm(t))
-    assistants, users = defaultdict(list), defaultdict(list)
+    assistants, user_ids = defaultdict(list), []
     for sid, session, role, text in owned:
         if role == "user":
-            users[session].append(sid)  # empty users remain turn boundaries (v2 MB1)
+            user_ids.append(sid)  # empty users remain turn boundaries (v2 MB1)
         if role == "assistant" and norm(text):
             assistants[session].append((sid, text))
+    user_ids.sort()
     used, replacements, splits = set(), [], []
     for index, role, text in items:
         vk = vkey(role, text)
         if role != "assistant" or held[vk] or want[vk] != 1:
             continue
         hits = []
+        limit = _nonspace_nfd_len(text)
         for session, arows in assistants.items():
             for k in range(len(arows)):
-                for n in range(2, 9):  # v2 MAX_FRAGMENTS = 8; consecutive non-empty assistant rows
-                    run = arows[k:k + n]
-                    if len(run) < n:
+                ids, parts = [arows[k][0]], [arows[k][1]]
+                next_user = bisect_right(user_ids, ids[0])
+                boundary = user_ids[next_user] if next_user < len(user_ids) else None
+                total = _nonspace_nfd_len(parts[0])
+                for j in range(k + 1, len(arows)):
+                    sid, content = arows[j]
+                    if boundary is not None and sid > boundary:
                         break
-                    if vk in (vkey(role, " ".join(c for _, c in run)), vkey(role, "".join(c for _, c in run))):
-                        ids = [s for s, _ in run]
-                        if not any(ids[0] < u < ids[-1] for ids_in_session in users.values() for u in ids_in_session) and all(
-                                vkey(role, c) not in want for _, c in run):
+                    ids.append(sid)
+                    parts.append(content)
+                    total += _nonspace_nfd_len(content)
+                    if total > limit:
+                        break
+                    if total < limit:
+                        continue
+                    if vk in (vkey(role, " ".join(parts)), vkey(role, "".join(parts))):
+                        if all(vkey(role, c) not in want for c in parts):
                             hits.append((ids, session))
                         break
         if len(hits) == 1 and not used.intersection(hits[0][0]):  # uniqueness before use (v2 MB2)
@@ -429,3 +480,215 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
             out.update(verdict="FAIL", out_of_order={"transcript_index": index, "role": role})
             break
     return out
+
+
+@functools.cache
+def todo_header() -> str:
+    """The todo injection header: the product's ``_PRESERVED_TODO_CONTEXT_PREFIX`` (engine.py), read, never copied."""
+    tree = ast.parse((Path(__file__).resolve().parents[4] / "engine.py").read_text())
+    return next(ast.literal_eval(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and [getattr(t, "id", None) for t in n.targets] == ["_PRESERVED_TODO_CONTEXT_PREFIX"])
+
+
+def link_pending_ids(relations):
+    """#2377: rows the ingest marked ``link_pending`` (related_store_id NULL). It marks rows only when computing their
+    links raised, and then over-marks (a new row of that ingest is marked too), so a surplus row that carries one is a
+    visible copy; the mark on any row is a defect signal."""
+    return {sid for sid, kind, other, *_ordinal in relations if kind == "link_pending" and other is None}
+
+
+def composite_witness(relations, rows):
+    """#2212 ``composite_of`` witness (provisional format): the stored user rows C it credits. C holds one relation
+    per segment, ordinals 0..n-1 contiguous with n >= 2, each naming an earlier stored user row of C's session, or NULL
+    for the host scaffold, at most once and only at ordinal 0 (the product renders the todo block first). With one
+    NULL that leftover span starts with the todo injection header; with
+    none, ordinal 0 names a stored user row that starts with it. C's content is the segments joined by "\n\n" in
+    ordinal order, byte for byte. Valid composites consume their non-NULL parts once, in ascending C store id:
+    a composite sharing any already-claimed part receives no credit; NULL claims nothing. Only C is credited:
+    the contained rows are scored as ordinary rows. A replayed composite needs its own possible_replay_of link."""
+    header, segments, valid = todo_header(), defaultdict(list), {}
+    for sid, kind, other, *ordinal in relations:
+        if kind == "composite_of":
+            segments[sid].append((ordinal[0] if ordinal else None, other))
+    for c, parts in segments.items():
+        session, role, content = rows.get(c, (None, None, None))
+        ordinals = [o for o, _r in parts]
+        if role != "user" or len(parts) < 2 or not all(type(o) is int for o in ordinals) \
+                or sorted(ordinals) != list(range(len(parts))):
+            continue
+        related = [r for _o, r in sorted(parts)]
+        nulls = [i for i, r in enumerate(related) if r is None]
+        if nulls not in ([], [0]) or any(r not in rows or rows[r][0] != session for r in related if r is not None):
+            continue
+        if any(r >= c or rows[r][1] != "user" for r in related if r is not None):
+            continue
+        texts, content = [None if r is None else rows[r][2] or "" for r in related], content or ""
+        if nulls:  # the scaffold is the one span the contained rows leave
+            i = nulls[0]
+            head = "".join(t + "\n\n" for t in texts[:i])
+            tail = "".join("\n\n" + t for t in texts[i + 1:])
+            if len(content) < len(head) + len(tail) or not (content.startswith(head) and content.endswith(tail)):
+                continue
+            texts[i] = content[len(head):len(content) - len(tail)]
+            first_ok = texts[i].startswith(header)
+        else:
+            first_ok = rows[related[0]][1] == "user" and texts[0].startswith(header)
+        if first_ok and "\n\n".join(texts) == content:
+            valid[c] = {r for r in related if r is not None}
+    out, claimed = set(), set()
+    for c, parts in sorted(valid.items()):
+        if not parts & claimed:
+            out.add(c)
+            claimed.update(parts)
+    return out
+
+
+def attribution_forms(relations, rows, logged=None):
+    """The witnesses that credit a surplus row as a visible copy beyond the relation witnesses: store id sets keyed
+    by their output count. ``logged``: the store ids the LCM-X log names as a failed link's source (the gate audit's
+    log input); None leaves the form out."""
+    forms = {"link_pending_rows": link_pending_ids(relations), "composite_rows": composite_witness(relations, rows)}
+    if logged is not None:
+        forms["logged_link_rows"] = set(logged)
+    return forms
+
+
+def split_surplus(groups, relations, rows=None, forms=None, creditable=None):
+    """Maximum matching of relation witnesses to rows, with each key capped at its unlicensed surplus.
+
+    Flow: key quota -> unique self/pair witness -> stored row. Witness and row nodes belong to one key, so a row
+    explains at most one copy of each key it holds: an assistant row whose content and tool entries were stored
+    twice explains one copy of each. Full ID lists include expected copies, and they count copies, not rows: a row
+    whose ``tool_calls`` holds one call entry twice appears twice and still explains at most one of them.
+    Store order identifies a key's expected copy only when the key keeps at most one copy (expected, licensed or
+    loose-allowed): that copy is the earliest (as for licences and silent examples), so only the last ``surplus``
+    copies can be explained. A self relation counts only on such a row, and a pair explains only such an endpoint,
+    so a relation on the expected copy (an edited revision's ``supersedes``, say) never explains a later unmarked
+    copy. A key that keeps two or more copies counts its worst case, because a silent re-store stored before a
+    related later copy cannot be told apart: its surplus fills rows without a self relation first, then the
+    self-related rows that hold the most copies, and each self-related row it reaches explains one copy; pairs
+    explain nothing there. A copy that a host merge record consumed as a composite's part is a kept copy of its key
+    and stays in the key's ID list. A group's optional fourth item lists the copies that a host transform's
+    accounting chose out of store order: those a #823 merge record consumed and those an embedded credit reserved.
+    A key with any takes the worst case whatever it keeps, because #823 merges and #804 licensed parts pick their
+    copies around reserved rows, so store order no longer identifies the kept copy.
+    Each ``attribution_forms`` set (``forms``, computed from the relations when None) is a self witness too; a form's
+    count is the visible surplus it adds to the relation witnesses alone, so two forms on one row both count it.
+    ``creditable``: a set, when given, receives the rows that the completed matching (the pass with every form)
+    credited through their own self witness, so a caller reports only rows that explain a surplus copy, never a
+    candidate in a key whose matching capacity is zero. A key that keeps at most one copy never reports its
+    expected copy; in a worst-case key the reported rows are those the matching picked for its surplus slots
+    (the lowest store ids it reaches), as with the silent examples.
+    """
+    # Stored text only verifies an existing directed witness; it never creates one.
+    # ``rows`` (store_id -> (session, role, content)) covers every stored row, tool results included; without it,
+    # the evidence maps attached to surplus groups are merged once each (score() shares one map across groups).
+    if rows is None:
+        rows, seen = {}, set()
+        for group in groups:
+            if len(group) > 4 and id(group[4]) not in seen:
+                seen.add(id(group[4]))
+                rows.update(group[4])
+    forms = attribution_forms(relations, rows) if forms is None else forms
+    held = {sid for group in groups for sid in group[2]}
+    live = {name: ids & held for name, ids in forms.items()}
+    # Passes: one with every touched form, one without, one per touched form (up to 5 in the audit, 4 in B2).
+    out = _matched(groups, relations, rows, set().union(*live.values()), creditable)
+    base = _matched(groups, relations, rows, set())["visible_surplus_rows"] if any(live.values()) else 0
+    for name, ids in live.items():
+        out[name] = _matched(groups, relations, rows, ids)["visible_surplus_rows"] - base if ids else 0
+    out["link_pending_rows_total"] = len(forms["link_pending_rows"])
+    return out
+
+
+def _matched(groups, relations, rows, credited, creditable=None):
+    graph, source, sink = defaultdict(dict), ("source",), ("sink",)
+
+    def edge(a, b, capacity=1):
+        if b not in graph[a]:
+            graph[a][b], graph[b][a] = capacity, 0
+
+    self_ids = {sid for sid, kind, *_rest in relations if kind in ("supersedes", "generated_unproven")} | credited
+    pairs = sorted({tuple(sorted((sid, other))) for sid, kind, other, *_rest in relations
+                    if kind == "possible_replay_of" and other is not None and sid != other})
+    replay_rows = rows
+    stripped_pairs = [(other, sid) for sid, kind, other, *_rest in relations
+                      if kind == "possible_replay_of" and other in replay_rows and sid in replay_rows and other < sid
+                      and replay_rows[sid][:2] == replay_rows[other][:2]
+                      and stripped_replay_content(replay_rows[sid][2]) is not None
+                      and stripped_replay_content(replay_rows[sid][2]) == stripped_replay_content(replay_rows[other][2])]
+    caps = []
+    for index, (_key, surplus, ids, *merged) in enumerate(groups):
+        quota, held, count = ("key", index), set(ids), Counter(ids)
+        copies = sorted(ids)  # one row can hold a key twice (a repeated tool-call entry): count copies, not rows
+        kept = len(copies) - surplus  # the key's expected, licensed or loose-allowed copies
+        if kept <= 1 and not (merged and merged[0]):
+            # Store order identifies the expected copy: only the key's last `surplus` copies can be explained.
+            cap, later = surplus, set(copies[max(0, kept):]) if surplus > 0 else set()
+            witnesses = [("self", sid) for sid in sorted(later & self_ids)]
+            witnesses += [("pair", a, b) for a, b in pairs if a in held and b in held and (a in later or b in later)]
+            witnesses += [("pair", a, b) for a, b in stripped_pairs if b in later and a not in held]
+        else:
+            # Worst case: the surplus fills rows without a self relation first, then the self-related rows that hold
+            # the most copies; each self-related row it reaches explains one copy, and pairs explain nothing.
+            later, cap = held & self_ids, 0
+            left = surplus - sum(n for sid, n in count.items() if sid not in later)
+            for n in sorted((count[sid] for sid in later), reverse=True):
+                if left <= 0:
+                    break
+                cap, left = cap + 1, left - n
+            witnesses = [("self", sid) for sid in sorted(later)]
+        caps.append(cap)
+        edge(source, quota, cap)
+        for witness in witnesses:
+            before, after = ("in", index, witness), ("out", index, witness)
+            edge(quota, before)
+            edge(before, after)
+            for sid in witness[1:]:
+                if sid not in later:
+                    continue
+                row = ("row", index, sid)
+                edge(after, row)
+                edge(row, sink)
+    visible = 0
+    while True:
+        parent, queue = {source: None}, [source]
+        for node in queue:
+            for nxt, capacity in graph[node].items():
+                if capacity > 0 and nxt not in parent:
+                    parent[nxt] = node
+                    queue.append(nxt)
+            if sink in parent:
+                break
+        if sink not in parent:
+            break
+        node = sink
+        while parent[node] is not None:
+            previous = parent[node]
+            graph[previous][node] -= 1
+            graph[node][previous] += 1
+            node = previous
+        visible += 1
+    if creditable is not None:  # rows whose own self witness carries flow in the completed matching
+        for index, (_key, _surplus, ids, *_merged) in enumerate(groups):
+            for sid in set(ids):
+                if graph[("row", index, sid)].get(("out", index, ("self", sid)), 0) > 0:
+                    creditable.add(sid)
+    examples = []
+    for index, (key, surplus, ids, *_merged) in enumerate(groups):
+        silent = surplus - (caps[index] - graph[source][("key", index)])  # surplus minus what the matching explained
+        if not silent:
+            continue
+        # Best-effort representatives: the highest-numbered rows that still hold a copy the matching left unexplained
+        # (a row explains at most one copy), usually the later copies rather than the original. Rows without a self
+        # relation sort last, so they are taken first: in a worst-case key the likely silent copy is the unmarked one.
+        copies = sorted(ids)
+        kept = len(copies) - surplus
+        # With one kept copy and no reserved merge, store order identifies the surplus.
+        candidates = copies[max(0, kept):] if kept <= 1 and not (_merged and _merged[0]) else copies
+        count = Counter(candidates)
+        unexplained = sorted((sid for sid, n in count.items() if n > 1 - graph[("row", index, sid)].get(sink, 1)),
+                             key=lambda sid: (sid not in self_ids, sid))
+        examples += [{"store_id": sid, "role": key[0], "sha256": key[1]} for sid in unexplained[-silent:]]
+    return {"visible_surplus_rows": visible, "silent_surplus_rows": sum(g[1] for g in groups) - visible,
+            "silent_surplus_examples": sorted(examples, key=lambda e: (e["store_id"], e["role"], e["sha256"]))[:10]}

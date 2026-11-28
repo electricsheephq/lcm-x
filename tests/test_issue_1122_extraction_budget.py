@@ -10,6 +10,7 @@ from hermes_lcm.config import LCMConfig
 from tests.test_issue_605_foreground_budget import (
     _advance_on,
     _engine,
+    _host_module,
     _leaves,
     _pin_lcm_char_counter as _pin_lcm_char_counter,
     _provider,
@@ -170,8 +171,24 @@ def test_extraction_deadline_subtracts_serialization_time(tmp_path, monkeypatch,
     try:
         engine._run_pre_compaction_extraction(_view(), timeout_seconds=9.0, deadline=deadline)
         assert len(extraction_calls) == 1
+        assert extraction_calls[0]["deadline"] == deadline
         assert extraction_calls[0]["timeout"] == pytest.approx(deadline - clock(), abs=0.01)
         assert extraction_calls[0]["timeout"] == pytest.approx(7.0, abs=0.01)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("host_seconds", [5.0, 50.0])
+def test_extraction_installs_absolute_stream_deadline(tmp_path, monkeypatch, clock, host_seconds):
+    seen = []
+    host = _host_module(monkeypatch, clock, seen)
+    host._deadline = original = clock() + host_seconds
+    engine = _engine(tmp_path, extraction_enabled=True)
+    deadline = clock() + 10.0
+    try:
+        engine._run_pre_compaction_extraction(_view(), deadline=deadline)
+        assert seen == [(10.0, min(deadline, original))]
+        assert host._deadline == original
     finally:
         engine.shutdown()
 

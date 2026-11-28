@@ -126,9 +126,11 @@ def test_null_category_keeps_full_s4_interval(tmp_path, source, kind_key):
     overlay(baseline, source, [{"question_id": f"ku{i:03d}", "score": 1, kind_key: None,
                                 "recallHealth": None, "annotation": None} for i in (5, 6, 7)])
     result = d8_guard.compare_runs(candidate, baseline)
-    assert not result["pass"]
+    assert result["pass"]  # Three losses are inside the floor-4 count margin.
     assert not result["INCOMPLETE"]
     assert result["categories"]["knowledge-update"]["paired_n"] == 78
+    assert result["categories"]["knowledge-update"]["c"] == 3
+    assert result["categories"]["knowledge-update"]["b"] == 0
     assert result["categories"]["knowledge-update"]["lower_bound_points"] < -2
     loaded = {r["questionId"]: r for r in failclose.load_rows(baseline)}["ku005"]
     assert loaded[kind_key] == "knowledge-update"

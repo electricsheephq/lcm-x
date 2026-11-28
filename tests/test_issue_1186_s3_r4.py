@@ -222,8 +222,12 @@ def test_prepare_start_failure_degrades_and_can_retry(tmp_path, monkeypatch, tra
 @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
 def test_stateless_grep_schedules_slow_model_off_turn(tmp_path, monkeypatch, transport, mode):
     monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {"available": True})
-    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed", embedding_query_timeout_s=0.25)
+    # 1.5 s: a 0.25 s real-time grep deadline expired in the full-text stage on a slow runner. Still below the 2 s
+    # release wait below, so model construction on the turn thread would still fail this test.
+    config = LCMConfig(embeddings_enabled=True, embedding_provider="fastembed", embedding_query_timeout_s=1.5)
     config.stateless_session_patterns = ["ephemeral-*"]
+    # Workers abandoned by earlier tests in this process must not fill the shared full-text pool.
+    monkeypatch.setattr(tools, "_lcm_full_text_worker_slots", threading.BoundedSemaphore(tools._LCM_FULL_TEXT_MAX_WORKERS))
     engine = _engine(tmp_path, config)
     _seed(engine, "ephemeral-1")
     release = threading.Event()

@@ -117,7 +117,8 @@ def test_02_bindings_use_raw_view_before_redaction(engines):
     entries = ledger.decode_entries(vector["entries"])
     assert [e.ref for e in entries] == [b["occ_id"] for b in bindings]
     assert entries[0].uidset_digest is not None and entries[1].uidset_digest is None
-    assert not sql_rows(engine, "lineage_marks")
+    # P1g deliberately lifts X11: the store mark means examined through.
+    assert sql_rows(engine, "lineage_marks")[0]["max_store_id"] == stored[-1]["store_id"]
     assert engine._last_ingest_attribution["ledger_digest_ms"] >= 0
     assert engine._last_ingest_attribution["ledger_ms"] >= 0
 
@@ -183,7 +184,9 @@ def _exercise_alt_stamp(engines, monkeypatch, bound, rollback):
         binding = next(b for b in sql_rows(engine, "occurrence_bindings") if b["store_id"] == row["store_id"])
         assert observations[0]["occ_id"] == binding["occ_id"]
     if rollback:
-        assert observed == [True]
+        # T1-28 class: the injected error poisons the lazy attempt (one discarded pre-lock pass);
+        # the rerun meets the same persistent error under the lock and fails open, as on main.
+        assert observed == [True, True]
         assert not engine._store.get_message_relations([row["store_id"]], "alt_stamp")
 
 
@@ -249,12 +252,14 @@ def test_07_fail_open_and_owner_propagation(engines, monkeypatch, caplog, failur
             assert count(engine, key) == 1
             assert sum("ledger." + key in r.getMessage() for r in caplog.records) == 1
             assert all(not sql_rows(engine, table) for table in TABLES)
-            assert engine._store._conn.execute("SELECT 1 FROM ledger_meta WHERE key LIKE 'session_lineage:%'").fetchone() is None
+            # P1f: adoption commits independently of a later writer-savepoint failure.
+            persisted = engine._store._conn.execute("SELECT value FROM ledger_meta WHERE key='session_lineage:S'").fetchone()
+            assert persisted == ((engine._host_uid_lineage_key()[0],) if failure == "integrity" else None)
     assert calls and not engine._store._conn.in_transaction
 
 
 def test_08_read_only_drain_and_delegate_exclusions(engines):
-    """Lock-in: these paths leave existing ledger tables unchanged, even on Part A."""
+    """Queue is read-only; a decided drain writes a binding but no view; delegates stay excluded."""
     engine = engines()
     baseline = ledger_state(engine)
     locker = sqlite3.connect(engine._store.db_path)
@@ -268,7 +273,11 @@ def test_08_read_only_drain_and_delegate_exclusions(engines):
         locker.close()
     engine._retry_pending_session_tails()
     assert [r["content"] for r in engine._store.get_session_messages("S")] == ["frozen"]
-    assert ledger_state(engine) == baseline
+    bindings = sql_rows(engine, "occurrence_bindings")
+    assert len(bindings) == 1
+    assert bindings[0]["disposition"] == "stored" and bindings[0]["stamp"] == "10.0"
+    assert sql_rows(engine, "ingest_views") == baseline["ingest_views"]
+    baseline = ledger_state(engine)
     assert engine._append_delegate_child_rows("child", [_m("user", "child row", 20.)],
         {"parent_session_id": "S", "source": "parent_frame", "child_subagent_id": "", "parent_subagent_id": "", "child_role": ""}) == 1
     assert engine._store.get_session_messages("child")[0]["content"] == "child row"
@@ -331,14 +340,19 @@ def test_10_foreground_insert_respaces_exhausted_gap(engines):
     assert count(engine, "respaced") == 1
 
 
-def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
+@pytest.mark.parametrize("recovery", [False, True], ids=["default", "recovery-on"])
+def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch, recovery):
     """Lock-in: with the ledger off, an ingest's SQL equals Part A's (783a8b824) for the same fixture.
+
+    With host-row recovery on (opt-in), it also holds #2042's cursor-zero guard probe.
 
     The expected statements were captured once from the Part A engine, so the test needs no git history.
     """
+    # #2293 step 1, M2: remove two redundant folded-tail SELECTs; keep the ledger-off write protocol.
     from tests.behaviour.reconcile_trace_harness import install_clock
     install_clock(monkeypatch)
     candidate = engines(mode="off", initialized=False)
+    candidate._config.host_row_recovery_enabled = recovery  # the guard reads the flag at each ingest
     view = [_m("user", "same input", 10.), _m("assistant", "same answer", 11.)]
     statements = []
     candidate._store._conn.set_trace_callback(statements.append)
@@ -347,12 +361,26 @@ def test_11_off_sql_matches_pinned_part_a(engines, monkeypatch):
     finally:
         candidate._store._conn.set_trace_callback(None)
     expected = json.loads((Path(__file__).parent / "fixtures" / "ingest_ledger_off_sql_part_a.json").read_text())
+    if recovery:
+        # #2042, opt-in: exactly one indexed probe after BEGIN/attempt savepoint; preserve the historical fixture.
+        expected.insert(2, "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 'S')")
 
     def product(sql):
         # Drop SQLite's own FTS5 statements, as the ingest trace harness does: they vary by SQLite version.
         return [s for s in sql if not s.lstrip().startswith("--") and not re.search(r"(['\"])(main|temp)\1\s*\.", s)]
 
-    assert product(statements) == product(expected)
+    # #2293 M5: BEGIN IMMEDIATE moves to the first write, savepoints of scopes that close before it are never issued,
+    # and the attempt reads its write generation; every other statement, in order, is Part A's. One BEGIN IMMEDIATE
+    # and one COMMIT, as in Part A.
+    control = re.compile(r"^(BEGIN( IMMEDIATE)?|COMMIT|ROLLBACK|SAVEPOINT \w+|RELEASE( SAVEPOINT)? \w+"
+                         r"|ROLLBACK TO( SAVEPOINT)? \w+|PRAGMA (data_version|schema_version))$")
+
+    def split(sql):
+        sql = product(sql)
+        return ([s for s in sql if not control.match(s.strip())],
+                [s.strip() for s in sql if s.strip() in ("BEGIN IMMEDIATE", "COMMIT")])
+
+    assert split(statements) == split(expected)
 
 
 def test_12_absorbed_uid_change_updates_foreground_vector(engines):
@@ -465,3 +493,36 @@ def test_r2_real_read_only_prematch_error_counts_once(engines, monkeypatch):
     finally:
         locker.rollback()
         locker.close()
+
+
+def test_p1_gate_failed_vector_then_restart(engines, monkeypatch):
+    from tests.p1_gate import expect_from_view, record, store_outcome
+
+    engine = engines()
+    view = [_m("user", "question", 10.), _m("assistant", "answer", 11.)]
+    write = ledger.write_view
+    fired = []
+
+    def fail(*args, **kwargs):
+        result = write(*args, **kwargs)
+        fired.append(True)
+        raise sqlite3.OperationalError("injected vector savepoint failure")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "write_view", fail)
+        engine.ingest(copy.deepcopy(view))
+    assert fired == [True] and count(engine, "write_failed") == 1
+    assert all(not sql_rows(engine, table) for table in ("ingest_views", "occurrence_bindings", "stamp_observations"))
+    root = Path(engine._hermes_home)
+    engine.shutdown()
+    fresh = _engine(root)
+    view += [_m("user", "next question", 12.), _m("assistant", "next answer", 13.)]
+    try:
+        fresh.ingest(copy.deepcopy(view))
+        assert [r["content"] for r in fresh._store.get_session_messages("S")] == [r["content"] for r in view]
+        outcome = store_outcome(fresh._store._conn, expect_from_view(view, "conv"))
+        record(dict(family="savepoint", boundary="vector_restart"), outcome, fresh)
+        assert outcome["loss"] == outcome["silent"] == 0, outcome
+    finally:
+        fresh.shutdown()

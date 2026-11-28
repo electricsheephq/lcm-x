@@ -36,19 +36,26 @@ REVIEW_POLICY_FILES = {
 MEMORY_MIGRATION_FILES = {
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
+    "scripts/lcm_x_capture.py",
 }
 # Modules that directly shape main-model context, summary requests, stored turn
 # content/identity/ownership, compaction selection/commit/progress, or host
 # compress/rebind (docs/process/turn-path-probe-packet.md). Reachability alone
-# does not qualify: explicit tools/commands and default-off features stay out.
+# does not qualify: explicit tools/commands and default-off features stay out, except
+# the two opt-in modules below, which store turn rows when turned on.
 # Default model-facing tool schemas count as context; persistence plumbing alone
 # does not qualify, but row-content policy and compaction commit ownership do.
+# tests/test_differential_relevance.py requires every static engine import
+# in this list or NON_TURN_PATH_FILES with a written exclusion reason.
 TURN_PATH_FILES = {
+    "host_row_recovery.py",  # Off by default; when on, recovery stores turn content under its original session/conversation.
+    "unended_catchup.py",  # Off by default; when on, the #2042 catch-up stores failed-turn sessions' content under their own ids.
     "ingest_ledger.py",  # Transaction-owned shadow ledger writes on foreground ingest.
     "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
     "compaction_policy.py", "compaction_request.py", "compress_run.py",
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
-    "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
+    "head_copy.py",  # v0.30.3: a stored copy of the summary head stays out of assembly and compaction input.
+    "host_rewrite.py", "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
     "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
@@ -57,6 +64,7 @@ TURN_PATH_FILES = {
     "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
     "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.
     "engine_registry.py",  # Post-turn hooks select the clone that ingests each session turn.
+    "maintenance_scheduler.py",  # Runs default-on maintenance and the exit drain that stores pending session-end tails.
     "message_patterns.py",  # Pattern matches omit rows from ingest, replay and compaction.
     "model_routing.py",  # Sets provider, model and effort on the summary request.
     "plugin_identity.py",  # Engine-name matching gates post-turn ingest and clone resolution.
@@ -77,6 +85,9 @@ TURN_PATH_FILES = {
 }
 # Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
 NON_TURN_PATH_FILES = {
+    "ingest_classifier.py",  # Pure, unwired P2 classifier; L1 moves it to TURN_PATH_FILES when wired.
+    "recorder.py",  # Default-off recorder (#2243): register() imports it only when LCM_RECORDER_ENABLED is on.
+    "recorder_read.py",  # Offline recording reader (#2243): imports nothing from the plugin.
     "entity_ops.py",  # Default-off entity event operations and resolved view.
     "entity_store.py",  # Default-off entity-memory persistence.
     "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
@@ -86,6 +97,16 @@ NON_TURN_PATH_FILES = {
     "assertion_state.py",  # Default-off assertion query state.
     "assertion_store.py",  # Default-off assertion persistence.
     "chunking.py",  # Explicit chunk backfill or default-off embeddings.
+    "claude_code_audit.py",  # Claude Code capture audit; reads a capture store only, never on the turn path.
+    "claude_code_capture.py",  # Claude Code transcript projection; not imported by the Hermes turn path.
+    "claude_code_store.py",  # Claude Code capture writer, only for stores it creates and stamps.
+    "cloud_delta.py",  # Cloud capture page-delta codec; called only by the cloud upload and restore code, never loaded by Hermes or the capture worker.
+    "cloud_guard.py",  # Cloud publication guard and retention; isolated CLI only, never the Hermes turn path.
+    "cloud_copy.py",  # Cloud capture snapshot and upload; run only by scripts/lcm_x_cloud.py, never loaded by Hermes or the capture worker.
+    "cloud_reader.py",  # Cloud capture recall merger; a separate process started through reader-override.json, never loaded by Hermes.
+    "cloud_restore.py",  # Cloud restore in a separate process; never loaded by Hermes or the capture worker.
+    "cloud_s3.py",  # Cloud S3 transport; called only by cloud copy/guard, never the Hermes turn path.
+    "cloud_view.py",  # Isolated replica-view builder; never loaded by Hermes or the capture worker.
     "command.py",  # Explicit commands or default-off embedding backfill.
     "command_auth.py",  # Explicit slash-command authorization only.
     "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.
@@ -101,16 +122,16 @@ NON_TURN_PATH_FILES = {
     "expand_tools.py",  # Explicit lcm_describe/lcm_expand tool handlers only.
     "expansion_evidence.py",  # Explicit expansion context/provenance only.
     "guidance.py",  # Exported policy loader unused by default prompt.
-    "host_evidence.py",  # Unwired opt-in host evidence helper.
     "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
+    "mcp_reader.py",  # Separate read-only `lcm-x mcp` process; never loaded by Hermes.
     "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
-    "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.
     "query_view_store.py",  # Default-off query views; optional-schema verification.
+    "readonly_store.py",  # Read-only store views for the `lcm-x mcp` reader only.
     "reasoning.py",  # Explicit computation or default-off pre-answer hook.
     "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
     "recall_session.py",  # Default-off session delivery for explicit recall only.

@@ -1,0 +1,346 @@
+[
+  {
+    "id": "Q01",
+    "kind": "positive",
+    "fact": "F01",
+    "question": "What value did we settle on for the amber lantern freeze code?",
+    "gold": "VELNORA-7101"
+  },
+  {
+    "id": "Q02",
+    "kind": "positive",
+    "fact": "F02",
+    "question": "What value did we settle on for the violet relay handoff badge?",
+    "gold": "ZEMBRIL-7102"
+  },
+  {
+    "id": "Q03",
+    "kind": "positive",
+    "fact": "F03",
+    "question": "What value did we settle on for the copper ferry fallback key?",
+    "gold": "ORVEXA-7103"
+  },
+  {
+    "id": "Q04",
+    "kind": "positive",
+    "fact": "F04",
+    "question": "What value did we settle on for the silver canopy audit seal?",
+    "gold": "PELDRIN-7104"
+  },
+  {
+    "id": "Q05",
+    "kind": "positive",
+    "fact": "F05",
+    "question": "What value did we settle on for the indigo beacon repair tag?",
+    "gold": "TALVORA-7105"
+  },
+  {
+    "id": "Q06",
+    "kind": "positive",
+    "fact": "F06",
+    "question": "What value did we settle on for the ochre turbine routing stamp?",
+    "gold": "DREMBIX-7106"
+  },
+  {
+    "id": "Q07",
+    "kind": "positive",
+    "fact": "F07",
+    "question": "What value did we settle on for the coral orchard rollback phrase?",
+    "gold": "SOVRILA-7107"
+  },
+  {
+    "id": "Q08",
+    "kind": "positive",
+    "fact": "F08",
+    "question": "What value did we settle on for the teal spindle approval code?",
+    "gold": "KELNAVI-7108"
+  },
+  {
+    "id": "Q09",
+    "kind": "positive",
+    "fact": "F09",
+    "question": "What value did we settle on for the staging relay port?",
+    "gold": "48213"
+  },
+  {
+    "id": "Q10",
+    "kind": "positive",
+    "fact": "F10",
+    "question": "What value did we settle on for the canopy retry ceiling?",
+    "gold": "49327"
+  },
+  {
+    "id": "Q11",
+    "kind": "positive",
+    "fact": "F11",
+    "question": "What value did we settle on for the ferry buffer capacity?",
+    "gold": "50641"
+  },
+  {
+    "id": "Q12",
+    "kind": "positive",
+    "fact": "F12",
+    "question": "What value did we settle on for the orchard batch budget?",
+    "gold": "52873"
+  },
+  {
+    "id": "Q13",
+    "kind": "positive",
+    "fact": "F13",
+    "question": "What value did we settle on for the spindle archive quota?",
+    "gold": "54917"
+  },
+  {
+    "id": "Q14",
+    "kind": "positive",
+    "fact": "F14",
+    "question": "What value did we settle on for the beacon queue capacity?",
+    "gold": "57139"
+  },
+  {
+    "id": "Q15",
+    "kind": "positive",
+    "fact": "F15",
+    "question": "What value did we settle on for the quartz relay write port?",
+    "gold": "61333"
+  },
+  {
+    "id": "Q16",
+    "kind": "positive",
+    "fact": "F16",
+    "question": "What value did we settle on for the linen canopy write limit?",
+    "gold": "63447"
+  },
+  {
+    "id": "Q17",
+    "kind": "positive",
+    "fact": "F17",
+    "question": "What value did we settle on for the opal ferry write quota?",
+    "gold": "65561"
+  },
+  {
+    "id": "Q18",
+    "kind": "positive",
+    "fact": "F18",
+    "question": "What value did we settle on for the maroon orchard write budget?",
+    "gold": "67675"
+  },
+  {
+    "id": "Q19",
+    "kind": "positive",
+    "fact": "F19",
+    "question": "What value did we settle on for the saffron spindle write capacity?",
+    "gold": "69789"
+  },
+  {
+    "id": "Q20",
+    "kind": "positive",
+    "fact": "F20",
+    "question": "What value did we settle on for the azure beacon write ceiling?",
+    "gold": "71903"
+  },
+  {
+    "id": "Q21",
+    "kind": "positive",
+    "fact": "F21",
+    "question": "What value did we settle on for the mauve gate inspection code?",
+    "gold": "VORNALI-8201"
+  },
+  {
+    "id": "Q22",
+    "kind": "positive",
+    "fact": "F22",
+    "question": "What value did we settle on for the umber fan calibration seal?",
+    "gold": "XEMDORA-8202"
+  },
+  {
+    "id": "Q23",
+    "kind": "positive",
+    "fact": "F23",
+    "question": "What value did we settle on for the jade dock launch badge?",
+    "gold": "NELVORI-8203"
+  },
+  {
+    "id": "Q24",
+    "kind": "positive",
+    "fact": "F24",
+    "question": "What value did we settle on for the pearl mast service key?",
+    "gold": "BRIMZEL-8204"
+  },
+  {
+    "id": "Q25",
+    "kind": "positive",
+    "fact": "F25",
+    "question": "What value did we settle on for the scarlet vane test stamp?",
+    "gold": "CALVEXI-8205"
+  },
+  {
+    "id": "Q26",
+    "kind": "positive",
+    "fact": "F26",
+    "question": "What value did we settle on for the cobalt loom acceptance tag?",
+    "gold": "DRONVIA-8206"
+  },
+  {
+    "id": "Q27",
+    "kind": "positive",
+    "fact": "F27",
+    "question": "What value did we settle on for the ivory bell routing phrase?",
+    "gold": "FELZARI-8207"
+  },
+  {
+    "id": "Q28",
+    "kind": "positive",
+    "fact": "F28",
+    "question": "What value did we settle on for the russet lens repair code?",
+    "gold": "HOVNELA-8208"
+  },
+  {
+    "id": "Q29",
+    "kind": "positive",
+    "fact": "F29",
+    "question": "What value did we settle on for the night lantern overflow seal?",
+    "gold": "JELVORA-9301"
+  },
+  {
+    "id": "Q30",
+    "kind": "positive",
+    "fact": "F30",
+    "question": "What value did we settle on for the storm relay evacuation badge?",
+    "gold": "KAZNIRI-9302"
+  },
+  {
+    "id": "Q31",
+    "kind": "positive",
+    "fact": "F31",
+    "question": "What value did we settle on for the winter canopy recovery key?",
+    "gold": "LUMVEXA-9303"
+  },
+  {
+    "id": "Q32",
+    "kind": "positive",
+    "fact": "F32",
+    "question": "What value did we settle on for the dawn ferry archive stamp?",
+    "gold": "MORZELI-9304"
+  },
+  {
+    "id": "Q33",
+    "kind": "positive",
+    "fact": "F33",
+    "question": "What value did we settle on for the early prism freeze seal?",
+    "gold": "NAVZORI-9401"
+  },
+  {
+    "id": "Q34",
+    "kind": "positive",
+    "fact": "F34",
+    "question": "What value did we settle on for the early rotor handoff badge?",
+    "gold": "PERNIVA-9402"
+  },
+  {
+    "id": "Q35",
+    "kind": "positive",
+    "fact": "F35",
+    "question": "What value did we settle on for the early cradle fallback key?",
+    "gold": "QUELZAR-9403"
+  },
+  {
+    "id": "Q36",
+    "kind": "positive",
+    "fact": "F36",
+    "question": "What value did we settle on for the early wicket audit stamp?",
+    "gold": "RIMVOLA-9404"
+  },
+  {
+    "id": "Q37",
+    "kind": "positive",
+    "fact": "F37",
+    "question": "What value did we settle on for the delegated finch inspection seal?",
+    "gold": "SARNEXI-9501"
+  },
+  {
+    "id": "Q38",
+    "kind": "positive",
+    "fact": "F38",
+    "question": "What value did we settle on for the delegated moth calibration key?",
+    "gold": "TOVZELA-9502"
+  },
+  {
+    "id": "Q39",
+    "kind": "positive",
+    "fact": "F39",
+    "question": "What value did we settle on for the resumed flute continuity seal?",
+    "gold": "VARZONI-9601"
+  },
+  {
+    "id": "Q40",
+    "kind": "positive",
+    "fact": "F40",
+    "question": "What value did we settle on for the forked harp routing badge?",
+    "gold": "WELNIRA-9602"
+  },
+  {
+    "id": "Q41",
+    "kind": "latest",
+    "pair": "L1",
+    "question": "What is the latest value for the magenta cradle deployment key?",
+    "gold": "COVNIRA-9801"
+  },
+  {
+    "id": "Q42",
+    "kind": "latest",
+    "pair": "L2",
+    "question": "What is the latest value for the bronze wicket recovery seal?",
+    "gold": "DARNEXA-9802"
+  },
+  {
+    "id": "Q43",
+    "kind": "latest",
+    "pair": "L3",
+    "question": "What is the latest value for the turquoise arch routing badge?",
+    "gold": "ELVZORI-9803"
+  },
+  {
+    "id": "Q44",
+    "kind": "latest",
+    "pair": "L4",
+    "question": "What is the latest value for the lavender chute inspection stamp?",
+    "gold": "FIMNELA-9804"
+  },
+  {
+    "id": "Q45",
+    "kind": "negative",
+    "question": "What value did we choose for the alabaster balloon fuel allowance?",
+    "gold": null
+  },
+  {
+    "id": "Q46",
+    "kind": "negative",
+    "question": "What value did we choose for the verdant shell warranty password?",
+    "gold": null
+  },
+  {
+    "id": "Q47",
+    "kind": "negative",
+    "question": "What value did we choose for the cerulean kite customs code?",
+    "gold": null
+  },
+  {
+    "id": "Q48",
+    "kind": "negative",
+    "question": "What value did we choose for the plum anchor catering budget?",
+    "gold": null
+  },
+  {
+    "id": "Q49",
+    "kind": "negative",
+    "question": "What value did we choose for the tangerine basket insurance seal?",
+    "gold": null
+  },
+  {
+    "id": "Q50",
+    "kind": "negative",
+    "question": "What value did we choose for the charcoal reed parking permit?",
+    "gold": null
+  }
+]

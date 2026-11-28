@@ -65,7 +65,8 @@ def aggregate(args):
             name = f"{arm}.seed-{seed}.{label}.json"
             for population in ("scores", "loss"):
                 for checkpoint_dir in (args.out / population).glob("cp-*"):
-                    (checkpoint_dir / name).unlink(missing_ok=True)
+                    if checkpoint_dir.is_dir() and not checkpoint_dir.is_symlink():
+                        (checkpoint_dir / name).unlink(missing_ok=True)
             receipt = args.logs / f"s2-{arm}-{label}.log.wall"
             if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"] or not (directory / "summary.json").exists():
                 per_run[key] = {"arm": arm, "result": "INCOMPLETE", "reason": "missing successful wall receipt or summary"}

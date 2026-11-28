@@ -9,7 +9,10 @@ recording the supersedes link remains the caller's job.
 from __future__ import annotations
 
 from bisect import bisect_left
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
+from itertools import accumulate
+import json
+import logging
 import struct
 import threading
 import time
@@ -17,6 +20,7 @@ import weakref
 from typing import NamedTuple
 
 from .message_content import normalize_content_value
+from .escalation import stripped_replay_content  # noqa: F401  (re-exported for engine and tests)
 from .reconcile import ReconcileMixin, _strip_volatile_host_scaffolding
 from .sqlite_session import TransactionOwner
 from .store import ledger_digest
@@ -25,7 +29,13 @@ ORDINAL_STEP = 1 << 20
 MIN_GAP = 1 << 10
 STAMP_WRITTEN, STAMP_EXISTS, STAMP_CAPPED = "written", "exists", "capped"
 _MAX_ORDINAL = (1 << 63) - 1
+# Widest window the fallback searches (#2840): at most (W+1)(W+2)/2 O(1) candidates;
+# past it the whole lineage is re-spaced at ORDINAL_STEP, which also ends the packing.
+_RESPACE_WINDOW_LIMIT = 256
+# Labels per re-spacing statement: 3 * 300 + 1 bound parameters, under SQLite's oldest 999 limit.
+_RESPACE_CHUNK = 300
 _ENTRY = struct.Struct(">16sB16s16sq")
+logger = logging.getLogger(__name__)
 
 
 class LedgerError(ValueError):
@@ -204,22 +214,32 @@ def common_prefix_len(chain_a, chain_b):
     return min(len(chain_a), len(chain_b)) // 16
 
 
+def _window_step(positions, prefix, start, end):
+    """Return (lower, step) for re-spacing gaps start..end; prefix sums make it O(1)."""
+    lower = positions[start - 1] if start else 0
+    count = end - start + prefix[end + 1] - prefix[start]
+    return lower, ((positions[end] - lower) // (count + 1) if end < len(positions)
+                   else min(ORDINAL_STEP, (_MAX_ORDINAL - lower) // count))
+
+
 def plan_ordinals(existing, placements):
     """Return (new ordinals in placement order, changed old-to-new ordinals).
 
     A supersedes target inside [left, right) determines its natural gap; an
     out-of-bounds target uses the NEW gap. View-order clamping then applies.
-    Tied minimal windows choose the leftmost. Duplicate existing labels (part
+    Tied minimal windows choose the leftmost; none within _RESPACE_WINDOW_LIMIT
+    re-spaces the whole lineage. Duplicate existing labels (part
     witnesses) share one label and therefore one re-spacing map entry.
     """
     original = sorted(set(existing))
+    original_set = set(original)
     if any(not isinstance(value, int) or not 0 < value <= _MAX_ORDINAL for value in original):
         raise LedgerError("existing ordinals must be positive signed 64-bit integers")
     positions, groups = original.copy(), defaultdict(list)
     previous_left, previous_right, previous_gap = 0, 0, 0
     for index, placement in enumerate(placements):
         left, right, supersedes = Placement(*placement)
-        if any(value is not None and value not in original for value in (left, right, supersedes)):
+        if any(value is not None and value not in original_set for value in (left, right, supersedes)):
             raise LedgerError("placement bound is not an existing ordinal")
         left_bound, right_bound = left or 0, right if right is not None else _MAX_ORDINAL + 1
         if left_bound >= right_bound or left_bound < previous_left or right_bound < previous_right:
@@ -233,7 +253,10 @@ def plan_ordinals(existing, placements):
             gap = len(original) if right is None else bisect_left(original, right)
         previous_gap = max(gap, previous_gap)
         groups[previous_gap].append(index)
-    result = [None] * sum(map(len, groups.values()))
+    result, sizes = [None] * sum(map(len, groups.values())), [0] * (len(positions) + 1)
+    for gap, indexes in groups.items():
+        sizes[gap] = len(indexes)
+    prefix = [0, *accumulate(sizes)]
     for gap, indexes in sorted(groups.items()):
         if result[indexes[0]] is not None:
             continue  # A preceding re-spacing already placed this whole gap.
@@ -246,30 +269,89 @@ def plan_ordinals(existing, placements):
                                  else lower + (upper - lower) * offset // (len(indexes) + 1))
             continue
         # Width counts movable EXISTING labels; outer endpoints remain fixed.
-        window = None
-        for width in range(len(positions) + 1):
+        window, widths = None, min(len(positions), _RESPACE_WINDOW_LIMIT)
+        for width in range(widths + 1):
             for start in range(max(0, gap - width), min(gap, len(positions) - width) + 1):
-                end = start + width
-                lower = positions[start - 1] if start else 0
-                count = width + sum(len(groups[g]) for g in range(start, end + 1))
-                step = ((positions[end] - lower) // (count + 1) if end < len(positions)
-                        else min(ORDINAL_STEP, (_MAX_ORDINAL - lower) // count))
+                lower, step = _window_step(positions, prefix, start, start + width)
                 if step >= MIN_GAP:
-                    window = start, end, lower, step
+                    window = start, start + width, lower, step
                     break
             if window is not None:
                 break
+        if window is None and widths < len(positions):
+            # No window within the limit: every label and placement, in order, at the normal step.
+            # Invariant: a caller passing more than _RESPACE_WINDOW_LIMIT labels passes the complete lineage.
+            lower, step = _window_step(positions, prefix, 0, len(positions))
+            window = (0, len(positions), lower, step) if step >= 1 else None
         if window is None:
             raise LedgerError("signed 64-bit ordinal space exhausted")
         start, end, value, step = window
+        moved = 0
         for g in range(start, end + 1):
             for index in groups[g]:
                 value += step
                 result[index] = value
             if g < end:
                 value += step
+                moved += positions[g] != value
                 positions[g] = value
+        logger.info("LCM ledger ordinals respace fallback planned: window %s, %d labels to move",
+                    "whole lineage" if end - start > _RESPACE_WINDOW_LIMIT else end - start, moved)
     return result, {old: new for old, new in zip(original, positions) if old != new}
+
+
+def plan_rebinds(store, conversation_id, session_id, salt, attempt, mark):
+    """Plan exact own-session pairs, including bound hits in the uniqueness test.
+
+    The cap counts candidate keys only (#2254): keys with an entry that this
+    ingest neither stored nor matched to a row that already has a binding. An
+    entry matched to a bound row can never pair, so it is kept only where it
+    shares a key with a candidate, for the uniqueness test.
+    """
+    matched = attempt["matched"]
+    matched_bound = {r[0] for r in store._conn.execute(
+        "SELECT DISTINCT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(set(matched.values()))),))} if matched else set()
+    by_key, candidates, skipped = defaultdict(list), set(), Counter()
+    for i, entry in enumerate(attempt["entries"]):
+        if i in attempt["stored"]:
+            continue
+        stamp = attempt["stamps"][i]
+        if stamp is None:
+            skipped["unstamped"] += 1
+            continue
+        key = stamp, entry.identity_digest
+        by_key[key].append(i)
+        if matched.get(i) not in matched_bound:
+            candidates.add(key)
+    if len(candidates) > 4096:
+        return dict(pairs=[], skipped=Counter(too_large=1), too_large=True)
+    want = {key: indexes for key, indexes in by_key.items() if key in candidates}  # first-seen order
+    rows = store.find_rows_by_observed_at(conversation_id, [session_id], [float(s) for s, _ in want])
+    keyed = defaultdict(list)
+    for row in rows:
+        if rows.canonical_stamps.get(row["store_id"]) == row["observed_at"]:
+            keyed[stamp_text(row["observed_at"]), identity_digest(salt, row)].append(row["store_id"])
+    bound = {r[0] for r in store._conn.execute(
+        "SELECT store_id FROM occurrence_bindings WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted({r["store_id"] for r in rows})),))}
+    owners, pairs = Counter(attempt["matched"].values()), []
+    for key, indexes in want.items():
+        hits = keyed.get(key, ())
+        if not hits:
+            continue
+        if len(indexes) != 1 or len(hits) != 1:
+            skipped["ambiguous"] += len(indexes)
+            continue
+        i, sid = indexes[0], hits[0]
+        if sid in bound or sid <= (mark or 0):
+            skipped["already_bound"] += 1
+        elif (attempt["matched"].get(i) not in (None, sid)
+              or owners[sid] > (attempt["matched"].get(i) == sid)):
+            skipped["anchor_disagree"] += 1
+        else:
+            pairs.append((i, sid))
+    return dict(pairs=sorted(pairs, key=lambda pair: pair[1]), skipped=skipped, too_large=False)
 
 
 def lineage_key(host_uid_key: str | None, session_id: str) -> str:
@@ -310,9 +392,12 @@ def insert_bindings(conn, lineage, rows):
 def insert_emissions(conn, lineage, view_seq, rows):
     _require_owner(conn)
     return [conn.execute(
-        "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id) "
-        "VALUES (?,?,?,?,?,?,'proposed',NULL)",
-        (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]'),
+        "INSERT INTO ledger_emissions(lineage,view_seq,output_index,descriptor_digest,kind,source_store_ids,state,next_occ_id,recovered_store_id) "
+        "VALUES (?,?,?,?,?,?,'proposed',NULL,(SELECT CASE WHEN count(*)=1 THEN min(store_id) END "
+        "FROM messages WHERE role='user' AND session_id=? AND (conversation_id IN (?, '') OR conversation_id IS NULL) "
+        "AND observed_at=? AND store_id<=?))",
+        (lineage, view_seq, row["output_index"], row["descriptor_digest"], row["kind"], '[]',
+         *(row.get("recovery_source") or (None, None, None, None))),
     ).lastrowid for row in rows]
 
 
@@ -335,17 +420,26 @@ def apply_respace(conn, lineage, mapping):
             or len(set(mapping.values())) != len(mapping)
             or set(mapping.values()) & (occupied - mapping.keys())):
         raise LedgerError("invalid re-spacing map")
-    temporary, count, staged = min(occupied | {0}), 0, []
-    for old, new in mapping.items():
-        temporary -= 1
-        if temporary < -(1 << 63):
-            raise LedgerError("temporary ordinal space exhausted")
-        cursor = conn.execute("UPDATE occurrence_bindings SET ordinal=? WHERE lineage=? AND ordinal=?",
-                              (temporary, lineage, old))
-        count += cursor.rowcount
-        staged.append((temporary, new))
-    for temporary, new in staged:
-        conn.execute("UPDATE occurrence_bindings SET ordinal=? WHERE lineage=? AND ordinal=?", (new, lineage, temporary))
+    # Two phases: old -> unique temporaries below every label, then temporaries -> new (#2840: chunked).
+    temporary = min(occupied | {0})
+    staged = [(old, new, temporary - offset) for offset, (old, new) in enumerate(mapping.items(), 1)]
+    valid = [item for item in staged if item[2] >= -(1 << 63)]
+    count = _move_ordinals(conn, lineage, [(old, temp) for old, _new, temp in valid])
+    if len(valid) < len(staged):
+        raise LedgerError("temporary ordinal space exhausted")
+    _move_ordinals(conn, lineage, [(temp, new) for _old, new, temp in staged])
+    return count
+
+
+def _move_ordinals(conn, lineage, pairs):
+    """Apply (from, to) pairs with one CASE statement per chunk; each scans the lineage once."""
+    count = 0
+    for at in range(0, len(pairs), _RESPACE_CHUNK):
+        chunk = pairs[at:at + _RESPACE_CHUNK]
+        count += conn.execute(
+            "UPDATE occurrence_bindings SET ordinal=CASE ordinal" + " WHEN ? THEN ?" * len(chunk)
+            + " END WHERE lineage=? AND ordinal IN (" + ",".join("?" * len(chunk)) + ")",
+            (*(value for pair in chunk for value in pair), lineage, *(old for old, _new in chunk))).rowcount
     return count
 
 
@@ -356,10 +450,68 @@ def write_view(conn, salt, lineage, kind, state, entries, *, view_seq=None, prec
     chain = prefix_chain(salt, entries) if precomputed_chain is None else precomputed_chain
     seq = next_view_seq(conn) if view_seq is None else view_seq
     conn.execute("INSERT INTO ingest_views VALUES (?,?,?,?,?,?)", (lineage, seq, kind, state, encoded, chain))
+    _prune_views(conn, lineage, kind)
+    return seq
+
+
+def _prune_views(conn, lineage, kind):
+    # UID checks can read only the last two retained views of each kind.
     conn.execute("DELETE FROM ingest_views WHERE lineage=? AND kind=? AND view_seq NOT IN "
                  "(SELECT view_seq FROM ingest_views WHERE lineage=? AND kind=? ORDER BY view_seq DESC LIMIT 2)",
                  (lineage, kind, lineage, kind))
-    return seq
+
+
+def merge_provisional(conn, provisional, lineage):
+    """Re-key without changing occurrence identity; the caller owns the savepoint and relations."""
+    _require_owner(conn)
+    kept = "AND disposition IN ('stored','migrated','ambiguous') ORDER BY ordinal"
+    target = _rows(conn.execute("SELECT * FROM occurrence_bindings WHERE lineage=? " + kept, (lineage,)))
+    source = _rows(conn.execute("SELECT * FROM occurrence_bindings WHERE lineage=? " + kept, (provisional,)))
+    keyed, pairs = defaultdict(deque), []
+    for row in target:
+        if row["stamp"] is not None:
+            keyed[row["stamp"], row["identity_digest"]].append(row["store_id"])
+    for row in source:
+        matches = keyed[row["stamp"], row["identity_digest"]] if row["stamp"] is not None else ()
+        if matches and matches[0] != row["store_id"]:
+            pairs.append((row["store_id"], matches.popleft()))
+    digests = {r["identity_digest"] for r in target}
+    result = dict(pairs=pairs, unstamped_skipped=sum(r["stamp"] is None and r["identity_digest"] in digests for r in source))
+    result["late"] = bool(conn.execute(
+        "SELECT 1 FROM occurrence_bindings b JOIN messages m USING(store_id) WHERE b.lineage=? "
+        "AND b.disposition IN ('stored','migrated','ambiguous') AND b.store_id> "
+        "(SELECT min(store_id) FROM occurrence_bindings WHERE lineage=?) "
+        "AND m.session_id=? LIMIT 1", (lineage, provisional, provisional.removeprefix("provisional:"))).fetchone())
+    olds = [r[0] for r in conn.execute("SELECT DISTINCT ordinal FROM occurrence_bindings "
+                                     "WHERE lineage=? AND ordinal IS NOT NULL ORDER BY ordinal", (provisional,))]
+    maximum = conn.execute("SELECT max(ordinal) FROM occurrence_bindings WHERE lineage=?", (lineage,)).fetchone()[0]
+    new, respace = plan_ordinals([maximum] if maximum is not None else [], [Placement(maximum, None)] * len(olds))
+    if respace:
+        raise LedgerError("signed 64-bit ordinal space exhausted")
+    result["bindings"] = conn.execute("SELECT count(*) FROM occurrence_bindings WHERE lineage=?", (provisional,)).fetchone()[0]
+    conn.executemany("UPDATE occurrence_bindings SET lineage=?,ordinal=? WHERE lineage=? AND ordinal=?",
+                     [(lineage, ordinal, provisional, old) for old, ordinal in zip(olds, new)])
+    for table, name in (("occurrence_bindings", None), ("stamp_observations", "observations"),
+                        ("ledger_emissions", "emissions"), ("ingest_views", "views")):
+        moved = conn.execute(f"UPDATE {table} SET lineage=? WHERE lineage=?", (lineage, provisional)).rowcount
+        if name:
+            result[name] = moved
+    for kind in ("ingest", "emission"):
+        _prune_views(conn, lineage, kind)
+    conn.execute("INSERT INTO lineage_marks(lineage,legacy_proof_digest,max_leaf_id,stamp_policy) "
+                 "SELECT ?,legacy_proof_digest,max_leaf_id,stamp_policy FROM lineage_marks WHERE lineage=? "
+                 "ON CONFLICT(lineage) DO UPDATE SET "
+                 "legacy_proof_digest=coalesce(lineage_marks.legacy_proof_digest,excluded.legacy_proof_digest), "
+                 "max_leaf_id=coalesce(lineage_marks.max_leaf_id,excluded.max_leaf_id), "
+                 "stamp_policy=CASE WHEN 'stamp_unreliable' IN (lineage_marks.stamp_policy,excluded.stamp_policy) "
+                 "THEN 'stamp_unreliable' ELSE 'normal' END", (lineage, provisional))
+    conn.execute("DELETE FROM lineage_marks WHERE lineage=?", (provisional,))
+    conn.execute("INSERT INTO ledger_meta(key,value) SELECT ?,value FROM ledger_meta WHERE key=? "
+                 "ON CONFLICT(key) DO UPDATE SET value=CAST(max(CAST(ledger_meta.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+                 ("emission_recovered:" + lineage, "emission_recovered:" + provisional))
+    conn.execute("DELETE FROM ledger_meta WHERE key=?", ("emission_recovered:" + provisional,))
+    conn.execute("INSERT OR REPLACE INTO ledger_meta(key,value) VALUES (?,?)", ("adopted_from:" + provisional, lineage))
+    return result
 
 
 def add_stamp_observation(conn, lineage, occ_id, stamp, kind, view_seq, source="ledger"):
@@ -407,8 +559,160 @@ def newest_view(conn, lineage, kind):
     return rows[0] if rows else None
 
 
-def emission_candidate(conn, lineage):
-    """Return (newest usable live emission view, reason), without registry reads.
+def persisted_lineage(conn, session_id, fallback):
+    """Use the same session lineage preference as the writers."""
+    row = conn.execute("SELECT value FROM ledger_meta WHERE key=?", ("session_lineage:" + str(session_id),)).fetchone()
+    return row[0] if row else fallback
+
+
+# Keep the partial-index predicate verbatim; a subset IN-list forces a sort.
+_COLD_WINDOW = ("SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists "
+                "FROM occurrence_bindings b LEFT JOIN messages m ON m.store_id=b.store_id "
+                "WHERE b.lineage=? AND b.disposition IN ('stored','migrated','ambiguous') "
+                "AND b.ordinal>? ORDER BY b.ordinal LIMIT ?")
+_COLD_ANCHOR = ("SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists FROM "
+                "(SELECT * FROM occurrence_bindings INDEXED BY idx_occ_lineage_digest "
+                "WHERE lineage=? AND identity_digest=? LIMIT ?) b "
+                "LEFT JOIN messages m ON m.store_id=b.store_id")
+
+
+def cold_cursor_candidate(conn, *, session_id, attempt, ignored):
+    """Read a bounded, occurrence-proven prefix; never mutate ledger or store.
+
+    The engine owns admission and compares this result with its complete legacy
+    choice. Returned pairs are consumption evidence, not new ledger/uid bindings.
+    """
+    entries, stamps = attempt["entries"], attempt["stamps"]
+    lineage = persisted_lineage(conn, session_id, attempt["lineage"])
+    counts = Counter()
+    ingest = newest_view(conn, lineage, "ingest")
+    emission, reason = emission_candidate(conn, lineage, adopted_fallback=True)
+    if reason != "usable":
+        counts["emission_withheld." + reason] += 1
+    if reason == "below_floor" and not conn.execute(
+            "SELECT 1 FROM ledger_meta WHERE key='emission_provenance_floor'").fetchone():
+        counts["emission_no_floor_key"] += 1
+    def record_match(record):
+        old = decode_entries(record["entries"])
+        size = min(len(entries), len(old))
+        m = common_prefix_len(attempt["chain"][:16 * size], record["prefix_chain"][:16 * size])
+        while m < size:
+            a, b = entries[m], old[m]
+            if (a.identity_digest != b.identity_digest
+                    or a.stamp_digest is not None and b.stamp_digest is not None and a.stamp_digest != b.stamp_digest
+                    or a.uidset_digest is not None and b.uidset_digest is not None and a.uidset_digest != b.uidset_digest):
+                break
+            m += 1
+        return record, old, size, m
+
+    records = [record_match(r) for r in (ingest, emission) if r is not None]
+    remaining = 4 * max((r[3] for r in records), default=0) + 256
+
+    def read_bindings(sql, params, limit):
+        nonlocal remaining
+        rows = _rows(conn.execute(sql, (*params, limit)))
+        remaining -= len(rows)
+        observations = defaultdict(set)
+        if rows and remaining >= 0:
+            ids = json.dumps([row["occ_id"] for row in rows])
+            for occ, stamp in conn.execute("SELECT occ_id,stamp FROM stamp_observations "
+                                          "WHERE occ_id IN (SELECT value FROM json_each(?))", (ids,)):
+                observations[occ].add(stamp)
+        for row in rows:
+            row["observations"] = observations[row["occ_id"]]
+        return rows
+
+    def eligible(row, entry, stamp, last):
+        if row["disposition"] == "ambiguous":
+            return "ambiguous_disposition"
+        if row["disposition"] not in ("stored", "migrated") or row["ordinal"] is None or row["ordinal"] <= last:
+            return "not_contiguous"
+        if row["row_exists"] is None:
+            return "missing_row"
+        if row["session_id"] != session_id:
+            return "other_session"
+        if row["identity_digest"] != entry.identity_digest:
+            return "not_contiguous"
+        observed = stamp_text(row["observed_at"])
+        if stamp is not None and stamp not in row["observations"]:
+            if row["stamp"] is not None and row["stamp"] != stamp:
+                return "stamp"
+            if observed is not None and observed != stamp:
+                return "observed_at"
+        return None
+
+    def prove(record, old, size, m):
+        nonlocal remaining
+        result = dict(k=0, m=m, pairs={}, kind=record["kind"], view_seq=record["view_seq"])
+        last, anchor, window = 0, True, deque()
+        stop = "record_mismatch" if m < size else "length_end"
+        for i in range(m):
+            entry, ref, stamp = entries[i], old[i], stamp_text(stamps[i])
+            if ref.is_descriptor:
+                # Even exact generated bytes can be a fresh host occurrence.
+                # Check this before ignored rows; no descriptor is proof in P1d.
+                stop = "descriptor"
+                break
+            if ignored[i]:
+                result["k"] = i + 1
+                continue
+            if remaining <= 0 and (anchor or not window):
+                stop = "budget"
+                break
+            row = None
+            if anchor:
+                if ref.ref is not None:
+                    rows = read_bindings(
+                        "SELECT b.*, m.*, b.store_id AS bound_store_id, m.store_id AS row_exists "
+                        "FROM occurrence_bindings b LEFT JOIN messages m ON m.store_id=b.store_id "
+                        "WHERE b.lineage=? AND b.occ_id=? LIMIT ?", (lineage, ref.ref), 1)
+                    row = rows[0] if rows and not eligible(rows[0], entry, stamp, last) else None
+                if row is None:
+                    rows = read_bindings(_COLD_ANCHOR, (lineage, entry.identity_digest), max(0, remaining) + 1)
+                    if remaining < 0:
+                        stop = "budget"
+                        break
+                    rows = [r for r in rows if not eligible(r, entry, stamp, last)]
+                    if len(rows) != 1:
+                        stop = "no_anchor" if not rows else "ambiguous_anchor"
+                        break
+                    row = rows[0]
+                window.clear()
+            else:
+                if not window:
+                    window = deque(read_bindings(_COLD_WINDOW, (lineage, last), min(m - i, remaining)))
+                if not window:
+                    stop = "not_contiguous"
+                    break
+                row = window.popleft()
+                stop = eligible(row, entry, stamp, last)
+                if stop:
+                    break
+                if ref.ref is not None and ref.ref != row["occ_id"]:
+                    stop = "not_contiguous"
+                    break
+            # Contiguity and a NULL eligible stamp prove position, not occurrence.
+            # Every host row needs its own stamp witness or equal known uid sets
+            # on the record's own binding, including continuation rows.
+            if not (stamp is not None and (stamp == row["stamp"] or stamp in row["observations"])
+                    or entry.uidset_digest is not None and entry.uidset_digest == ref.uidset_digest
+                    and ref.ref == row["occ_id"]):
+                stop = "no_occurrence_evidence"
+                break
+            last, anchor = row["ordinal"], False
+            result["pairs"][i] = row
+            result["k"] = i + 1
+            stop = "record_mismatch" if m < size else "length_end"
+        counts["stop." + stop] += 1
+        return result
+
+    runs = [prove(*r) for r in records]
+    winner = max(runs, key=lambda r: r["k"], default=dict(k=0, pairs={}))
+    return winner, counts
+
+
+def emission_candidate(conn, lineage, *, adopted_fallback=False):
+    """Return the live emission view and reason, without registry reads.
 
     One SQL statement reads the view, state, recovered mark and provenance floor
     in a consistent snapshot when no transaction is open. Inside the caller's
@@ -428,6 +732,12 @@ def emission_candidate(conn, lineage):
         return None, "none"
     view = rows[0]
     recovered, floor = view.pop("recovered"), view.pop("floor")
+    if adopted_fallback and view["state"] == "refused":
+        accepted = _rows(conn.execute(
+            "SELECT * FROM ingest_views WHERE lineage=? AND kind='emission' AND state='adopted' "
+            "AND view_seq<? ORDER BY view_seq DESC LIMIT 1", (lineage, view["view_seq"])))
+        if accepted:
+            view = accepted[0]
     if view["state"] not in ("proposed", "adopted"):
         return None, "refused"
     if recovered is not None and view["view_seq"] <= recovered:

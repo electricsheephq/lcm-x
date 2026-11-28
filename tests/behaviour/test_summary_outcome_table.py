@@ -48,6 +48,8 @@ OUTCOMES = [
     Outcome("configured-timeout", (2, 0, 0, 0), "configured timeout expired", "provider_failure"),
     Outcome("config-error", (1, 0, 0, 0), "Error code: 404 - unknown model", "config_error"),
     Outcome("content-filter", (2, 2, 2, 2), "Error code: 400 - content_filter"),
+    Outcome("content-filter-finish", (2, 2, 2, 2), "content_filter"),
+    Outcome("content-filter-finish-whitespace", (2, 2, 2, 2), "content_filter"),
     Outcome("context-length-rescue", (2, 2, 2, 2), "maximum context length exceeded"),
     # #1209: each full-window cut opens its route; later sweeps try the next route, then L3.
     Outcome("foreground-budget-cut", (1, 1, 0, 0), "request timed out", "hung", level=None),
@@ -167,6 +169,10 @@ def test_summary_outcome_table(monkeypatch, caplog, outcome, models):
         elif outcome.level is None:
             assert host.deadline is not None
             clock.now = host.deadline
+        if outcome.name.startswith("content-filter-finish"):
+            content = " " if outcome.name.endswith("whitespace") else ""
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="content_filter", message=SimpleNamespace(content=content))])
         if outcome.error:
             error_type = TimeoutError if outcome.name in {"configured-timeout", "foreground-budget-cut"} else RuntimeError
             raise error_type(outcome.error)
@@ -216,8 +222,8 @@ def test_summary_outcome_table(monkeypatch, caplog, outcome, models):
             level = 3 if outcome.level is None else outcome.level
             assert escalation.summarize_with_escalation(SOURCE, **kwargs) == (outcome.result, level)
             expected_provenance = {"model": models[0] if outcome.level == 1 else "deterministic"}
-            if outcome.name in {"content-filter", "context-length-rescue"}:
-                expected_provenance["content_filter_error" if outcome.name == "content-filter"
+            if outcome.name.startswith("content-filter") or outcome.name == "context-length-rescue":
+                expected_provenance["content_filter_error" if outcome.name.startswith("content-filter")
                                     else "context_length_error"] = True
             assert provenance == expected_provenance
             assert budget.stop_reason == ""

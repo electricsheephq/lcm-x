@@ -39,6 +39,7 @@ def diagnostic_engine(tmp_path):
         embeddings_enabled=True,
         embedding_provider="voyage",
         embedding_model="voyage-4-large",
+        embedding_privacy_enabled=True,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine._session_id = "session-a"
@@ -235,6 +236,7 @@ def engine(tmp_path):
         embedding_provider="voyage",
         embedding_model="voyage-4-large",
         sensitive_patterns=["api_key", "private_key"],
+        embedding_privacy_enabled=True,
     )
     store = MessageStore(config.database_path, ingest_protection_config=config)
     dag = SummaryDAG(config.database_path)

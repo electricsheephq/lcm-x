@@ -30,7 +30,7 @@ pytest.importorskip("hypothesis")
 from hypothesis import Phase, settings, strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
-from hermes_lcm import engine as engine_module
+from hermes_lcm import maintenance_scheduler
 from hermes_lcm import escalation, tokens
 from tests.conftest import _MAINTENANCE_SCHEDULERS, _wait_scheduler_idle
 from hermes_lcm.config import LCMConfig
@@ -268,7 +268,7 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
             # Product-default maintenance is asynchronous; keep the temporary
             # store and fakes alive until the existing test drain says idle.
             for name in _MAINTENANCE_SCHEDULERS:
-                scheduler = getattr(engine_module, name, None)
+                scheduler = getattr(maintenance_scheduler, name, None)
                 if scheduler is not None:
                     assert _wait_scheduler_idle(scheduler, 30.0), name
         finally:
@@ -603,7 +603,8 @@ TestGatewayReset = GatewayResetMachine.TestCase
 TestGatewayReset.settings = PROFILE
 
 
-RESTART_CHILD = "#1286: cold published child lacks its parent emission proof"
+RESTART_CHILD = ("#1286: cold published child lacks its parent emission proof; visible surplus "
+                 "(generated_unproven); fix planned v0.30.x")
 
 
 def interrupted_child_start(point, host, prior_emission, include_known_open):
@@ -619,7 +620,8 @@ def interrupted_child_start(point, host, prior_emission, include_known_open):
 
 KNOWN_OPEN[RESTART_CHILD] = interrupted_child_start
 
-RESTART_SUPERSEDED = "#1286: unadopted compaction supersedes the durable input emission"
+RESTART_SUPERSEDED = ("#1286: unadopted compaction supersedes the durable input emission; visible surplus "
+                      "(generated_unproven); fix planned v0.30.x")
 
 
 def interrupted_recompression(point, prior_emission, include_known_open):

@@ -1,0 +1,174 @@
+"""Read-only SQLite inputs and explicitly retained D5 captures."""
+
+import hashlib
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+
+class CaptureError(ValueError):
+    """A capture failed its safety or integrity precondition."""
+
+
+def _readonly(path, timeout=5.0):
+    """A read-only connection that never writes beside the input. immutable=1 (no locks, no sidecars) is used only for
+    a WAL-mode file with neither -wal nor -journal beside it: no connection has it open and nothing is pending. A
+    rollback-journal file keeps plain mode=ro, so a held lock reads as "database is locked" and a hot journal fails
+    loudly instead of being read past."""
+    path = Path(path).absolute()
+    if path.is_symlink():  # SQLite follows the link to its target's -wal; the sidecar checks below would not.
+        raise CaptureError("database input is a symlink")
+    with path.open("rb") as stream:
+        header = stream.read(20)
+    wal_mode = len(header) == 20 and header[18] == 2 and header[19] == 2
+    if wal_mode and Path(str(path) + "-wal").exists() and not Path(str(path) + "-shm").exists():
+        raise CaptureError("WAL input has a -wal but no -shm: reading it would create a -shm beside it")
+    quiet = wal_mode and not any(Path(str(path) + s).exists() for s in ("-wal", "-journal"))
+    return sqlite3.connect(f"file:{quote(str(path))}?mode=ro" + ("&immutable=1" if quiet else ""), uri=True,
+                           timeout=timeout)
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _quick_check(path):
+    with closing(_readonly(path)) as db:
+        return "ok" if db.execute("PRAGMA quick_check").fetchall() == [("ok",)] else "failed"
+
+
+def _relative(root, name):
+    path = Path(name)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        raise ValueError("expected a relative file name")
+    return root / path
+
+
+BACKUP_DEADLINE_S = 3600.0
+
+
+def backup(src, dest, deadline_s=BACKUP_DEADLINE_S):
+    """An online backup bounded by deadline_s: a lock held past it (the step keeps returning busy or locked) fails
+    with CaptureError instead of waiting forever. One step copies every page (pages=-1), because SQLite restarts a
+    multi-step backup whenever another connection writes between steps, which could stall a large live store."""
+    dest, deadline = Path(dest), time.monotonic() + deadline_s
+
+    def progress(status, remaining, total):
+        if time.monotonic() > deadline:
+            raise CaptureError("backup deadline passed")
+
+    with dest.open("xb"):
+        pass
+    with closing(_readonly(src, timeout=min(5.0, deadline_s))) as source, closing(sqlite3.connect(dest)) as target:
+        source.backup(target, pages=-1, progress=progress)
+        target.execute("PRAGMA journal_mode=DELETE")
+    try:
+        result = _quick_check(dest)
+    except sqlite3.DatabaseError:
+        raise CaptureError("backup quick_check failed") from None
+    if result != "ok":
+        raise CaptureError("backup quick_check failed")
+
+
+def _holds_symlink(root):
+    """True when any entry under root is a symlink; never follows one."""
+    return any((Path(directory) / name).is_symlink()
+               for directory, dirs, names in os.walk(root, followlinks=False) for name in dirs + names)
+
+
+def clone_tree(src, dest):
+    if Path(dest).exists():
+        raise FileExistsError("clone destination exists")
+    if sys.platform == "darwin":
+        subprocess.run(["cp", "-cR", str(src), str(dest)], check=True)
+    else:
+        shutil.copytree(src, dest, symlinks=True)  # Copy a link as a link, so the check below sees it.
+
+
+def capture(kind, out_dir, *, store_db, host_db, payload_dir, extras=None, home=None, derived=None):
+    """*derived*, if given, is called with the filled capture dir and returns {name: bytes}: files made from the
+    capture itself (a T0 doctor.log), written before capture-hashes.json so they are hashed with it."""
+    if kind not in ("T0", "H8"):
+        raise CaptureError("unknown capture kind")
+    out = Path(out_dir)
+    for source in (payload_dir, home):  # Refused before any mkdir: a capture never lands inside what it copies.
+        if source is not None and out.resolve().is_relative_to(Path(source).resolve()):
+            raise CaptureError("capture dir is inside the payload source or the gateway home")
+    out.mkdir()
+    backup(store_db, out / "store.db")
+    backup(host_db, out / "host-0.db")
+    payload = out / "lcm-large-outputs"
+    if payload_dir is None:
+        payload.mkdir()  # Only an explicit None means "no payload"; a wrong path must never read as empty.
+    elif Path(payload_dir).is_symlink() or not Path(payload_dir).is_dir():
+        raise CaptureError("payload dir must be an existing real directory")
+    elif _holds_symlink(payload_dir):
+        raise CaptureError("payload dir holds a symlink")  # Checked before any copy, on every platform.
+    else:
+        clone_tree(payload_dir, payload)
+        if any(path.is_symlink() for path in payload.rglob("*")):
+            raise CaptureError("payload dir holds a symlink")  # A link would point the capture at live data.
+    for name, source in (extras or {}).items():
+        dest = _relative(out, name)
+        normalized = dest.relative_to(out).as_posix()
+        if dest.exists() or normalized == "capture-hashes.json" or dest.is_relative_to(payload):
+            raise CaptureError("extra collides with capture layout")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.suffix == ".db":
+            backup(source, dest)
+        else:
+            with Path(source).open("rb") as reader, dest.open("xb") as writer:
+                shutil.copyfileobj(reader, writer)
+    captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    if kind == "T0":  # The edition reads T0_AT from the capture's window.log, so it carries the same stamp.
+        dest = out / "window.log"
+        if dest.exists():
+            raise CaptureError("extra collides with capture layout")
+        dest.write_text(json.dumps({"captured_at": captured_at}), encoding="utf-8")
+    for name, data in (derived(out) if derived else {}).items():
+        dest = _relative(out, name)
+        if dest.exists() or dest.relative_to(out).as_posix() == "capture-hashes.json" or dest.is_relative_to(payload):
+            raise CaptureError("derived file collides with capture layout")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    files, payload_lines = {}, []
+    for path in sorted(out.rglob("*")):
+        if path.is_file():
+            name, digest = path.relative_to(out).as_posix(), _sha256(path)
+            if path.is_relative_to(payload):
+                payload_lines.append(f"{name} {digest}\n")
+            else:
+                files[name] = digest
+    manifest = dict(schema="d5-clone-capture/1", kind=kind, captured_at=captured_at, files=files,
+                    payload_files=len(payload_lines),
+                    payload_sha256=hashlib.sha256("".join(payload_lines).encode()).hexdigest())
+    hashes = out / "capture-hashes.json"
+    hashes.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    with closing(_readonly(out / "store.db")) as store, closing(_readonly(out / "host-0.db")) as host:
+        return dict(kind=kind, captured_at=captured_at, capture_hashes_sha256=_sha256(hashes),
+                    files=len(files), payload_files=len(payload_lines),
+                    store_max_store_id=store.execute("SELECT max(store_id) FROM messages").fetchone()[0],
+                    host_max_id=host.execute("SELECT max(id) FROM messages").fetchone()[0])
+
+
+def free_space_ok(path, need_bytes):
+    return shutil.disk_usage(path).free >= need_bytes
+
+
+def remove_capture(out_dir, receipt_written: bool):
+    out = Path(out_dir)
+    if not receipt_written or not (out / "capture-hashes.json").is_file():
+        raise CaptureError("capture removal requires a receipt and capture hashes")
+    shutil.rmtree(out)

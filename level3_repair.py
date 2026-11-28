@@ -17,6 +17,7 @@ from .escalation import (
     _L3_TRUNCATION_MARKER, SummarySpendGuard, summarize_with_escalation, summary_route_available,
 )
 from .maintenance import backup_database
+from .message_content import canonical_text
 from .tokens import count_messages_tokens, count_tokens
 from .vector_store import VectorStore
 
@@ -196,6 +197,7 @@ def _commit_group(engine, rows, group, new) -> str:
                     return "a source was removed during the repair"
             for node_id in group:
                 text, tokens, level, source_tokens, model = new[node_id]
+                text = canonical_text(text)
                 conn.execute(
                     "UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ?, "
                     "source_token_count = COALESCE(?, source_token_count) WHERE node_id = ?",

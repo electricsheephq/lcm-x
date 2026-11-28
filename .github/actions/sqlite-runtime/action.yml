@@ -16,12 +16,24 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Build and load SQLite ${{ inputs.version }}
+    # The built library is cached per image family (ImageOS), architecture, gcc version, SQLite version, archive hash
+    # and this file, so a changed compile option or compiler rebuilds it. The version check below runs on every job.
+    - name: Key the SQLite build cache
+      id: sqlite-key
+      shell: bash
+      run: echo "toolchain=${ImageOS:-unknown}-$(uname -m)-gcc$(gcc -dumpfullversion)" >> "$GITHUB_OUTPUT"
+    - name: Restore the SQLite build
+      id: sqlite-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/sqlite-runtime/libsqlite3.so.0
+        key: sqlite-runtime-${{ steps.sqlite-key.outputs.toolchain }}-${{ inputs.version }}-${{ inputs.sha256 }}-${{ hashFiles('.github/actions/sqlite-runtime/action.yml') }}
+    - name: Build SQLite ${{ inputs.version }}
+      if: steps.sqlite-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         SQLITE_URL: ${{ inputs.url }}
         SQLITE_SHA256: ${{ inputs.sha256 }}
-        SQLITE_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
         dir="$RUNNER_TEMP/sqlite-runtime"
@@ -40,6 +52,14 @@ runs:
           -DSQLITE_DEFAULT_RECURSIVE_TRIGGERS=1 -DSQLITE_THREADSAFE=1 \
           -Wl,-soname,libsqlite3.so.0 \
           -o "$dir/libsqlite3.so.0" "$src" -lpthread -ldl -lm
+    - name: Load SQLite ${{ inputs.version }}
+      shell: bash
+      env:
+        SQLITE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/sqlite-runtime"
+        test -s "$dir/libsqlite3.so.0"
         export LD_LIBRARY_PATH="$dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
         python - <<'PY'

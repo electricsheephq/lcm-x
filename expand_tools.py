@@ -289,7 +289,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs: Any) -> str:
         if refs:
             result["externalized_refs"] = refs
             result["externalized_ref"] = refs[0]
-            if bool(engine_session_id) and stored_session_id == engine_session_id:
+            if (
+                bool(engine_session_id) and stored_session_id == engine_session_id
+            ) or _tools._reader_any_session(engine):
                 payload_summaries = []
                 for ref in refs:
                     payload = _tools._get_externalized_payload(engine, ref)

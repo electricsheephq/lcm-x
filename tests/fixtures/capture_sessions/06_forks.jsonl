@@ -1,0 +1,8 @@
+{"type": "user", "uuid": "copy", "sessionId": "parent", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "shared synthetic prefix"}}
+{"type": "assistant", "uuid": "copy-answer", "sessionId": "parent", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "shared answer"}}
+{"type": "user", "uuid": "copy", "sessionId": "fork-a", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "shared synthetic prefix"}}
+{"type": "assistant", "uuid": "copy-answer", "sessionId": "fork-a", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "shared answer"}}
+{"type": "user", "uuid": "fork-a-new", "sessionId": "fork-a", "timestamp": "2099-01-01T00:00:00Z", "message": {"role": "user", "content": "fresh synthetic fork"}}
+{"type": "user", "uuid": "copy", "sessionId": "fork-b", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "user", "content": "shared synthetic prefix"}}
+{"type": "assistant", "uuid": "copy-answer", "sessionId": "fork-b", "timestamp": "2000-01-01T00:00:00Z", "message": {"role": "assistant", "content": "shared answer"}}
+{"type": "user", "uuid": "fork-b-new", "sessionId": "fork-b", "timestamp": "2099-01-01T00:00:00Z", "message": {"role": "user", "content": "fresh synthetic fork"}}

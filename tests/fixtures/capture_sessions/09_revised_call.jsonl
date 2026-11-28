@@ -1,0 +1,3 @@
+{"type": "assistant", "uuid": "revised-call", "sessionId": "revised-call", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "revised-tool", "name": "Read", "input": {"path": "synthetic.txt"}}]}}
+{"type": "user", "uuid": "result", "sessionId": "revised-call", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "revised-tool", "content": "synthetic result"}]}}
+{"type": "assistant", "uuid": "revised-call", "sessionId": "revised-call", "message": {"role": "assistant", "content": [{"type": "text", "text": "revised call description"}, {"type": "tool_use", "id": "revised-tool", "name": "Read", "input": {"path": "synthetic.txt"}}]}}

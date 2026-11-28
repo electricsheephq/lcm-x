@@ -31,5 +31,6 @@ for ARG in "$@"; do
     export VOYAGE_API_KEY
   fi
 done
-trap 'unset OPENROUTER_API_KEY VOYAGE_API_KEY' EXIT
-"$PYTHON" -m bench.fmp "$@"
+# exec: Python replaces this shell, so a SIGTERM to the launcher's PID reaches the harness's drain handler.
+# The keys stay in the environment of this one process only, as before.
+exec "$PYTHON" -m bench.fmp "$@"

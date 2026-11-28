@@ -217,7 +217,7 @@ def test_interior_zero_published_drop(local_store, monkeypatch, slice_s, policy,
 
     monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: FailFirst(c.embedding_provider, c.embedding_model))
     first = command._chunk_backfill_run(config, db, apply=True, limit=32, retry_uncertain=False, policy=policy,
-                                        incremental=True, maintenance_slice=slice_s)
+                                        incremental=True, maintenance_slice=0.0)
     pub = _published(db)
     with sqlite3.connect(db) as conn:
         unc = conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0]
@@ -265,7 +265,7 @@ def test_record_behind_uncertain_slots(local_store, monkeypatch, slice_s):
 
     monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: Flaky(c.embedding_provider, c.embedding_model))
     first = command._chunk_backfill_run(config, db, apply=True, limit=10000, retry_uncertain=False, policy="",
-                                        incremental=True, maintenance_slice=slice_s)
+                                        incremental=True, maintenance_slice=0.0)
     rec = _record(db) or []
     pub = _published(db)
     s_pub = sum(1 for c in s_chunks if c.chunk_id in pub)

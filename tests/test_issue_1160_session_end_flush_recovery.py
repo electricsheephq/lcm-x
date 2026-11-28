@@ -110,7 +110,7 @@ _PROBE = textwrap.dedent(r'''
         skipped = []
         class ReleaseAfterSkip(logging.Handler):
             def emit(self, record):
-                if "operation=message_store.append_protected_batch" in record.getMessage():
+                if "raw-message ingest skipped" in record.getMessage():
                     skipped.append(stored(sid))
                     locker.rollback()
         release = ReleaseAfterSkip()
@@ -127,6 +127,7 @@ _PROBE = textwrap.dedent(r'''
             else:
                 agent.shutdown_memory_provider(history)
             assert skipped == [prefix]
+            assert "operation=message_store.append_protected_batch" not in log.getvalue()
         finally:
             logging.getLogger().removeHandler(release)
             locker.rollback()

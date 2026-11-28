@@ -197,7 +197,9 @@ def test_flag_off_answer_and_manifest_identity(tmp_path, monkeypatch):
             for key in ("call_dir", "latency_s", "at", "transcripts"):
                 call.pop(key, None)
     assert {k: v for k, v in after.items() if k not in ("evidence_labels", "evidence_sha256")} == before
-    assert json.loads((base_path / "run-manifest.json").read_text()) == json.loads((path / "run-manifest.json").read_text())
+    manifest = json.loads((path / "run-manifest.json").read_text())
+    assert manifest["harness"].pop("codex_home_mode") == "symlink"
+    assert json.loads((base_path / "run-manifest.json").read_text()) == manifest
     q = datasets.load(locomo(tmp_path), "locomo", None)[0][0]
     client = SimpleNamespace(call=lambda *a, **k: {"content": "CORRECT"})
     before_judged = base_module("judges").judge_row(before, q, client, models=[MODEL])
