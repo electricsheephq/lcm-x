@@ -473,6 +473,15 @@ def test_doctor_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     expected = json.loads((FIXTURES / "lcm_doctor.json").read_text())["cases"][case]
+    # The existing cases have no two-window sessions. Keep their recorded
+    # output intact and assert the new check in its exact position.
+    checks = expected["checks"]
+    lifecycle = next(i for i, item in enumerate(checks) if item["check"] == "lifecycle_fragmentation")
+    checks.insert(lifecycle + 1, {
+        "check": "two_window_replay_copies",
+        "status": "pass",
+        "detail": {"row_count": 0, "unstamped": 0, "stamped_exact": 0, "session_count": 0, "sessions": []},
+    })
     with doctor_engine(tmp_path, case, monkeypatch) as engine:
         identity = observe_identity(engine, monkeypatch)
         actual = tools.lcm_doctor({}, engine=engine)

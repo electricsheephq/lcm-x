@@ -149,7 +149,7 @@ from .message_analysis import (
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from . import aux_session as _aux_session
-from .aux_session import AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
+from .aux_session import _DELEGATE_SOURCE, AuxiliarySessionMixin, DelegateChildMixin, drain_live_child_stores
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _strip_volatile_host_scaffolding
@@ -173,11 +173,15 @@ from .host_uid_emit import (
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
-from .db_bootstrap import refresh_legacy_conversation_ids
+from .db_bootstrap import (
+    refresh_legacy_conversation_ids,
+    rotation_predecessor_metadata_key,
+    walk_rotation_predecessors,
+)
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import HOST_OCCURRENCE_SNAPSHOT_PREFIX, LifecycleStateStore, reowned_emission_prefix
 from .message_content import (
     canonical_text,
     canonical_value,
@@ -986,6 +990,8 @@ class LCMEngine(
         self.emit_automatic_compaction_status = False
         # #582 survival fit: the failure reason of this compress(), the last fit, and the one-shot warning.
         self._survival_fit_reason: Optional[str] = None
+        self._session_owner_backoff: tuple[str, str, str, frozenset[int]] | None = None
+        self._session_owner_warning_keys: set[tuple[str, str]] = set()
         self._survival_overhead_observation = None  # #1012 F4: (bound conversation key, largest overhead)
         self._survival_pass_observed = False  # #1107: this compress() recorded the host's figure for its own list
         self._last_survival_fit: Optional[Dict[str, Any]] = None
@@ -1758,6 +1764,12 @@ class LCMEngine(
     def last_compression_noop_reason(self) -> str:
         """Human-readable reason for the latest no-op compression decision."""
         return self._bypass_compress_state().get("_last_compression_noop_reason", "")
+
+    @property
+    def _last_compression_failure_reason(self) -> str:
+        """Reason code for a failed compression pass."""
+        state = self._bypass_compress_state()
+        return (state.get("_survival_fit_reason") or "") if state.get("_last_compression_status") == "error" else ""
 
     @property
     def last_compression_was_noop(self) -> bool:
@@ -3557,6 +3569,7 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._session_owner_backoff = None
         self._warn_turn_start_defer_ceiling()
         self._rearm_embedding_maintenance()
         if getattr(self, "_survival_overhead_observation", None) is not None and \
@@ -3614,6 +3627,9 @@ class LCMEngine(
             self._schedule_rollup_maintenance(session_id)
         if not self._session_ignored and not self._session_stateless:
             self._schedule_embedding_maintenance()
+
+    def _current_binding_is_delegate(self) -> bool:
+        return self._session_platform == _DELEGATE_SOURCE or self._is_known_delegate_child(self._session_id)
 
     def _invalidate_rollups_for_published_node(self, node: "SummaryNode") -> None:
         """Stale the rollups covering EVERY UTC day a just-published node spans.
@@ -4574,6 +4590,7 @@ class LCMEngine(
         state = self._lifecycle.rebind_own_finalized(self._session_id, state.conversation_id)
         if state is None:
             return  # another session holds the row now: nothing written, the frontier unchanged
+        self._session_owner_backoff = None
         self._ledger_count("ledger.emission_boundary_unadopted")
         frontier = int(state.current_frontier_store_id or 0)
         if int(self._last_compacted_store_id or 0) != frontier:
@@ -4615,6 +4632,7 @@ class LCMEngine(
                 self._ledger_count("ledger.emission_boundary_unadopted")
                 return False
             state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+        self._session_owner_backoff = None
         resumable_finalized = (
             state.last_finalized_frontier_store_id
             if state.last_finalized_session_id == session_id
@@ -6168,7 +6186,7 @@ class LCMEngine(
 
     @staticmethod
     def _rotation_predecessor_metadata_key(session_id: str) -> str:
-        return f"rotation_predecessor_session:{session_id}"
+        return rotation_predecessor_metadata_key(session_id)
 
     def _record_rotation_predecessor(self, session_id: str, predecessor_session_id: str) -> None:
         """#680: remember the compression-boundary lineage so an externalized ref
@@ -6192,18 +6210,7 @@ class LCMEngine(
 
     def _rotation_predecessor_session_ids(self, session_id: str, max_hops: int = 32) -> list[str]:
         """The recorded compression-boundary predecessors of ``session_id``, nearest first."""
-        found: list[str] = []
-        current = session_id
-        for _ in range(max_hops):
-            try:
-                predecessor = self._store.read_metadata_json(self._rotation_predecessor_metadata_key(current))
-            except Exception:
-                break
-            if not isinstance(predecessor, str) or not predecessor or predecessor == session_id or predecessor in found:
-                break
-            found.append(predecessor)
-            current = predecessor
-        return found
+        return walk_rotation_predecessors(self._store.read_metadata_json, session_id, max_hops)
 
     def carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         """Move retained summaries from the old session into the new one.
@@ -6442,6 +6449,7 @@ class LCMEngine(
             "threshold_tokens": self.threshold_tokens,
             "last_compression_status": self.last_compression_status,
             "last_compression_noop_reason": self.last_compression_noop_reason,
+            "last_compression_failure_reason": self._last_compression_failure_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
             "last_stub_first_exit": dict(self._last_stub_first_exit) if self._last_stub_first_exit else None,
@@ -6758,6 +6766,10 @@ class LCMEngine(
                 # commit proof or a carried native recovery proof.
                 or self._durable_commit_proof_payload() is not None
                 or bool(self._load_native_recovery_replay_snapshot_digests())
+                # A gateway rebind can still prove an empty child's inherited tail.
+                or (self._conversation_id != self._session_id and bool(
+                    self._load_compression_carry_ranges(with_anchor=False)
+                ))
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
@@ -7475,7 +7487,7 @@ class LCMEngine(
                 store._timed_atomic(timing) if timing is not None else store.atomic(immediate=True)):
             super()._write_compress_commit_proof_payload(proof, payload)
             self._write_compaction_metadata(
-                self._replay_snapshot_metadata_key("host_occurrence_snapshot"),
+                self._replay_snapshot_metadata_key(HOST_OCCURRENCE_SNAPSHOT_PREFIX),
                 json.dumps(snapshot, sort_keys=True),
             )
 
@@ -7513,18 +7525,19 @@ class LCMEngine(
                 return False
         return True
 
-    def _durable_commit_proof_payload(self, session_id=None):
+    def _durable_commit_proof_payload(self, session_id=None, *, binding=None, reowned=False):
         local = self._compress_commit_proof
         if local and local.get("durable") is False and local.get("session_id") == (session_id or self._session_id):
             return None
-        payload = super()._durable_commit_proof_payload(session_id)
+        payload = super()._durable_commit_proof_payload(session_id, binding=binding, reowned=reowned)
         if payload is None:
             return None
         try:
-            raw = self._store.read_metadata_json(self._replay_snapshot_metadata_key(
-                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id))
-            snapshot = self._store.read_metadata_json(self._replay_snapshot_metadata_key(
-                "host_occurrence_snapshot", session_id))
+            proof_prefix, snapshot_prefix = _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, HOST_OCCURRENCE_SNAPSHOT_PREFIX
+            if reowned:
+                proof_prefix, snapshot_prefix = reowned_emission_prefix(proof_prefix), reowned_emission_prefix(snapshot_prefix)
+            raw = self._store.read_metadata_json(self._replay_snapshot_metadata_key(proof_prefix, session_id))
+            snapshot = self._store.read_metadata_json(self._replay_snapshot_metadata_key(snapshot_prefix, session_id))
             digest = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
             # A concurrent writer may replace the proof between the two reads:
             # attach the snapshot only to the proof that was validated above.
@@ -8961,6 +8974,39 @@ class LCMEngine(
         ):
             raise error
 
+    def _receipt_prior_ingest_row(self, index, message, claimed_id):
+        """Re-use an own-row occurrence recorded for a UID already spent by a stamp.
+
+        Gateway turns can sit between the two occurrences in the ledger, so its
+        contiguous cursor cannot prove the second one. Require the exact prior
+        host prefix and an explicit, live occurrence binding for this index.
+        """
+        attempt = getattr(self, "_ingest_ledger_attempt", None)
+        if attempt is None or message.get("timestamp") is not None or index >= len(attempt["entries"]):
+            return None
+        conn, session = self._store.connection, self._session_id
+        try:
+            lineage = ingest_ledger.persisted_lineage(conn, session, attempt["lineage"])
+            view = ingest_ledger.newest_view(conn, lineage, "ingest")
+            end = 16 * (index + 1)
+            if view is None or view["prefix_chain"][:end] != attempt["chain"][:end]:
+                return None
+            entry = ingest_ledger.decode_entries(view["entries"])[index]
+            if (entry.ref is None or entry.is_descriptor or entry.uidset_digest is None
+                    or entry[:3] != attempt["entries"][index][:3]):
+                return None
+            stored = conn.execute(
+                "SELECT m.store_id FROM occurrence_bindings b JOIN messages m ON b.store_id = m.store_id "
+                "WHERE b.lineage = ? AND b.occ_id = ? AND b.disposition = 'stored' AND b.identity_digest = ? "
+                "AND m.store_id > ? AND m.session_id = ? AND m.conversation_id = ?",
+                (lineage, entry.ref, entry.identity_digest, claimed_id, session, session),
+            ).fetchone()
+            if stored:
+                return self._store.get(stored[0])
+        except (sqlite3.Error, ValueError, IndexError) as exc:
+            self._raise_ingest_busy(exc)
+        return None
+
     def _ledger_cold_cursor(self, messages, ignored, today, session_count, after_commit):
         """Admit the read-only candidate only after the complete legacy choice."""
         attempt, store = getattr(self, "_ingest_ledger_attempt", None), self._store
@@ -9251,12 +9297,29 @@ class LCMEngine(
         uid_recognition = uid_recognition_enabled(self)
         uid_fetched = {} if uid_recognition else None
         ledger_run, today = dict(k=0, pairs={}), self._ingest_cursor
+        self._reowned_receipt_ids = None
+        self._reowned_receipt_pairs = {}
+        provisional_tool_rewind: set[int] = set()
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = self._cold_reader_replay_messages(messages, replay_messages, ignored_original_messages)
+
+            @lru_cache(maxsize=1)
+            def ingest_drop_decisions() -> list[bool]:
+                # A receipt matches from the first host row against a nonempty
+                # session. Classify that view without spending the suffix's budget.
+                return [drop for _, drop, *_ in self._ingest_row_drop_decisions(
+                    replay_messages=replay_messages, new_messages=replay_messages, original_new_messages=messages,
+                    cursor=0, compression_boundary_ingest_pending=self._compression_boundary_ingest_pending,
+                    empty_session_placeholder_budget={}, empty_session_placeholder_ordinals={},
+                    ignored_original_messages=ignored_original_messages, skipped_indexes=set(), probe=True,
+                )]
+
             self._ingest_cursor = self._reconcile_ingest_cursor_from_store(
                 reconcile_messages,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
                 session_counts=bind_session_counts, uid_fetched=uid_fetched,
+                ingest_drop_decisions=ingest_drop_decisions, original_messages=messages,
+                provisional_tool_rewind=provisional_tool_rewind,
             )
             today = self._ingest_cursor
             ledger_run = self._ledger_cold_cursor(
@@ -9287,6 +9350,9 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+            # The provisional proof found a partial group. Its entire segment
+            # goes through storage, even if legacy tool equality would replay it.
+            new_prefix_occurrences.update(provisional_tool_rewind)
         # Remapping can expose rows the ledger proved: they are no longer a
         # consumed prefix, so every residual consumer must be able to match them.
         ledger_run["pairs"] = {idx: row for idx, row in ledger_run["pairs"].items() if idx < cursor}
@@ -9387,8 +9453,12 @@ class LCMEngine(
                 if uid_recognition and anchor_plan["cursor"] < n:
                     matched = anchor_plan.setdefault("matched", {})
                     other_claims = {int(row["store_id"]) for rows in matched.values() for row in rows}
+                    receipt_claims = {sid for idx, sid in self._reowned_receipt_pairs.items()
+                                      if idx < anchor_plan["cursor"]}
+                    other_claims |= receipt_claims
                     for idx, row in self._host_uid_resolve(
-                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims).items():
+                            messages, reconcile_messages, fetched=uid_fetched, avoid=other_claims,
+                            reowned=self._reowned_receipt_store_ids()).items():
                         if (idx >= anchor_plan["cursor"] and idx not in matched and idx not in anchor_plan["remainders"]
                                 and (row is None or row["store_id"] not in other_claims)):
                             if row is not None:
@@ -9879,6 +9949,179 @@ class LCMEngine(
         )
         return scan_start, ignored_original_messages, replay_messages
 
+    def _ingest_row_drop_decisions(
+        self, *,
+        replay_messages: List[Dict[str, Any]],
+        new_messages: List[Dict[str, Any]],
+        original_new_messages: List[Dict[str, Any]],
+        cursor: int,
+        compression_boundary_ingest_pending: bool,
+        empty_session_placeholder_budget: dict[str, int],
+        empty_session_placeholder_ordinals: dict[str, set[int]],
+        ignored_original_messages: list[bool],
+        skipped_indexes: set[int],
+        probe: bool = False,
+    ):
+        """Classify ingest drops in host order, preserving placeholder occurrence budgets."""
+        boundary_placeholder_seen: dict[str, int] = {}
+        boundary_seen_synthetic_summary_before = False
+        empty_session_placeholder_seen: dict[str, int] = {}
+        if empty_session_placeholder_ordinals and cursor > 0:
+            for replay_msg in replay_messages[:cursor]:
+                replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
+                digest = self._active_replay_placeholder_digest(replay_text)
+                if digest:
+                    empty_session_placeholder_seen[digest] = empty_session_placeholder_seen.get(digest, 0) + 1
+        boundary_all_placeholder_replay_batch = (
+            compression_boundary_ingest_pending
+            and len(new_messages) > 1
+            and all(
+                self._is_ignored_active_replay_placeholder(
+                    msg,
+                    text_content_for_pattern_matching(msg.get("content")) or "",
+                )
+                for msg in new_messages
+            )
+        )
+        boundary_budget = {}
+        if compression_boundary_ingest_pending:
+            boundary_budget = self._compression_boundary_active_placeholder_digest_budget
+            if probe:
+                boundary_budget = dict(boundary_budget)
+            stored_counts = self._compression_boundary_stored_placeholder_digest_counts
+            if boundary_budget and stored_counts:
+                incoming_counts: dict[str, int] = {}
+                relevant_digests = set(boundary_budget) | set(stored_counts)
+                for msg in new_messages:
+                    text = text_content_for_pattern_matching(msg.get("content")) or ""
+                    digest = self._active_replay_placeholder_digest(text)
+                    if digest in relevant_digests:
+                        incoming_counts[digest] = incoming_counts.get(digest, 0) + 1
+                adjusted_budget: dict[str, int] = {}
+                for digest, count in boundary_budget.items():
+                    parsed_count = max(0, int(count or 0))
+                    incoming_count = max(0, int(incoming_counts.get(digest, 0) or 0))
+                    stored_count = max(0, int(stored_counts.get(digest, 0) or 0))
+                    remaining = min(parsed_count, max(0, incoming_count - stored_count))
+                    if remaining > 0:
+                        adjusted_budget[digest] = remaining
+                boundary_budget = adjusted_budget
+                if not probe:
+                    self._compression_boundary_active_placeholder_digest_budget = adjusted_budget
+        empty_session_all_placeholder_replay_batch = (
+            bool(empty_session_placeholder_ordinals)
+            and len(new_messages) > 1
+            and all(
+                self._is_ignored_active_replay_placeholder(
+                    msg,
+                    text_content_for_pattern_matching(msg.get("content")) or "",
+                )
+                for msg in new_messages
+            )
+        )
+        for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
+            absolute_idx = cursor + offset
+            if absolute_idx in skipped_indexes:
+                continue
+            replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
+            original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
+            volatile_placeholder = self._is_volatile_ignored_quarantine_placeholder(
+                replay_msg,
+                replay_text,
+            )
+            volatile_digest = self._active_replay_placeholder_digest(replay_text)
+            generated_volatile_placeholder = volatile_placeholder and (
+                original_text != replay_text
+                or (
+                    volatile_digest is not None
+                    and volatile_digest in self._load_generated_ignored_placeholder_hashes()
+                )
+            )
+            active_replay_placeholder = self._is_ignored_active_replay_placeholder(replay_msg, replay_text)
+            active_replay_placeholder_digest = self._active_replay_placeholder_digest(replay_text)
+            if not active_replay_placeholder:
+                replay_text_stripped = replay_text.strip()
+                if (
+                    self._is_context_summary_content(replay_text)
+                    or replay_text_stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                    or replay_text_stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
+                ):
+                    boundary_seen_synthetic_summary_before = True
+            compression_carried_active_placeholder = False
+            metadata_replayed_active_placeholder = False
+            if (
+                empty_session_placeholder_budget
+                and empty_session_placeholder_ordinals
+                and active_replay_placeholder
+                and active_replay_placeholder_digest is not None
+            ):
+                empty_session_placeholder_seen[active_replay_placeholder_digest] = (
+                    empty_session_placeholder_seen.get(active_replay_placeholder_digest, 0) + 1
+                )
+                ordinal = empty_session_placeholder_seen[active_replay_placeholder_digest]
+                remaining = empty_session_placeholder_budget.get(active_replay_placeholder_digest, 0)
+                if (
+                    remaining > 0
+                    and ordinal in empty_session_placeholder_ordinals.get(
+                        active_replay_placeholder_digest,
+                        set(),
+                    )
+                    and (ordinal > 1 or empty_session_all_placeholder_replay_batch)
+                ):
+                    metadata_replayed_active_placeholder = True
+                    if remaining == 1:
+                        empty_session_placeholder_budget.pop(active_replay_placeholder_digest, None)
+                    else:
+                        empty_session_placeholder_budget[active_replay_placeholder_digest] = remaining - 1
+            if (
+                compression_boundary_ingest_pending
+                and active_replay_placeholder
+                and active_replay_placeholder_digest is not None
+            ):
+                boundary_placeholder_seen[active_replay_placeholder_digest] = (
+                    boundary_placeholder_seen.get(active_replay_placeholder_digest, 0) + 1
+                )
+                current_placeholder_ordinal = boundary_placeholder_seen[active_replay_placeholder_digest]
+                boundary_ordinals = self._compression_boundary_active_placeholder_digest_ordinals
+                generated_message_ids = getattr(
+                    self,
+                    "_generated_ignored_active_replay_placeholder_message_ids",
+                    set(),
+                )
+                has_generated_provenance = (
+                    id(replay_msg) in generated_message_ids
+                    or id(original_msg) in generated_message_ids
+                )
+                ordinal_matches_generated = (
+                    current_placeholder_ordinal in boundary_ordinals.get(
+                        active_replay_placeholder_digest,
+                        set(),
+                    )
+                    and (
+                        current_placeholder_ordinal > 1
+                        or boundary_seen_synthetic_summary_before
+                        or boundary_all_placeholder_replay_batch
+                    )
+                )
+                if boundary_budget and (
+                    has_generated_provenance
+                    or (not has_generated_provenance and ordinal_matches_generated)
+                ):
+                    remaining = boundary_budget.get(active_replay_placeholder_digest, 0)
+                    if remaining > 0:
+                        compression_carried_active_placeholder = True
+                        if remaining == 1:
+                            boundary_budget.pop(active_replay_placeholder_digest, None)
+                        else:
+                            boundary_budget[active_replay_placeholder_digest] = remaining - 1
+            replayed_active_placeholder = active_replay_placeholder and (
+                self._is_cached_active_replay_message_at_index(absolute_idx, replay_msg)
+                or compression_carried_active_placeholder
+                or metadata_replayed_active_placeholder
+            )
+            drop = ignored_original_messages[absolute_idx] or generated_volatile_placeholder or replayed_active_placeholder
+            yield absolute_idx, drop, volatile_digest if generated_volatile_placeholder else None, original_text, replay_text
+
     def _ingest_filter_rows(
         self, *,
         messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
@@ -9900,167 +10143,22 @@ class LCMEngine(
     ) -> tuple[list[tuple[int, Dict[str, Any]]], List[Dict[str, Any]]]:
         if messages_to_store_with_index:
             kept: list[tuple[int, Dict[str, Any]]] = []
-            boundary_placeholder_seen: dict[str, int] = {}
-            boundary_seen_synthetic_summary_before = False
-            empty_session_placeholder_seen: dict[str, int] = {}
-            if empty_session_placeholder_ordinals and cursor > 0:
-                for replay_msg in replay_messages[:cursor]:
-                    replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
-                    digest = self._active_replay_placeholder_digest(replay_text)
-                    if digest:
-                        empty_session_placeholder_seen[digest] = empty_session_placeholder_seen.get(digest, 0) + 1
-            boundary_all_placeholder_replay_batch = (
-                compression_boundary_ingest_pending
-                and len(new_messages) > 1
-                and all(
-                    self._is_ignored_active_replay_placeholder(
-                        msg,
-                        text_content_for_pattern_matching(msg.get("content")) or "",
-                    )
-                    for msg in new_messages
-                )
-            )
-            if compression_boundary_ingest_pending:
-                boundary_budget = self._compression_boundary_active_placeholder_digest_budget
-                stored_counts = self._compression_boundary_stored_placeholder_digest_counts
-                if boundary_budget and stored_counts:
-                    incoming_counts: dict[str, int] = {}
-                    relevant_digests = set(boundary_budget) | set(stored_counts)
-                    for msg in new_messages:
-                        text = text_content_for_pattern_matching(msg.get("content")) or ""
-                        digest = self._active_replay_placeholder_digest(text)
-                        if digest in relevant_digests:
-                            incoming_counts[digest] = incoming_counts.get(digest, 0) + 1
-                    adjusted_budget: dict[str, int] = {}
-                    for digest, count in boundary_budget.items():
-                        parsed_count = max(0, int(count or 0))
-                        incoming_count = max(0, int(incoming_counts.get(digest, 0) or 0))
-                        stored_count = max(0, int(stored_counts.get(digest, 0) or 0))
-                        remaining = min(parsed_count, max(0, incoming_count - stored_count))
-                        if remaining > 0:
-                            adjusted_budget[digest] = remaining
-                    self._compression_boundary_active_placeholder_digest_budget = adjusted_budget
-            empty_session_all_placeholder_replay_batch = (
-                bool(empty_session_placeholder_ordinals)
-                and len(new_messages) > 1
-                and all(
-                    self._is_ignored_active_replay_placeholder(
-                        msg,
-                        text_content_for_pattern_matching(msg.get("content")) or "",
-                    )
-                    for msg in new_messages
-                )
-            )
-            for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
-                absolute_idx = cursor + offset
-                if absolute_idx in replayed_tool_segment_indexes:
-                    continue
-                if new_prefix_occurrences and absolute_idx in unchanged_prefix_occurrences:
-                    continue
-                replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
-                original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
-                volatile_placeholder = self._is_volatile_ignored_quarantine_placeholder(
-                    replay_msg,
-                    replay_text,
-                )
-                volatile_digest = self._active_replay_placeholder_digest(replay_text)
-                generated_volatile_placeholder = volatile_placeholder and (
-                    original_text != replay_text
-                    or (
-                        volatile_digest is not None
-                        and volatile_digest in self._load_generated_ignored_placeholder_hashes()
-                    )
-                )
-                active_replay_placeholder = self._is_ignored_active_replay_placeholder(replay_msg, replay_text)
-                active_replay_placeholder_digest = self._active_replay_placeholder_digest(replay_text)
-                if not active_replay_placeholder:
-                    replay_text_stripped = replay_text.strip()
-                    if (
-                        self._is_context_summary_content(replay_text)
-                        or replay_text_stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
-                        or replay_text_stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
-                    ):
-                        boundary_seen_synthetic_summary_before = True
-                compression_carried_active_placeholder = False
-                metadata_replayed_active_placeholder = False
-                if (
-                    empty_session_placeholder_budget
-                    and empty_session_placeholder_ordinals
-                    and active_replay_placeholder
-                    and active_replay_placeholder_digest is not None
-                ):
-                    empty_session_placeholder_seen[active_replay_placeholder_digest] = (
-                        empty_session_placeholder_seen.get(active_replay_placeholder_digest, 0) + 1
-                    )
-                    ordinal = empty_session_placeholder_seen[active_replay_placeholder_digest]
-                    remaining = empty_session_placeholder_budget.get(active_replay_placeholder_digest, 0)
-                    if (
-                        remaining > 0
-                        and ordinal in empty_session_placeholder_ordinals.get(
-                            active_replay_placeholder_digest,
-                            set(),
-                        )
-                        and (ordinal > 1 or empty_session_all_placeholder_replay_batch)
-                    ):
-                        metadata_replayed_active_placeholder = True
-                        if remaining == 1:
-                            empty_session_placeholder_budget.pop(active_replay_placeholder_digest, None)
-                        else:
-                            empty_session_placeholder_budget[active_replay_placeholder_digest] = remaining - 1
-                if (
-                    compression_boundary_ingest_pending
-                    and active_replay_placeholder
-                    and active_replay_placeholder_digest is not None
-                ):
-                    boundary_placeholder_seen[active_replay_placeholder_digest] = (
-                        boundary_placeholder_seen.get(active_replay_placeholder_digest, 0) + 1
-                    )
-                    current_placeholder_ordinal = boundary_placeholder_seen[active_replay_placeholder_digest]
-                    boundary_budget = self._compression_boundary_active_placeholder_digest_budget
-                    boundary_ordinals = self._compression_boundary_active_placeholder_digest_ordinals
-                    generated_message_ids = getattr(
-                        self,
-                        "_generated_ignored_active_replay_placeholder_message_ids",
-                        set(),
-                    )
-                    has_generated_provenance = (
-                        id(replay_msg) in generated_message_ids
-                        or id(original_msg) in generated_message_ids
-                    )
-                    ordinal_matches_generated = (
-                        current_placeholder_ordinal in boundary_ordinals.get(
-                            active_replay_placeholder_digest,
-                            set(),
-                        )
-                        and (
-                            current_placeholder_ordinal > 1
-                            or boundary_seen_synthetic_summary_before
-                            or boundary_all_placeholder_replay_batch
-                        )
-                    )
-                    if boundary_budget and (
-                        has_generated_provenance
-                        or (not has_generated_provenance and ordinal_matches_generated)
-                    ):
-                        remaining = boundary_budget.get(active_replay_placeholder_digest, 0)
-                        if remaining > 0:
-                            compression_carried_active_placeholder = True
-                            if remaining == 1:
-                                boundary_budget.pop(active_replay_placeholder_digest, None)
-                            else:
-                                boundary_budget[active_replay_placeholder_digest] = remaining - 1
-                replayed_active_placeholder = active_replay_placeholder and (
-                    self._is_cached_active_replay_message_at_index(absolute_idx, replay_msg)
-                    or compression_carried_active_placeholder
-                    or metadata_replayed_active_placeholder
-                )
-                if (
-                    ignored_original_messages[absolute_idx]
-                    or generated_volatile_placeholder
-                    or replayed_active_placeholder
-                ):
+            skipped_indexes = replayed_tool_segment_indexes
+            if new_prefix_occurrences:
+                skipped_indexes = skipped_indexes | unchanged_prefix_occurrences
+            for absolute_idx, drop, volatile_digest, original_text, replay_text in self._ingest_row_drop_decisions(
+                replay_messages=replay_messages, new_messages=new_messages, original_new_messages=original_new_messages,
+                cursor=cursor, compression_boundary_ingest_pending=compression_boundary_ingest_pending,
+                empty_session_placeholder_budget=empty_session_placeholder_budget,
+                empty_session_placeholder_ordinals=empty_session_placeholder_ordinals,
+                ignored_original_messages=ignored_original_messages, skipped_indexes=skipped_indexes,
+            ):
+                offset = absolute_idx - cursor
+                original_msg = original_new_messages[offset]
+                replay_msg = new_messages[offset]
+                if drop:
                     self._ignored_message_count += 1
-                    if generated_volatile_placeholder and volatile_digest is not None:
+                    if volatile_digest is not None:
                         self._remember_generated_ignored_placeholder_hash(volatile_digest)
                     replay_preserves_ignore_decision = (
                         self._is_volatile_ignored_quarantine_placeholder(replay_msg, replay_text)

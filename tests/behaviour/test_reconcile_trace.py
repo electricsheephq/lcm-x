@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.behaviour.reconcile_trace_harness import (
+    ATTEMPT_ATTRIBUTES,
     CACHE_ATTRIBUTES,
     GOLDEN,
     OBSERVED_ATTRIBUTES,
@@ -34,8 +35,9 @@ def test_reconcile_golden(case: Any, tmp_path: Path) -> None:
 
 def test_observed_attribute_inventory_is_complete() -> None:
     discovered = engine_attributes(Path(reconcile.__file__).read_text())
-    assert discovered <= OBSERVED_ATTRIBUTES | CACHE_ATTRIBUTES, (
-        f"Unobserved engine state: {sorted(discovered - OBSERVED_ATTRIBUTES - CACHE_ATTRIBUTES)}; "
+    unobserved = discovered - OBSERVED_ATTRIBUTES - CACHE_ATTRIBUTES - ATTEMPT_ATTRIBUTES
+    assert not unobserved, (
+        f"Unobserved engine state: {sorted(unobserved)}; "
         "update OBSERVED_ATTRIBUTES.\n" + TRACE_GUIDANCE)
     # Prove this guard is sensitive to new state used by a transitive helper,
     # independently of the frozen constant and without editing product source.

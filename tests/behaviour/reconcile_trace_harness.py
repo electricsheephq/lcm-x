@@ -73,6 +73,9 @@ CACHE_ATTRIBUTES = frozenset({
     "_replay_identity_memo",  # #2856 live identity memo: output-neutral by its own oracle and the session differential
     "_storage_ready",  # read only by the identity wrapper, to leave the memo off until storage is open
 })
+# Attempt-local receipt state is covered by the #1250 replay invariants. It
+# is reset at transaction entry and is not a durable or published observation.
+ATTEMPT_ATTRIBUTES = frozenset({"_reowned_receipt_ids", "_reowned_receipt_pairs"})
 Trace = list[str]
 Message = dict[str, Any]
 NOTE: Message = {"role": "system", "content": (
