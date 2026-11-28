@@ -82,9 +82,14 @@ bound to a recorded rotation predecessor, the check also includes rows from that
 compact a session from one window using the conversation ID that owns its rows. Use that same conversation when
 resuming the session (#1250).
 The returning session-id window treats validated receipt rows as its own for host UID recognition when enabled in mode `on`.
-Equal timestamps prove only the receipt's ordered prefix. In every UID mode, ingest re-stores the whole tool group,
-including its opening call, when the receipt or provisional proof leaves part of the group unproven.
+Equal timestamps prove only the receipt's ordered prefix. In every UID mode, a receipt or provisional proof can
+require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
 A new result may still join an unanswered call already owned by the receiving conversation.
+After a re-own, the returning conversation can store a new result without its gateway-owned call.
+The tested cases kept one such orphan across six cold restarts. Provider-facing assembly drops the orphan
+when its call is absent and emits a stable prefix on repeated assembly. The full result stayed in the store
+and recall recovered it after two more restarts. Compaction of the returning window's mixed view was refused
+because it included gateway-owned rows.
 Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
 provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
 an unstamped replay of the returning window's compacted view can still add a copy on each restart.

@@ -1664,7 +1664,7 @@ class IdentityAnchorMixin:
     ) -> bool:
         """An assistant tool-call segment is replayed whole or not at all, except a stored segment whose
         only new rows are trailing results resuming in place on its session's newest row.
-        Receipt rows and rows matched to a provisional owner by the rebind proof
+        Rows matched to a provisional owner by the rebind proof
         can resume only in their own conversation or with no recorded owner.
         ``proven`` rows (the audited prefix's positional replays) stay replayed.
         Return whether the provisional ownership check rejected a resume."""
@@ -1686,8 +1686,6 @@ class IdentityAnchorMixin:
                         if owner in provisional_owners:
                             rejected_provisional_resume = True
                             resumes = False
-                        else:
-                            resumes = int(last["store_id"]) not in self._reowned_receipt_store_ids()
                 if len(held) != end - index and not resumes:
                     hits.difference_update(k for k in range(index, end) if k not in proven)
                 index = end

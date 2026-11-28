@@ -459,9 +459,14 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   rotation predecessor, the check also includes rows from that predecessor chain. A `reowned_session_rows:<session>`
   receipt records the exact transferred store IDs for the original session-id binding. A returning session-id window treats
   validated receipt rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
-  and conflicting UID bindings can veto a pair in `shadow` and `on`. In every UID mode, ingest re-stores the whole tool group,
-  including its opening call, when the receipt or provisional proof leaves part of the group unproven.
+  and conflicting UID bindings can veto a pair in `shadow` and `on`. In every UID mode, a receipt or provisional proof
+  can require ingest to re-store a whole tool group, including its opening call, when it cannot prove a held result.
   A new result may still join an unanswered call already owned by the receiving conversation.
+  After a re-own, a new result can be stored in the returning conversation while its call stays with the gateway.
+  In the tested shapes, one such orphan stayed constant across six cold restarts. Provider-facing assembly drops
+  the result when its call is absent, and consecutive assemblies with the same rows emit the same prefix.
+  The full result remained in the session store and was retrievable by recall after two more restarts.
+  Compaction from the returning window refused the mixed view because it still included gateway-owned rows.
   Across six cold restarts, a returning window's own receipt-backed compacted replay added no rows. An unproven
   provisional suffix can still be re-stored on each restart where v0.30.4 does the same. After rollback to v0.30.4,
   an unstamped replay of the returning window's compacted view can still add a copy on each restart.

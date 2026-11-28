@@ -234,17 +234,20 @@ def test_receipt_trailing_call_and_new_result_form_one_bounded_copy(open_engine)
     _bind_gateway(gateway)
     gateway.compress(view, force=True)
     before = _rows(gateway)
+    assert before[-1]["conversation_id"] == GATEWAY
     assert gateway._store.read_metadata_json(REOWN_KEY) == [row["store_id"] for row in before]
     gateway.shutdown()
 
+    # Known limit: the new result stays under S while its call belongs to G.
     for stored in _cold_replay(open_engine, view + [result], 6):
+        assert len(stored) == 3
         assert stored[:len(before)] == before
-        assert [(row["conversation_id"], row["role"]) for row in stored[len(before):]] == [
-            (SESSION, "assistant"), (SESSION, "tool"),
-        ]
+        orphan = stored[-1]
+        assert (orphan["conversation_id"], orphan["role"], orphan["tool_call_id"]) == (SESSION, "tool", "trailing")
+        assert _digests(stored) == _digests(before + [result])
 
 
-def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=()):
+def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=(), earlier=(), stamp_result=True):
     call_ids = ("r17-first", "r17-second") if shape == "partial-results" else ("r17-first",)
     call = {"role": "assistant", "content": "", "tool_calls": [
         {"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}
@@ -254,8 +257,9 @@ def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=()):
         {"role": "tool", "content": f"Result for {call_id}.", "tool_call_id": call_id, "tool_name": "read"}
         for call_id in call_ids
     ]]
+    incoming = [*earlier, *incoming]
     if stamped:
-        for index, row in enumerate(incoming):
+        for index, row in enumerate(incoming if stamp_result else incoming[:-1]):
             row["timestamp"] = 100 + index
     if shape == "uid" and mode == "on":
         for index, row in enumerate(incoming):
@@ -283,8 +287,8 @@ def _measure_tool_resume(open_engine, shape, mode, stamped, *, follow_up=()):
 
     view = emitted + incoming
     proof, states = {}, []
-    # With a follow-up, measure the initial return and then six cold replays.
-    for pass_index in range(7 if follow_up else 6):
+    # The growth regressions measure the initial return and six cold replays.
+    for pass_index in range(7 if follow_up or earlier else 6):
         returning = open_engine(fresh_tail_count=0)
         (_bind_gateway if shape == "provisional" else _start)(returning)
         before = _rows(returning)
@@ -329,27 +333,23 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
     proof, states = _measure_tool_resume(open_engine, shape, mode, stamped)
     if shape in {"receipt", "partial-results"} and stamped:
-        assert proof["receipt_before_ingest"] == 1
+        assert proof["receipt_before_ingest"] == (3 if shape == "partial-results" else 2)
     if shape == "provisional" and stamped:
         assert proof["provisional_before_ingest"] == 1
-    if shape == "partial-results" and not stamped:
-        # Known limit: the unstamped second result stays orphaned on every pass.
-        assert [state["rows"] for state in states] == [4] * 6
+    if shape in {"receipt", "uid", "partial-results"}:
+        # Known limit: the new result stays orphaned under S on every pass.
+        assert [state["rows"] for state in states] == [4 if shape == "partial-results" else 3] * 6
         assert [state["orphans"] for state in states] == [1] * 6
         assert states[0]["writes"] == ["tool"]
         assert states[0]["owners"] == [SESSION]
-        assert states[0]["result_ids"] == ["r17-second"]
+        assert states[0]["result_ids"] == ["r17-second" if shape == "partial-results" else "r17-first"]
         assert not any(state["writes"] for state in states[1:])
         return
     assert not any(state["orphans"] for state in states)
-    expected = {
-        "control": ["tool"],
-        "partial-results": ["assistant", "tool", "tool"],
-        "provisional": ["user", "assistant", "tool"],
-    }.get(shape, ["assistant", "tool"])
+    expected = {"control": ["tool"], "provisional": ["user", "assistant", "tool"]}[shape]
     assert states[0]["writes"] == expected
     assert states[0]["owners"] == [GATEWAY if shape == "provisional" else SESSION] * len(expected)
-    assert states[0]["result_ids"] == (["r17-first", "r17-second"] if shape == "partial-results" else ["r17-first"])
+    assert states[0]["result_ids"] == ["r17-first"]
     assert not any(state["writes"] for state in states[1:])
 
 
@@ -368,6 +368,36 @@ def test_unstamped_partial_results_followed_by_turn_do_not_grow(open_engine, mon
     assert states[0]["writes"] == ["tool", "user", "assistant"]
     assert states[0]["owners"] == [SESSION] * 3
     assert states[0]["result_ids"] == ["r17-second"]
+    assert not any(state["writes"] for state in states[1:])
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+@pytest.mark.parametrize("finding", ["stamped-held-with-later-turn", "earlier-tool-group"])
+def test_reowned_result_with_another_turn_does_not_grow(open_engine, monkeypatch, mode, finding):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    if finding == "stamped-held-with-later-turn":
+        _, states = _measure_tool_resume(
+            open_engine, "partial-results", mode, True, follow_up=LATER[:2], stamp_result=False,
+        )
+        expected_writes, result_id = ["tool", "user", "assistant"], "r17-second"
+    else:
+        earlier = (
+            {"role": "user", "content": "Run the earlier tool check."},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "earlier", "type": "function", "function": {"name": "read", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "content": "Earlier result.", "tool_call_id": "earlier", "tool_name": "read"},
+        )
+        _, states = _measure_tool_resume(open_engine, "receipt", mode, False, earlier=earlier)
+        expected_writes, result_id = ["tool"], "r17-first"
+
+    # Known limit: the gateway owns the call and the returning window owns the result.
+    assert [state["rows"] for state in states] == [6] * 7
+    assert [state["orphans"] for state in states] == [1] * 7
+    assert states[0]["writes"] == expected_writes
+    assert states[0]["owners"] == [SESSION] * len(expected_writes)
+    assert states[0]["result_ids"] == [result_id]
     assert not any(state["writes"] for state in states[1:])
 
 
