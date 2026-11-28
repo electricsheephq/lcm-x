@@ -139,6 +139,51 @@ def test_receipt_claim_does_not_hide_pruned_tool_source(open_engine):
 
 
 @pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("proof", ["partial-stamp", "uid-call", "uid-result", "both-uid", "stamps"])
+def test_receipt_checks_tool_segment_after_combining_proofs(open_engine, proof):
+    call_id = "receipt-tool-call"
+    original = [dict(EARLY[0], timestamp=100), {
+        "role": "assistant", "content": "", "timestamp": 101,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+    }, {
+        "role": "tool", "content": "Original tool result.", "tool_call_id": call_id, "timestamp": 102,
+    }]
+    uid_indexes = {"uid-call": [1], "uid-result": [2], "both-uid": [1, 2]}.get(proof, [])
+    for index in uid_indexes:
+        original[index]["message_uid"] = f"receipt-tool-{index}"
+    _reown_then_append(open_engine, original)
+
+    raw = [dict(row) for row in original]
+    for index in uid_indexes:
+        raw[index].pop("timestamp")
+    if proof == "partial-stamp":
+        raw[2].pop("timestamp")
+        raw[2]["content"] = "New tool result."
+
+    resumed = open_engine(fresh_tail_count=0)
+    _start(resumed)
+    before = _rows(resumed)
+    if proof != "partial-stamp":
+        # A separate durable-tail matcher can also replay these bytes. Verify
+        # that the receipt itself can prove the group with both kinds of evidence.
+        assert resumed._cursor_from_reowned_session_rows(raw, before, len(before)) == (
+            len(raw), {index: row["store_id"] for index, row in enumerate(before[:len(raw)])},
+        )
+    resumed.ingest(raw)
+    after = _rows(resumed)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    if proof == "partial-stamp":
+        assert [(row["conversation_id"], row["role"]) for row in added] == [
+            (SESSION, "assistant"), (SESSION, "tool"),
+        ]
+        assert added[0]["tool_calls"][0]["id"] == added[1]["tool_call_id"] == call_id
+        assert added[1]["content"] == raw[2]["content"]
+    else:
+        assert added == []
+
+
+@pytest.mark.usefixtures("uid_lineage")
 @pytest.mark.parametrize("mixed, expected", [(True, [8, 9, 10, 11, 12]), (False, [6, 8, 10, 12, 14])],
                          ids=["mixed-replay", "same-uids-replay-plus-pair"])
 def test_receipt_uid_replay_matches_ga_sequence(open_engine, mixed, expected):

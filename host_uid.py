@@ -331,11 +331,12 @@ class HostUidShadowMixin:
             return source
 
     def _host_uid_resolve(self, messages, identities=None, *, excluded=(), prefix_only=False, fetched=None,
-                          bound_uids=None, held=None, avoid=(), reowned=()):
+                          bound_uids=None, held=None, avoid=(), reowned=(), defer_tool_segments=False):
         """Resolve durable occurrences and optionally report placeholder versions superseded by their source.
 
         The receipt replay and the session-id window's UID prefix and post-cursor resolves pass validated
         ``reowned`` IDs. Those rows must still belong to this session's lineage.
+        Receipt replay defers the tool segment check until it combines UID and stamp matches.
         """
         if not self._uid_recognition_enabled():
             return {}
@@ -384,7 +385,8 @@ class HostUidShadowMixin:
                         continue
                 if prefix_only:
                     break
-            if resolved and (identities is not None or prefix_only and len(resolved) < len(messages)):
+            if resolved and not defer_tool_segments and (
+                    identities is not None or prefix_only and len(resolved) < len(messages)):
                 visible = [i for i, m in enumerate(messages) if not self._matches_ignore_message_patterns(m)]
                 hits = {j for j, i in enumerate(visible) if i in resolved}
                 self._identity_anchor_tool_segments([messages[i] for i in visible], 0, hits,

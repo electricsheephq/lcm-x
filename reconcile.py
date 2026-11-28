@@ -3527,6 +3527,7 @@ class ReconcileMixin:
                         [message for message, drop in zip(host_messages, drops) if not drop],
                         identities=[message for message, drop in zip(messages, drops) if not drop],
                         reowned=reowned,
+                        defer_tool_segments=True,
                     )
         next_pos, paired_rows, stamp_claimed = 0, {}, set()
         visible = (index for index, drop in enumerate(drops) if not drop)
@@ -3566,9 +3567,9 @@ class ReconcileMixin:
                 break
             else:
                 break
-        if paired_rows and not recognition:
-            # Stamp-only replay must not consume the opening assistant of an
-            # unproven tool segment and leave only its results to be stored.
+        if paired_rows:
+            # Check the combined stamp and UID matches before advancing past
+            # the opening assistant of an unproven tool segment.
             hits = set(paired_rows)
             self._identity_anchor_tool_segments(messages, 0, hits, paired_rows)
             stop = min(paired_rows.keys() - hits, default=len(messages))
