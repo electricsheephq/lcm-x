@@ -1882,6 +1882,7 @@ class CompactionMixin:
         ``stage_compaction_publication``). ``before_publication(conn)`` (#787 promotion) re-validates first, in
         that transaction; it raises to reject."""
         before_commit = None
+        reowned_store_ids: list[int] = []
         if self._session_id and self._conversation_id:
             publication_session_id = self._session_id
             publication_conversation_id = self._conversation_id
@@ -1899,6 +1900,7 @@ class CompactionMixin:
                     filter_exclusion_proofs,
                     carried_ranges,
                     copy_exclusion_proofs=self._store_complete_copy_exclusion_proofs,
+                    reowned_store_ids=reowned_store_ids,
                     **({"copy_matches": self._store_complete_uid_copy_publication_match}
                        if uid_recognition_enabled(self) else {}),
                 )
@@ -1909,6 +1911,12 @@ class CompactionMixin:
             escalation_level=level or None,  # #441; 0 = placeholder, no model call
             model=model,
         )
+        if reowned_store_ids:
+            logger.info(
+                "LCM publication re-owned provisional rows: conversation=%s session=%s count=%d store_ids=%d-%d",
+                publication_conversation_id, publication_session_id, len(reowned_store_ids),
+                reowned_store_ids[0], reowned_store_ids[-1],
+            )
 
     def _leaf_consumption(self, selected_raw_chunk, compacted_chunk, sources, anchored_input, anchor_claims,
                           dependent_reply_message_ids):

@@ -7513,11 +7513,12 @@ class LCMEngine(
                 return False
         return True
 
-    def _durable_commit_proof_payload(self, session_id=None):
+    def _durable_commit_proof_payload(self, session_id=None, *, binding=None):
         local = self._compress_commit_proof
         if local and local.get("durable") is False and local.get("session_id") == (session_id or self._session_id):
             return None
-        payload = super()._durable_commit_proof_payload(session_id)
+        payload = (super()._durable_commit_proof_payload(session_id) if binding is None
+                   else super()._durable_commit_proof_payload(session_id, binding=binding))
         if payload is None:
             return None
         try:

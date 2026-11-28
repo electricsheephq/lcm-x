@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .aux_session import _DELEGATE_SOURCE
 from .db_bootstrap import (
     configure_connection,
     owned_conversation_clause,
@@ -986,6 +987,7 @@ class LifecycleStateStore:
         carried_ranges: list[tuple[str, int, int]] | None = None,
         copy_exclusion_proofs: dict[int, int] | None = None,
         copy_matches=None,
+        reowned_store_ids: list[int] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1039,17 +1041,15 @@ class LifecycleStateStore:
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs) + list(copy_proofs.values()))
         )
-        snapshot_rows = conn.execute(
-            """
+        snapshot_sql = """
             SELECT m.store_id, m.session_id, m.conversation_id, m.content, m.role,
                    m.tool_call_id, m.tool_calls, m.tool_name
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
             WHERE m.store_id = source.value
             ORDER BY m.store_id
-            """,
-            (str(snapshot_ids),),
-        ).fetchall()
+        """
+        snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         if (
             [int(row[0]) for row in snapshot_rows] != snapshot_ids
             or not all(row_is_owned(row) for row in snapshot_rows)
@@ -1057,6 +1057,31 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
+        reowned_ids = []
+        if conversation_id != session_id:
+            provisional_ids = [
+                int(row[0]) for row in snapshot_rows if row[1] == row[2] == session_id
+            ]
+            if provisional_ids:
+                reowned_ids = sorted(int(row[0]) for row in conn.execute(
+                    """
+                    UPDATE messages SET conversation_id = ?
+                    WHERE session_id = ? AND conversation_id = ?
+                      AND COALESCE(source, '') != ?
+                      AND store_id IN (SELECT value FROM json_each(?))
+                      AND store_id NOT IN (
+                          SELECT source.value
+                          FROM summary_nodes AS node, json_each(node.source_ids) AS source
+                          WHERE node.source_type = 'messages' AND node.node_id != ?
+                            AND source.value IN (SELECT value FROM json_each(?))
+                      )
+                    RETURNING store_id
+                    """,
+                    (conversation_id, session_id, session_id, _DELEGATE_SOURCE,
+                     str(provisional_ids), publication_node_id, str(provisional_ids)),
+                ).fetchall())
+                if reowned_ids:
+                    snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
@@ -1164,4 +1189,24 @@ class LifecycleStateStore:
             session_id,
             covered_end,
         )
+        if reowned_ids:
+            # Preserve the provisional frontier for its old nodes without leaving S current
+            # twice. A stale engine can still write new provisional rows for a later leaf.
+            now = time.time()
+            conn.execute(
+                """
+                UPDATE lcm_lifecycle_state
+                SET current_session_id = NULL, current_frontier_store_id = 0,
+                    last_finalized_session_id = :sid, last_finalized_at = :now, updated_at = :now,
+                    last_finalized_frontier_store_id = CASE
+                        WHEN last_finalized_session_id = :sid
+                         AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
+                        THEN MAX(current_frontier_store_id, last_finalized_frontier_store_id)
+                        ELSE current_frontier_store_id END
+                WHERE conversation_id = :sid AND current_session_id = :sid
+                """,
+                {"sid": session_id, "now": now},
+            )
+        if reowned_store_ids is not None:
+            reowned_store_ids[:] = reowned_ids
         return covered_end
