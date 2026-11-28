@@ -21,7 +21,9 @@ from hermes_lcm.engine_registry import (
     ActiveEngineUseStatus, use_active_lcm_engine, use_cold_lcm_engine, use_lcm_engine,
 )
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError, reowned_session_rows_key
+from hermes_lcm.tokens import count_messages_tokens
 from hermes_lcm.tools import lcm_grep
+from tests.test_issue_671_stub_first_exit import payload_of, tool_content, tool_pair
 
 SESSION = "S-1250"
 GATEWAY = "agent:main:local:dm:S-1250"
@@ -289,7 +291,8 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
 
 @pytest.mark.parametrize("finalize_before_conflict", [False, True], ids=["keep-armed", "arm-after-end"])
 def test_second_window_stall_backs_off_after_gateway_ends(open_engine, summary_calls, finalize_before_conflict):
-    writer, gateway = open_engine(), open_engine()
+    writer = open_engine(large_output_active_replay_stubbing_enabled=False)
+    gateway = open_engine()
     writer.on_session_start(SESSION, platform="gui", context_length=200_000)
     writer.ingest(list(EARLY))
     _bind_gateway(gateway)
@@ -315,6 +318,54 @@ def test_second_window_stall_backs_off_after_gateway_ends(open_engine, summary_c
         "error", "session_owned_by_other_window", threshold, 0,
     )
     assert _rows(writer) == before
+
+
+def test_second_window_backoff_allows_stub_exit_and_pre_leaf_condensation(open_engine, monkeypatch):
+    writer = open_engine(
+        large_output_externalization_threshold_chars=1_000_000,
+        leaf_chunk_tokens=250,
+        summary_prefix_target_tokens=100,
+    )
+    gateway = open_engine()
+    writer.on_session_start(SESSION, platform="gui", context_length=200_000)
+    writer.ingest(list(EARLY))
+    _bind_gateway(gateway)
+    gateway.ingest(EARLY + LATER)
+    first = _publish(gateway, EARLY + LATER)
+    later = _add_turn(gateway, first, 0)
+    _publish(gateway, later)
+
+    leaf_calls = []
+    summarize_leaf = writer._summarize_leaf_chunk_with_rescue
+
+    def count_leaf(*args, **kwargs):
+        leaf_calls.append(None)
+        return summarize_leaf(*args, **kwargs)
+
+    monkeypatch.setattr(writer, "_summarize_leaf_chunk_with_rescue", count_leaf)
+    writer.threshold_tokens = 3_500
+    host = list(EARLY) + [{"role": "user", "content": "Read the tool fixture."}]
+    host += tool_pair("threshold-tool", payload_of(6_000, "threshold"))
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(leaf_calls) == 1
+
+    host += [{"role": "user", "content": "The tool output is now outside the fresh tail."}]
+    host = writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer._last_threshold_full_sweep["stop_reason"] == "stub_first_exit"
+    assert tool_content(host, "threshold-tool").startswith("[Externalized tool output:")
+    assert writer._session_owner_backoff is not None
+
+    # Give the already published summaries their own sweep budget.
+    writer._config.summary_prefix_target_tokens = 1
+    host += [{"role": "user", "content": payload_of(3_600, "new threshold turn")}]
+    expected = _digests(_rows(writer)) + _digests(host[-1:])
+    writer.compress(host, current_tokens=count_messages_tokens(host))
+    assert writer._last_threshold_full_sweep["pre_leaf_condensation_passes"] == 1
+    assert writer._last_threshold_full_sweep["condensation_passes"] == 1
+    assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+    assert len(leaf_calls) == 1
+    assert _digests(_rows(writer)) == expected
 
 
 @pytest.mark.parametrize("next_pass_overflow,claim_late", [

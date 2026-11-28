@@ -454,9 +454,10 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   4. At P1 this is a no-op: legacy `host_uid_bindings` retains its own key. Canonical uid/revision merging moves to P2.
   5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Lineage merge leaves message ownership unchanged.
 - **Publication ownership (#1250).** A gateway leaf can take ownership of a session's own eligible provisional rows in the same
-  transaction as the leaf and frontier. A `reowned_session_rows:<session>` receipt in metadata records the exact
-  transferred store IDs for the original session-id binding. A returning session-id window treats validated receipt
-  rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
+  transaction as the leaf and frontier. Any non-delegate window can get `session_owned_by_other_window` when all conflicting
+  rows belong to the session and one other conversation with a lifecycle record owns them. A `reowned_session_rows:<session>`
+  receipt records the exact transferred store IDs for the original session-id binding. A returning session-id window treats
+  validated receipt rows as its own for host UID recognition when enabled in mode `on`. Equal timestamps prove only the receipt's ordered prefix,
   and conflicting UID bindings can veto a pair in `shadow` and `on`. In `off` and `shadow` (the default), ordinary
   ingest stores rows it cannot recognize after the receipt's first break under the session ID. Measured against v0.30.4
   across six cold restarts, that excess stays constant.

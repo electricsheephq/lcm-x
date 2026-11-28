@@ -76,10 +76,10 @@ to its parent session.
 
 ## Compaction commits
 
-When another conversation owns rows in this session, the session-id window can see
-`session_owned_by_other_window` in status and an observation in doctor. This also applies when the window still
-uses a recorded compression predecessor as its conversation ID. Until v0.31.0, compact a session from one
-window using the conversation ID that owns its rows. Use that same conversation when resuming the session (#1250).
+Any non-delegate window can see `session_owned_by_other_window` in status and an observation in doctor when all
+conflicting rows belong to the session and one other conversation with a lifecycle record owns them. Until v0.31.0,
+compact a session from one window using the conversation ID that owns its rows. Use that same conversation when
+resuming the session (#1250).
 The returning session-id window treats validated receipt rows as its own for host UID recognition when enabled in mode `on`.
 Equal timestamps prove only the receipt's ordered prefix. In `off` and `shadow` (the default), ordinary ingest
 stores rows it cannot recognize after the receipt's first break under the session ID. Measured against v0.30.4

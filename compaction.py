@@ -2922,18 +2922,6 @@ class CompactionMixin:
                 "stop_reason": "",
                 "budget_exhausted": False,
             }
-        # Keep ingest and the usual refusal fallback; a saved list could omit newly arrived turns.
-        if state.recovery_assembly_cap is None and (
-            conflict := self._other_window_publication_backoff(state.working_messages)
-        ) is not None:
-            return "return", self._fail_open_after_publication_failure(
-                state.working_messages,
-                conflict,
-                compress_started=state._compress_started,
-                threshold_full_sweep_active=state.threshold_full_sweep_active,
-                recovery_assembly_cap=None,
-                leaf_passes=0,
-            )
         # #671: an automatic threshold pass (the #651 candidate; never a recovery attempt) first tries the free
         # cuts: no leaf, no condensation, no model call when they reach the target.
         if self._no_progress_candidate and not recovery_attempt:
@@ -4335,6 +4323,11 @@ class CompactionMixin:
             return result
         working_messages = state.working_messages
         ingest_cleanup_changed_active_context = state.ingest_cleanup_changed_active_context
+        # Recheck on the ingested view even if the stub-first exit takes the pass.
+        other_window_conflict = (
+            self._other_window_publication_backoff(working_messages)
+            if recovery_assembly_cap is None else None
+        )
         action, result = self._prepare_compression_sweep(state, messages, force, recovery_attempt)
         if action == "return":
             return result
@@ -4388,6 +4381,17 @@ class CompactionMixin:
         action, result = self._condense_before_leaves(state, focus_topic)
         if action == "return":
             return result
+        # Back off the conflicting leaf after the independent stub and condensation work.
+        if other_window_conflict is not None:
+            return self._fail_open_after_publication_failure(
+                working_messages,
+                other_window_conflict,
+                compress_started=_compress_started,
+                threshold_full_sweep_active=threshold_full_sweep_active,
+                recovery_assembly_cap=recovery_assembly_cap,
+                leaf_passes=0,
+                condensation_passes=state.pre_leaf_condensation_passes,
+            )
         pre_leaf_condensation_passes = state.pre_leaf_condensation_passes
         pre_leaf_condensation_reason = state.pre_leaf_condensation_reason
         max_leaf_passes = state.max_leaf_passes
