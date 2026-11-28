@@ -218,7 +218,7 @@ def summary_calls(open_engine, monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("followup", ["owner-changed", "start", "reset", "overflow", "cleanup", "hold"])
+@pytest.mark.parametrize("followup", ["owner-changed", "owner-state-removed", "start", "reset", "overflow", "cleanup", "hold"])
 def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, caplog, monkeypatch, followup):
     writer, gateway = open_engine(), open_engine()
     writer.on_session_start(SESSION, platform="gui", context_length=200_000)
@@ -262,6 +262,11 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
                 "UPDATE messages SET conversation_id = ? WHERE session_id = ?", ("new-owner", SESSION),
             )
         before = _rows(writer)
+    elif followup == "owner-state-removed":
+        with writer._store.atomic(immediate=True):
+            writer._store.connection.execute(
+                "DELETE FROM lcm_lifecycle_state WHERE conversation_id = ?", (GATEWAY,),
+            )
     elif followup == "start":
         writer.on_session_start(SESSION, conversation_id=SESSION, platform="gui", context_length=200_000)
     elif followup == "reset":
@@ -277,8 +282,9 @@ def test_second_window_stall_reuses_replay_fallback(open_engine, summary_calls, 
     writer.compress(list(fallback), force=True)
     assert len(summary_calls) > call_count
     assert _rows(writer) == before
-    if followup == "owner-changed":
-        assert writer._session_owner_backoff[2] == "new-owner"
+    if followup in {"owner-changed", "owner-state-removed"}:
+        assert writer._session_owner_backoff is None
+        assert writer.last_compression_noop_reason == "summary publication could not prove contiguous source coverage"
 
 
 @pytest.mark.parametrize("finalize_before_conflict", [False, True], ids=["keep-armed", "arm-after-end"])

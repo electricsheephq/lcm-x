@@ -452,8 +452,8 @@ A tail exists because the store hit SQLite busy at session end. The ledger is in
   2. At P1, pair kept P and L bindings by equal non-NULL stamp and identity_digest, consuming L matches once in P ordinal order. Keep both stored rows and write `possible_replay_of` from P's copy to L's. Unstamped digest twins get no relation and are counted.
   3. Give each distinct non-NULL P ordinal a fresh ordinal after L's max, in P's order; occ_ids, refs and relations are unchanged, so UNIQUE (lineage, ordinal) holds. Re-key bindings, observations, emissions and vectors; keep the newest two vectors per kind. view_seq is store-global, so P's newest becomes L's cursor when it is newer.
   4. At P1 this is a no-op: legacy `host_uid_bindings` retains its own key. Canonical uid/revision merging moves to P2.
-  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record).
-- **Publication ownership (#1250).** A gateway leaf can take ownership of eligible provisional rows in the same
+  5. Keep L's max_store_id (P1g re-scans once), coalesce L's legacy_proof_digest and max_leaf_id with P's, and keep stamp_unreliable if either side has it. Merge emission_recovered by numeric maximum and record `ledger_meta['adopted_from:' + P] = L` (the #1520 record). Lineage merge leaves message ownership unchanged.
+- **Publication ownership (#1250).** A gateway leaf can take ownership of a session's own eligible provisional rows in the same
   transaction as the leaf and frontier. A `reowned_session_rows:<session>` receipt in metadata records the exact
   transferred store IDs for the original session-id binding. A returning window uses the receipt to recognize its
   ordered replay and store the new suffix under the conversation ID the host requested.

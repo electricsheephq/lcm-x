@@ -212,6 +212,75 @@ def test_replay_receipt_skips_ignored_host_message(open_engine, monkeypatch):
     _step(resumed, "raw replay with heartbeat", raw + new, lambda: resumed.ingest(raw + new), new)
     assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
     assert resumed._last_ingest_reconciliation["cursor"] == len(raw)
+    assert resumed._last_ingest_reconciliation["effective_incoming"] == len(EARLY) + len(new)
+
+
+@pytest.mark.parametrize("stored_stamp, incoming_stamp", [(None, None), (100, None), (None, 100), (100, 100)])
+def test_singleton_replay_receipt_needs_occurrence_proof(open_engine, stored_stamp, incoming_stamp):
+    writer, gateway = open_engine(), open_engine()
+    _start(writer)
+    original = dict(EARLY[0], timestamp=stored_stamp)
+    writer.ingest([original])
+    _bind_gateway(gateway)
+    full = [original, *LATER]
+    gateway.ingest(full)
+    gateway.compress(full)
+    assert gateway.last_compression_status == "compacted"
+    assert gateway._store.read_metadata_json(REOWN_KEY) == [_rows(writer)[0]["store_id"]]
+
+    resumed = open_engine()
+    _start(resumed)
+    repeat = dict(original, timestamp=incoming_stamp)
+    is_replay = stored_stamp is not None and stored_stamp == incoming_stamp
+    _step(resumed, "singleton replay", [repeat], lambda: resumed.ingest([repeat]), [] if is_replay else [repeat])
+    if is_replay:
+        assert resumed._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
+
+
+def test_receipt_replay_keeps_new_message_matching_only_after_redaction(open_engine, monkeypatch):
+    if message_patterns._regex_engine is None:
+        monkeypatch.setattr(message_patterns, "_regex_engine", _FakeTimeoutRegexEngine)
+    _, gateway, _ = _mixed(open_engine, sequential=True)
+    new = {"role": "user", "content": "api_key=sk-synthetic...test needs redaction"}
+    resumed = open_engine(
+        ignore_message_patterns=[r"\[LCM sensitive redaction:"],
+        sensitive_patterns_enabled=True, sensitive_patterns=["api_key"],
+    )
+    _start(resumed)
+    redacted = resumed._redact_active_replay_messages([new])[0]
+    assert redacted != new
+    assert not resumed._matches_ignore_message_patterns(new)
+    assert resumed._matches_ignore_message_patterns(redacted)
+    raw = EARLY[:2] + [new] + EARLY[2:]
+    before = _rows(gateway)
+    resumed.ingest(raw)
+    after = _rows(resumed)
+    assert after[:len(before)] == before
+    assert [row["content"] for row in after[len(before):]].count(redacted["content"]) == 1
+
+
+def test_receipt_replay_skips_cached_active_placeholder(open_engine, monkeypatch):
+    if message_patterns._regex_engine is None:
+        monkeypatch.setattr(message_patterns, "_regex_engine", _FakeTimeoutRegexEngine)
+    config = {"ignore_message_patterns": ["^HEARTBEAT"]}
+    writer, gateway = open_engine(**config), open_engine(**config)
+    _start(writer)
+    ignored = {"role": "user", "content": "HEARTBEAT ignored in active replay"}
+    raw = EARLY[:2] + [ignored] + EARLY[2:]
+    writer.ingest(raw)
+    replay = list(writer._last_active_replay_messages)
+    assert replay[2]["content"].startswith("[LCM active replay placeholder: message ignored;")
+    _bind_gateway(gateway)
+    gateway.ingest(raw + LATER)
+    gateway.compress(raw + LATER)
+    assert gateway.last_compression_status == "compacted"
+
+    writer._schedule_ingest_cursor_reconciliation()
+    new = {"role": "user", "content": "New message following the active replay."}
+    _step(writer, "active placeholder replay", replay + [new], lambda: writer.ingest(replay + [new]), [new])
+    assert writer._last_ingest_reconciliation["reason"] == "replayed re-owned session rows"
+    assert writer._last_ingest_reconciliation["cursor"] == len(replay)
+    assert writer._last_ingest_reconciliation["effective_incoming"] == len(EARLY) + 1
 
 
 def test_replay_receipt_stops_at_unmatched_host_message(open_engine):
@@ -232,16 +301,20 @@ def test_short_view_skips_full_receipt_scan(open_engine, monkeypatch):
     assert writer._cursor_from_reowned_session_rows(EARLY[:2], stored[-1:], len(stored)) == 0
 
 
-def test_malformed_replay_receipt_does_not_prevent_reownership(open_engine):
+@pytest.mark.parametrize("prior, retained", [
+    ('malformed', []), ('"scalar"', []), ('{"foreign": 999}', []), ('999', []),
+    ('[999, "unusable", 1.5, true, null, {}]', [999]),
+])
+def test_malformed_replay_receipt_does_not_prevent_reownership(open_engine, prior, retained):
     writer, gateway = open_engine(), open_engine()
     _start(writer)
     writer.ingest(list(EARLY))
     before = _rows(writer)
-    writer._store.write_metadata_json([REOWN_KEY], "malformed")
+    writer._store.write_metadata_json([REOWN_KEY], prior)
     _bind_gateway(gateway)
     full = EARLY + LATER
     _step(gateway, "gateway ingest", full, lambda: gateway.ingest(full), LATER)
     _step(gateway, "gateway publishes with malformed receipt", full, lambda: gateway.compress(full), may_reown=True)
     assert gateway.last_compression_status == "compacted"
-    assert sorted(gateway._store.read_metadata_json(REOWN_KEY)) == [row["store_id"] for row in before]
+    assert sorted(gateway._store.read_metadata_json(REOWN_KEY)) == [row["store_id"] for row in before] + retained
     assert all(row["conversation_id"] == GATEWAY for row in _rows(gateway))

@@ -77,8 +77,8 @@ to its parent session.
 ## Compaction commits
 
 When another conversation owns rows in this session, compaction can refuse with
-`session_owned_by_other_window` in status and an observation in doctor. Keep only one window compacting a session
-until v0.31.0 (#1250).
+`session_owned_by_other_window` in status and an observation in doctor. Until v0.31.0, compact a session from one
+window using the conversation ID that owns its rows. Use that same conversation when resuming the session (#1250).
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 

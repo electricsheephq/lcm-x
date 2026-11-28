@@ -1131,9 +1131,11 @@ class LifecycleStateStore:
                         conn.execute(
                             """
                             INSERT INTO metadata (key, value) VALUES (?, ?)
-                            ON CONFLICT(key) DO UPDATE SET value = CASE WHEN json_valid(metadata.value) THEN (
+                            ON CONFLICT(key) DO UPDATE SET value = CASE WHEN
+                                json_type(CASE WHEN json_valid(metadata.value) THEN metadata.value END) = 'array'
+                            THEN (
                                 SELECT json_group_array(value) FROM (
-                                    SELECT value FROM json_each(metadata.value)
+                                    SELECT value FROM json_each(metadata.value) WHERE type = 'integer'
                                     UNION SELECT value FROM json_each(excluded.value)
                                 )
                             ) ELSE excluded.value END
@@ -1147,9 +1149,12 @@ class LifecycleStateStore:
                 owners = {row[2] for row in offending}
                 if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
                     other_conversation_id, = owners
-                    raise LifecycleOtherWindowConflictError(
-                        other_conversation_id, frozenset(int(row[0]) for row in offending),
-                    )
+                    if conn.execute(
+                        "SELECT 1 FROM lcm_lifecycle_state WHERE conversation_id = ?", (other_conversation_id,),
+                    ).fetchone():
+                        raise LifecycleOtherWindowConflictError(
+                            other_conversation_id, frozenset(int(row[0]) for row in offending),
+                        )
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )

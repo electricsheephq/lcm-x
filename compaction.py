@@ -2104,7 +2104,9 @@ class CompactionMixin:
                     mapped = store_ids.intersection(self._get_store_id_map_for_messages(working_messages).values())
                     if mapped and self._store.connection.execute(
                         "SELECT 1 FROM json_each(?) AS source CROSS JOIN messages AS m "
-                        "WHERE m.store_id = source.value AND m.session_id = ? AND m.conversation_id = ? LIMIT 1",
+                        "WHERE m.store_id = source.value AND m.session_id = ? AND m.conversation_id = ? "
+                        "AND EXISTS (SELECT 1 FROM lcm_lifecycle_state WHERE conversation_id = m.conversation_id) "
+                        "LIMIT 1",
                         (json.dumps(sorted(mapped)), session, other_conversation),
                     ).fetchone():
                         return LifecycleOtherWindowConflictError(other_conversation, store_ids)
