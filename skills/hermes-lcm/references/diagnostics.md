@@ -75,8 +75,8 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 - `/lcm status` can report `last_compression_failure_reason: session_owned_by_other_window`. The
   `last_compression_noop_reason` and the `/lcm doctor` compaction observation explain that another conversation
   owns the rows this window tried to summarize. Keep only one window compacting a session until v0.31.0 (#1250).
-- `two_window_replay_copies` counts possible copies in sessions shared by multiple windows. The `lcm_doctor`
-  result includes total rows and affected sessions, with up to 20 session IDs and 50 store IDs per session.
+- `two_window_replay_copies` counts unstamped repeats and exact stamped copies in sessions shared by multiple windows.
+  The `lcm_doctor` detail includes `unstamped`, `stamped_exact`, total rows, and affected sessions, with up to 20 session IDs and 50 store IDs per session.
   Genuine repeated messages without a stamp or host UID can also be counted. See the v0.30.5 known issue
   in [Session lifecycle](session-lifecycle.md).
   The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.

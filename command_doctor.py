@@ -19,9 +19,9 @@ TWO_WINDOW_REPLAY_SCAN_LIMIT = 20_000
 
 
 def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
-    """Report possible unstamped replay copies without changing the store."""
+    """Report unstamped repeats and exact stamped copies without changing the store."""
     check = "two_window_replay_copies"
-    row_count = session_count = rows_scanned = 0
+    unstamped_count = stamped_exact_count = session_count = rows_scanned = 0
     sessions = []
     try:
         store = engine._store
@@ -56,6 +56,7 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
                 if remaining <= 0:
                     break
                 seen: set[bytes] = set()
+                seen_stamped: set[tuple[bytes, float]] = set()
                 count = 0
                 store_ids = []
                 # Select the newest IDs first, then stream their rows in replay order.
@@ -69,24 +70,34 @@ def two_window_replay_copies_check(engine: Any) -> dict[str, Any]:
                     row = store._row_to_dict(record)
                     identity = engine._message_replay_identity(row, stored_row=True, store=store, session_id=session_id)
                     digest = sha256(repr(identity).encode("utf-8")).digest()
-                    if record[-1] and digest in seen:
+                    stamp = row["observed_at"]
+                    unstamped_copy = bool(record[-1]) and digest in seen
+                    stamped_copy = stamp is not None and (digest, stamp) in seen_stamped
+                    if unstamped_copy or stamped_copy:
                         count += 1
+                        unstamped_count += unstamped_copy
+                        stamped_exact_count += stamped_copy
                         if len(sessions) < 20 and len(store_ids) < 50:
                             store_ids.append(row["store_id"])
                     seen.add(digest)
+                    if stamp is not None:
+                        seen_stamped.add((digest, stamp))
                 if count:
-                    row_count += count
                     session_count += 1
                     if len(sessions) < 20:
                         sessions.append({"session_id": session_id, "store_ids": store_ids})
     except Exception as exc:
         return {"check": check, "status": "fail", "detail": {"error": str(exc)}}
 
-    detail: dict[str, Any] = {"row_count": row_count, "session_count": session_count, "sessions": sessions}
+    row_count = unstamped_count + stamped_exact_count
+    detail: dict[str, Any] = {
+        "row_count": row_count, "unstamped": unstamped_count, "stamped_exact": stamped_exact_count,
+        "session_count": session_count, "sessions": sessions,
+    }
     if row_count:
         detail["message"] = (
-            "These are possible copies stored again on a cold restart while two windows shared a session "
-            "with unstamped rows. A genuine new message that repeats earlier text without a stamp can also "
+            "This counts unstamped repeats and exact stamped copies in sessions shared by two windows. "
+            "A genuine new message that repeats earlier text without a stamp can also "
             "be counted. See skills/hermes-lcm/references/session-lifecycle.md."
         )
     if rows_scanned < rows_in_scope:

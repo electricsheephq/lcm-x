@@ -99,7 +99,7 @@ an unstamped replay of the returning window's compacted view can still add a cop
 **v0.30.5 known issue (#1250).** When two windows share a session, cold replays can store unstamped rows
 again, one copy per unstamped retained or later row. The short-tail probes measured 1 to 6 extra rows per
 cold restart with no loss. Keep one window per session until v0.31.0.
-The `two_window_replay_copies` doctor check counts possible unstamped copies. A genuine new message that repeats
+The `two_window_replay_copies` doctor check counts unstamped repeats and exact stamped copies. A genuine new message that repeats
 earlier text without a stamp or host UID can also be counted.
 The check scans at most the newest 20,000 in-scope rows and reports a partial count past that limit.
 

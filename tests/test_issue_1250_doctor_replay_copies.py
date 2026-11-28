@@ -2,6 +2,7 @@
 
 from contextlib import closing, contextmanager
 from copy import deepcopy
+from itertools import accumulate
 import json
 import sqlite3
 from time import perf_counter
@@ -112,7 +113,7 @@ def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass, stor
             gateway.ingest(deepcopy(view))
         assert two_window_replay_copies_check(gateway)["status"] == "pass"
 
-    counts, extras, scan_ms = [], [], []
+    counts, extras, counted_ids, scan_ms = [], [], [], []
     for cold_pass, expected_stored in enumerate(stored_per_pass, start=1):
         with cold_engine(G, fresh=1) as gateway:
             before = stored(gateway)
@@ -128,16 +129,18 @@ def test_cold_replay_count(cold_engine, monkeypatch, mode, shape, per_pass, stor
             detail = check["detail"]
             counts.append(detail["row_count"])
             extras.append(len(added))
-            # The first two passes also copy stamped rows outside the doctor's count.
             assert len(added) == expected_stored
             assert len(unstamped_ids) == per_pass
-            assert detail["row_count"] == cold_pass * per_pass
+            assert detail["row_count"] == sum(extras)
+            assert detail["unstamped"] == cold_pass * per_pass
+            assert detail["stamped_exact"] == sum(extras) - cold_pass * per_pass
             assert "partial" not in detail
             assert detail["session_count"] == 1
             sample, = detail["sessions"]
             assert sample["session_id"] == S
-            assert sample["store_ids"][-per_pass:] == unstamped_ids
-    print(f"{shape}/{mode}: count={counts}; extra={extras}")
+            counted_ids.extend(row["store_id"] for row in added)
+            assert sample["store_ids"] == counted_ids
+    print(f"{shape}/{mode}: doctor={counts}; cumulative_extra={list(accumulate(extras))}")
     print(f"{shape}/{mode}: scan_ms={[round(elapsed, 3) for elapsed in scan_ms]}")
 
 
@@ -179,7 +182,9 @@ def test_receipt_orphan(cold_engine):
 
 
 def empty_check():
-    return {"check": CHECK, "status": "pass", "detail": {"row_count": 0, "session_count": 0, "sessions": []}}
+    return {"check": CHECK, "status": "pass", "detail": {
+        "row_count": 0, "unstamped": 0, "stamped_exact": 0, "session_count": 0, "sessions": [],
+    }}
 
 
 def insert_rows(engine, rows):
@@ -206,7 +211,23 @@ def test_genuine_unstamped_repeat(cold_engine):
         check = two_window_replay_copies_check(second)
         assert check["status"] == "warn"
         assert check["detail"]["row_count"] == 1
+        assert check["detail"]["unstamped"] == 1
+        assert check["detail"]["stamped_exact"] == 0
         assert check["detail"]["sessions"] == [{"session_id": S, "store_ids": [repeated[-1]["store_id"]]}]
+
+
+@pytest.mark.parametrize("second_stamp", (100, 101), ids=("exact", "different"))
+def test_two_window_stamped_repeat(tmp_path, second_stamp):
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        insert_rows(engine, [(S, S, "Repeated", 100), (S, G, "Repeated", second_stamp)])
+        check = two_window_replay_copies_check(engine)
+        if second_stamp == 100:
+            assert check["status"] == "warn"
+            detail = check["detail"]
+            assert (detail["row_count"], detail["unstamped"], detail["stamped_exact"]) == (1, 0, 1)
+            assert detail["sessions"] == [{"session_id": S, "store_ids": [2]}]
+        else:
+            assert check == empty_check()
 
 
 @pytest.mark.parametrize("evidence", ("distinct", "stamp", "uid"))
@@ -260,6 +281,7 @@ def test_newest_rows_budget(tmp_path, total_rows):
         assert detail["rows_scanned"] == 20_000
         assert detail["rows_in_scope"] == total_rows
         assert detail["row_count"] == 1
+        assert (detail["unstamped"], detail["stamped_exact"]) == (1, 0)
         assert detail["sessions"] == [{"session_id": S, "store_ids": [total_rows]}]
         assert "newest rows only and is a lower bound" in detail["message"]
         if total_rows == 200_000:
@@ -306,6 +328,7 @@ def test_doctor_output_and_caps(tmp_path):
         assert check["status"] == "warn"
         detail = check["detail"]
         assert (detail["row_count"], detail["session_count"]) == (21 * 51, 21)
+        assert (detail["unstamped"], detail["stamped_exact"]) == (21 * 51, 0)
         assert detail["sessions"] == [
             {"session_id": f"s-{i:02d}", "store_ids": list(range(i * 52 + 2, i * 52 + 52))}
             for i in range(20)

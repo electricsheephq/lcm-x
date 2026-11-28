@@ -480,7 +480,7 @@ def test_doctor_json(
     checks.insert(lifecycle + 1, {
         "check": "two_window_replay_copies",
         "status": "pass",
-        "detail": {"row_count": 0, "session_count": 0, "sessions": []},
+        "detail": {"row_count": 0, "unstamped": 0, "stamped_exact": 0, "session_count": 0, "sessions": []},
     })
     with doctor_engine(tmp_path, case, monkeypatch) as engine:
         identity = observe_identity(engine, monkeypatch)
