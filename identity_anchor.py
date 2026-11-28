@@ -1659,11 +1659,16 @@ class IdentityAnchorMixin:
             group.append(options[0])
         return group
 
-    def _identity_anchor_tool_segments(self, messages, cursor: int, hits: set, matched, proven=()) -> None:
+    def _identity_anchor_tool_segments(
+        self, messages, cursor: int, hits: set, matched, proven=(), *, provisional_owners=(),
+    ) -> bool:
         """An assistant tool-call segment is replayed whole or not at all, except a stored segment whose
         only new rows are trailing results resuming in place on its session's newest row.
-        A receipt row can resume only in its own conversation or with no recorded owner.
-        ``proven`` rows (the audited prefix's positional replays) stay replayed."""
+        Receipt rows and rows matched to a provisional owner by the rebind proof
+        can resume only in their own conversation or with no recorded owner.
+        ``proven`` rows (the audited prefix's positional replays) stay replayed.
+        Return whether the provisional ownership check rejected a resume."""
+        rejected_provisional_resume = False
         index, n = max(cursor, 0), len(messages)
         while index < n:
             if str(messages[index].get("role") or "") == "assistant" and messages[index].get("tool_calls"):
@@ -1676,15 +1681,19 @@ class IdentityAnchorMixin:
                     last = max((row for k in held for row in matched.get(k, ())), key=lambda r: int(r["store_id"]),
                                default=None)
                     tail = self._store.get_session_tail(str(last["session_id"]), limit=1) if last else None
-                    resumes = bool(tail) and int(tail[-1]["store_id"]) == int(last["store_id"]) and (
-                        tail[-1].get("conversation_id") in (None, "", self._conversation_id)
-                        or int(last["store_id"]) not in self._reowned_receipt_store_ids()
-                    )
+                    resumes = bool(tail) and int(tail[-1]["store_id"]) == int(last["store_id"])
+                    if resumes and (owner := tail[-1].get("conversation_id")) not in (None, "", self._conversation_id):
+                        if owner in provisional_owners:
+                            rejected_provisional_resume = True
+                            resumes = False
+                        else:
+                            resumes = int(last["store_id"]) not in self._reowned_receipt_store_ids()
                 if len(held) != end - index and not resumes:
                     hits.difference_update(k for k in range(index, end) if k not in proven)
                 index = end
             else:
                 index += 1
+        return rejected_provisional_resume
 
     def _identity_anchor_backfill_prefix(self, messages, identity_messages, cursor: int) -> list:
         """R5 NULL backfill for a reconciled or same-call accepted compaction prefix: a stamped row whose occurrence-bound mapped row

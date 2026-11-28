@@ -4081,14 +4081,19 @@ class ReconcileMixin:
                         break
             hits = set(range(cursor))
             matched_rows = {index: [row] for (index, _), row in zip(matched, suffix) if index < cursor}
-            self._identity_anchor_tool_segments(messages, 0, hits, matched_rows, proven=range(min(tail, default=cursor)))
+            provisional_tail_start = min(tail, default=cursor)
+            rejected_provisional_resume = self._identity_anchor_tool_segments(
+                messages, 0, hits, matched_rows, proven=range(provisional_tail_start), provisional_owners=owners,
+            )
             cut = min((index for index in range(cursor) if index not in hits), default=cursor)
             if tool_rewind is not None and cut < cursor:
                 end = cut + 1
                 while end < len(messages) and messages[end].get("role") == "tool":
                     end += 1
                 tool_rewind.extend(range(cut, end))
-            return cut
+            # The next bind matches an ordered suffix. Store the provisional
+            # continuation together so a partial copy cannot split that proof.
+            return provisional_tail_start if rejected_provisional_resume else cut
         except Exception:
             logger.debug("LCM provisional rebind proof load failed", exc_info=True)
             return None

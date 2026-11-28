@@ -292,6 +292,9 @@ def _measure_tool_resume(open_engine, shape, mode, stamped):
             receipt = getattr(returning, "_cursor_from_reowned_session_rows", None)
             if shape in {"receipt", "partial-results"} and stamped and receipt:
                 proof["receipt_before_ingest"] = receipt(view, before, len(before))[0]
+            if shape == "provisional" and stamped:
+                assert not returning._reowned_receipt_store_ids()
+                proof["provisional_before_ingest"] = returning._cursor_from_provisional_rebind(view, before)
         returning.ingest(view)
         after = _rows(returning)
         assert after[:len(before)] == before
@@ -324,10 +327,8 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
     if shape in {"receipt", "partial-results"} and stamped:
         assert proof["receipt_before_ingest"] == 1
     if shape == "provisional" and stamped:
-        assert states[0]["reason"] == "replayed proven provisional session tail"
-        assert states[0]["writes"] == ["tool"]
-        assert states[0]["orphans"] == 1
-        pytest.xfail("The provisional source has no receipt and keeps the existing exemption.")
+        assert proof["provisional_before_ingest"] == 1
+    assert not any(state["orphans"] for state in states)
     expected = {
         "control": ["tool"],
         "partial-results": ["assistant", "tool", "tool"],
@@ -337,7 +338,6 @@ def test_tool_group_resume_ownership(open_engine, monkeypatch, shape, mode, stam
     assert states[0]["owners"] == [GATEWAY if shape == "provisional" else SESSION] * len(expected)
     assert states[0]["result_ids"] == (["r17-first", "r17-second"] if shape == "partial-results" else ["r17-first"])
     assert not any(state["writes"] for state in states[1:])
-    assert not any(state["orphans"] for state in states)
 
 
 @pytest.mark.usefixtures("uid_lineage")
