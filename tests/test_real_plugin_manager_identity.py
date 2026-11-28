@@ -11,6 +11,7 @@ from pathlib import Path
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -60,10 +61,21 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str) -> dict:
+def _run(
+    tmp_path, *, plugin_dir: str, enabled: list[str], engine: str,
+    probe: str = _PROBE, probe_args: tuple[str, ...] = (),
+) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
-    (home / "plugins" / plugin_dir).symlink_to(REPO_ROOT)
+    target = home / "plugins" / plugin_dir
+    if os.name == "nt":
+        target.mkdir()
+        for source in (*REPO_ROOT.glob("*.py"), REPO_ROOT / "plugin.yaml"):
+            shutil.copy2(source, target / source.name)
+        for name in ("adapters", "access_context", "access_policy", "skills"):
+            shutil.copytree(REPO_ROOT / name, target / name)
+    else:
+        target.symlink_to(REPO_ROOT)
     (home / "config.yaml").write_text(
         "plugins:\n  enabled: [" + ", ".join(enabled) + "]\n"
         f"context:\n  engine: {engine}\n",
@@ -71,15 +83,21 @@ def _run(tmp_path, *, plugin_dir: str, enabled: list[str], engine: str) -> dict:
     )
     python, src = HERMES
     env = {
+        **{key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "COMSPEC") if key in os.environ},
         "HOME": str(tmp_path / "home"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", "") if os.name == "nt" else "/usr/bin:/bin",
         "HERMES_HOME": str(home),
         "PROBE_ENGINE": engine,
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
         "HERMES_DISABLE_LAZY_INSTALLS": "1",
+        "LCM_EMBEDDINGS_ENABLED": "0",
+        "LCM_TEMPORAL_ROLLUPS_ENABLED": "0",
     }
+    if os.name == "nt":
+        env.update({key: str(home) for key in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")})
     completed = subprocess.run(
-        [python, "-c", _PROBE],
+        [python, "-c", probe, *probe_args],
         cwd=src or None,
         env=env,
         capture_output=True,
@@ -118,6 +136,197 @@ def test_in_place_rename_with_only_legacy_name_is_the_documented_failure(tmp_pat
     assert result["selected"] is None
     assert "LCM plugin loaded" not in result["log"]
     assert "Context engine 'lcm' not found — falling back to built-in compressor" in result["log"]
+
+
+_RELOAD_PROBE = textwrap.dedent(
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import closing
+    from pathlib import Path
+    from threading import Event, Thread
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+    import json, os, sqlite3, sys
+    from agent import conversation_loop
+    from hermes_cli import plugins
+    from hermes_state import SessionDB
+    from run_agent import AIAgent
+
+    timing = sys.argv[1]
+    plugin = "hermes-lcm-x"
+    home = Path(os.environ["HERMES_HOME"])
+    database = home / "lcm.db"
+    state_path = home / "state.db"
+    state = SessionDB(db_path=state_path)
+    session = "retained-across-import"
+    first = [("user", "first question"), ("assistant", "first answer")]
+    stopped = [("user", "interrupted question"), ("assistant", "partial answer")]
+    expected = first + stopped
+
+    plugins.discover_plugins(force=True)
+    manager = plugins.get_plugin_manager()
+    original = plugins.get_plugin_context_engine()
+    engine_module = sys.modules[type(original).__module__]
+    with patch("agent.process_bootstrap.OpenAI"):
+        agent = AIAgent(
+            api_key="test-key-1234567890", base_url="https://openrouter.ai/api/v1",
+            model="test/model", quiet_mode=True, session_db=state, session_id=session,
+            skip_context_files=True, skip_memory=True, platform="cli", enabled_toolsets=["todo"],
+        )
+    retained = agent.context_compressor
+    assert type(retained) is type(original) and retained is not original
+    agent.client, agent.tool_delay, agent.save_trajectories = MagicMock(), 0, False
+    agent._compression_feasibility_checked = True
+    retained.update_model("test/model", 64000, provider="openrouter")
+
+    def rows(path=database, order="store_id"):
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+            return conn.execute(f"SELECT role, content FROM messages ORDER BY {order}").fetchall()
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=first[1][1], tool_calls=None), finish_reason="stop",
+        )],
+        model="test/model", usage=SimpleNamespace(prompt_tokens=100, completion_tokens=6, total_tokens=106),
+    )
+    agent.client.chat.completions.create.side_effect = [response]
+    with patch("agent.title_generator.call_llm", return_value=response):
+        initial = agent.run_conversation(user_message=first[0][1], conversation_history=[])
+    assert initial["final_response"] == first[1][1]
+    assert rows() == first
+
+    notify = conversation_loop._notify_context_engine_turn_complete
+    notifications = []
+    delivery_errors = []
+
+    def reload_plugin():
+        assert plugins.get_plugin_context_engine() is None
+        plugins.discover_plugins(force=True)
+        replacement = plugins.get_plugin_context_engine()
+        assert replacement is not None
+        assert sys.modules[type(replacement).__module__] is not engine_module
+        return replacement
+
+    def unload_plugin():
+        assert manager.unload(plugin)
+        assert plugins.get_plugin_context_engine() is None
+
+    def stop_provider(*args, **kwargs):
+        agent._current_streamed_assistant_text = stopped[1][1]
+        raise InterruptedError("synthetic provider interruption")
+
+    def deliver_at_boundary(owner, messages, **meta):
+        assert owner is agent and owner.context_compressor is retained
+        assert meta["interrupted"]
+        assert rows(state_path, "id") == expected
+        assert rows() == first
+
+        if timing == "old-engine-draining":
+            group = original._unload_group
+            release = Event()
+            worker = Thread(target=release.wait, args=(30,), daemon=True)
+            assert group.start_worker(worker)
+            with ThreadPoolExecutor(1) as pool:
+                unloading = pool.submit(unload_plugin)
+                try:
+                    assert group.closing.wait(5)
+                    assert not unloading.done() and not retained._stable_use_closed
+                    notify(owner, messages, **meta)
+                    assert rows() == expected
+                    assert not retained._stable_use_closed
+                finally:
+                    release.set()
+                unloading.result(timeout=15)
+        else:
+            unload_plugin()
+            if timing == "between-registrations":
+                notify(owner, messages, **meta)
+                return
+
+            replacement = reload_plugin()
+            assert retained._reload_successor is None
+            if timing == "after-takeover":
+                retained.should_compress_preflight(messages[:-1])
+                successor = retained._reload_successor
+                assert successor is not None and successor._unload_group is replacement._unload_group
+                assert rows() == expected[:-1]
+                notify(owner, messages, **meta)
+                return
+
+            construct = replacement._clone_for_agent
+            entered, release = Event(), Event()
+
+            def pause_construction():
+                entered.set()
+                assert release.wait(15)
+                return construct()
+
+            with (
+                patch.object(replacement, "_clone_for_agent", new=pause_construction),
+                ThreadPoolExecutor(1) as pool,
+            ):
+                delivering = pool.submit(notify, owner, messages, **meta)
+                try:
+                    assert entered.wait(5), "the stop did not reach replacement clone construction"
+                    assert rows() == first
+                    if timing == "second-unload-during-clone":
+                        unload_plugin()
+                finally:
+                    release.set()
+                delivering.result(timeout=15)
+            if timing == "during-clone":
+                successor = retained._reload_successor
+                assert successor is not None and successor._unload_group is replacement._unload_group
+
+    def observe_delivery(owner, messages, **meta):
+        # Hermes logs notification errors and keeps going. Check them outside its callback.
+        try:
+            deliver_at_boundary(owner, messages, **meta)
+        except Exception as exc:
+            delivery_errors.append(exc)
+        else:
+            notifications.append((messages, meta))
+
+    with patch.object(agent, "_interruptible_api_call", new=stop_provider), patch.object(
+        conversation_loop, "_notify_context_engine_turn_complete", new=observe_delivery,
+    ):
+        stopped_turn = agent.run_conversation(
+            user_message=stopped[0][1], conversation_history=initial["messages"],
+        )
+    if delivery_errors:
+        raise delivery_errors[0]
+    assert stopped_turn["interrupted"] and len(notifications) == 1
+    assert rows() == expected, rows()
+    if plugins.get_plugin_context_engine() is None:
+        reload_plugin()
+    messages, meta = notifications[0]
+    # Replay the notification and end the same session to expose duplicate writes on takeover.
+    notify(agent, messages, **meta)
+    retained.on_session_end(session, messages)
+    assert rows() == expected, rows()
+
+    unload_plugin()
+    database.unlink()
+    notify(agent, messages, **meta)
+    assert not database.exists()
+    print(json.dumps({"deleted_during_hermes": True}))
+    """
+)
+
+
+@pytest.mark.parametrize("timing", [
+    "old-engine-draining",
+    "between-registrations",
+    "during-clone",
+    "second-unload-during-clone",
+    "after-takeover",
+])
+def test_retained_interruption_survives_real_plugin_reimport(tmp_path, timing):
+    result = _run(
+        tmp_path, plugin_dir="hermes-lcm-x", enabled=["hermes-lcm-x"], engine="lcm-x",
+        probe=_RELOAD_PROBE, probe_args=(timing,),
+    )
+    assert result["deleted_during_hermes"]
 
 
 # --- Two physical LCM copies during migration (#471 fix round 1) -------------

@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from weakref import WeakSet
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -201,14 +202,20 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
         active_engine, resolved, context_present = _command_engine_for_current_session(
             engine, resolve_active_lcm_engine, with_resolution=True,
         )
-        return handle_lcm_command(
-            raw_args, active_engine,
-            session_engine_resolved=resolved, session_context_present=context_present,
-            session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
-            engine_profile=_command_engine_profile(active_engine),
-            context_session_id=_session_context_value("HERMES_SESSION_ID"),
-            context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
-        )
+        def run(selected):
+            return handle_lcm_command(
+                raw_args, selected,
+                session_engine_resolved=resolved, session_context_present=context_present,
+                session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
+                engine_profile=_command_engine_profile(selected),
+                context_session_id=_session_context_value("HERMES_SESSION_ID"),
+                context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
+            )
+
+        if getattr(active_engine, "_unload_group", None) is None:
+            return run(active_engine)
+        with active_engine._admit_plugin_operation() as admitted:
+            return run(active_engine) if admitted else "LCM plugin is unloading."
 
     return _handler
 def _hook_question_date(payload: dict) -> object:
@@ -543,10 +550,12 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from . import engine_registry
-    from .config import LCMConfig
+    from .config import LCMConfig, _callback_profile_home, _resolved_profile_home
     from .engine import LCMEngine
     from .engine_registry import (
+        ActiveEngineUseResult,
         ActiveEngineUseStatus,
+        EngineUnloadInProgress,
         resolve_active_lcm_engine,
         use_active_lcm_engine,
         use_cold_lcm_engine,
@@ -600,7 +609,31 @@ def register(ctx):
     engine.apply_identity_migration(identity_notice)
     _identity.warn_identity_migration_once(identity_notice)
 
-    # Register as the context engine (replaces ContextCompressor)
+    # Establish unload ownership before publishing a cloneable prototype.
+    on_unload = getattr(ctx, "on_unload", None)
+    if callable(on_unload):
+        shutdown = engine._enable_plugin_unload()
+        manager = getattr(ctx, "_manager", None)
+        if manager is not None:
+            if not hasattr(manager, "_lcm_x_retained_engines"):
+                manager._lcm_x_retained_engines = WeakSet()
+            if not hasattr(manager, "_lcm_x_known_sessions"):
+                manager._lcm_x_known_sessions = set()
+            engine._unload_group.retained_engines = manager._lcm_x_retained_engines
+            engine._unload_group.retained_engines.add(engine)
+            engine._unload_group.bound_sessions = manager._lcm_x_known_sessions
+            engine._unload_group.current_prototype = lambda: getattr(manager, "_context_engine", None)
+
+        def retire_registration():
+            if manager is not None:
+                manager._lcm_x_has_unloaded = True
+            shutdown()
+
+        try:
+            on_unload(retire_registration)
+        except Exception:
+            engine._unload_group = None
+            logger.info("LCM unload callback registration failed; stop Hermes to release lcm.db", exc_info=True)
     ctx.register_context_engine(engine)
     active = _engine_took_slot(ctx, engine, hermes_home)
 
@@ -690,6 +723,12 @@ def register(ctx):
                 history = list(history)
                 platform = str(payload.get("platform") or "")
                 wait = aux_session._LIVE_CHILD_STORE_WAIT_S
+                owner = getattr(child_engine, "_unload_group", None)
+                if (owner is not None and owner.closing.is_set() and owner is not engine._unload_group
+                        and storage == aux_session.live_child_storage_identity(engine)):
+                    with engine._admit_plugin_operation() as admitted:
+                        if admitted and child_engine._flush_retired_delegate_child(session_id, history, platform):
+                            return None
 
                 outcome: dict = {}
 
@@ -706,7 +745,7 @@ def register(ctx):
                     # Only the child's own engine: it serves the child's profile, as main's end store does. Never the
                     # plugin prototype, which may serve another profile. It never binds and never ingests.
                     outcome.clear()
-                    result = use_lcm_engine(child_engine, store_child, timeout=wait)
+                    result = use_lcm_engine(child_engine, store_child, timeout=wait, allow_unloading=owner is not None)
                     if outcome.get("moved"):
                         aux_session.warn_live_child_moved(session_id)
                         return False
@@ -715,7 +754,22 @@ def register(ctx):
                     return bool(result.used and isinstance(result.value, int) and outcome.get("linked")
                                 and "error" not in outcome)
 
-                aux_session.run_live_child_store(session_id, store, rows=len(history))
+                def store_retired():
+                    with child_engine._storage_lock:
+                        if storage != aux_session.live_child_storage_identity(child_engine):
+                            aux_session.warn_live_child_moved(session_id)
+                            return False
+                        return child_engine._flush_retired_delegate_child(
+                            session_id, history, platform, retry_busy=True,
+                        )
+
+                # Hermes may already have selected the callback before removing
+                # the hook. After closing admission, that callback can only use
+                # its child's existing store and durable lineage.
+                aux_session.run_live_child_store(
+                    session_id, store, rows=len(history),
+                    **({"owner": owner, "retired_operation": store_retired} if owner is not None else {}),
+                )
             except Exception as exc:
                 logger.debug("LCM live delegated-child store error: %s", exc)
             return None
@@ -841,11 +895,26 @@ def register(ctx):
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
     try:
-        def _on_post_llm_call(**kwargs):
+        def _forward_reloaded_post_llm_call(payload):
+            if not engine._plugin_is_unloading():
+                return False
+            replacement = getattr(getattr(ctx, "_manager", None), "_context_engine", None)
+            callback = getattr(replacement, "_lcm_registered_post_llm_call", None)
+            if (replacement is engine or not callable(callback)
+                    or replacement._plugin_is_unloading()
+                    or _resolved_profile_home(replacement._hermes_home) != _resolved_profile_home(engine._hermes_home)
+                    or replacement._db_path != engine._db_path):
+                return False
+            callback(_retained_dispatch=True, **payload)
+            return True
+
+        def _on_post_llm_call(*, _retained_dispatch=False, **kwargs):
             if not active:
                 return
             history = kwargs.get("conversation_history")
             if not history:
+                return
+            if _forward_reloaded_post_llm_call(kwargs):
                 return
             host_engine = kwargs.get("context_compressor")
             if not _identity.is_lcm_engine_name(getattr(host_engine, "name", None)):
@@ -899,39 +968,187 @@ def register(ctx):
                     )
                 _ingest_and_note(active_engine)
 
+            def _replay_existing_lane(active_engine):
+                return active_engine._ingest_reload_lane(session_id, conversation_id, history, platform)
+
+            def _ingest_retained(active_engine):
+                _ingest_and_note(active_engine)
+                return True
+
+            def _use_scoped_writer(operation):
+                with engine._admit_plugin_operation() as admitted:
+                    if not admitted:
+                        return False
+                    try:
+                        replacement = engine.clone_for_agent()
+                    except EngineUnloadInProgress:
+                        return False  # Let the callback retry through the current registration.
+                    try:
+                        replay = use_lcm_engine(replacement, operation, timeout=None)
+                        return replay.used and bool(replay.value)
+                    finally:
+                        replacement.shutdown()
+
+            def _invoke_retained(candidate, operation):
+                if candidate._plugin_is_unloading():
+                    ok, _ = candidate._run_retained_or_dormant(operation)
+                    return ok
+                return use_lcm_engine(candidate, operation, timeout=None).used
+
             try:
                 if host_engine is not None:
-                    result = use_lcm_engine(
-                        host_engine,
-                        _bind_and_ingest,
-                        timeout=None,
-                    )
+                    result = use_lcm_engine(host_engine, _bind_and_ingest, timeout=None)
+                    if (result.status == ActiveEngineUseStatus.CLOSED_ENGINE
+                            and getattr(host_engine, "_plugin_is_unloading", lambda: False)()
+                            and session_id
+                            and _resolved_profile_home(host_engine._hermes_home) == _resolved_profile_home(engine._hermes_home)
+                            and host_engine._db_path.resolve() == engine._db_path.resolve()):
+                        if host_engine._flush_retired_delegate_child(session_id, history, platform):
+                            return
+                        if (hasattr(host_engine, "_run_retained_or_dormant")
+                                and host_engine._run_retained_or_dormant(
+                                    lambda active_engine: (_bind_and_ingest(active_engine), True)[1],
+                                )[0]):
+                            return
+                        if _forward_reloaded_post_llm_call(kwargs):
+                            return
                 else:
+                    unload_capable = engine._unload_group is not None
+                    manager = getattr(ctx, "_manager", None)
+                    if unload_capable:
+                        dispatch_home = _callback_profile_home(manager)
+                        if dispatch_home != _resolved_profile_home(engine._hermes_home):
+                            logger.warning(
+                                "LCM post_llm_call could not establish the session's storage binding; "
+                                "completed messages may be absent from the plugin-local store",
+                            )
+                            return
+
+                    def _ingest_bound_engine(selected):
+                        if unload_capable and (
+                            _resolved_profile_home(selected._hermes_home) != _resolved_profile_home(engine._hermes_home)
+                            or selected._db_path.resolve() != engine._db_path.resolve()
+                        ):
+                            return False
+                        if (getattr(selected, "_fresh_reload_hook_binding", None)
+                                == (session_id, selected._conversation_id)
+                                and not selected._proves_local_hook_turn(session_id, history)):
+                            return False
+                        _ingest_and_note(selected)
+                        return True
+
                     result = use_active_lcm_engine(
-                        _ingest_and_note,
+                        _ingest_bound_engine,
                         session_id=session_id,
                         conversation_id=conversation_id,
                         timeout=None,
                     )
-                    if (
-                        result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
-                    ):
+                    if result.used and not result.value:
+                        result = ActiveEngineUseResult(ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT)
+                    reloaded = unload_capable and getattr(manager, "_lcm_x_has_unloaded", False)
+                    if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT and not _retained_dispatch
+                            and not reloaded):
                         result = use_cold_lcm_engine(
                             engine,
                             _bind_and_ingest,
                             timeout=None,
                         )
-                        if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
-                            # No engine of the child's own: store its rows without binding one.
-                            stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
-                            if stored.used and stored.value:
-                                logger.debug(
-                                    "LCM post_llm_call delegated child %s: rows stored without binding an engine",
-                                    session_id,
-                                )
+                    if (result.status in (ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                          ActiveEngineUseStatus.CLOSED_ENGINE,
+                                          ActiveEngineUseStatus.ENGINE_NOT_RESIDENT)
+                            and unload_capable and session_id):
+                        owner = engine._unload_group
+                        retained_pool = list(owner.retained_engines or ()) if owner is not None else ()
+                        matched = None
+                        for candidate in retained_pool:
+                            latest = candidate._reload_successor or candidate
+                            if (latest._session_id == session_id
+                                    and (not conversation_id or latest._conversation_id == conversation_id)
+                                    and _resolved_profile_home(latest._hermes_home) == _resolved_profile_home(engine._hermes_home)
+                                    and latest._db_path.resolve() == engine._db_path.resolve()):
+                                matched = candidate
+                                if conversation_id and latest._conversation_id == conversation_id:
+                                    break
+                        if matched is not None:
+                            latest = matched._reload_successor or matched
+                            if (getattr(latest, "_fresh_reload_hook_binding", None)
+                                    == (session_id, latest._conversation_id)
+                                    and not latest._proves_local_hook_turn(session_id, history)):
+                                matched = None
+                        if matched is not None:
+                            if matched._plugin_is_unloading():
+                                if matched._retained_successor() is None and _forward_reloaded_post_llm_call(kwargs):
+                                    return
+                                if _invoke_retained(matched, _ingest_retained):
+                                    return
+                            elif _invoke_retained(matched, _ingest_retained):
                                 return
+                        if result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT or (
+                            matched is None and result.status in (
+                                ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                ActiveEngineUseStatus.CLOSED_ENGINE,
+                            )
+                        ):
+                            lane = use_lcm_engine(
+                                engine,
+                                lambda current: current._unattached_reload_lane(session_id, conversation_id, platform),
+                                timeout=None,
+                            )
+                            if lane.used and lane.value:
+                                conversation_id = lane.value
+                                if _use_scoped_writer(_replay_existing_lane):
+                                    return
+                            has_same_module_retained = any(
+                                getattr(r, "_origin_engine_type", type(r)) is type(engine)
+                                and (r._reload_successor or r)._session_id
+                                and _resolved_profile_home((r._reload_successor or r)._hermes_home)
+                                == _resolved_profile_home(engine._hermes_home)
+                                and (r._reload_successor or r)._db_path.resolve() == engine._db_path.resolve()
+                                for r in retained_pool
+                            )
+                            if (result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+                                    and reloaded and not has_same_module_retained
+                                    and session_id not in owner.bound_sessions
+                                    and engine._proves_local_hook_turn(session_id, history)):
+                                # Require local Hermes ownership when the
+                                # current registration sees a previously
+                                # unattached session. Older hosts emit the
+                                # same post payload for another profile.
+                                def _ingest_fresh_lane(selected):
+                                    if str(getattr(selected, "_session_id", "") or ""):
+                                        return False
+                                    if not selected._start_fresh_reload_lane(session_id, conversation_id, platform):
+                                        return False
+                                    _ingest_and_note(selected)
+                                    return True
+
+                                cold = use_lcm_engine(engine, _ingest_fresh_lane, timeout=None)
+                                if cold.used and cold.value:
+                                    return
+                    child_fallback = (
+                        (not unload_capable and result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT)
+                        or (
+                            unload_capable
+                            and result.status in (
+                                ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT,
+                                ActiveEngineUseStatus.ENGINE_NOT_RESIDENT,
+                            )
+                            and (engine._storage_ready or engine._db_path.is_file())
+                        )
+                    )
+                    if child_fallback:
+                        # No engine of the child's own: store its rows without binding one.
+                        stored = use_lcm_engine(engine, _store_delegate_child, timeout=None)
+                        if stored.used and stored.value:
+                            logger.debug(
+                                "LCM post_llm_call delegated child %s: rows stored without binding an engine",
+                                session_id,
+                            )
+                            return
 
                 if not result.used:
+                    if _forward_reloaded_post_llm_call(kwargs):
+                        return
                     if result.status is ActiveEngineUseStatus.RESIDENT_ENGINE_CONFLICT:
                         engine._log_session_ingest_outcome(session_id, reason="resident_engine_conflict")
                     logger.warning(
@@ -943,6 +1160,8 @@ def register(ctx):
 
         register_hook = getattr(ctx, "register_hook", None)
         if callable(register_hook):
+            if engine._unload_group is not None and active:
+                engine._lcm_registered_post_llm_call = _on_post_llm_call
             register_hook("post_llm_call", _on_post_llm_call)
             logger.debug("LCM registered post_llm_call hook for per-turn ingest")
             try:

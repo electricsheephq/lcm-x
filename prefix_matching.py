@@ -253,9 +253,10 @@ class PrefixMatchingMixin:
         *,
         conversation_id: str | None = None,
         raise_busy: bool = False,
+        store=None,
     ) -> Optional[int]:
         try:
-            stored_messages = self._store.get_range(
+            stored_messages = (self._store if store is None else store).get_range(
                 session_id,
                 limit=max(1, len(messages)),
                 conversation_id=conversation_id,

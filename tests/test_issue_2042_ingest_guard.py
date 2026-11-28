@@ -28,12 +28,11 @@ from tests.test_issue_2042_unended_catchup import (
 def _catchup_writer(config, home, rows, begin, release, observations):
     """Use the real catch-up store path, with a zero-budget first lock attempt."""
     try:
-        class ControlledEngine(LCMEngine):
-            def __init__(self, **kwargs):
-                super().__init__(**kwargs)
-                store = self._store
-                store.connection.execute("PRAGMA busy_timeout=0")
-                atomic = store.atomic
+        class ControlledStore(catchup.MessageStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.connection.execute("PRAGMA busy_timeout=0")
+                atomic = self.atomic
                 first = True
 
                 @contextmanager
@@ -51,17 +50,19 @@ def _catchup_writer(config, home, rows, begin, release, observations):
                             stack.enter_context(atomic(*args, **kw))
                         except sqlite3.OperationalError as exc:
                             assert "locked" in str(exc).lower(), str(exc)
-                            assert not store.connection.in_transaction
+                            assert not self.connection.in_transaction
                             observations.put("busy")
                             assert release.wait(30), "ingest did not release its write lock"
                             stack.enter_context(atomic(*args, **kw))
                         yield
 
-                store.atomic = controlled_atomic
+                self.atomic = controlled_atomic
 
         before = Counter(catchup.unended_catchup_counts())
-        catchup._store_candidate(ControlledEngine, config, home, config.database_path,
-                                {"id": SID, "source": "desktop"}, rows, 128000)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(catchup, "MessageStore", ControlledStore)
+            catchup._store_candidate(LCMEngine, config, home, config.database_path,
+                                    {"id": SID, "source": "desktop"}, rows, 128000)
         observations.put(dict(Counter(catchup.unended_catchup_counts()) - before))
     except BaseException:
         observations.put({"error": traceback.format_exc()})

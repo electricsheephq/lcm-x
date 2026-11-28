@@ -825,16 +825,83 @@ class _IngestAttempt:
     thread: int = field(default_factory=threading.get_ident)
 
 
+_EXISTING_OPEN_OPTIONS = threading.local()
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
     _ingest_prelock = True
 
     def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+        pending = getattr(_EXISTING_OPEN_OPTIONS, "pending", None)
+        if pending is not None and isinstance(self, pending[0]):
+            _EXISTING_OPEN_OPTIONS.pending = None
+            self._init_fields(
+                db_path,
+                ingest_protection_config=ingest_protection_config,
+                hermes_home=hermes_home,
+                create_parent=False,
+            )
+            self._open_existing_db(write_timeout_ms=pending[1])
+            return
+        self._init_fields(
+            db_path,
+            ingest_protection_config=ingest_protection_config,
+            hermes_home=hermes_home,
+            create_parent=True,
+        )
+        self._init_db()
+
+    @classmethod
+    def _open_existing(
+        cls,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        write_timeout_ms: int = 5000,
+    ) -> "MessageStore":
+        """Open an established store without creating files or running schema bootstrap."""
+        previous = getattr(_EXISTING_OPEN_OPTIONS, "pending", None)
+        _EXISTING_OPEN_OPTIONS.pending = (cls, write_timeout_ms)
+        try:
+            return cls(
+                db_path,
+                ingest_protection_config=ingest_protection_config,
+                hermes_home=hermes_home,
+            )
+        finally:
+            _EXISTING_OPEN_OPTIONS.pending = previous
+
+    def _open_existing_db(self, *, write_timeout_ms: int = 5000) -> None:
+        self._conn = sqlite3.connect(
+            self.db_path.resolve().as_uri() + "?mode=rw",
+            uri=True,
+            timeout=write_timeout_ms / 1000,
+            check_same_thread=False,
+            isolation_level="IMMEDIATE",
+        )
+        try:
+            refuse_schema_version_too_new(self._conn)
+            self._conn.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            self.close()
+            raise
+
+    def _init_fields(
+        self,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        create_parent: bool,
+    ) -> None:
         self.ingest_prelock_counts = Counter()
         self._ingest_prelock_state = None
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if create_parent:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_identity = _database_identity(self.db_path, self)  # fixed at open: a later cwd or symlink change cannot move it
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
@@ -860,7 +927,18 @@ class MessageStore:
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
         self._manual_chunk_backlog_pending = False
-        self._init_db()
+
+    def existing_summary_node(self, node_id: int):
+        """Read summary proof without opening a separate DAG connection."""
+        from .dag import SummaryNode
+
+        row = self._conn.execute(
+            "SELECT node_id, session_id, depth, summary, expand_hint FROM summary_nodes WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return SummaryNode(node_id=row[0], session_id=row[1], depth=row[2], summary=row[3], expand_hint=row[4])
 
     def _init_db(self):
         # #1159: reserve the write lock before FTS5 can read during re-prepare.

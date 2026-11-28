@@ -19,9 +19,9 @@ import time
 import uuid
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict, deque
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
-from functools import cached_property, lru_cache, wraps
+from functools import cached_property, lru_cache, partial, wraps
 from pathlib import Path
 from time import perf_counter as _perf_counter
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
@@ -34,7 +34,7 @@ from .compaction_policy import (
     resolve_threshold,
     threshold_tokens,
 )
-from .config import LCMConfig, _disabled_tool_names, _parse_float_env, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
+from .config import LCMConfig, _disabled_tool_names, _parse_float_env, _resolved_profile_home, containment_base_dir, identity_anchor_enabled, ingest_ledger_mode, lcm_env_get, profile_bound
 from .dag import CondensationPublicationRejected, SummaryDAG, SummaryNode
 from . import ingest_ledger, sender_capture, survival_codec
 from . import maintenance_scheduler
@@ -48,6 +48,9 @@ from .engine_registry import (
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
+    EngineUnloadGroup,
+    EngineUnloadInProgress,
+    engine_unload_group,
     live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
     use_lcm_engine,
@@ -170,7 +173,7 @@ from .host_uid_emit import (
 )
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice, _host_estimate, survival_reserve_fraction
-from .db_bootstrap import refresh_legacy_conversation_ids
+from .db_bootstrap import SQLITE_BUSY_TIMEOUT_MS, refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
@@ -807,12 +810,18 @@ class LCMEngine(
                 "summarized tool rows are no longer rewritten"
             )
         self._hermes_home = hermes_home
+        self._unload_group: EngineUnloadGroup | None = None
+        self._reload_successor: LCMEngine | None = None
+        self._last_seen_session_max_store_id: int = 0
+        self._saved_context_window_tokens: dict[str, int] = {}
+        self._dormant_ephemeral_active: bool = False
         self._stable_use_lock = threading.Lock()
         self._compaction_gate = threading.Condition()
         self._compress_owner: int | None = None
         self._compress_owner_depth = 0
         self._compress_reentry_refusals = 0
         self._compaction_inflight = 0
+        self._plugin_operations_inflight = 0
         self._compaction_closing = False
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
         self._condensation_inflight_ids: Counter[int] = Counter()
@@ -821,6 +830,7 @@ class LCMEngine(
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
         self._pending_session_tails: list[dict] = []
+        self._detached_stores_to_close: set[MessageStore] = set()
         self._session_end_flush_active = False
         self._assertion_extraction_metrics_lock = threading.RLock()
         self._assertion_extraction_idle = threading.Event()
@@ -1249,6 +1259,32 @@ class LCMEngine(
         model and context-window metadata is copied so the clone is immediately
         budget-aware even before a compatible Hermes host calls update_model().
         """
+        group = self._unload_group
+        if group is None:
+            return self._clone_for_agent()
+        if group.closing.is_set():
+            raise EngineUnloadInProgress("Cannot clone LCM engine during plugin unload")
+        # Construction opens no database. Only publish the clone under the
+        # group lock so a stalled constructor cannot delay the unload gate.
+        clone = self._clone_for_agent()
+        with group.lock:
+            if group.closing.is_set():
+                raise EngineUnloadInProgress("Cannot clone LCM engine during plugin unload")
+            clone._unload_group = group
+            group.engines.add(clone)
+            if group.retained_engines is not None:
+                group.retained_engines.add(clone)
+            return clone
+
+    def _try_clone_for_retained_binding(self) -> "LCMEngine | None":
+        # A retained engine can come from a previous package import. Handle
+        # the admission exception in the registration that created it.
+        try:
+            return self.clone_for_agent()
+        except EngineUnloadInProgress:
+            return None
+
+    def _clone_for_agent(self) -> "LCMEngine":
         clone = type(self)(
             config=copy.deepcopy(self._config),
             hermes_home=self._hermes_home,
@@ -1325,7 +1361,16 @@ class LCMEngine(
     def _ensure_storage(self) -> None:
         """Open once on real use; recursive binder reads share this lock."""
         with self._storage_lock:
-            if self._storage_ready or self._storage_binding:
+            if self._storage_binding:
+                return
+            if self._plugin_is_unloading() and (
+                self._stable_use_closed or (
+                    not self._storage_ready and self._stable_use_owner_thread != threading.get_ident()
+                    and not getattr(self._thread_context, "plugin_operation", False)
+                )
+            ):
+                raise RuntimeError("LCM storage is closed for plugin unload")
+            if self._storage_ready:
                 return
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
@@ -1351,6 +1396,12 @@ class LCMEngine(
 
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
+        group = self._unload_group
+        if group is not None and str(db_path) != ":memory:":
+            absolute_path = os.path.normcase(os.path.abspath(db_path))
+            canonical_path = os.path.normcase(os.path.realpath(db_path))
+            with group.lock:
+                group.databases.update((absolute_path, canonical_path))
         self._assertions = None
         self._entities = None
         self._query_views = None
@@ -1530,6 +1581,8 @@ class LCMEngine(
         """
         if not hermes_home:
             return False
+        if self._plugin_is_unloading():
+            raise RuntimeError("Cannot rebind LCM storage during plugin unload")
         db_path = self._resolve_db_path(hermes_home)
         if not self._storage_ready:
             if self._db_path == db_path and self._hermes_home == hermes_home:
@@ -1847,7 +1900,8 @@ class LCMEngine(
         session. Host lifecycle hooks must compare against this value before
         deciding whether a post-turn ingest needs to rebind the engine.
         """
-        return self._session_id
+        successor = self._reload_successor
+        return successor._session_id if successor is not None else self._session_id
 
     @property
     def current_session_id(self) -> str:
@@ -1951,6 +2005,26 @@ class LCMEngine(
         return turn_id is not None and (not turn_id or turn_id == self._host_turn_id_for_deferral())
 
     def update_from_response(self, usage: Dict[str, Any]) -> None:
+        if self._plugin_is_unloading():
+            if (successor := self._retained_successor()) is not None:
+                def update(engine):
+                    engine.update_from_response(usage)
+                    self.last_prompt_tokens = engine.last_prompt_tokens
+                    self.last_completion_tokens = engine.last_completion_tokens
+                    self.last_total_tokens = engine.last_total_tokens
+
+                use_lcm_engine(successor, update)
+            else:
+                latest = self._reload_successor or self
+                latest._update_from_response_unlocked(usage, persist=not latest._stable_use_closed)
+                if latest is not self:
+                    self.last_prompt_tokens = latest.last_prompt_tokens
+                    self.last_completion_tokens = latest.last_completion_tokens
+                    self.last_total_tokens = latest.last_total_tokens
+            return
+        self._update_from_response_unlocked(usage, persist=True)
+
+    def _update_from_response_unlocked(self, usage: Dict[str, Any], *, persist: bool = True) -> None:
         if self._thread_context_stateless():
             auxiliary_session_id = self._thread_context_session_id()
             if auxiliary_session_id:
@@ -2024,7 +2098,8 @@ class LCMEngine(
         self.last_cache_read_tokens = int(usage.get("cache_read_tokens", 0) or 0)
         self.last_cache_write_tokens = int(usage.get("cache_write_tokens", 0) or 0)
         self.last_reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
-        self._record_turn_compaction_telemetry()
+        if persist:
+            self._record_turn_compaction_telemetry()
         # #2863: any response on the main path ends the host's post-compaction wait, with or without a count, as the
         # host's built-in compressor does (context_compressor.py 3b421578:2899-2901). The host reads the verify flag
         # before this call (turn_usage.py 3b421578:130-131) and calls it with {} to consume the wait when a provider
@@ -2616,6 +2691,14 @@ class LCMEngine(
         next ingest for the same binding handles it under the store write lock. A new compaction
         applies it before advancing the call number for its own ingest. A refusal without a matching
         snapshot skips the restore."""
+        if self._plugin_is_unloading():
+            self._run_retained_or_dormant(
+                lambda engine: engine._record_rejected_compaction_unlocked(allow_during_unload=True),
+            )
+            return
+        self._record_rejected_compaction_unlocked()
+
+    def _record_rejected_compaction_unlocked(self, *, allow_during_unload: bool = False) -> None:
         if self._bypasses_lcm_context_management():
             return
         snapshot = getattr(self, "_compress_refusal", None)
@@ -2635,7 +2718,10 @@ class LCMEngine(
                 logger.warning("LCM compaction refusal restore deferred: engine lifecycle lock timed out")
                 return
             with self._compaction_gate:
-                can_restore = not self._compaction_closing and self._compress_owner is None
+                can_restore = (
+                    (allow_during_unload or not self._compaction_closing)
+                    and self._compress_owner is None
+                )
                 if can_restore:
                     self._claim_compress_owner(caller)
             if not can_restore:
@@ -2743,11 +2829,11 @@ class LCMEngine(
         """#787: shutdown and storage rebind drop this store's queued preparations and prepared leaves."""
         store = self.__dict__.get("_store")
         if store is not None:
-            leaf_prep.discard(store.db_path)
+            leaf_prep.discard(store.db_path, self._unload_group)
 
     def _prepare_leaves_after_turn(self, history) -> None:
         """#787 (default off): after a completed turn's ingest, enqueue one background leaf preparation (O(1))."""
-        if not getattr(self._config, "background_leaf_prep_enabled", False):
+        if self._plugin_is_unloading() or not getattr(self._config, "background_leaf_prep_enabled", False):
             return
         try:
             leaf_prep.enqueue_after_turn(self, history)
@@ -2787,6 +2873,14 @@ class LCMEngine(
 
         The #651 and #625 holds exempt recovery, cleanup-only, forced overflow, the survival ceiling
         and bypassed sessions."""
+        if self._plugin_is_unloading() and self._reload_successor is not None:
+            successor = self._retained_successor()
+            if successor is None:
+                return False
+            return bool(use_lcm_engine(
+                successor,
+                lambda engine: engine._automatic_compression_blocked(ignore_cooldown=ignore_cooldown),
+            ).value)
         self._thread_context.compression_busy = self._compression_owned_by_another_thread()
         if self._thread_context.compression_busy:
             return True
@@ -2818,6 +2912,12 @@ class LCMEngine(
     def _compression_block_reason(self) -> Optional[str]:
         """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
         sweep hold is ``cooldown:lcm_sweep_budget``."""
+        if self._plugin_is_unloading() and self._reload_successor is not None:
+            successor = self._retained_successor()
+            return use_lcm_engine(
+                successor,
+                lambda engine: engine._compression_block_reason(),
+            ).value if successor is not None else None
         if getattr(self._thread_context, "compression_busy", False):
             self._thread_context.compression_busy = False
             return "cooldown:lcm_compaction_in_progress"
@@ -3106,6 +3206,19 @@ class LCMEngine(
     def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
         """Persist stopped turns on the already-bound engine (#1623)."""
         try:
+            if self._plugin_is_unloading():
+                self._run_retained_or_dormant(
+                    lambda engine: engine._on_turn_complete_unlocked(messages, usage=usage, **meta),
+                )
+                return
+            self._on_turn_complete_unlocked(messages, usage=usage, **meta)
+        except Exception as exc:
+            logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
+        finally:
+            sender_capture.retire(self, meta.get("turn_id"))
+
+    def _on_turn_complete_unlocked(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
+        try:
             # Stopped turns can skip post_llm_call and stopped-tail ingest.
             if not self._bypasses_lcm_context_management():
                 self._turn_start_defer_mid_turn_id = None
@@ -3143,9 +3256,10 @@ class LCMEngine(
                 finally:
                     active_engine.note_turn_complete()
 
-            use_lcm_engine(self, ingest_stopped, timeout=None)
-        except Exception as exc:
-            logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
+            if self._stable_use_owner_thread == threading.get_ident():
+                ingest_stopped(self)
+            else:
+                use_lcm_engine(self, ingest_stopped, timeout=None)
         finally:
             sender_capture.retire(self, meta.get("turn_id"))
 
@@ -3186,6 +3300,15 @@ class LCMEngine(
         compression runs later the same turn, already-ingested messages
         are skipped (no duplicates).
         """
+        # Hook and interrupted-turn callers already hold the stable lease.
+        # Direct callers must also remain admitted until their write finishes.
+        if self._stable_use_owner_thread == threading.get_ident():
+            return self._ingest_admitted(messages, host_pairs=host_pairs)
+        with self._admit_plugin_operation() as admitted:
+            if admitted:
+                return self._ingest_admitted(messages, host_pairs=host_pairs)
+
+    def _ingest_admitted(self, messages, *, host_pairs=()):
         try:
             if not host_pairs:
                 messages, host_view = self._canonical_host_view(messages)
@@ -3292,6 +3415,8 @@ class LCMEngine(
 
     def _schedule_rollup_maintenance(self, scope: str) -> None:
         """Enqueue one best-effort rollup pass using private SQLite helpers."""
+        if self._plugin_is_unloading():
+            return
         try:
             raw_database_path = str(self._dag.db_path)
             if raw_database_path == ":memory:":
@@ -3307,7 +3432,7 @@ class LCMEngine(
             spend_guard = self._rollup_spend_guard
 
             def maintain() -> None:
-                private_dag = SummaryDAG(database_path)
+                private_dag = SummaryDAG._open_existing(database_path)
                 try:
                     run_rollup_maintenance(
                         private_dag,
@@ -3319,11 +3444,12 @@ class LCMEngine(
                 finally:
                     private_dag.close()
 
-            maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
-                key,
-                profile_bound(maintain),
-                owner=self._rollup_maintenance_owner,
-            )
+            scheduler = maintenance_scheduler._ROLLUP_MAINTENANCE_SCHEDULER
+            work = profile_bound(maintain)
+            if self._unload_group is None:
+                scheduler.schedule(key, work, owner=self._rollup_maintenance_owner)
+            else:
+                self._unload_group.schedule_rollup(scheduler, key, work, owner=self._rollup_maintenance_owner)
         except Exception:
             # Maintenance is opportunistic; a scheduler/setup failure must never
             # turn a successful foreground session bind into a host failure.
@@ -3339,7 +3465,8 @@ class LCMEngine(
         one pass queued per database, and the pass runs the backfill core under
         its lease on a private connection.
         """
-        if self._embedding_maintenance_retired or not getattr(self._config, "embeddings_enabled", False):
+        if (self._embedding_maintenance_retired or self._plugin_is_unloading()
+                or not getattr(self._config, "embeddings_enabled", False)):
             return
         try:
             raw_database_path = str(self._dag.db_path)
@@ -3414,17 +3541,22 @@ class LCMEngine(
                 self._embedding_maintenance_owner = object()
             self._embedding_maintenance_retired = False
 
-    def _retire_embedding_maintenance(self, wait: bool) -> None:
+    def _retire_embedding_maintenance(self, wait: bool, *, deadline: float | None = None) -> None:
         with self._embedding_maintenance_lock:
             self._embedding_maintenance_retired = True
             # Snapshot under the lock: a concurrent rearm mints a new owner, which must stay live.
             owner = self._embedding_maintenance_owner
         retire_local_model_prepare(owner)
+        timeout = _EMBEDDING_RETIRE_TIMEOUT_S if wait else 0.0
+        if wait and deadline is not None:
+            timeout = max(0.0, deadline - time.monotonic())
         try:
-            maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
-                owner,
-                timeout=_EMBEDDING_RETIRE_TIMEOUT_S if wait else 0,
-            )
+            scheduler = maintenance_scheduler._EMBEDDING_MAINTENANCE_SCHEDULER
+            drained = scheduler.retire_owner(owner, timeout=timeout)
+            if self._unload_group is not None:
+                self._unload_group.remember_embedding_retirement(scheduler, owner, drained=drained)
+            if deadline is not None and not drained:
+                logger.warning("LCM unload: incremental embedding work still running")
         except Exception:
             logger.warning("LCM could not retire background incremental embedding", exc_info=True)
 
@@ -3533,11 +3665,17 @@ class LCMEngine(
         )
 
     def _register_active_engine_binding(self) -> None:
+        if self._plugin_is_unloading():
+            return
         session_id = str(self._session_id or "")
         conversation_id = str(self._conversation_id or "")
         if not session_id:
             return
         with _ACTIVE_ENGINE_COLD_START_LOCK:
+            owner = self._unload_group
+            if owner is not None:
+                with owner.lock:
+                    owner.bound_sessions.add(session_id)
             with _ACTIVE_ENGINE_REGISTRY_LOCK:
                 _remove_registry_entries_for_engine(
                     self,
@@ -4947,6 +5085,28 @@ class LCMEngine(
             "reset_epoch": state.last_reset_at if state is not None else None,
         }
 
+    def _ingest_unloaded_compress_view(self, messages, *, host_pairs=()) -> None:
+        """Persist incoming compress() messages via main's reclassification/ingest path without running an LLM pass."""
+        self._maybe_reclassify_late_auxiliary_before_compaction_write()
+        with self._bypass_compression_binding() as bypassed:
+            try:
+                canonical, host_view = self._canonical_host_view(messages)
+            except Exception as exc:
+                self._last_compression_status = "error"
+                self._record_ingest_failure("compress", exc)
+                return
+            effective_pairs = host_view.get("host_pairs", host_pairs)
+            if bypassed:
+                bypass_id = self._bypass_lcm_session_id()
+                if bypass_id and canonical:
+                    self._store_delegate_child_turn(bypass_id, canonical)
+                return
+            if self._session_id and canonical and not self._bypasses_lcm_context_management():
+                self._ingest_messages(
+                    canonical,
+                    **({"host_pairs": effective_pairs} if effective_pairs else {}),
+                )
+
     def bind_session_state(self, session_db: Any = None, session_id: str = "") -> None:
         """Handle Hermes' reset-only switch after an end or an empty /new.
 
@@ -4960,88 +5120,109 @@ class LCMEngine(
                 "LCM-X cannot detach a context engine from its session; "
                 "keep compression off on this fork"
             )
+        if self._plugin_is_unloading():
+            self._run_retained_or_dormant(
+                lambda engine: engine._bind_session_state_unlocked(session_db, session_id),
+            )
+            return
         with self._exclusive_lifecycle("rebind"):
-            if session_db is not None:  # a call without a handle keeps the one already held
-                self._host_session_db = session_db
-            if (
-                self._stable_use_closed
-                or not self._session_id
-                or session_id == self._session_id
-                or (
-                    self._session_id != self._foreground_session_id
-                    # An initially filtered session has no foreground marker.
-                    # Let it reach the exact empty-reset proof below, but never
-                    # let a filtered side channel replace an existing foreground.
-                    and (self._foreground_session_id or not (self._session_ignored or self._session_stateless))
+            self._bind_session_state_unlocked(session_db, session_id)
+
+    def _bind_session_state_unlocked(self, session_db: Any = None, session_id: str = "") -> None:
+        if session_db is not None:  # a call without a handle keeps the one already held
+            self._host_session_db = session_db
+        if (
+            self._stable_use_closed
+            or not self._session_id
+            or session_id == self._session_id
+            or (
+                self._session_id != self._foreground_session_id
+                # An initially filtered session has no foreground marker.
+                # Let it reach the exact empty-reset proof below, but never
+                # let a filtered side channel replace an existing foreground.
+                and (self._foreground_session_id or not (self._session_ignored or self._session_stateless))
+            )
+            or self._thread_context_stateless()
+            or self._thread_context_has_auxiliary_session(session_id)
+            or self._is_live_auxiliary_child_session(session_id, self._session_id, {})
+        ):
+            return
+        state = self._lifecycle.get_by_conversation(self._conversation_id)
+        if state is not None and state.current_session_id == self._session_id:
+            # Empty-history CLI /new skips end. Require a reset of this exact
+            # binding and no stored/attempted ingest or summary/commit history.
+            # Prefix fingerprints survive reset, including a failed ingest.
+            empty_reset_binding = (
+                self._pending_reset_session_id == self._session_id
+                and self._pending_reset_conversation_id == self._conversation_id
+                and self._pending_reset_frontier_store_id == 0
+                and self._ingest_cursor == 0
+                and not self._compression_boundary_ingest_pending
+                and not self._pending_context_anchor_messages
+                and not self._lcm_normal_message_prefix_fingerprints.get(
+                    (self._session_id, self._conversation_id)
                 )
-                or self._thread_context_stateless()
-                or self._thread_context_has_auxiliary_session(session_id)
-                or self._is_live_auxiliary_child_session(session_id, self._session_id, {})
-            ):
+                and state.current_frontier_store_id == 0
+                and state.last_finalized_session_id is None
+                and state.last_finalized_frontier_store_id == 0
+                and state.last_finalized_at is None
+                and state.last_rollover_at is None
+                and state.last_maintenance_attempt_at is None
+                and not state.debt_kind and state.debt_size_estimate == 0
+                and state.last_reset_at is not None
+                and state.updated_at == state.last_reset_at
+                and self._store.get_session_count(self._session_id) == 0
+                and self._dag.get_session_node_count(self._session_id) == 0
+                and self._dag.get_session_node_count(self._conversation_id) == 0
+            )
+            if not empty_reset_binding:
                 return
-            state = self._lifecycle.get_by_conversation(self._conversation_id)
-            if state is not None and state.current_session_id == self._session_id:
-                # Empty-history CLI /new skips end. Require a reset of this exact
-                # binding and no stored/attempted ingest or summary/commit history.
-                # Prefix fingerprints survive reset, including a failed ingest.
-                empty_reset_binding = (
-                    self._pending_reset_session_id == self._session_id
-                    and self._pending_reset_conversation_id == self._conversation_id
-                    and self._pending_reset_frontier_store_id == 0
-                    and self._ingest_cursor == 0
-                    and not self._compression_boundary_ingest_pending
-                    and not self._pending_context_anchor_messages
-                    and not self._lcm_normal_message_prefix_fingerprints.get(
-                        (self._session_id, self._conversation_id)
-                    )
-                    and state.current_frontier_store_id == 0
-                    and state.last_finalized_session_id is None
-                    and state.last_finalized_frontier_store_id == 0
-                    and state.last_finalized_at is None
-                    and state.last_rollover_at is None
-                    and state.last_maintenance_attempt_at is None
-                    and not state.debt_kind and state.debt_size_estimate == 0
-                    and state.last_reset_at is not None
-                    and state.updated_at == state.last_reset_at
-                    and self._store.get_session_count(self._session_id) == 0
-                    and self._dag.get_session_node_count(self._session_id) == 0
-                    and self._dag.get_session_node_count(self._conversation_id) == 0
-                )
-                if not empty_reset_binding:
-                    return
-                self._on_session_end_unlocked(self._session_id, [])
-                if self._session_ignored or self._session_stateless:
-                    # Bypass end hooks skip lifecycle writes. The exact reset
-                    # and empty-binding proof above permits finalizing here.
-                    self._lifecycle.finalize_session(self._conversation_id, self._session_id)
-                state = self._lifecycle.get_by_conversation(self._conversation_id)
-            if (
-                state is None
-                or state.current_session_id is not None
-                or state.last_finalized_session_id != self._session_id
-            ):
-                return
-            self._on_session_start_unlocked(session_id, platform=self._session_platform)
+            self._on_session_end_unlocked(self._session_id, [])
             if self._session_ignored or self._session_stateless:
-                # This is an explicit foreground reset, unlike a side-channel
-                # start. Keep it eligible for the next reset back to normal.
-                self._foreground_session_id = self._session_id
-                self._foreground_session_platform = self._session_platform
-                self._foreground_conversation_id = self._conversation_id
+                # Bypass end hooks skip lifecycle writes. The exact reset
+                # and empty-binding proof above permits finalizing here.
+                self._lifecycle.finalize_session(self._conversation_id, self._session_id)
+            state = self._lifecycle.get_by_conversation(self._conversation_id)
+        if (
+            state is None
+            or state.current_session_id is not None
+            or state.last_finalized_session_id != self._session_id
+        ):
+            return
+        self._on_session_start_unlocked(session_id, platform=self._session_platform)
+        if self._session_ignored or self._session_stateless:
+            # This is an explicit foreground reset, unlike a side-channel
+            # start. Keep it eligible for the next reset back to normal.
+            self._foreground_session_id = self._session_id
+            self._foreground_session_platform = self._session_platform
+            self._foreground_conversation_id = self._conversation_id
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
+        if self._plugin_is_unloading() and kwargs.get("boundary_reason") == "compression":
+            latest = self._reload_successor or self
+            if (not kwargs.get("hermes_home")
+                    or _resolved_profile_home(kwargs["hermes_home"]) == _resolved_profile_home(latest._hermes_home)):
+                # Keep the bound profile spelling for compression boundaries.
+                clean_kwargs = {k: v for k, v in kwargs.items() if k != "hermes_home"}
+                self._run_retained_or_dormant(
+                    lambda engine: engine._start_bound_session(session_id, clean_kwargs),
+                )
+                return
         with self._exclusive_lifecycle("rebind"):
-            if self._stable_use_closed:
+            if self._stable_use_closed or self._plugin_is_unloading():
                 raise RuntimeError("LCM engine is closed")
-            self._on_session_start_unlocked(session_id, **kwargs)
-            self._enqueue_host_row_recovery(session_id, kwargs)
-            self._enqueue_unended_catchup(session_id, kwargs)
-            binding = self._emission_binding()
-            for name in ("_compress_commit_proof", "_last_emission_descriptors"):
-                if not self._emission_proof_matches_binding(getattr(self, name), binding):
-                    self._frontier_holder().filter_by_binding(
-                        proof=name == "_compress_commit_proof", descriptors=name == "_last_emission_descriptors",
-                    )
+            self._start_bound_session(session_id, kwargs)
+
+    def _start_bound_session(self, session_id, kwargs):
+        self._on_session_start_unlocked(session_id, **kwargs)
+        self._enqueue_host_row_recovery(session_id, kwargs)
+        self._enqueue_unended_catchup(session_id, kwargs)
+        binding = self._emission_binding()
+        for name in ("_compress_commit_proof", "_last_emission_descriptors"):
+            if not self._emission_proof_matches_binding(getattr(self, name), binding):
+                self._frontier_holder().filter_by_binding(
+                    proof=name == "_compress_commit_proof", descriptors=name == "_last_emission_descriptors",
+                )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
         if not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
@@ -5421,22 +5602,539 @@ class LCMEngine(
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         started = time.perf_counter()
+        if self._plugin_is_unloading():
+            sender_capture.retire(self)
+            latest = self._reload_successor or self
+            if not latest._flush_retired_delegate_child(session_id, messages, latest._session_platform):
+                self._run_retained_or_dormant(
+                    lambda engine: (
+                        sender_capture.retire(engine),
+                        engine._finish_bound_session(session_id, messages, started, started),
+                    ),
+                    busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+                )
+            return
         sender_capture.retire(self)
         admission_started = time.perf_counter()
         with self._exclusive_lifecycle("end"):
+            if self._plugin_is_unloading():
+                latest = self._reload_successor or self
+                if not latest._flush_retired_delegate_child(session_id, messages, latest._session_platform):
+                    self._run_retained_or_dormant(
+                        lambda engine: (
+                            sender_capture.retire(engine),
+                            engine._finish_bound_session(session_id, messages, started, started),
+                        ),
+                        busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS,
+                    )
+                return
             if self._stable_use_closed:
                 return
-            with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
-                self._frozen_tail_reached = False
-                self._retry_session_end_tails()
+            self._finish_bound_session(session_id, messages, started, admission_started)
+
+    def _finish_bound_session(self, session_id, messages, started, admission_started):
+        with self._session_end_diagnostic(messages, started, time.perf_counter(), admission_started):
+            self._frozen_tail_reached = False
+            self._retry_session_end_tails()
+            try:
+                messages, host_view = self._canonical_host_view(messages)
+            except Exception as exc:
+                self._record_ingest_failure("session-end ingest", exc)
+            else:
+                self._on_session_end_unlocked(session_id, messages, **host_view)
+            finally:
+                self._session_end_flush_active = False
+
+    def _open_retired_store(self, store, *, busy_timeout_ms=_SESSION_END_BUSY_TIMEOUT_MS):
+        return closing(MessageStore._open_existing(
+            store.db_identity, hermes_home=self._hermes_home,
+            ingest_protection_config=self._config,
+            write_timeout_ms=busy_timeout_ms,
+        ))
+
+    @staticmethod
+    def _unwrap_retired_native_summaries(rows):
+        if not any(message.get("_compressed_summary") for _, message in rows):
+            return rows
+        try:
+            from agent.context_compressor import ContextCompressor
+        except ImportError:
+            return rows
+        unwrap = getattr(ContextCompressor, "_strip_context_summary_handoff_message", None)
+        if not callable(unwrap):
+            return rows
+        return [(index, normalized) for index, message in rows if
+                (normalized := unwrap(message) if message.get("_compressed_summary") else message) is not None]
+
+    @staticmethod
+    def _retired_tail_key(session_id, conversation_id):
+        lane = json.dumps([session_id, conversation_id]).encode()
+        return "retired_tail:" + hashlib.sha256(lane).hexdigest()
+
+    def _retired_tail_replay_prefix(self, messages, end_store_id):
+        """Return the verified host position and whether it covers the late write."""
+        store = self._store
+        stored = store.get_range(
+            self._session_id, limit=len(messages) + 1, conversation_id=self._conversation_id,
+        )
+        kept = [(idx, row) for idx, row in enumerate(messages) if not self._cold_tail_ingest_drops(row)]
+        if stored and kept and not kept[0][1].get("_compressed_summary") and self._session_end_rows_equal(
+            stored[0], kept[0][1], session_id=self._session_id,
+        ):
+            kept = self._unwrap_retired_native_summaries(kept)
+        for row, (_, message) in zip(stored, kept):
+            if not self._session_end_rows_equal(row, message, session_id=self._session_id):
+                return None
+            stamp = _normalize_observed_at(message.get("timestamp"))
+            saved_stamp = _normalize_observed_at(row.get("observed_at"))
+            if stamp is not None and saved_stamp is not None and stamp != saved_stamp:
+                return None
+        if len(stored) > len(kept):
+            return len(messages), False
+        if not stored or stored[-1]["store_id"] < end_store_id:
+            return None
+        cursor = kept[len(stored) - 1][0] + 1
+        return cursor, True
+
+    def _flush_retired_delegate_child(self, session_id, messages, platform, *, retry_busy=False):
+        """Persist late delegated rows only when the existing store proves its lineage."""
+        old_store = self.__dict__.get("_store")
+        if (not messages or old_store is None or str(old_store.db_path) == ":memory:"
+                or not old_store.db_path.is_file()
+                or self._session_id_matches_lcm_bypass_filters(session_id, platform=platform or "subagent")):
+            return False
+        try:
+            with _aux_session._DELEGATE_STORE_LOCK, self._open_retired_store(old_store) as store:
+                with store.atomic(immediate=True):
+                    sessions = self._delegate_child_store_sessions(session_id, store=store)
+                    root = sessions[-1]
+                    link = self._stored_delegate_child_link(session_id, store=store)
+                    root_link = self._stored_delegate_child_link(root, store=store)
+                    parent = root_link.get("parent_session_id")
+                    key = (str(store.db_path), session_id)
+                    if (not link or not parent or parent in sessions or root_link["source"] == "compression"
+                            or key in _aux_session._DELEGATE_AUXILIARY_IDS
+                            or self._session_id_matches_lcm_bypass_filters(
+                                parent, platform=self._host_session_parent(parent)[1],
+                            )):
+                        return False
+                    view = [row for row in messages
+                            if isinstance(row, dict) and not self._matches_ignore_message_patterns(row)]
+                    stored, _ = self._append_delegate_child_view(
+                        session_id, view, store=store,
+                        context_window_tokens=old_store.get_context_window_tokens(session_id),
+                    )
+                if stored:
+                    _aux_session._DELEGATE_RESUME_BOUNDARIES.pop(key, None)
+                return True
+        except Exception as exc:
+            if retry_busy and _is_ingest_busy_error(exc):
+                return _aux_session.LIVE_STORE_RETRY
+            logger.debug("LCM retired delegated-child tail write failed", exc_info=True)
+            return False
+
+    @staticmethod
+    def _query_session_max_store_id(store, session_id: str, conversation_id: str) -> int:
+        if store is None or store.connection is None or not session_id:
+            return 0
+        if conversation_id:
+            row = store.connection.execute(
+                "SELECT COALESCE(MAX(store_id), 0) FROM messages WHERE session_id = ? AND conversation_id = ?",
+                (session_id, conversation_id),
+            ).fetchone()
+        else:
+            row = store.connection.execute(
+                "SELECT COALESCE(MAX(store_id), 0) FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row[0] or 0) if row is not None else 0
+
+    def _copy_retained_state(self, retired: "LCMEngine") -> None:
+        """Transfer exact in-memory session/cursor/replay/reset state to a successor clone."""
+        self._hermes_home = retired._hermes_home
+        self._db_path = retired._db_path
+        self._host_session_db = getattr(retired, "_host_session_db", None)
+        self._engine_name = retired._engine_name
+        self._identity_migration = copy.deepcopy(retired._identity_migration)
+
+        self.model = retired.model
+        self.base_url = retired.base_url
+        self.api_key = retired.api_key
+        self.provider = retired.provider
+        self.api_mode = retired.api_mode
+        if retired._context_length_source:
+            self._set_context_length(
+                retired.raw_context_length,
+                source=retired._context_length_source,
+                model=retired.model,
+                provider=retired.provider,
+            )
+        elif retired.raw_context_length or retired.context_length:
+            self._set_context_length(
+                retired.raw_context_length or retired.context_length,
+                source="adopt_retained",
+                model=retired.model,
+                provider=retired.provider,
+            )
+        self._update_model_pending_session_start = retired._update_model_pending_session_start
+        for attr in (
+            "last_prompt_tokens", "last_completion_tokens", "last_total_tokens",
+            "last_input_tokens", "last_output_tokens",
+            "last_cache_read_tokens", "last_cache_write_tokens", "last_reasoning_tokens",
+            "cache_metrics_available", "compression_count",
+            "_last_gate_tokens", "_last_compression_status", "_last_compression_noop_reason",
+            "_last_compaction_duration_ms", "_last_boundary_skip_time",
+            "_no_progress_observed_tokens", "_no_progress_ingest_generation", "_no_progress_hold_persisted",
+            "_sweep_budget_hold_until", "_sweep_budget_hold_conversation", "_sweep_budget_hold_turn_paced",
+            "_compress_calls", "_compress_commit_reason", "_compress_commit_publication",
+            "_compaction_telemetry_counter_epoch", "_compaction_telemetry_skips",
+            "_compaction_telemetry_counter_rebaseline_pending", "_compaction_telemetry_turn_reset_pending",
+            "_session_id", "_session_platform", "_conversation_id",
+            "_foreground_session_id", "_foreground_session_platform", "_foreground_conversation_id",
+            "_foreground_rebind_session_id", "_foreground_rebind_previous_session_id",
+            "_foreground_rebind_previous_platform", "_foreground_rebind_previous_conversation_id",
+            "_foreground_rebind_parent_session_id",
+            "_session_ignored", "_session_stateless", "_lcm_current_start_allows_bypass_lineage",
+            "_pending_reset_session_id", "_pending_reset_conversation_id", "_pending_reset_frontier_store_id",
+            "_compression_boundary_ingest_pending", "_last_overflow_recovery_failed",
+            "_last_condensation_suppressed_reason", "_last_seen_session_max_store_id",
+            "_ignored_message_count", "_ignore_pattern_dropped_count",
+        ):
+            if attr in retired.__dict__:
+                self.__dict__[attr] = retired.__dict__[attr]
+        for attr in (
+            "_session_match_keys", "_last_active_replay_source_identities", "_last_active_replay_messages",
+            "_last_ingest_reconciliation", "_no_progress_hold", "_hung_summary_strike",
+            "_pending_context_anchor_messages",
+            "_compression_boundary_active_placeholder_digest_budget",
+            "_compression_boundary_active_placeholder_digest_ordinals",
+            "_compression_boundary_stored_placeholder_digest_counts",
+            "_generated_ignored_active_replay_placeholder_message_ids",
+            "_generated_ignored_active_replay_placeholder_messages",
+            "_generated_ignored_active_replay_placeholder_hashes",
+            "_generated_ignored_active_replay_placeholder_hash_counts",
+            "_generated_ignored_active_replay_placeholder_hash_ordinals",
+            "_out_of_band_durable_rows", "_emitted_carriers_seen", "_emitted_carriers_retired",
+            "_saved_context_window_tokens", "_seen_retired_tail", "_auxiliary_session_ids", "_auxiliary_lineage_session_ids",
+            "_auxiliary_last_prompt_tokens", "_auxiliary_direct_end_guard_session_ids",
+            "_auxiliary_handoff_parent_session_ids", "_delegate_child_bind_parent_ids",
+            "_auxiliary_foreground_reused_session_ids", "_lcm_bypass_lineage_session_ids",
+            "_lcm_bypass_lineage_platforms", "_lcm_non_bypass_platforms",
+            "_lcm_session_last_platform", "_lcm_session_last_normal_platform",
+            "_lcm_session_last_bypassed", "_lcm_session_last_conversation_id",
+            "_lcm_session_last_normal_conversation_id",
+            "_lcm_bypass_message_prefix_fingerprints", "_lcm_normal_message_prefix_fingerprints",
+        ):
+            if attr in retired.__dict__:
+                self.__dict__[attr] = copy.deepcopy(retired.__dict__[attr])
+        self._frontier = copy.deepcopy(retired._frontier)
+        refusal = getattr(retired, "_compress_refusal", None)
+        self._compress_refusal = copy.deepcopy(refusal) if isinstance(refusal, dict) else None
+
+    def _run_dormant_as_main(self, operation, *, busy_timeout_ms: int = SQLITE_BUSY_TIMEOUT_MS):
+        """Execute main's exact logic during unload drain or a closed unload gap."""
+        latest = self._reload_successor or self
+        if not latest._session_id:
+            return False, None
+        is_memory = str(latest._db_path) == ":memory:"
+        if not is_memory and not latest._db_path.is_file():
+            return False, None
+        if latest._stable_use_closed and is_memory:
+            return False, None
+        if latest._stable_use_owner_thread == threading.get_ident():
+            return True, operation(latest)
+        deadline = time.monotonic() + max(busy_timeout_ms, SQLITE_BUSY_TIMEOUT_MS) / 1000
+        with latest._exclusive_lifecycle("dormant", deadline=deadline) as acquired:
+            if not acquired:
+                return False, None
+            if not latest._stable_use_closed:
+                if not latest._storage_ready and not is_memory and not latest._db_path.is_file():
+                    return False, None
+                value = operation(latest)
+                store = latest.__dict__.get("_store")
+                if store is not None and store.connection is not None:
+                    try:
+                        latest._last_seen_session_max_store_id = latest._query_session_max_store_id(
+                            store, latest._session_id, latest._conversation_id,
+                        )
+                    except sqlite3.Error:
+                        pass
+                    latest._saved_context_window_tokens = dict(store._context_window_tokens)
+                return True, value
+            if not latest._db_path.is_file():
+                return False, None
+            helper_attrs = (
+                "_adaptive_retrieval", "_store", "_dag", "_lifecycle",
+                "_assertions", "_entities", "_query_views",
+            )
+            saved_helpers = {attr: latest.__dict__[attr] for attr in helper_attrs if attr in latest.__dict__}
+            store = dag = lifecycle = None
+            try:
+                store = MessageStore._open_existing(
+                    latest._db_path, ingest_protection_config=latest._config,
+                    hermes_home=latest._hermes_home, write_timeout_ms=busy_timeout_ms,
+                )
+                store._context_window_tokens.update(getattr(latest, "_saved_context_window_tokens", {}) or {})
+                dag = SummaryDAG._open_existing(latest._db_path)
+                lifecycle = LifecycleStateStore(latest._db_path, existing_only=True)
+            except BaseException:
+                for helper in (lifecycle, dag, store):
+                    if helper is not None:
+                        try:
+                            helper.close()
+                        except Exception:
+                            pass
+                raise
+            latest._store = store
+            latest._dag = dag
+            latest._lifecycle = lifecycle
+            latest._assertions = None
+            latest._entities = None
+            latest._query_views = None
+            latest._adaptive_retrieval = None
+            latest._storage_ready = True
+            latest._stable_use_closed = False
+            latest._dormant_ephemeral_active = True
+            max_before = None
+            try:
+                max_before = latest._query_session_max_store_id(
+                    store, latest._session_id, latest._conversation_id,
+                )
+                if max_before != getattr(latest, "_last_seen_session_max_store_id", 0):
+                    latest._ingest_cursor_needs_reconcile = True
+            except sqlite3.Error:
+                pass
+            saved_session_id = latest._session_id
+            saved_conversation_id = latest._conversation_id
+            saved_cursor = latest._frontier.cursor
+            saved_needs_reconcile = latest._frontier.needs_reconcile
+            try:
+                value = operation(latest)
                 try:
-                    messages, host_view = self._canonical_host_view(messages)
-                except Exception as exc:
-                    self._record_ingest_failure("session-end ingest", exc)
-                else:
-                    self._on_session_end_unlocked(session_id, messages, **host_view)
-                finally:
-                    self._session_end_flush_active = False
+                    latest._last_seen_session_max_store_id = latest._query_session_max_store_id(
+                        store, latest._session_id, latest._conversation_id,
+                    )
+                except sqlite3.Error:
+                    pass
+                latest._saved_context_window_tokens = dict(store._context_window_tokens)
+                return True, value
+            finally:
+                dropped_ephemeral_tail = any(
+                    tail.get("store") is store for tail in latest._pending_session_tails
+                )
+                latest._pending_session_tails[:] = [
+                    tail for tail in latest._pending_session_tails if tail.get("store") is not store
+                ]
+                if (
+                    dropped_ephemeral_tail
+                    and not saved_needs_reconcile
+                    and max_before is not None
+                    and (latest._session_id, latest._conversation_id) == (saved_session_id, saved_conversation_id)
+                    and latest._frontier.cursor == saved_cursor
+                ):
+                    try:
+                        max_after = latest._query_session_max_store_id(
+                            store, latest._session_id, latest._conversation_id,
+                        )
+                    except sqlite3.Error:
+                        max_after = None
+                    if max_after == max_before:
+                        latest._frontier.needs_reconcile = False
+                if not latest._pending_session_tails and not latest._detached_stores_to_close:
+                    maintenance_scheduler._PENDING_TAIL_ENGINES.discard(latest)
+                to_close = []
+                for attr in helper_attrs:
+                    helper = latest.__dict__.get(attr)
+                    if helper is not None and helper is not saved_helpers.get(attr):
+                        to_close.append(helper)
+                for helper in (lifecycle, dag, store):
+                    if helper is not None and helper not in to_close:
+                        to_close.append(helper)
+                for helper in to_close:
+                    try:
+                        helper.close()
+                    except Exception:
+                        logger.debug("LCM dormant cleanup failed closing SQLite helper", exc_info=True)
+                for attr in helper_attrs:
+                    if attr in saved_helpers:
+                        latest.__dict__[attr] = saved_helpers[attr]
+                    else:
+                        latest.__dict__.pop(attr, None)
+                latest._storage_ready = False
+                latest._stable_use_closed = True
+                latest._dormant_ephemeral_active = False
+                latest._unregister_active_engine_binding()
+
+    def _run_retained_or_dormant(self, operation, *, busy_timeout_ms: int = SQLITE_BUSY_TIMEOUT_MS):
+        """Prefer a live replacement registration's clone; otherwise run dormant parity execution."""
+        adopted_box = []
+        successor = self._retained_successor(on_adopt=lambda engine: adopted_box.append(operation(engine)))
+        if adopted_box:
+            return True, adopted_box[0]
+        if successor is not None:
+            result = use_lcm_engine(successor, operation, timeout=None)
+            if result.used:
+                return True, result.value
+        owner = self._unload_group
+        if successor is None and owner is not None and owner.current_prototype is not None:
+            successor = self._retained_successor(on_adopt=lambda engine: adopted_box.append(operation(engine)))
+            if adopted_box:
+                return True, adopted_box[0]
+            if successor is not None:
+                result = use_lcm_engine(successor, operation, timeout=None)
+                if result.used:
+                    return True, result.value
+        return self._run_dormant_as_main(operation, busy_timeout_ms=busy_timeout_ms)
+
+    def _unattached_reload_lane(self, session_id, conversation_id, platform):
+        """Find one durable lane when an older host omits its compressor."""
+        if (not self._storage_ready and not self._db_path.is_file()) or self._session_id_matches_lcm_bypass_filters(
+            session_id, platform=platform,
+        ):
+            return None
+        lanes = self._store.connection.execute(
+            "SELECT conversation_id FROM lcm_lifecycle_state WHERE current_session_id = ? LIMIT 2",
+            (session_id,),
+        ).fetchall()
+        if len(lanes) != 1 or (conversation_id and conversation_id != lanes[0][0]):
+            return None
+        return lanes[0][0]
+
+    def _proves_local_hook_turn(self, session_id, messages):
+        # Hermes persists the final assistant row before post_llm_call. A
+        # session id by itself can also name a different profile's session.
+        reply = messages[-1]
+        if reply.get("role") != "assistant" or reply.get("tool_calls"):
+            return False
+        identity = self._host_occurrence_metadata(reply)
+        stamp, uid = identity["timestamp"], identity["message_uid"]
+        if stamp is None and uid is None:
+            return False
+        try:
+            with closing(sqlite3.connect(self._state_db_path().resolve().as_uri() + "?mode=ro",
+                                         uri=True, timeout=0.05)) as conn:
+                session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+                source_clause = "AND COALESCE(s.source, '') != 'subagent'" if "source" in session_cols else ""
+                if uid is not None and any(row[1] == "message_uid" for row in conn.execute("PRAGMA table_info(messages)")):
+                    saved = conn.execute(
+                        f"""SELECT m.content FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                        WHERE s.id = ? {source_clause} AND s.ended_at IS NULL
+                          AND m.role = 'assistant' AND m.message_uid = ?""",
+                        (session_id, uid),
+                    ).fetchone()
+                    return saved is not None and (
+                        not isinstance(reply.get("content"), str) or saved[0] == reply["content"]
+                    )
+                if stamp is None or not isinstance(reply.get("content"), str):
+                    return False
+                return conn.execute(
+                    f"""SELECT 1 FROM sessions AS s JOIN messages AS m ON m.session_id = s.id
+                    WHERE s.id = ? {source_clause} AND s.ended_at IS NULL
+                      AND m.role = 'assistant' AND m.timestamp = ? AND m.content = ?""",
+                    (session_id, stamp, reply["content"]),
+                ).fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+    def _start_fresh_reload_lane(self, session_id, conversation_id, platform):
+        if (self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)
+                or self._plugin_is_unloading()
+                or ((self._storage_ready or self._db_path.is_file())
+                    and self._stored_delegate_child_link(session_id))):
+            return False
+        lane = conversation_id or session_id
+        if not self._lifecycle.claim_new_hook_binding(session_id, lane):
+            return False
+        # Reuse the normal ingest/reconciliation path cleanly after claiming.
+        self._apply_session_start_metadata(session_id, {"platform": platform})
+        self._conversation_id = self._foreground_conversation_id = lane
+        self._lcm_session_last_conversation_id[session_id] = lane
+        self._lcm_session_last_normal_conversation_id[session_id] = lane
+        self._fresh_reload_hook_binding = (session_id, lane)
+        self._schedule_ingest_cursor_reconciliation()
+        self._register_active_engine_binding()
+        return True
+
+    def _ingest_reload_lane(self, session_id, conversation_id, messages, platform):
+        """Replay through a scoped clone without changing durable ownership."""
+        self._apply_session_start_metadata(session_id, {"platform": platform})
+        self._conversation_id = conversation_id
+        self._schedule_ingest_cursor_reconciliation()
+        if self._bypasses_lcm_context_management():
+            return False
+        self._ingest_messages(messages)
+        return True
+
+    def _adopt_retained_binding(self, retired):
+        """Attach a successor clone to the retired engine's exact state."""
+        if not retired._session_id:
+            return False
+        if str(retired._db_path) != ":memory:" and not retired._db_path.is_file():
+            return False
+        self._copy_retained_state(retired)
+        self._origin_engine_type = getattr(retired, "_origin_engine_type", type(retired))
+        store = self._store
+        store._context_window_tokens.update(getattr(retired, "_saved_context_window_tokens", {}) or {})
+        refusal = getattr(self, "_compress_refusal", None)
+        if isinstance(refusal, dict) and isinstance(refusal.get("binding"), tuple) and len(refusal["binding"]) == 4:
+            refusal["binding"] = (store, *refusal["binding"][1:])
+        current_max = self._query_session_max_store_id(store, self._session_id, self._conversation_id)
+        if current_max != getattr(retired, "_last_seen_session_max_store_id", 0):
+            self._ingest_cursor_needs_reconcile = True
+        self._last_seen_session_max_store_id = current_max
+        state = self._lifecycle.get_by_conversation(self._conversation_id) if self._conversation_id else None
+        if state is not None and state.current_session_id == self._session_id:
+            self._register_active_engine_binding()
+        elif self._session_id:
+            if self._unload_group is not None:
+                with self._unload_group.lock:
+                    self._unload_group.bound_sessions.add(self._session_id)
+            with _ACTIVE_ENGINE_REGISTRY_LOCK:
+                if _ACTIVE_ENGINES_BY_SESSION_ID.get(self._session_id) is None:
+                    _ACTIVE_ENGINES_BY_SESSION_ID[self._session_id] = self
+        return True
+
+    def _retained_successor(self, *, on_adopt=None):
+        """Resolve the current registration's clone for this retired foreground."""
+        owner = self._unload_group
+        if owner is None or owner.current_prototype is None or not self._stable_use_closed:
+            return None
+        with self._storage_lock:
+            prototype = owner.current_prototype()
+            if not callable(getattr(prototype, "_adopt_retained_binding", None)) or prototype._plugin_is_unloading():
+                return None
+            current_owner = prototype._unload_group
+            if (current_owner is None or current_owner is owner
+                    or _resolved_profile_home(prototype._hermes_home) != _resolved_profile_home(self._hermes_home)
+                    or prototype._db_path.resolve() != self._db_path.resolve()):
+                return None
+            previous = self._reload_successor
+            if previous is not None and previous._unload_group is current_owner:
+                return previous if not previous._compaction_is_closing() else None
+            retired = previous if previous is not None else self
+            if not retired._stable_use_closed or not retired._session_id or not retired._db_path.is_file():
+                return None
+            try_clone = getattr(prototype, "_try_clone_for_retained_binding", None)
+            if not callable(try_clone) or (successor := try_clone()) is None:
+                return None
+            try:
+                def adopt(clone):
+                    if not clone._adopt_retained_binding(retired):
+                        return False
+                    if on_adopt is not None:
+                        on_adopt(clone)
+                    return True
+
+                result = use_lcm_engine(successor, adopt)
+            except Exception:
+                successor.shutdown()
+                logger.warning("LCM could not attach the retained session after reload", exc_info=True)
+                return None
+            if not result.used or not result.value:
+                successor.shutdown()
+                return None
+            self._reload_successor = successor
+            return successor
 
     def _on_session_end_unlocked(
         self,
@@ -6255,9 +6953,15 @@ class LCMEngine(
             raise
 
     def on_session_reset(self) -> None:
+        if self._plugin_is_unloading():
+            self._run_retained_or_dormant(
+                lambda engine: (sender_capture.retire(engine), engine._on_session_reset_unlocked()),
+            )
+            sender_capture.retire(self)
+            return
         sender_capture.retire(self)
         with self._exclusive_lifecycle("reset"):
-            if self._stable_use_closed:
+            if self._stable_use_closed or self._plugin_is_unloading():
                 return
             self._on_session_reset_unlocked()
 
@@ -6430,6 +7134,12 @@ class LCMEngine(
         by spanning the same current + last-finalized sessions its leaf fallback
         uses (see ``_recent_ready_rollups``), so no window content is dropped.
         """
+        with self._admit_plugin_operation() as admitted:
+            if not admitted:
+                return 0
+            return self._carry_over_new_session_context(old_session_id, new_session_id)
+
+    def _carry_over_new_session_context(self, old_session_id: str, new_session_id: str) -> int:
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
         if self._session_ignored and new_session_id == self._session_id:
@@ -6537,6 +7247,27 @@ class LCMEngine(
         return _disabled_tool_names()
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        if engine_unload_group(self) is None:
+            return LCMEngine._handle_tool_call(self, name, args, **kwargs)
+        if self._plugin_is_unloading():
+            if (successor := self._retained_successor()) is not None:
+                result = use_lcm_engine(successor, lambda engine: engine.handle_tool_call(name, args, **kwargs))
+                if result.used and result.value is not None:
+                    return result.value
+            if (self._stable_use_owner_thread != threading.get_ident()
+                    and not getattr(self._thread_context, "plugin_operation", False)
+                    and name != "lcm_inspect" and kwargs.get("messages")):
+                self._run_dormant_as_main(lambda engine: engine._ingest_unloaded_compress_view(kwargs["messages"]))
+            return json.dumps({"error": "LCM plugin is unloading"})
+        # Registered hooks that already hold a stable lease are already admitted.
+        if self._stable_use_owner_thread == threading.get_ident():
+            return self._handle_tool_call(name, args, **kwargs)
+        with self._admit_plugin_operation() as admitted:
+            if not admitted:
+                return json.dumps({"error": "LCM plugin is unloading"})
+            return self._handle_tool_call(name, args, **kwargs)
+
+    def _handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
         if name in self._disabled_tool_names():
             return json.dumps({"error": f"LCM tool {name} is disabled via LCM_DISABLED_TOOLS"})
         # Ingest live messages if passed (enables current-turn search)
@@ -6841,6 +7572,11 @@ class LCMEngine(
         self._set_context_length(context_length, source="update_model")
         self._warn_turn_start_defer_ceiling()
         self._update_model_pending_session_start = True
+        if self._plugin_is_unloading():
+            if (successor := self._retained_successor()) is not None:
+                successor.update_model(model, context_length, base_url, api_key, provider, api_mode)
+            elif (latest := self._reload_successor) is not None:
+                latest.update_model(model, context_length, base_url, api_key, provider, api_mode)
 
     def _refresh_session_filters(self) -> None:
         self._session_match_keys = build_session_match_keys(
@@ -7424,15 +8160,19 @@ class LCMEngine(
         against its DAG node; None when the content does not start with one."""
         return self._verified_lcm_summary_prefix(content)[0]
 
-    def _verified_lcm_summary_prefix(self, content: str) -> tuple[Optional[int], list[int]]:
+    def _verified_lcm_summary_prefix(self, content: str, *, session_id=None, node_reader=None) -> tuple[Optional[int], list[int]]:
         """(end offset, node ids) of the verified leading LCM summary parts, else (None, [])."""
         if not content.startswith("[") or "[Expand for details:" not in content:
             return None, []
-        dag = getattr(self, "_dag", None)
-        session_id = getattr(self, "_session_id", "")
-        if dag is None or not session_id:
+        if node_reader is None:
+            dag = getattr(self, "_dag", None)
+            if dag is None:
+                return None, []
+            node_reader = dag.get_node
+        session_id = self._session_id if session_id is None else session_id
+        if not session_id:
             return None, []
-        return self._verify_summary_prefix(content, dag.get_node, lambda sid: sid == session_id, self._LCM_SUMMARY_PART_HEADER_RE)
+        return self._verify_summary_prefix(content, node_reader, lambda sid: sid == session_id, self._LCM_SUMMARY_PART_HEADER_RE)
 
     @staticmethod
     def _verify_summary_prefix(content, get_node, owns_session, header_re=_LCM_SUMMARY_PART_HEADER_RE):
@@ -8343,14 +9083,34 @@ class LCMEngine(
                     prepared["view_only"] = self._precompute_ingest_view_only(messages)
                     if getattr(self, "_identity_anchor_recovery", None):
                         self._identity_anchor_observe_recovery()
-                    with self._store.ingest_atomic(admission_retry=admission_retry,
-                            prelock=retried_tail is None and not admission_retry) as sample:
+                    with self._store.ingest_atomic(
+                        admission_retry=admission_retry,
+                        prelock=(retried_tail is None and not admission_retry),
+                    ) as sample:
                         entered_at = _perf_counter()
                         reclassified = False
                         poisoned_before = self._store.ingest_prelock_counts["poisoned"]
                         try:
                             while True:
                                 try:
+                                    retired_key = seen_key = retired_tail = None
+                                    if self._unload_group is not None:
+                                        retired_key = self._retired_tail_key(self._session_id, self._conversation_id)
+                                        retired_tail = self._store.read_metadata_json(retired_key)
+                                        seen_key = (self._store.db_identity, retired_key)
+                                    seen_tails = getattr(self, "_seen_retired_tail", None)
+                                    reconcile_retired = (
+                                        type(retired_tail) is int
+                                        and not (isinstance(seen_tails, dict) and seen_tails.get(seen_key) == retired_tail)
+                                    )
+                                    retired_prefix = (
+                                        self._retired_tail_replay_prefix(messages, retired_tail) if reconcile_retired else None
+                                    )
+                                    if retired_prefix is not None:
+                                        self._ingest_cursor, _ = retired_prefix
+                                        self._ingest_cursor_needs_reconcile = False
+                                    elif reconcile_retired:
+                                        self._ingest_cursor_needs_reconcile = True
                                     emission_attempt = self._ingest_ledger_attempt = (
                                         dict(ledger_prepared, stored={}, matched={}, remainders={}, observations=[])
                                         if ledger_prepared is not None else None)
@@ -8368,6 +9128,21 @@ class LCMEngine(
                                     if self._ingest_ledger_attempt is not None:
                                         self._write_ingest_ledger(self._ingest_ledger_attempt, after_commit, attribution)
                                     self._link_stored_todo_replays(messages, prepared.get("stored_at", {}))
+                                    if self._plugin_is_unloading() and (stored := prepared.get("stored_at")):
+                                        written_key = self._retired_tail_key(self._session_id, self._conversation_id)
+                                        written_tail = max(stored.values())
+                                        self._store.write_metadata_json([written_key], json.dumps(written_tail))
+                                        after_commit.append(lambda k=(self._store.db_identity, written_key), v=written_tail: (
+                                            setattr(self, "_seen_retired_tail", {
+                                                **(getattr(self, "_seen_retired_tail", None) or {}), k: v,
+                                            })
+                                        ))
+                                    elif retired_prefix is not None and retired_prefix[1]:
+                                        after_commit.append(lambda k=seen_key, v=retired_tail: (
+                                            setattr(self, "_seen_retired_tail", {
+                                                **(getattr(self, "_seen_retired_tail", None) or {}), k: v,
+                                            })
+                                        ))
                                     self._store._finish_ingest_prelock()
                                     break
                                 except BaseException as error:
@@ -10764,7 +11539,10 @@ class LCMEngine(
             daemon=True,
         )
         try:
-            worker.start()
+            if self._unload_group is None:
+                worker.start()
+            elif not self._unload_group.start_worker(worker):
+                raise RuntimeError("LCM is unloading")
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"[:300]
             with self._assertion_extraction_metrics_lock:
@@ -13600,14 +14378,32 @@ class LCMEngine(
         self._ingest_telemetry(self._log_ingest_route, session, "S3", stored or 0, "tail retry", ids)
         return True
 
+    def _close_detached_store(self, store: MessageStore) -> None:
+        try:
+            store.close()
+        except Exception:
+            if self._unload_group is not None:
+                # The committed tail is gone. Keep the handle for unload retry.
+                self._detached_stores_to_close.add(store)
+            raise
+        self._detached_stores_to_close.discard(store)
+
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False,
-                                     sibling: bool = False, shutdown: bool = False) -> None:
-        """Drain under the lifecycle lock, sharing one busy-wait budget."""
+                                     sibling: bool = False, deprioritized_tails: set[int] | None = None,
+                                     shutdown: bool = False) -> bool:
+        """Drain under the lifecycle lock and report whether busy work needs another attempt."""
         if not self._pending_session_tails:
-            return
+            return False
         if deadline is None:
             deadline = time.monotonic() + _SESSION_END_BUSY_TIMEOUT_MS / 1000
-        for tail in list(self._pending_session_tails):
+        if deprioritized_tails is not None:
+            tails = [tail for tail in self._pending_session_tails if id(tail) not in deprioritized_tails] + [
+                tail for tail in self._pending_session_tails if id(tail) in deprioritized_tails
+            ]
+        else:
+            tails = list(self._pending_session_tails)
+        retry_busy = False
+        for index, tail in enumerate(tails):
             store = tail["store"]
             committed = False
             try:
@@ -13618,7 +14414,12 @@ class LCMEngine(
                         if self._retry_cold_tail(tail, sibling=sibling, deadline=deadline):
                             committed = True
                             self._pending_session_tails.remove(tail)
+                            if deprioritized_tails is not None:
+                                deprioritized_tails.discard(id(tail))
+                        elif deprioritized_tails is not None:
+                            deprioritized_tails.add(id(tail))
                         if time.monotonic() >= deadline:
+                            retry_busy = index + 1 < len(tails)
                             break
                         continue
                     covered, last_id, left, rule, _stop, candidates = self._match_pending_tail(tail)
@@ -13650,6 +14451,8 @@ class LCMEngine(
                     self._ingest_telemetry(self._log_ingest_route, tail["session_id"], "session_end" if exiting else "warm_tail",
                                            covered, rule, ids)
                     self._pending_session_tails.remove(tail)
+                    if deprioritized_tails is not None:
+                        deprioritized_tails.discard(id(tail))
                     # Read the bound store without a lazy open (#2152): after a failed
                     # rebind, opening the new home here would raise out of shutdown's cleanup.
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
@@ -13657,25 +14460,32 @@ class LCMEngine(
             except (Exception, KeyboardInterrupt) as exc:
                 if committed and tail in self._pending_session_tails:
                     self._pending_session_tails.remove(tail)
+                    if deprioritized_tails is not None:
+                        deprioritized_tails.discard(id(tail))
                     if store is self.__dict__.get("_store") and tail["session_id"] == self._session_id:
                         self._ingest_cursor_needs_reconcile = True
                 if isinstance(exc, KeyboardInterrupt) or _is_ingest_busy_error(exc):
                     self._ledger_count("ledger.tail.retry.deferred")
                     logger.debug("LCM pending session-end retry deferred", exc_info=True)
+                    retry_busy = True
                     break
                 self._ledger_count("ledger.tail.retry_failed")
                 logger.warning("LCM pending session-end retry failed (%s); retry pending", type(exc).__name__)
+                if not committed and deprioritized_tails is not None:
+                    deprioritized_tails.add(id(tail))
             finally:
                 if (store is not self.__dict__.get("_store")
                         and not any(t["store"] is store for t in self._pending_session_tails)):
-                    store.close()
+                    self._close_detached_store(store)
             if time.monotonic() >= deadline:
+                retry_busy = index + 1 < len(tails)
                 break
         if exiting:
             self._warn_unflushed_session_tails("SQLite lock", deadline=deadline,
                 outcome_reason="pending_tail_dropped_at_shutdown" if shutdown else "pending_tail_dropped_at_exit")
-        elif not self._pending_session_tails:
+        elif not self._pending_session_tails and not self._detached_stores_to_close:
             maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
+        return retry_busy
 
     def _cold_tail_absent_count(self, tail, *, deadline=None):
         """Count absent occurrences once, matching known stamps before untimed rows."""
@@ -13764,6 +14574,7 @@ class LCMEngine(
         *,
         validate: Callable[[Any], bool] | None = None,
         timeout: float | None = 5.0,
+        allow_unloading: bool = False,
     ) -> ActiveEngineUseResult:
         """Run one bounded operation while rebind and shutdown are excluded."""
         if self._stable_use_owner_thread == threading.get_ident():
@@ -13777,7 +14588,7 @@ class LCMEngine(
             return ActiveEngineUseResult(ActiveEngineUseStatus.BUSY)
         self._stable_use_owner_thread = threading.get_ident()
         try:
-            if self._stable_use_closed:
+            if self._stable_use_closed or (self._plugin_is_unloading() and not allow_unloading):
                 return ActiveEngineUseResult(ActiveEngineUseStatus.CLOSED_ENGINE)
             if validate is not None and not validate(self):
                 return ActiveEngineUseResult(ActiveEngineUseStatus.BINDING_CHANGED)
@@ -13791,18 +14602,62 @@ class LCMEngine(
 
     def _compaction_is_closing(self) -> bool:
         with self._compaction_gate:
-            return self._compaction_closing
+            return self._compaction_closing or self._plugin_is_unloading()
 
-    def shutdown(self):
+    def _plugin_is_unloading(self) -> bool:
+        return self._unload_group is not None and self._unload_group.closing.is_set()
+
+    @contextmanager
+    def _admit_plugin_operation(self):
+        """Keep admitted native calls live through unload without serializing them."""
+        if self._unload_group is None or getattr(self._thread_context, "plugin_operation", False):
+            yield True
+            return
+        with self._compaction_gate:
+            admitted = not (self._compaction_closing or self._plugin_is_unloading())
+            if admitted:
+                self._plugin_operations_inflight += 1
+        if not admitted:
+            yield False
+            return
+        self._thread_context.plugin_operation = True
+        try:
+            yield True
+        finally:
+            del self._thread_context.plugin_operation
+            with self._compaction_gate:
+                self._plugin_operations_inflight -= 1
+                self._compaction_gate.notify_all()
+
+    def _enable_plugin_unload(self) -> Callable[[], None]:
+        self._unload_group = EngineUnloadGroup(self)
+        return self._unload_group.shutdown
+
+    def shutdown(self, *, deadline: float | None = None, deprioritized_tails: set[int] | None = None):
         # #2482: a live delegated child's in-flight or queued store needs this engine open; it is bounded.
-        drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
+        if not self._plugin_is_unloading():
+            drain_live_child_stores(_aux_session._LIVE_CHILD_SHUTDOWN_DRAIN_S)
         with self._compaction_gate:
             self._compaction_closing = True
+            if self._plugin_operations_inflight:
+                wait_s = _shutdown_compaction_wait_s()
+                if deadline is not None:
+                    wait_s = min(wait_s, max(0.0, deadline - time.monotonic()))
+                # An admitted operation may call a helper that takes a stable
+                # lease. Drain it before acquiring the lifecycle lock.
+                if not self._compaction_gate.wait_for(lambda: self._plugin_operations_inflight == 0, timeout=wait_s):
+                    logger.warning("LCM shutdown: plugin operations still running; connections left open")
+                    return
         sender_capture.retire(self)
-        with self._exclusive_lifecycle("shutdown"):
+        with self._exclusive_lifecycle("shutdown", deadline=deadline) as acquired:
+            if not acquired:
+                logger.warning("LCM unload: engine still in use; connections left open")
+                return
             if self._stable_use_closed:
                 return
             wait_s = _shutdown_compaction_wait_s()
+            if deadline is not None:
+                wait_s = min(wait_s, max(0.0, deadline - time.monotonic()))
             with self._compaction_gate:
                 if not self._compaction_gate.wait_for(
                     lambda: self._compaction_inflight == 0, timeout=wait_s,
@@ -13813,11 +14668,25 @@ class LCMEngine(
                     return
             # Wait for running compaction before taking the storage lock: every lazy
             # helper read takes it, so holding it here could block that pass (#2101, #2152).
-            with self._storage_lock:
-                self._shutdown_unlocked(deadline=time.monotonic() + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000)
+            if deadline is None:
+                self._storage_lock.acquire()
+            elif not self._storage_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                logger.warning("LCM unload: storage still binding; connections left open")
+                return
+            try:
+                tail_deadline = time.monotonic() + maintenance_scheduler._SESSION_END_SHUTDOWN_TIMEOUT_MS / 1000
+                if deadline is not None:
+                    tail_deadline = min(tail_deadline, deadline)
+                if self._shutdown_unlocked(
+                    deadline=tail_deadline, unload_deadline=deadline, deprioritized_tails=deprioritized_tails,
+                ) is False:
+                    return
                 self._stable_use_closed = True
+            finally:
+                self._storage_lock.release()
 
-    def _shutdown_unlocked(self, *, deadline: float):
+    def _shutdown_unlocked(self, *, deadline: float, unload_deadline: float | None = None,
+                           deprioritized_tails: set[int] | None = None):
         snapshot = getattr(self, "_compress_refusal", None)
         if snapshot and snapshot.get("refused") and (store := self._bound_store_unopened()) is not None:
             try:
@@ -13836,12 +14705,34 @@ class LCMEngine(
             except Exception:
                 logger.warning("LCM shutdown: deferred compaction refusal restore failed", exc_info=True)
         self._retry_pending_session_tails(
-            deadline=deadline, exiting=True, shutdown=True,
+            deadline=deadline, exiting=unload_deadline is None and deprioritized_tails is None,
+            deprioritized_tails=deprioritized_tails, shutdown=True,
         )
+        detached_stores = self._detached_stores_to_close.copy()
+        if self._pending_session_tails:
+            if unload_deadline is not None or deprioritized_tails is not None:
+                # A tail can still own an old profile's store, or hit a transient
+                # failure such as SQLITE_READONLY. Keep retrying through deferred
+                # unload until it flushes or explicit engine.shutdown() runs at exit.
+                if unload_deadline is not None:
+                    logger.warning("LCM unload: session-end rows still pending; deferring storage cleanup")
+                return False
+            detached_stores.update(tail["store"] for tail in self._pending_session_tails
+                                   if tail["store"] is not self.__dict__.get("_store"))
         self._discard_prepared_leaves()
-        self._retire_embedding_maintenance(wait=True)
+        self._retire_embedding_maintenance(wait=True, deadline=unload_deadline)
+        bound_store = self.__dict__.get("_store")
+        if bound_store is not None and bound_store.connection is not None:
+            try:
+                self._last_seen_session_max_store_id = self._query_session_max_store_id(
+                    bound_store, self._session_id, self._conversation_id,
+                )
+            except sqlite3.Error:
+                pass
+            self._saved_context_window_tokens = dict(bound_store._context_window_tokens)
         cleanup = [
             self._unregister_active_engine_binding,
+            *(partial(self._close_detached_store, store) for store in detached_stores),
             *(
                 helper.close
                 for attr in ("_adaptive_retrieval", "_store", "_dag", "_lifecycle",
@@ -13858,6 +14749,8 @@ class LCMEngine(
                 logger.warning("LCM shutdown cleanup failed", exc_info=True)
         if failures:
             raise failures[0]
+        if not self._pending_session_tails:
+            maintenance_scheduler._PENDING_TAIL_ENGINES.discard(self)
 
     def _bound_store_unopened(self):
         """The bound store object, read without a lazy open (#2152): a failed rebind stays failed."""

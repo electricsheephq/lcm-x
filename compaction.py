@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
 from .config import ingest_ledger_mode
+from .engine_registry import engine_unload_group, use_lcm_engine
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     ForegroundBudget,
@@ -93,6 +94,37 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "source_wrong_depth",
     "source_already_claimed",
 })
+
+
+def _counted_compaction():
+    """Keep connections live through preflight, delegating retired engines to main-parity execution."""
+    def decorate(operation):
+        @wraps(operation)
+        def counted(self, messages, *args, **kwargs):
+            with self._compaction_gate:
+                unloading = self._plugin_is_unloading()
+                if not unloading:
+                    if self._compaction_closing:
+                        return False
+                    self._compaction_inflight += 1
+            if unloading:
+                def preflight(engine):
+                    with engine._fresh_tail_pressure_yield_invocation():
+                        result = engine._should_compress_preflight_impl(messages)
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    return bool(result)
+
+                ok, value = self._run_retained_or_dormant(preflight)
+                return bool(value) if ok else False
+            try:
+                return operation(self, messages, *args, **kwargs)
+            finally:
+                with self._compaction_gate:
+                    self._compaction_inflight -= 1
+                    self._compaction_gate.notify_all()
+        return counted
+    return decorate
 
 
 _PROGRESS_FIELDS = ("role", "content", "tool_call_id", "tool_calls")
@@ -309,45 +341,57 @@ class CompactionMixin:
                 self._turn_start_defer_logged = False
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
-        if self._bypasses_lcm_context_management():
-            if self._compression_boundary_cooldown_active():
+        if self._plugin_is_unloading():
+            successor = self._retained_successor()
+            if successor is not None:
+                return bool(use_lcm_engine(successor, lambda engine: engine.should_compress(prompt_tokens)).value)
+            latest = self._reload_successor or self
+            if latest._stable_use_closed:
+                return False
+            return self._should_compress_unlocked(latest, prompt_tokens)
+        return self._should_compress_unlocked(self, prompt_tokens)
+
+    @staticmethod
+    def _should_compress_unlocked(engine, prompt_tokens: int = None) -> bool:
+        if engine._bypasses_lcm_context_management():
+            if engine._compression_boundary_cooldown_active():
                 return False
             if prompt_tokens is not None:
                 tokens = prompt_tokens
             else:
-                auxiliary_session_id = self._thread_context_session_id()
+                auxiliary_session_id = engine._thread_context_session_id()
                 if auxiliary_session_id:
-                    tokens = self._current_auxiliary_prompt_tokens(auxiliary_session_id)
+                    tokens = engine._current_auxiliary_prompt_tokens(auxiliary_session_id)
                 else:
-                    tokens = self.last_prompt_tokens
-            self._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
-            if self._should_force_overflow_recovery(observed_tokens=tokens):
+                    tokens = engine.last_prompt_tokens
+            engine._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
+            if engine._should_force_overflow_recovery(observed_tokens=tokens):
                 return True
-            if self.threshold_tokens <= 0:
+            if engine.threshold_tokens <= 0:
                 return False
-            return tokens >= self.threshold_tokens
-        if self._compression_boundary_cooldown_active():
-            self._end_turn_start_defer_episode()
+            return tokens >= engine.threshold_tokens
+        if engine._compression_boundary_cooldown_active():
+            engine._end_turn_start_defer_episode()
             return False
-        tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
-        self._last_gate_tokens = int(tokens or 0)
-        self._no_progress_observed_tokens = int(tokens or 0)
-        if self._should_force_overflow_recovery(observed_tokens=tokens):
-            self._end_turn_start_defer_episode()
+        tokens = prompt_tokens if prompt_tokens is not None else engine.last_prompt_tokens
+        engine._last_gate_tokens = int(tokens or 0)
+        engine._no_progress_observed_tokens = int(tokens or 0)
+        if engine._should_force_overflow_recovery(observed_tokens=tokens):
+            engine._end_turn_start_defer_episode()
             return True
-        if self.threshold_tokens <= 0:
-            self._end_turn_start_defer_episode()
+        if engine.threshold_tokens <= 0:
+            engine._end_turn_start_defer_episode()
             return False
-        ceiling = self._config.turn_start_defer_ceiling
-        if ceiling and self.context_length > 0:
-            self._warn_turn_start_defer_ceiling()
-            if tokens >= self.threshold_tokens and self._turn_start_defer_is_mid_turn():
-                ceiling_tokens = self._turn_start_defer_ceiling_tokens(ceiling, self.context_length)
+        ceiling = engine._config.turn_start_defer_ceiling
+        if ceiling and engine.context_length > 0:
+            engine._warn_turn_start_defer_ceiling()
+            if tokens >= engine.threshold_tokens and engine._turn_start_defer_is_mid_turn():
+                ceiling_tokens = engine._turn_start_defer_ceiling_tokens(ceiling, engine.context_length)
                 if tokens < ceiling_tokens:
-                    with self._compaction_gate:
-                        level = logging.DEBUG if self._turn_start_defer_logged else logging.INFO
-                        self._turn_start_defer_logged = True
-                        self._turn_start_deferred_checks += 1
+                    with engine._compaction_gate:
+                        level = logging.DEBUG if engine._turn_start_defer_logged else logging.INFO
+                        engine._turn_start_defer_logged = True
+                        engine._turn_start_deferred_checks += 1
                     try:
                         logger.log(
                             level, "LCM automatic compaction deferred: turn_start_defer_ceiling=%s phase=mid-turn "
@@ -357,9 +401,10 @@ class CompactionMixin:
                     except Exception:
                         pass  # A diagnostic handler cannot change the gate result.
                     return False
-        self._end_turn_start_defer_episode()
-        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
+        engine._end_turn_start_defer_episode()
+        return tokens >= engine.threshold_tokens and not engine._sweep_budget_hold_applies(tokens, managed_scope=True)
 
+    @_counted_compaction()
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
         with self._fresh_tail_pressure_yield_invocation():
@@ -862,11 +907,49 @@ class CompactionMixin:
         # Bypass detection can inspect the auxiliary registry. Keep it outside the compaction gate.
         owned = not self._bypasses_lcm_context_management()
         with self._compaction_gate:
-            if self._compaction_closing or (owned and not self._claim_compress_owner(caller)):
-                return messages
-            if owned and not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
-                self._compress_refusal = None
-            self._compaction_inflight += 1
+            unloading = self._plugin_is_unloading()
+            if not unloading:
+                if self._compaction_closing or (owned and not self._claim_compress_owner(caller)):
+                    return messages
+                if owned and not (getattr(self, "_compress_refusal", None) or {}).get("refused"):
+                    self._compress_refusal = None
+                self._compaction_inflight += 1
+        if unloading:
+            def invoke(engine):
+                # Run full compaction on a live successor; in dormant gap/drain,
+                # preserve the incoming view directly via main's ingest path.
+                if engine._compaction_is_closing():
+                    engine._ingest_unloaded_compress_view(messages, host_pairs=host_pairs)
+                    engine._compress_occurrences = None
+                    engine._last_compression_status = "noop"
+                    engine._last_compression_noop_reason = "engine shutting down"
+                    self._last_compression_status = engine.last_compression_status
+                    self._last_compression_noop_reason = engine.last_compression_noop_reason
+                    self.compression_count = engine.compression_count
+                    return messages
+                try:
+                    result = engine.compress(
+                        messages, current_tokens, focus_topic, force, bypass_cooldown,
+                        host_pairs=host_pairs, caller_messages=caller_messages,
+                    )
+                except Exception as exc:
+                    return exc
+                if result is messages and engine._compaction_is_closing():
+                    engine._ingest_unloaded_compress_view(messages, host_pairs=host_pairs)
+                    engine._compress_occurrences = None
+                    engine._last_compression_status = "noop"
+                    engine._last_compression_noop_reason = "engine shutting down"
+                self._last_compression_status = engine.last_compression_status
+                self._last_compression_noop_reason = engine.last_compression_noop_reason
+                self.compression_count = engine.compression_count
+                return result
+
+            ok, result = self._run_retained_or_dormant(invoke)
+            if ok and isinstance(result, Exception):
+                raise result
+            return result if ok and isinstance(result, list) else messages
+        binding = (self._session_id, self._conversation_id, self._db_path)
+        input_messages = messages
         try:
             self._maybe_reclassify_late_auxiliary_before_compaction_write()
             with self._bypass_compression_binding() as bypassed:
@@ -889,8 +972,8 @@ class CompactionMixin:
                 # Generated pairs match the copy made here and take precedence.
                 host_pairs = host_view.get("host_pairs", host_pairs)
                 if self._compaction_is_closing():
-                    return messages
-                if bypassed:
+                    result = messages
+                elif bypassed:
                     if owned:  # First-ingest reclassification found a late auxiliary caller.
                         with self._compaction_gate:
                             self._release_compress_owner()
@@ -899,9 +982,16 @@ class CompactionMixin:
                     if handle is not None and handle.session_id == self._bypass_lcm_session_id():
                         self._emission_handle = None
                     # #1931: store a delegated child's rows before the host rewrites its view.
-                    return self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
-            return self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
-                                        host_pairs=host_pairs, caller_messages=caller_messages)
+                    result = self._compress_delegate_child_bypassed(messages, current_tokens, focus_topic, force)
+                else:
+                    result = self._compress_owned(messages, current_tokens, focus_topic, force, bypass_cooldown,
+                                                  host_pairs=host_pairs, caller_messages=caller_messages)
+            if (result is input_messages or result is messages) and self._plugin_is_unloading():
+                # Shutdown drains this admitted call (_compaction_inflight == 1)
+                # while holding _stable_use_lock; ingest on the open store directly.
+                if binding == (self._session_id, self._conversation_id, self._db_path):
+                    self._ingest_unloaded_compress_view(input_messages, host_pairs=host_pairs)
+            return result
         finally:
             # Keep the store open and the owner held through the pass's finalizers.
             with self._compaction_gate:
@@ -1919,7 +2009,7 @@ class CompactionMixin:
             return None
         db_path, conversation_id = str(self._store.db_path), self._conversation_id
         state = self._lifecycle.get_by_conversation(conversation_id)
-        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0))
+        chain = leaf_prep.ready_chain(db_path, conversation_id, int(getattr(state, "current_frontier_store_id", 0) or 0), engine_unload_group(self))
         bounds = leaf_prep.levels(self.threshold_tokens, self.context_length,
                                   self._working_leaf_chunk_tokens(raw_tokens_outside_tail))
         if not chain or bounds is None:
@@ -1994,8 +2084,9 @@ class CompactionMixin:
     def _reject_prepared_chain(self, leaf, reason: str) -> None:
         """#787: the first rejection ends the chain from ``leaf`` on, each leaf counted under ``reason``."""
         db_path, conversation_id = str(self._store.db_path), str(self._conversation_id or "")
-        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier) or [leaf]
-        leaf_prep.reject(db_path, conversation_id, chain, reason)
+        owner = engine_unload_group(self)
+        chain = leaf_prep.ready_chain(db_path, conversation_id, leaf.start_frontier, owner) or [leaf]
+        leaf_prep.reject(db_path, conversation_id, chain, reason, owner)
         logger.info("LCM prepared leaf promotion rejected: reason=%s leaves=%d", reason, len(chain))
 
     def _prepared_leaf_summary(self, leaf):
@@ -3935,7 +4026,7 @@ class CompactionMixin:
         self._clear_persisted_no_progress_hold()
         state.leaf_passes += 1
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
-            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
+            leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared, engine_unload_group(self))
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
             state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
