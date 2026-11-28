@@ -2101,7 +2101,8 @@ class CompactionMixin:
         if (session, conversation) == (self._session_id, self._conversation_id):
             try:
                 provisional_sessions = [session, *self._rotation_predecessor_session_ids(session)]
-                if not self._current_binding_is_delegate() and conversation in provisional_sessions:
+                conflict_sessions = provisional_sessions if conversation in provisional_sessions else [session]
+                if not self._current_binding_is_delegate():
                     mapped = store_ids.intersection(self._get_store_id_map_for_messages(working_messages).values())
                     if mapped and self._store.connection.execute(
                         "SELECT 1 FROM json_each(?) AS source CROSS JOIN messages AS m "
@@ -2109,7 +2110,7 @@ class CompactionMixin:
                         "AND m.conversation_id = ? "
                         "AND EXISTS (SELECT 1 FROM lcm_lifecycle_state WHERE conversation_id = m.conversation_id) "
                         "LIMIT 1",
-                        (json.dumps(sorted(mapped)), json.dumps(provisional_sessions), other_conversation),
+                        (json.dumps(sorted(mapped)), json.dumps(conflict_sessions), other_conversation),
                     ).fetchone():
                         return LifecycleOtherWindowConflictError(other_conversation, store_ids)
             except sqlite3.Error:

@@ -51,6 +51,68 @@ def _cold_replay(open_engine, raw, passes, *, fresh=0):
 
 
 @pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["off", "shadow", "on", "on-ignore"])
+@pytest.mark.parametrize("shape", ["unstamped", "new-uids", "same-uids", "stamps"])
+def test_provisional_rebind_suffix_requires_occurrence_evidence(open_engine, monkeypatch, mode, shape):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on" if mode == "on-ignore" else mode)
+    if mode == "on-ignore" and message_patterns._regex_engine is None:
+        monkeypatch.setattr(message_patterns, "_regex_engine", _FakeTimeoutRegexEngine)
+    settings = dict(fresh_tail_count=0, ignore_message_patterns=["^HEARTBEAT"] if mode == "on-ignore" else [])
+    writer = open_engine(**settings)
+    _start(writer)
+    writer.ingest(EARLY)
+    emitted = writer.compress(EARLY, force=True)
+    late = [dict(message) for message in LATER[:2]]
+    if shape == "stamps":
+        late = [dict(row, timestamp=200 + index) for index, row in enumerate(late)]
+    if shape in {"new-uids", "same-uids"}:
+        late = [dict(row, message_uid=f"late-{index}") for index, row in enumerate(late)]
+    writer.ingest(emitted + late)
+    writer.shutdown()
+    if shape == "new-uids":
+        late = [dict(row, message_uid=f"new-{index}") for index, row in enumerate(late)]
+    copies = shape != "stamps" and (shape != "same-uids" or mode != "on")
+    for pass_number in range(1, 7):
+        gateway = open_engine(**settings)
+        _bind_gateway(gateway)
+        before = _rows(gateway)
+        gateway.ingest(emitted + late)
+        stored = _rows(gateway)
+        assert stored[:len(before)] == before
+        repeats = pass_number if copies else 0
+        if shape == "new-uids" and mode == "on":
+            repeats = 1
+        assert _digests(stored) == _digests(EARLY + late + late * repeats)
+        gateway.shutdown()
+
+
+@pytest.mark.usefixtures("uid_lineage")
+@pytest.mark.parametrize("mode", ["shadow", "on"])
+@pytest.mark.parametrize("other_binding", [False, True], ids=["different-uid", "canonical-uid-on-other-row"])
+def test_provisional_rebind_suffix_stops_at_uid_conflict_even_with_equal_stamp(
+    open_engine, monkeypatch, mode, other_binding,
+):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    early = [dict(EARLY[0], message_uid="early-0"), *EARLY[1:]]
+    late = [dict(row, timestamp=200 + index) for index, row in enumerate(LATER[:2])]
+    if not other_binding:
+        late[1]["message_uid"] = "original"
+    writer = open_engine(fresh_tail_count=0)
+    _start(writer)
+    writer.ingest(early)
+    emitted = writer.compress(early, force=True)
+    writer.ingest(emitted + late)
+    writer.shutdown()
+
+    gateway = open_engine(fresh_tail_count=0)
+    _bind_gateway(gateway)
+    repeated = dict(late[1], message_uid="early-0" if other_binding else "new")
+    gateway.ingest(emitted + [late[0], repeated])
+    assert gateway._last_ingest_reconciliation["cursor"] == len(emitted) + 1
+    assert _digests(_rows(gateway)) == _digests(early + late + [repeated])
+
+
+@pytest.mark.usefixtures("uid_lineage")
 @pytest.mark.parametrize("stamp_first", [True, False], ids=["stamp-first", "uid-first"])
 def test_receipt_row_cannot_prove_two_occurrences(open_engine, stamp_first):
     original = dict(EARLY[0], timestamp=100, message_uid="early-0")

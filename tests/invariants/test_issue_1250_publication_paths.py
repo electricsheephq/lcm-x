@@ -130,7 +130,7 @@ def rotate_and_bind(engine, *, store_child_turn=True, prior=None):
     bind(engine, C, boundary_reason="compression", old_session_id=S)
     assert engine._conversation_id == (prior or S)
     assert engine._store.read_metadata_json(f"rotation_predecessor_session:{C}") == S
-    child_turn = turns("child", 1) if store_child_turn else []
+    child_turn = [dict(row, timestamp=200 + index) for index, row in enumerate(turns("child", 1))] if store_child_turn else []
     if child_turn:
         host += child_turn
         engine.ingest(list(host))

@@ -317,16 +317,20 @@ def test_second_window_stall_backs_off_after_gateway_ends(open_engine, summary_c
     assert _rows(writer) == before
 
 
-@pytest.mark.parametrize("next_pass_overflow", [False, True], ids=["threshold", "overflow"])
+@pytest.mark.parametrize("next_pass_overflow,claim_late", [
+    pytest.param(False, False, id="threshold"),
+    pytest.param(True, False, id="overflow"),
+    pytest.param(False, True, id="gateway-claims-late"),
+])
 def test_second_window_publishes_after_overflow_drops_conflicting_rows(
-    open_engine, summary_calls, monkeypatch, next_pass_overflow,
+    open_engine, summary_calls, monkeypatch, next_pass_overflow, claim_late,
 ):
     writer, gateway = open_engine(large_output_active_replay_stubbing_enabled=False), open_engine()
     writer.on_session_start(SESSION, platform="gui", context_length=200_000)
     writer.ingest(list(EARLY))
     _bind_gateway(gateway)
     gateway.ingest(EARLY + LATER)
-    _publish(gateway, EARLY + LATER)
+    gateway_view = _publish(gateway, EARLY + LATER)
     host = writer.compress(list(EARLY))
     assert writer.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
     for i in range(3):
@@ -354,16 +358,41 @@ def test_second_window_publishes_after_overflow_drops_conflicting_rows(
     assert (SESSION, GATEWAY) not in writer._session_owner_warning_keys
     assert _rows(writer) == before
 
+    if claim_late:
+        late = [row for row in before if row["conversation_id"] == SESSION]
+        late_ids = {row["store_id"] for row in late}
+        assert _coverage(writer) & late_ids
+        resumed = open_engine()
+        _bind_gateway(resumed)
+        host = gateway_view + [{"role": row["role"], "content": row["content"]} for row in late]
+        host += [
+            {"role": "assistant", "content": "Desktop reply after the late leaf."},
+            {"role": "user", "content": "Desktop follow-up after the late leaf."},
+        ]
+        resumed.ingest(host)
+        stored = _rows(resumed)
+        covered = _coverage(resumed)
+        call_count = len(summary_calls)
+        for _ in range(6):
+            host = resumed.compress(list(host), force=True)
+            assert resumed.get_status()["last_compression_failure_reason"] == "session_owned_by_other_window"
+            assert resumed._session_owner_backoff[2] == SESSION
+            assert resumed._session_owner_backoff[3] & late_ids
+            assert len(summary_calls) == call_count + 1
+            assert _rows(resumed) == stored
+            assert _coverage(resumed) == covered
 
-@pytest.mark.parametrize("kind", ["two-owners", "gateway-publisher", "delegate-publisher"])
+
+@pytest.mark.parametrize("kind", ["two-owners", "gateway-no-owner-state", "delegate-publisher"])
 def test_other_ownership_conflicts_never_back_off(open_engine, summary_calls, monkeypatch, kind):
     from hermes_lcm.lifecycle_state import LifecycleStateStore
 
     engine = open_engine()
-    publisher = "other-gateway" if kind == "gateway-publisher" else SESSION
+    publisher = "other-gateway" if kind == "gateway-no-owner-state" else SESSION
     platform = _DELEGATE_SOURCE if kind == "delegate-publisher" else "gui"
     engine.on_session_start(SESSION, platform=platform, conversation_id=publisher, context_length=200_000)
-    _bind_gateway(open_engine())
+    if kind != "gateway-no-owner-state":
+        _bind_gateway(open_engine())
     engine.ingest(list(EARLY))
     with engine._store.atomic(immediate=True):
         engine._store.connection.execute(
@@ -435,7 +464,8 @@ def test_previously_compacted_session_preserves_nodes_and_never_copies_tail(open
     if cold:
         engine = open_engine()
     _bind_gateway(engine)
-    host += LATER
+    # A later cold pass can prove these post-emission occurrences by stamp.
+    host += [dict(row, timestamp=200 + index) for index, row in enumerate(LATER)]
     engine.ingest(list(host))
     assert engine._last_ingest_reconciliation["cursor"] == 2
     assert _digests(_rows(engine)) == _digests(EARLY + LATER)

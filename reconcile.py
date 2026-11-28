@@ -3614,7 +3614,7 @@ class ReconcileMixin:
             ingest_drop_decisions=ingest_drop_decisions, original_messages=original_messages,
         )
         if session_count <= 0:
-            provisional_cursor = self._cursor_from_provisional_rebind(messages, [])
+            provisional_cursor = self._cursor_from_provisional_rebind(messages, [], original_messages=original_messages)
             if provisional_cursor is not None and provisional_cursor > uid_cursor:
                 self._record_ingest_reconciliation(
                     action="advanced cursor", reason="replayed proven provisional session tail",
@@ -3682,7 +3682,9 @@ class ReconcileMixin:
             )
             return proof_cursor
         if self._conversation_id != self._session_id:
-            provisional_cursor = self._cursor_from_provisional_rebind(messages, stored_tail_rows)
+            provisional_cursor = self._cursor_from_provisional_rebind(
+                messages, stored_tail_rows, original_messages=original_messages,
+            )
             if provisional_cursor is not None and provisional_cursor > max(cursor or 0, uid_cursor):
                 self._record_ingest_reconciliation(
                     action="advanced cursor", reason="replayed proven provisional session tail",
@@ -3820,7 +3822,7 @@ class ReconcileMixin:
                 return proof
         return None
 
-    def _cursor_from_provisional_rebind(self, messages, stored_rows) -> Optional[int]:
+    def _cursor_from_provisional_rebind(self, messages, stored_rows, *, original_messages=None) -> Optional[int]:
         """Use the old provisional binding's emitted head and ordered rows to prove replay."""
         session_id = self._session_id
         if not self._conversation_id or self._conversation_id == session_id:
@@ -3873,17 +3875,56 @@ class ReconcileMixin:
             if not any(row["conversation_id"] in owners for row in suffix):
                 return None
             metadata = self._remapped_output_metadata(messages, proof, cursor)
+            # The emission proves its own positions. Later rows need an independent
+            # witness: the provisional proof only matched their content and order.
+            last_store_id = int(proof.get("last_store_id") or 0)
+            tail = {
+                index: row for (index, _), row in zip(matched, suffix)
+                if index not in metadata and row["store_id"] > last_store_id
+            }
+            host_messages = messages if original_messages is None else original_messages
+            occurrences = {index: self._host_occurrence_metadata(host_messages[index]) for index in tail}
+            bindings, row_uids, resolved_uids = {}, {}, {}
+            if tail and host_message_uid_mode() != "off":
+                wanted = {item["message_uid"] for item in occurrences.values()} - {None}
+                if wanted and (lineage := self._host_uid_lineage_key()[0]) is not None:
+                    tail_ids = {row["store_id"] for row in tail.values()}
+                    bindings = self._store.host_uid_bindings_for(lineage, wanted, ("canonical",))
+                    row_uids = self._store.host_uid_uids_of_stores(lineage, tail_ids)
+                    if uid_recognition_enabled(self):
+                        tail_indexes = list(tail)
+                        resolved = self._host_uid_resolve(
+                            [host_messages[index] for index in tail_indexes],
+                            [messages[index] for index in tail_indexes],
+                            reowned=tail_ids,
+                        )
+                        resolved_uids = {tail_indexes[i]: row for i, row in resolved.items()}
             for (index, identity), row in zip(matched, suffix):
                 retained_id = (projection.entries[index].retained_source or {}).get("store_id")
                 if row["conversation_id"] not in {"", self._conversation_id, *owners} or (
                     (retained_id is not None and retained_id != row["store_id"])
                     or _has_lossy_redacted_identity(identity)
                     or identity != self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)
-                    or self._host_occurrence_changed(
+                    or (index not in tail and self._host_occurrence_changed(
                         messages[index], metadata.get(index, {"timestamp": row["observed_at"]})
-                    )
+                    ))
                 ):
                     return None
+                if index in tail:
+                    stamp, uid = occurrences[index]["timestamp"], occurrences[index]["message_uid"]
+                    observed = row["observed_at"]
+                    store_id = row["store_id"]
+                    durable_uids = row_uids.get(store_id, ())
+                    uid_conflict = uid is not None and (
+                        any(bound != store_id for bound, _ in bindings.get(uid, ()))
+                        or durable_uids and uid not in durable_uids
+                    )
+                    uid_row = resolved_uids.get(index)
+                    same_uid = uid_row is not None and uid_row["store_id"] == store_id
+                    same_stamp = stamp is not None and stamp == observed
+                    if (uid_conflict or (stamp is not None and observed is not None and not same_stamp)
+                            or not (same_stamp or same_uid)):
+                        return index
             return cursor
         except Exception:
             logger.debug("LCM provisional rebind proof load failed", exc_info=True)

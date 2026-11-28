@@ -1150,7 +1150,8 @@ class LifecycleStateStore:
             if predecessors is None:
                 predecessors = rotation_predecessor_session_ids(conn, session_id)
             provisional_sessions = {session_id, *predecessors}
-            if conversation_id in provisional_sessions and all(row[1] in provisional_sessions for row in offending):
+            conflict_sessions = provisional_sessions if conversation_id in provisional_sessions else {session_id}
+            if all(row[1] in conflict_sessions for row in offending):
                 owners = {row[2] for row in offending}
                 if len(owners) == 1 and not (publisher_is_delegate and publisher_is_delegate()):
                     other_conversation_id, = owners
