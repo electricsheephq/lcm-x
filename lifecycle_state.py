@@ -36,6 +36,10 @@ _OWNERSHIP_QUERY_MAX_RANGES = 200
 _BIND_CAS_ATTEMPTS = 8
 
 
+def reowned_session_rows_key(session_id: str) -> str:
+    return f"reowned_session_rows:{session_id}"
+
+
 class LifecycleBindingChangedError(RuntimeError):
     """Raised when publication loses its active session binding."""
 
@@ -1093,7 +1097,7 @@ class LifecycleStateStore:
             if provisional_ids:
                 selected = conn.execute(
                     """
-                    SELECT store_id, conversation_id FROM messages
+                    SELECT store_id, conversation_id, session_id FROM messages
                     WHERE COALESCE(source, '') != ?
                       AND store_id IN (SELECT value FROM json_each(?))
                       AND store_id NOT IN (
@@ -1116,6 +1120,25 @@ class LifecycleStateStore:
                     if updated != len(reowned_ids):
                         raise LifecyclePublicationConflictError("Compaction publication re-owned row count changed")
                     reowned_from = {row[1] for row in selected}
+                    # Keep the exact occurrences for a later bind to the original session-id
+                    # conversation. The receipt rolls back with the ownership and frontier.
+                    own_session_rows: dict[str, list[int]] = {}
+                    for store_id, old_owner, source_session in selected:
+                        if old_owner == source_session:
+                            own_session_rows.setdefault(source_session, []).append(store_id)
+                    for source_session, store_ids in own_session_rows.items():
+                        conn.execute(
+                            """
+                            INSERT INTO metadata (key, value) VALUES (?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = (
+                                SELECT json_group_array(value) FROM (
+                                    SELECT value FROM json_each(metadata.value)
+                                    UNION SELECT value FROM json_each(excluded.value)
+                                )
+                            )
+                            """,
+                            (reowned_session_rows_key(source_session), json.dumps(store_ids)),
+                        )
                     snapshot_rows = conn.execute(snapshot_sql, (str(snapshot_ids),)).fetchall()
         offending = [row for row in snapshot_rows if str(row[2] or "").strip() not in {"", conversation_id}]
         if offending:
@@ -1128,7 +1151,7 @@ class LifecycleStateStore:
                         "FROM lcm_lifecycle_state WHERE conversation_id = ?",
                         (other_conversation_id,),
                     ).fetchone()
-                    if binding is not None and (binding[0] == session_id or tuple(binding) == (None, session_id)):
+                    if binding is not None and session_id in binding:
                         raise LifecycleOtherWindowConflictError(
                             other_conversation_id, frozenset(int(row[0]) for row in offending),
                         )

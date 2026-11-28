@@ -2101,9 +2101,7 @@ class CompactionMixin:
                 other_binding = self._lifecycle.get_by_conversation(other_conversation)
                 if (
                     other_binding is not None
-                    and (other_binding.current_session_id == session or (
-                        other_binding.current_session_id is None and other_binding.last_finalized_session_id == session
-                    ))
+                    and session in (other_binding.current_session_id, other_binding.last_finalized_session_id)
                     and not self._current_binding_is_delegate()
                     and not store_ids.isdisjoint(self._get_store_id_map_for_messages(working_messages).values())
                 ):

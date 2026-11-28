@@ -65,6 +65,7 @@ from .ingest_protection import (
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
+from .lifecycle_state import reowned_session_rows_key
 from .message_content import canonical_value, normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
 from .store import _normalize_observed_at
@@ -3445,6 +3446,46 @@ class ReconcileMixin:
         )
         return 0
 
+    def _cursor_from_reowned_session_rows(self, messages, stored_rows, session_count: int) -> int:
+        """Recognize a returning session-id window's complete ordered raw history."""
+        session_id = self._session_id
+        if self._conversation_id != session_id or (
+            len(stored_rows) == session_count
+            and not any(row["conversation_id"] not in ("", session_id) for row in stored_rows)
+        ):
+            return 0
+        try:
+            ids = self._store.read_metadata_json(reowned_session_rows_key(session_id))
+        except ValueError:
+            return 0
+        if not isinstance(ids, list) or not all(type(store_id) is int and store_id > 0 for store_id in ids):
+            return 0
+        reowned = set(ids)
+        if len(stored_rows) < session_count:
+            stored_rows = self._store.get_session_messages(session_id, limit=session_count)
+        if not reowned or not reowned <= {row["store_id"] for row in stored_rows}:
+            return 0
+        # The original window contains these exact transferred occurrences and
+        # its own rows. A gateway-owned row outside the receipt is no evidence
+        # for this replay path, even if its bytes happen to match.
+        rows = [
+            row for row in stored_rows
+            if (row["store_id"] in reowned or row["conversation_id"] in ("", session_id))
+            and not self._matches_ignore_message_patterns(row, stored_row=True)
+        ]
+        if len(rows) > len(messages):
+            return 0
+        for message, row in zip(messages, rows):
+            ident = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
+            stamp = _normalize_observed_at(message.get("timestamp"))
+            if (_has_lossy_redacted_identity(ident)
+                    or stamp is not None and row["observed_at"] is not None and stamp != row["observed_at"]
+                    or ident != self._message_replay_identity(
+                        row, stored_row=True, strip_carrier=False, allow_pruned_tool_alias=False,
+                    )):
+                return 0
+        return len(rows) if any(row["store_id"] in reowned for row in rows) else 0
+
     def _reconcile_ingest_cursor_from_store(
         self,
         messages: List[Dict[str, Any]],
@@ -3559,6 +3600,15 @@ class ReconcileMixin:
                 stored_tail_count=len(stored_tail), effective_incoming=replay_cursor,
             )
             return replay_cursor
+        if max(cursor or 0, uid_cursor) < len(messages):
+            reowned_cursor = self._cursor_from_reowned_session_rows(messages, stored_rows, session_count)
+            if reowned_cursor > max(cursor or 0, uid_cursor):
+                self._record_ingest_reconciliation(
+                    action="advanced cursor", reason="replayed re-owned session rows",
+                    cursor=reowned_cursor, incoming=len(messages), session_count=session_count,
+                    stored_tail_count=len(stored_tail), effective_incoming=reowned_cursor,
+                )
+                return reowned_cursor
         lossy_at = next(
             (
                 index

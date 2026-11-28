@@ -20,7 +20,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.engine_registry import (
     ActiveEngineUseStatus, use_active_lcm_engine, use_cold_lcm_engine, use_lcm_engine,
 )
-from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError, reowned_session_rows_key
 from hermes_lcm.tools import lcm_grep
 
 SESSION = "S-1250"
@@ -577,6 +577,7 @@ def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monke
     before = _rows(engine)
     old = engine._lifecycle.get_by_conversation(SESSION)
     real = engine._lifecycle.stage_compaction_publication
+    key = reowned_session_rows_key(SESSION)
 
     def fail_after_staging(conn, *args, **kwargs):
         real(conn, *args, **kwargs)
@@ -586,6 +587,7 @@ def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monke
         assert conn.execute(
             "SELECT current_session_id FROM lcm_lifecycle_state WHERE conversation_id = ?", (SESSION,),
         ).fetchone()[0] is None
+        assert conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone() is not None
         raise LifecyclePublicationConflictError("Injected after ownership and frontier staging")
 
     with monkeypatch.context() as patch, caplog.at_level(logging.INFO):
@@ -595,5 +597,6 @@ def test_rollback_restores_ownership_nodes_and_both_frontiers(open_engine, monke
     assert "Injected after ownership and frontier staging" in caplog.text
     assert "re-owned provisional rows" not in caplog.text
     assert _rows(engine) == before
+    assert engine._store.read_metadata_json(key) is None
     assert engine._lifecycle.get_by_conversation(SESSION) == old
     assert _frontier(engine) == 0 and not _coverage(engine)
